@@ -16,6 +16,7 @@ router.get('/', authenticateToken, async (req, res) => {
         c.rent_amount, 
         c.start_date, 
         c.end_date, 
+        c.building_id,
         a.code as apartment_code, 
         b.name as building_name, 
         p.full_name as tenant_name
