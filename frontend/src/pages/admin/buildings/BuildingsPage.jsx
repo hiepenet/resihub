@@ -13,6 +13,9 @@ import {
   ArrowRight,
   Power,
   RotateCcw,
+  Trash2,
+  BookmarkCheck,
+  Calendar,
 } from 'lucide-react';
 import Button from '../../../components/ui/Button';
 import Input from '../../../components/ui/Input';
@@ -71,6 +74,17 @@ export default function BuildingsPage() {
     status: 'AVAILABLE',
   });
   const [aptFormError, setAptFormError] = useState('');
+
+  // NV-06 Reservation State
+  const [isReservationModalOpen, setIsReservationModalOpen] = useState(false);
+  const [reservationData, setReservationData] = useState({
+    prospect_name: '',
+    phone: '',
+    hold_amount: 1000000,
+    hold_until: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    note: '',
+  });
+  const [reservationError, setReservationError] = useState('');
 
   const loadBuildings = async () => {
     setIsLoading(true);
@@ -242,6 +256,76 @@ export default function BuildingsPage() {
       loadFloorMap(selectedBuilding.id);
     } catch (err) {
       setAptFormError(err.response?.data?.message || 'Lỗi khi tạo căn hộ.');
+    }
+  };
+
+  const handleDeleteFloor = async (floorId) => {
+    if (!window.confirm('Bạn có chắc chắn muốn xóa tầng này? (Chỉ xóa được khi không có căn hộ)')) return;
+    try {
+      await api.delete(`/api/v1/buildings/${selectedBuilding.id}/floors/${floorId}`);
+      await loadFloorMap(selectedBuilding.id);
+      loadBuildings();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi xóa tầng.');
+    }
+  };
+
+  const handleCreateReservation = async (e) => {
+    e.preventDefault();
+    setReservationError('');
+    if (!selectedApartment) return;
+
+    try {
+      await api.post('/api/v1/reservations', {
+        ...reservationData,
+        apartment_id: selectedApartment.id,
+      });
+      setIsReservationModalOpen(false);
+      setReservationData({
+        prospect_name: '',
+        phone: '',
+        hold_amount: 1000000,
+        hold_until: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        note: '',
+      });
+      setSelectedApartment(null);
+      loadFloorMap(selectedBuilding.id);
+    } catch (err) {
+      setReservationError(err.response?.data?.message || 'Lỗi khi đặt giữ chỗ.');
+    }
+  };
+
+  const handleForfeitReservation = async (apartmentId) => {
+    if (!window.confirm('Xác nhận khách hủy giữ chỗ (mất cọc)? Căn hộ sẽ mở lại trạng thái có sẵn.')) return;
+    try {
+      const resList = await api.get(`/api/v1/reservations?status=HELD`);
+      const found = resList.data?.data?.find((r) => r.apartment_id === apartmentId);
+      if (!found) {
+        alert('Không tìm thấy thông tin giữ chỗ đang chờ xử lý của căn này.');
+        return;
+      }
+      await api.patch(`/api/v1/reservations/${found.id}/forfeit`);
+      setSelectedApartment(null);
+      loadFloorMap(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi xử lý hủy giữ chỗ.');
+    }
+  };
+
+  const handleRefundReservation = async (apartmentId) => {
+    if (!window.confirm('Xác nhận hoàn tiền giữ chỗ cho khách? Căn hộ sẽ mở lại trạng thái có sẵn.')) return;
+    try {
+      const resList = await api.get(`/api/v1/reservations?status=HELD`);
+      const found = resList.data?.data?.find((r) => r.apartment_id === apartmentId);
+      if (!found) {
+        alert('Không tìm thấy thông tin giữ chỗ đang chờ xử lý của căn này.');
+        return;
+      }
+      await api.patch(`/api/v1/reservations/${found.id}/refund`);
+      setSelectedApartment(null);
+      loadFloorMap(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi hoàn tiền giữ chỗ.');
     }
   };
 
@@ -487,6 +571,15 @@ export default function BuildingsPage() {
                       <span className="text-xs text-slate-400">
                         {floor.apartments?.length || 0} căn hộ
                       </span>
+                      {isSysAdmin && (!floor.apartments || floor.apartments.length === 0) && (
+                        <button
+                          onClick={() => handleDeleteFloor(floor.id)}
+                          className="text-slate-400 hover:text-red-500 p-1 rounded transition-colors"
+                          title="Xóa tầng trống"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -589,10 +682,49 @@ export default function BuildingsPage() {
                 </div>
               </div>
 
-              <div className="pt-6 border-t border-slate-100 flex gap-2">
+              <div className="pt-6 border-t border-slate-100 flex flex-col gap-2.5">
+                {selectedApartment.status === 'AVAILABLE' && (
+                  <Button
+                    variant="primary"
+                    className="w-full bg-amber-500 hover:bg-amber-600 text-white flex items-center justify-center gap-1.5"
+                    onClick={() => setIsReservationModalOpen(true)}
+                  >
+                    <BookmarkCheck className="w-4 h-4" />
+                    <span>Đặt cọc giữ chỗ (NV-06)</span>
+                  </Button>
+                )}
+
+                {selectedApartment.status === 'RESERVED' && (
+                  <div className="space-y-2 w-full">
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+                      <p className="font-semibold flex items-center gap-1">
+                        <BookmarkCheck className="w-4 h-4 text-amber-600" />
+                        Căn hộ đang được giữ chỗ
+                      </p>
+                      <p className="text-[11px] mt-0.5">Khách đã đặt cọc giữ chỗ. Xử lý khi khách ký HĐ hoặc hủy:</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        className="flex-1 text-xs border-rose-200 text-rose-600 hover:bg-rose-50"
+                        onClick={() => handleForfeitReservation(selectedApartment.id)}
+                      >
+                        Hủy mất cọc
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="flex-1 text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
+                        onClick={() => handleRefundReservation(selectedApartment.id)}
+                      >
+                        Hoàn tiền cọc
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 <Button
-                  variant="primary"
-                  className="w-full"
+                  variant="secondary"
+                  className="w-full text-slate-600"
                   onClick={() => setSelectedApartment(null)}
                 >
                   Đóng panel
@@ -730,7 +862,7 @@ export default function BuildingsPage() {
             </div>
 
             <form onSubmit={handleCreateFloor} className="space-y-4">
-              <FormField label="Số tầng (Level)" required hint="1, 2, 3... (trệt có thể để 1)">
+              <FormField label="Số tầng (Level)" required hint="< 0: Hầm (B1, B2); 0: Trệt; > 0: Tầng 1, 2...">
                 <Input
                   type="number"
                   value={newFloor.level}
@@ -834,6 +966,85 @@ export default function BuildingsPage() {
                 </Button>
                 <Button type="submit" variant="primary">
                   Thêm căn hộ
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Đặt Cọc Giữ Chỗ (NV-06) */}
+      {isReservationModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-100">
+            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Đặt cọc giữ chỗ căn {selectedApartment?.code} (NV-06)
+                </h3>
+                <p className="text-xs text-slate-500">{selectedBuilding?.name} · Giá niêm yết: <Money amount={selectedApartment?.base_rent} /></p>
+              </div>
+              <button onClick={() => setIsReservationModalOpen(false)}>
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateReservation} className="space-y-4">
+              {reservationError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-xs text-red-700 rounded-xl flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                  <span>{reservationError}</span>
+                </div>
+              )}
+
+              <FormField label="Họ tên khách tiềm năng" required>
+                <Input
+                  placeholder="VD: Nguyễn Văn A"
+                  value={reservationData.prospect_name}
+                  onChange={(e) => setReservationData({ ...reservationData, prospect_name: e.target.value })}
+                  autoFocus
+                />
+              </FormField>
+
+              <FormField label="Số điện thoại" required>
+                <Input
+                  placeholder="VD: 0901234567"
+                  value={reservationData.phone}
+                  onChange={(e) => setReservationData({ ...reservationData, phone: e.target.value })}
+                />
+              </FormField>
+
+              <div className="grid grid-cols-2 gap-3">
+                <FormField label="Tiền giữ chỗ (VND)" required>
+                  <Input
+                    type="number"
+                    value={reservationData.hold_amount}
+                    onChange={(e) => setReservationData({ ...reservationData, hold_amount: parseInt(e.target.value, 10) || 0 })}
+                  />
+                </FormField>
+                <FormField label="Giữ đến ngày" required>
+                  <Input
+                    type="date"
+                    value={reservationData.hold_until}
+                    onChange={(e) => setReservationData({ ...reservationData, hold_until: e.target.value })}
+                  />
+                </FormField>
+              </div>
+
+              <FormField label="Ghi chú">
+                <Input
+                  placeholder="Khách hẹn thứ 7 tuần sau qua ký hợp đồng..."
+                  value={reservationData.note}
+                  onChange={(e) => setReservationData({ ...reservationData, note: e.target.value })}
+                />
+              </FormField>
+
+              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <Button variant="secondary" onClick={() => setIsReservationModalOpen(false)}>
+                  Hủy
+                </Button>
+                <Button type="submit" variant="primary" className="bg-amber-500 hover:bg-amber-600 text-white">
+                  Xác nhận giữ chỗ
                 </Button>
               </div>
             </form>

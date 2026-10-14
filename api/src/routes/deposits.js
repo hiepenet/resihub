@@ -43,10 +43,18 @@ router.get('/', authenticateToken, async (req, res) => {
  */
 router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'ACCOUNTANT', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
-  const { type, amount, description } = req.body;
+  const { type, amount, description, category } = req.body;
 
   if (!type || !amount) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Loại giao dịch và số tiền là bắt buộc.' });
+  }
+
+  // PRD Rule: Tiền cọc TUYỆT ĐỐI KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ (Mục 5.3 / FR-068)
+  if (type === 'deduct' && (category === 'rent' || (description && /tiền thuê|nợ thuê/i.test(description)))) {
+    return res.status(400).json({
+      code: 'RENT_OFFSET_PROHIBITED',
+      message: 'Quy tắc an toàn PRD: Tiền cọc TUYỆT ĐỐI KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ hằng tháng.',
+    });
   }
 
   const client = await pool.connect();

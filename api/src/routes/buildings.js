@@ -280,28 +280,112 @@ router.get('/:id/floor-map', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/buildings/:id/floors
+ * GET /api/v1/buildings/:id/floors
+ * Lấy danh sách tầng của tòa nhà
+ */
+router.get('/:id/floors', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT f.*, 
+        (SELECT COUNT(*) FROM apartment a WHERE a.floor_id = f.id) as apartment_count
+       FROM floor f
+       WHERE f.building_id = $1
+       ORDER BY f.level ASC`,
+      [id]
+    );
+
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[Get Floors Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách tầng.' });
+  }
+});
+
+/**
+ * POST /api/v1/buildings/:id/floors (NV-04)
  */
 router.post('/:id/floors', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
   const { level, name } = req.body;
 
-  if (level === undefined || level === null) {
+  if (level === undefined || level === null || level === '') {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Số tầng (level) là bắt buộc.' });
   }
 
+  const lvl = parseInt(level, 10);
+  if (isNaN(lvl)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Số tầng phải là số nguyên (INTEGER).' });
+  }
+
+  // Tự động sinh tên thông minh nếu để trống
+  let floorName = name?.trim();
+  if (!floorName) {
+    if (lvl < 0) floorName = `Tầng hầm B${Math.abs(lvl)}`;
+    else if (lvl === 0) floorName = `Tầng Trệt`;
+    else floorName = `Tầng ${lvl}`;
+  }
+
   try {
+    const checkDup = await pool.query(
+      'SELECT id FROM floor WHERE building_id = $1 AND level = $2',
+      [id, lvl]
+    );
+    if (checkDup.rows.length > 0) {
+      return res.status(409).json({
+        code: 'FLOOR_EXISTS',
+        message: `Tầng ${lvl} đã tồn tại trong tòa nhà này.`,
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO floor (building_id, level, name)
        VALUES ($1, $2, $3)
-       ON CONFLICT (building_id, level) DO UPDATE SET name = EXCLUDED.name
        RETURNING *`,
-      [id, parseInt(level, 10), name || `Tầng ${level}`]
+      [id, lvl, floorName]
     );
 
-    res.status(201).json({ data: result.rows[0] });
+    res.status(201).json({ message: 'Tạo tầng thành công.', data: result.rows[0] });
   } catch (err) {
+    console.error('[Create Floor Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tạo tầng.' });
+  }
+});
+
+/**
+ * DELETE /api/v1/buildings/:id/floors/:floor_id
+ * Xóa tầng khỏi tòa nhà (Chặn nếu tầng đang chứa căn hộ)
+ */
+router.delete('/:id/floors/:floor_id', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), async (req, res) => {
+  const { id, floor_id } = req.params;
+
+  try {
+    const aptCountRes = await pool.query(
+      'SELECT COUNT(*) FROM apartment WHERE floor_id = $1',
+      [floor_id]
+    );
+    const count = parseInt(aptCountRes.rows[0].count, 10);
+
+    if (count > 0) {
+      return res.status(400).json({
+        code: 'FLOOR_HAS_APARTMENTS',
+        message: `Không thể xóa tầng này vì đang chứa ${count} căn hộ. Vui lòng chuyển hoặc xóa căn hộ trước.`,
+      });
+    }
+
+    const delRes = await pool.query(
+      'DELETE FROM floor WHERE id = $1 AND building_id = $2 RETURNING id',
+      [floor_id, id]
+    );
+
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tầng cần xóa.' });
+    }
+
+    res.json({ message: 'Đã xóa tầng thành công.' });
+  } catch (err) {
+    console.error('[Delete Floor Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi xóa tầng.' });
   }
 });
 
