@@ -11,6 +11,7 @@ import tenantsRoute from './routes/tenants.js';
 import contractsRoute from './routes/contracts.js';
 import depositsRoute from './routes/deposits.js';
 import reservationsRoute from './routes/reservations.js';
+import notificationsRoute from './routes/notifications.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
 dotenv.config();
@@ -43,6 +44,7 @@ app.use('/api/v1/tenants', tenantsRoute);
 app.use('/api/v1/contracts', contractsRoute);
 app.use('/api/v1/deposits', depositsRoute);
 app.use('/api/v1/reservations', reservationsRoute);
+app.use('/api/v1/notifications', notificationsRoute);
 
 // 404 Handler
 app.use((req, res) => {
