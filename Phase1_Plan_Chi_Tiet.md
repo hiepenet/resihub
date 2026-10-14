@@ -989,57 +989,71 @@ Nộp 1 document ngắn gồm:
 # 📖 PHẦN II — QUY TRÌNH NGHIỆP VỤ CHI TIẾT (GIAI ĐOẠN 1)
 
 > Mỗi quy trình được mô tả đủ 6 góc độ: **Ai làm · UI Steps · API · DB · Validation · Test Cases**  
-> Ký hiệu trạng thái: `[DRAFT]` `[ACTIVE]` `[TERMINATED]` v.v. theo đúng PRD mục 12–13
+> Tuân thủ 100% các quyết định nghiệp vụ đã chốt trong PRD v0.2:
+> - Tiền cọc chuẩn **1 tháng tiền thuê**, **KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ**.
+> - Hoàn cọc trong **3–5 ngày làm việc** sau khi chấm dứt hợp đồng.
+> - Bảng giá dịch vụ **ghi đè theo từng hợp đồng (FR-065)**: Ưu tiên Giá HĐ → Giá Tòa → Giá mặc định.
+> - Ngày chốt kỳ (`billing_day`) **nằm ở từng hợp đồng (FR-066)**, job sinh hóa đơn chạy hằng ngày.
+> - Phí phạt chậm thanh toán **100.000 ₫/ngày sau 5 ngày quá hạn (FR-064)**.
+> - Cơ chế **Four-eyes (Người lập ≠ Người duyệt)** bật mặc định cho các phê duyệt tài chính và hợp đồng.
+> - Toàn bộ dữ liệu tiền tệ lưu trữ bằng **BIGINT đơn vị VND**, không xóa cứng dữ liệu (NFR-016).
 
 ---
 
 ## NV-01 — ĐĂNG NHẬP OTP (Cư dân & Nhân viên qua SĐT)
-> **FR-001, FR-002** · Actor: Tất cả · Module: M02
+> **FR-001, FR-002, US-001, AC-001.1..AC-001.3** · Actor: Tất cả · Module: M02
 
 ### Luồng tổng quan
 ```
-Người dùng nhập SĐT  →  Hệ thống gửi OTP (mock: log console)
-     →  Nhập OTP 6 số  →  Nhận JWT + Refresh Token
-     →  Redirect vào app theo role
+Người dùng nhập SĐT  →  Hệ thống gửi OTP (Dev: log console | Prod: SMS Gateway)
+     →  Nhập OTP 6 số  →  Nhận JWT Access Token (15 phút) + Refresh Token
+     →  Redirect vào ứng dụng theo đúng vai trò (Role-based Routing)
 ```
 
 ### UI Steps
 ```
 Bước 1 — Trang /login
   [Logo ResiHub]
+  Tab: [ Đăng nhập SĐT (Cư dân & NV) ] | [ Email / Mật khẩu (Nội bộ) ]
   Nhập số điện thoại: [ 09xxxxxxxx    ]
                       [ Gửi mã OTP   ] ← button
 
-Bước 2 — Trang /login/otp (sau khi gửi)
-  Đã gửi OTP đến 09xx xxxx xx
-  Nhập mã 6 số:  [ _ _ _ _ _ _ ]   ← auto-focus từng ô
+Bước 2 — Màn hình nhập OTP (hoặc popup)
+  Đã gửi mã xác thực OTP đến số điện thoại 09xx xxxx xx
+  Nhập mã 6 số:  [ _ _ _ _ _ _ ]   ← auto-focus từng ô, tự động submit khi đủ 6 số
   Còn hiệu lực:  04:32             ← countdown 5 phút
-  [Xác nhận]      [Gửi lại sau 60s]
+  [Xác nhận đăng nhập]   [Gửi lại mã sau 60s]
 
-Bước 3 — Thành công
-  Redirect theo role:
-  → RESIDENT     : /resident/apartment
-  → MANAGER      : /admin/dashboard
-  → ACCOUNTANT   : /admin/dashboard
-  → STAFF        : /admin/dashboard
-  → SYS_ADMIN    : /admin/buildings
+Bước 3 — Đăng nhập thành công & Điều hướng theo vai trò (Role-based Redirect)
+  → RESIDENT (Cư dân)               : /resident/apartment
+  → OWNER (Chủ đầu tư)              : /admin/dashboard
+  → MANAGER (Quản lý tòa nhà)       : /admin/dashboard
+  → ACCOUNTANT (Kế toán)            : /admin/dashboard
+  → STAFF (Kỹ thuật / Vận hành)     : /admin/dashboard
+  → SYS_ADMIN (Quản trị hệ thống)   : /admin/buildings
 ```
 
 ### API Flow
 ```
 POST /api/v1/auth/otp/request
   Body: { "phone": "0901234567" }
-  Rate limit: 3 req/giờ/SĐT  +  10 req/phút/IP
-  Dev: log OTP ra console   |   Prod: gọi SMS provider
-  Response: { "message": "OTP đã được gửi" }   ← không tiết lộ OTP
+  Rate limit: 10 req/phút/IP (chặn DDoS) + 3 req/giờ/SĐT (tiết kiệm chi phí SMS)
+  Dev: log OTP ra server console  |  Prod: gọi SMS provider VN
+  Response: { "message": "Mã xác thực OTP đã được gửi đến số điện thoại của bạn." }
+  ⚠️ QUY TẮC AN NINH (AC-001.3): Nếu SĐT chưa có trong hệ thống, VẪN TRẢ VỀ THÔNG ĐIỆP NHƯ TRÊN
+  (Thông báo trung lập, không tiết lộ SĐT có tồn tại hay không để chống brute-force thu thập SĐT).
 
 POST /api/v1/auth/otp/verify
   Body: { "phone": "0901234567", "otp": "123456" }
-  → Max 5 lần thử sai → lock 15 phút
-  → OTP hết hạn sau 5 phút
-  Response 200: { "accessToken": "...", "refreshToken": "...", "user": { id, roles, ... } }
-  Response 401: { "code": "OTP_INVALID", "message": "Mã OTP không đúng" }
-  Response 429: { "code": "TOO_MANY_ATTEMPTS", "message": "Quá nhiều lần thử. Thử lại sau 15 phút." }
+  → Kiểm tra số lần thử sai: Sai 1 lần tăng counter; Sai 5 lần liên tiếp → Khóa đăng nhập 15 phút
+  → Kiểm tra thời hạn OTP: Hết hạn sau 5 phút (TTL)
+  Response 200: {
+    "accessToken": "...",     // TTL: 15 phút
+    "refreshToken": "...",    // TTL: 7 ngày (riêng ACCOUNTANT 30 phút theo NFR-008)
+    "user": { id, phone, full_name, org_id, roles: [{ code, name, building_id }] }
+  }
+  Response 401: { "code": "OTP_INVALID", "message": "Mã OTP không đúng. Bạn còn X lần thử." }
+  Response 429: { "code": "TOO_MANY_ATTEMPTS", "message": "Bạn đã nhập sai 5 lần. Vui lòng thử lại sau 15 phút." }
 
 POST /api/v1/auth/refresh
   Body: { "refreshToken": "..." }
@@ -1047,423 +1061,611 @@ POST /api/v1/auth/refresh
 
 POST /api/v1/auth/logout
   Header: Authorization: Bearer <token>
-  → Invalidate refresh token trên server
+  → Thu hồi Refresh Token trên server
 ```
 
-### Validation Rules
+### Validation & Business Rules
 ```
 SĐT:
-  ✅ Đúng định dạng VN: 10 số, bắt đầu 0
-  ✅ Chỉ chứa chữ số
-  ❌ SĐT chưa tồn tại trong system → thông báo trung lập "OTP đã gửi" (không tiết lộ)
+  ✅ Đúng định dạng số điện thoại Việt Nam: 10 chữ số, bắt đầu bằng 0 hoặc +84
+  ✅ Tự động chuẩn hóa về định dạng 09xxxxxxxx khi lưu và so khớp
+  ❌ SĐT chứa chữ cái hoặc ký tự đặc biệt → báo lỗi ngay tại client
 
 OTP:
-  ✅ Đúng 6 chữ số
-  ✅ Còn hiệu lực (< 5 phút)
-  ✅ Khớp với SĐT vừa request
-  ❌ Sai → "Mã OTP không đúng, còn X lần thử"
-  ❌ Hết 5 lần → khóa 15 phút, hiển thị countdown
+  ✅ Bắt buộc đủ 6 chữ số
+  ✅ Còn hiệu lực trong vòng 5 phút (300 giây)
+  ✅ Khớp chính xác với mã lưu trong bộ nhớ/DB cho SĐT tương ứng
+  ❌ Hết 5 lần sai → Khóa 15 phút, hiển thị đồng hồ đếm ngược chờ mở khóa
 ```
 
 ### Test Cases
 ```
-TC-NV01-01: Đăng nhập thành công → nhận JWT, redirect đúng role
-TC-NV01-02: OTP sai 5 lần → bị khóa, không thể thử tiếp
-TC-NV01-03: OTP hết hạn → "Mã OTP đã hết hạn, gửi lại"
-TC-NV01-04: Gửi lại OTP quá 3 lần/giờ → 429
-TC-NV01-05: Gọi /auth/otp/request với SĐT không tồn tại → vẫn trả "OTP đã gửi" (không leak)
+TC-NV01-01: Nhập SĐT hợp lệ và OTP đúng → Đăng nhập thành công, nhận JWT, redirect đúng role.
+TC-NV01-02: Nhập sai OTP lần 1 đến lần 4 → Thông báo rõ số lần thử còn lại.
+TC-NV01-03: Nhập sai OTP lần 5 → Bị khóa tài khoản 15 phút, gọi API tiếp nhận HTTP 429.
+TC-NV01-04: Nhập OTP khi đã quá 5 phút → Báo mã đã hết hạn, yêu cầu gửi lại.
+TC-NV01-05: Gửi yêu cầu OTP quá 3 lần/giờ trên 1 SĐT → HTTP 429 Too Many Requests.
+TC-NV01-06: Gửi yêu cầu OTP với SĐT không tồn tại → Vẫn trả thông báo thành công (chống dò số điện thoại).
 ```
 
 ---
 
 ## NV-02 — ĐĂNG NHẬP EMAIL/MẬT KHẨU (Nhân viên nội bộ)
-> **FR-003** · Actor: MANAGER, ACCOUNTANT, STAFF, SYS_ADMIN · Module: M02
+> **FR-003** · Actor: SYS_ADMIN, OWNER, MANAGER, ACCOUNTANT, STAFF · Module: M02
 
-### Luồng
+### Luồng tổng quan
 ```
-/login → Tab "Nhân viên" → Nhập email + mật khẩu → Nhận JWT
+/login → Tab "Nhân viên nội bộ" → Nhập Email + Mật khẩu → Xác thực Bcrypt → Nhận JWT
 ```
 
-### API
+### UI Steps
+```
+Tại /login:
+  Tab: [ Email / Mật khẩu (Nội bộ) ]
+  Email công vụ: [ manager@resihub.vn ]
+  Mật khẩu:      [ ••••••••••••••     ] 👁️ (nút ẩn/hiện mật khẩu)
+  [Đăng nhập hệ thống]
+```
+
+### API Flow
 ```
 POST /api/v1/auth/login
-  Body: { "email": "manager@resihub.vn", "password": "..." }
-  → bcrypt.compare password
-  → Trả JWT + refresh token (session ngắn hơn: accessToken 15 phút)
-  Response 401: { "code": "INVALID_CREDENTIALS", "message": "Email hoặc mật khẩu không đúng" }
+  Body: { "email": "manager@resihub.vn", "password": "password123" }
+  → Tìm user theo email trong bảng person và app_user
+  → Kiểm tra app_user.status: Nếu SUSPENDED → Trả HTTP 403 "Tài khoản đã bị tạm khóa"
+  → So sánh mật khẩu bằng bcrypt.compare
+  → Ghi nhận last_login_at = NOW()
+  Response 200: {
+    "accessToken": "...",
+    "refreshToken": "...",
+    "user": { id, email, full_name, roles }
+  }
+  Response 401: { "code": "INVALID_CREDENTIALS", "message": "Email hoặc mật khẩu không chính xác." }
+  Response 403: { "code": "ACCOUNT_SUSPENDED", "message": "Tài khoản của bạn đang bị tạm khóa. Vui lòng liên hệ Quản trị viên." }
 ```
 
-### Validation
+### Validation & Business Rules
 ```
-✅ Email hợp lệ
-✅ Mật khẩu ≥ 8 ký tự
-✅ Tài khoản status = ACTIVE (nếu SUSPENDED → "Tài khoản đã bị tạm khóa")
+Email:
+  ✅ Định dạng email hợp lệ RFC 5322
+  ✅ Tự động trim khoảng trắng và chuyển chữ thường (lowercase)
+Mật khẩu:
+  ✅ Tối thiểu 8 ký tự
+Tài khoản:
+  ✅ app_user.status phải là ACTIVE. Không cho phép đăng nhập nếu SUSPENDED.
+```
+
+### Test Cases
+```
+TC-NV02-01: Đăng nhập email và mật khẩu đúng → Thành công, nhận Access Token (15m) và Refresh Token.
+TC-NV02-02: Nhập sai mật khẩu → HTTP 401 INVALID_CREDENTIALS.
+TC-NV02-03: Đăng nhập tài khoản có status = SUSPENDED → HTTP 403 ACCOUNT_SUSPENDED.
+TC-NV02-04: Mật khẩu dưới 8 ký tự → Báo lỗi client-side không gửi request.
 ```
 
 ---
 
 ## NV-03 — TẠO TÒA NHÀ MỚI
-> **FR-007** · Actor: SYS_ADMIN · Module: M03  
-> *(Xem tài liệu chi tiết riêng: Quy_Trinh_Tao_Toa_Nha.md)*
+> **FR-007, FR-070** · Actor: SYS_ADMIN, OWNER · Module: M03  
+> *(Xem tài liệu kỹ thuật đầy đủ: Quy_Trinh_Tao_Toa_Nha.md)*
 
-### Tóm tắt nhanh
+### Luồng tổng quan
 ```
-/admin/buildings → [+ Thêm tòa] → Drawer form → Submit → 201 → Redirect chi tiết tòa
-
-Fields bắt buộc: name, code (unique/org, A-Z/0-9/-)
-Fields tùy chọn: address, owner_id, payment_account, lease_terms
-
-Sau khi tạo: tòa ở ACTIVE, chưa có tầng → hiển thị checklist "Hoàn thiện cấu hình"
-Không xóa cứng: chỉ đổi status = INACTIVE
+/admin/buildings → [+ Thêm tòa nhà mới] → Drawer/Modal form
+→ Real-time check mã tòa (Blur) → Submit form → INSERT building + audit_log
+→ Hiển thị tòa mới ở trạng thái ACTIVE kèm Checklist "Hoàn thiện cấu hình"
 ```
 
-### State Machine
+### UI Steps
 ```
-[Tạo mới] → ACTIVE ──[SYS_ADMIN deactivate]──► INACTIVE
-                   ◄──[SYS_ADMIN reactivate]───
-Không thể INACTIVE khi đang có HĐ ACTIVE trên tòa đó
+Bước 1 — Tại trang /admin/buildings:
+  Click [+ Thêm tòa nhà mới] (Chỉ hiển thị với SYS_ADMIN và OWNER).
+
+Bước 2 — Drawer / Modal tạo tòa:
+  Thông tin cơ bản:
+    • Tên tòa nhà (*):           [ Tòa Landmark 81 - Vinhomes         ] (2–100 ký tự)
+    • Mã tòa (Code) (*):         [ TN-VINHOMES                        ] (A-Z, 0-9, dấu -)
+      Phản hồi kiểm tra mã:      [ ✅ Mã tòa chưa được dùng (Hợp lệ)  ] ← Real-time on blur
+    • Địa chỉ:                   [ 720A Điện Biên Phủ, Bình Thạnh     ]
+    • Chủ sở hữu tòa (nếu thuê): [ Chọn từ danh sách owner ▼         ] (FR-070 đa chủ sở hữu)
+    • Múi giờ vận hành:          [ Asia/Ho_Chi_Minh ▼                 ]
+  Tài khoản nhận tiền (Tùy chọn - FR-070):
+    • Ngân hàng:                 [ Vietcombank                        ]
+    • Số tài khoản:              [ 0071001234567                      ]
+    • Tên chủ tài khoản:         [ CONG TY RESIHUB                    ]
+    • Loại tài khoản:            [ Cá nhân | Hộ kinh doanh ▼          ]
+  Cài đặt thuê lại:
+    • Điều khoản thuê lại tòa:   [ Hợp đồng thuê nguyên tòa 10 năm... ]
+  [Hủy]   [✓ Tạo tòa nhà]
+
+Bước 3 — Kết quả & Checklist vận hành:
+  • Tòa mới tạo luôn ở trạng thái ACTIVE.
+  • Nếu tòa có 0 tầng → Tự động hiển thị banner nổi bật màu vàng:
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │ 🚀 Hoàn thiện cấu hình cho tòa "Landmark 81" để bắt đầu vận hành      │
+    │  ✅ Thông tin tòa nhà  |  ● Thêm tầng (0 tầng)  |  → Thêm căn hộ      │
+    │                                                     [+ Thêm tầng ngay] │
+    └────────────────────────────────────────────────────────────────────────┘
+```
+
+### API Flow
+```
+GET /api/v1/buildings/check-code?code=TN-A
+  Header: Authorization: Bearer <token>
+  Response 200: { "available": true, "code": "TN-A", "message": "Mã tòa hợp lệ và chưa được dùng." }
+  Response 200: { "available": false, "code": "TN-A", "message": "Mã tòa này đã tồn tại trong tổ chức." }
+
+POST /api/v1/buildings
+  Body: {
+    "name": "Tòa Landmark 81 - Vinhomes",
+    "code": "TN-VINHOMES",
+    "address": "720A Điện Biên Phủ, Bình Thạnh",
+    "owner_id": "uuid-owner" | null,
+    "timezone": "Asia/Ho_Chi_Minh",
+    "payment_account": { "bank": "VCB", "account_no": "...", "account_name": "...", "type": "business" },
+    "lease_terms": { "notes": "Hợp đồng thuê 10 năm..." }
+  }
+  → Transaction:
+    1. Kiểm tra UNIQUE(org_id, code)
+    2. INSERT INTO building (..., status = 'ACTIVE')
+    3. INSERT INTO audit_log (actor_id, action = 'CREATE', entity = 'building', after)
+  Response 201: { "message": "Đã tạo tòa nhà thành công.", "data": { id, name, code, status: 'ACTIVE', ... } }
+  Response 409: { "code": "BUILDING_CODE_EXISTS", "message": "Mã tòa TN-VINHOMES đã tồn tại." }
+  Response 422: { "code": "VALIDATION_ERROR", "message": "Dữ liệu không hợp lệ." }
+
+PATCH /api/v1/buildings/:id/status
+  Body: { "status": "INACTIVE" | "ACTIVE" }
+  → QUY TẮC RÀNG BUỘC (NFR-016):
+    Nếu đổi sang INACTIVE: Kiểm tra SELECT COUNT(*) FROM contract WHERE building_id = $1 AND status = 'ACTIVE'.
+    Nếu count > 0 → CHẶN LẬP TỨC: HTTP 400 ACTIVE_CONTRACTS_EXIST.
+    Không xóa cứng bản ghi tòa nhà khỏi database.
+```
+
+### State Machine của Building
+```
+       [Tạo mới]
+           │
+           ▼
+       ┌───────┐
+       │ACTIVE │ (Mặc định sau khi tạo)
+       └───────┘
+           │
+     [Deactivate] (Chỉ cho phép khi KHÔNG CÓ hợp đồng ACTIVE)
+           │
+           ▼
+      ┌──────────┐
+      │ INACTIVE │ (Tạm ngừng hoạt động, không xóa cứng)
+      └──────────┘
+           │
+      [Reactivate]
+           │
+           └──────► ACTIVE
+```
+
+### Test Cases
+```
+TC-NV03-01: SYS_ADMIN tạo tòa với thông tin hợp lệ → HTTP 201, status = ACTIVE, có bản ghi CREATE trong audit_log.
+TC-NV03-02: Để trống tên tòa hoặc tên < 2 ký tự → HTTP 422 VALIDATION_ERROR.
+TC-NV03-03: Nhập mã tòa chứa ký tự đặc biệt (@#$) → HTTP 422 VALIDATION_ERROR.
+TC-NV03-04: Tạo mã tòa trùng với tòa đã có trong org → HTTP 409 BUILDING_CODE_EXISTS.
+TC-NV03-05: MANAGER hoặc STAFF gọi API tạo tòa → HTTP 403 FORBIDDEN.
+TC-NV03-06: Chuyển trạng thái tòa sang INACTIVE khi đang có hợp đồng ACTIVE → HTTP 400 ACTIVE_CONTRACTS_EXIST.
+TC-NV03-07: Chuyển trạng thái tòa sang INACTIVE khi không có hợp đồng active → HTTP 200, status = INACTIVE, ghi audit_log.
 ```
 
 ---
 
 ## NV-04 — THÊM TẦNG VÀO TÒA
-> **FR-007** · Actor: MANAGER, SYS_ADMIN · Module: M03
+> **FR-007, US-008** · Actor: MANAGER, SYS_ADMIN · Module: M03
+
+### Luồng tổng quan
+```
+/admin/buildings/:id → Tab "Sơ đồ tầng" hoặc nút [+ Thêm tầng]
+→ Nhập số tầng (level) & Tên hiển thị → Lưu → Danh sách tầng tự động sắp xếp theo thứ tự tăng dần
+```
 
 ### UI Steps
 ```
-/admin/buildings/:id → Tab "Tầng & Căn hộ"
-→ [+ Thêm tầng] → Mini form inline hoặc modal:
-   Số tầng (level):  [ 1  ]   ← số nguyên > 0
-   Tên tầng:         [ Tầng 1 ]  ← tùy chọn, tự điền nếu để trống
-   [Lưu]
-
-→ Thêm nhiều tầng liên tiếp không cần reload
-→ Hiển thị danh sách tầng theo level tăng dần
+1. Chọn tòa nhà cần cấu hình trên thanh điều hướng.
+2. Click nút [+ Thêm tầng].
+3. Modal form thêm tầng:
+   • Số tầng (Level) (*):    [ 1            ] (Số nguyên ≥ 1, không âm)
+   • Tên hiển thị của tầng:  [ Tầng 1 (Trệt)] (Nếu để trống tự động điền "Tầng 1")
+   [Hủy]   [Thêm tầng]
+4. Sau khi thêm thành công:
+   • Tầng hiển thị ngay trong danh sách/sơ đồ mà không cần reload trang.
+   • Form giữ trạng thái sẵn sàng để thêm tầng kế tiếp (tự động gợi ý level = level cũ + 1).
 ```
 
-### API
+### API Flow
 ```
 POST /api/v1/buildings/:building_id/floors
-  Body: { "level": 1, "name": "Tầng 1" }
-  → UNIQUE(building_id, level): mỗi tầng chỉ 1 lần
-  Response 201: { id, building_id, level, name, created_at }
-  Response 409: { "code": "FLOOR_EXISTS", "message": "Tầng 1 đã tồn tại" }
+  Body: { "level": 1, "name": "Tầng 1 (Trệt)" }
+  → Kiểm tra UNIQUE(building_id, level)
+  Response 201: { "data": { "id": "uuid", "building_id": "...", "level": 1, "name": "Tầng 1 (Trệt)" } }
+  Response 409: { "code": "FLOOR_EXISTS", "message": "Tầng 1 đã tồn tại trong tòa nhà này." }
+  Response 400: { "code": "VALIDATION_ERROR", "message": "Số tầng phải là số nguyên dương." }
 
 GET /api/v1/buildings/:building_id/floors
-  Response: [{ id, level, name, apartment_count }]
+  Response: { "data": [{ "id": "...", "level": 1, "name": "Tầng 1", "apartment_count": 4 }] }
   Sắp xếp: ORDER BY level ASC
 ```
 
-### Validation
+### Validation & Business Rules
 ```
-level: số nguyên ≥ 1, không âm, không trùng trong tòa
-name:  tùy chọn, max 50 ký tự, nếu trống → tự gen "Tầng {level}"
+level:
+  ✅ Bắt buộc, số nguyên dương ≥ 1
+  ✅ Duy nhất trong cùng một tòa nhà (UNIQUE constraint)
+name:
+  ✅ Tối đa 50 ký tự. Nếu để trống, hệ thống tự động sinh: "Tầng {level}"
+```
+
+### Test Cases
+```
+TC-NV04-01: Tạo tầng 1 với tên hợp lệ → HTTP 201, lưu thành công.
+TC-NV04-02: Tạo tầng để trống tên → Tự động lưu tên "Tầng 1".
+TC-NV04-03: Tạo tầng có level đã tồn tại trong tòa → HTTP 409 FLOOR_EXISTS.
+TC-NV04-04: Nhập level là số âm hoặc chữ cái → HTTP 400 VALIDATION_ERROR.
 ```
 
 ---
 
-## NV-05 — TẠO CĂN HỘ
-> **FR-008** · Actor: MANAGER, SYS_ADMIN · Module: M03
+## NV-05 — TẠO CĂN HỘ & SƠ ĐỒ TRẠNG THÁI (Floor Map)
+> **FR-008, FR-010, US-002, AC-008.1..AC-008.3** · Actor: MANAGER, SYS_ADMIN · Module: M03
+
+### Luồng tổng quan
+```
+/admin/buildings → Chọn tòa → Tab "Sơ đồ tầng" → [+ Thêm căn hộ]
+→ Drawer form → Nhập thông tin & Giá niêm yết (BIGINT VND) → Lưu căn hộ ở trạng thái AVAILABLE
+→ Hiển thị trực quan trên Interactive Floor Map với màu sắc trạng thái
+```
 
 ### UI Steps
 ```
-/admin/buildings/:id/apartments → [+ Thêm căn hộ]
-→ Drawer form:
-   Tầng:         [ Tầng 1 ▼ ]    ← dropdown các tầng đã tạo
-   Mã căn:       [ A101    ]     ← unique trong tòa, real-time check
-   Diện tích:    [ 35      ] m²
-   Loại:         [ Studio ▼ ]    ← Studio / 1PN / 2PN / 3PN / Khác
-   Số phòng ngủ: [ 0       ]
-   Giá niêm yết: [ 6,500,000 ] ₫ ← BIGINT, format với dấu phân cách
-   Ghi chú:      [              ]
-   [Lưu]
+Bước 1 — Chọn tòa nhà và click [+ Thêm căn hộ] (Nút chỉ bật khi tòa đã có ít nhất 1 tầng):
+
+Bước 2 — Form tạo căn hộ:
+  • Tầng (*):            [ Tầng 1 ▼           ] (Dropdown danh sách tầng đã tạo)
+  • Mã căn hộ (*):       [ A101               ] (Duy nhất trong tòa nhà)
+  • Diện tích (*):       [ 35                 ] m²
+  • Loại căn hộ:         [ 1PN ▼              ] (Studio / 1PN / 2PN / 3PN / Khác)
+  • Số phòng ngủ:        [ 1                  ] phòng
+  • Giá niêm yết (*):    [ 7.500.000          ] ₫/tháng (Format tự động dấu chấm phân cách)
+  • Tiện ích đi kèm:     [☑ Wifi  ☑ Điều hòa  ☑ Nóng lạnh  ☑ Khóa từ]
+  • Ghi chú:             [ Cửa sổ hướng Đông thoáng mát... ]
+  [Hủy]   [Tạo căn hộ]
+
+Bước 3 — Sơ đồ tầng trực quan (FR-010):
+  Hiển thị lưới ô căn hộ theo từng tầng với màu sắc trạng thái chuẩn PRD:
+  🟢 Có sẵn (AVAILABLE)      🔵 Đang thuê (OCCUPIED)      🟡 Đã cọc giữ chỗ (RESERVED)
+  🔴 Đang bảo trì (MAINTENANCE)                           ⚫ Tạm ngừng KD (INACTIVE)
+  Click vào ô căn hộ → Mở Slide-over panel bên phải xem đầy đủ thông tin căn hộ.
 ```
 
-### API
+### API Flow
 ```
-POST /api/v1/buildings/:building_id/apartments
+POST /api/v1/apartments
   Body: {
-    "floor_id": "uuid",
+    "building_id": "uuid-building",
+    "floor_id": "uuid-floor",
     "code": "A101",
-    "area_m2": 35,
-    "type": "studio",
-    "bedrooms": 0,
-    "base_rent": 6500000,   ← BIGINT VND
+    "area_m2": 35.5,
+    "type": "1PN",
+    "bedrooms": 1,
+    "base_rent": 7500000,     // BẮT BUỘC: BIGINT VND (không dùng float)
+    "amenities": { "wifi": true, "air_conditioner": true },
     "note": ""
   }
-  Response 201: apartment object với status = "AVAILABLE"
-  Response 409: { "code": "APARTMENT_CODE_EXISTS" }
-  Response 422: validation errors
+  → Transaction:
+    1. Kiểm tra UNIQUE(building_id, code)
+    2. INSERT INTO apartment (..., status = 'AVAILABLE')
+    3. INSERT INTO audit_log (CREATE apartment)
+  Response 201: { "message": "Tạo căn hộ thành công.", "data": { id, code, status: 'AVAILABLE', ... } }
+  Response 409: { "code": "DUPLICATE_CODE", "message": "Mã căn A101 đã tồn tại trong tòa nhà này." }
 
 PATCH /api/v1/apartments/:id
-  → Chỉ sửa được khi status ≠ OCCUPIED (hoặc cảnh báo rõ ràng)
-  → Sửa diện tích khi đang có HĐ ACTIVE → cảnh báo ảnh hưởng tính phí + ghi audit
+  Body: { "base_rent", "area_m2", "status", "amenities", "note" }
+  → RÀNG BUỘC NGHIỆP VỤ (AC-008.2):
+    Nếu sửa diện tích (area_m2) khi căn đang OCCUPIED → Cảnh báo ảnh hưởng đến tính tiền pro-rata/dịch vụ diện tích và bắt buộc ghi Audit Log.
+    Không xóa cứng căn hộ khi đang có hợp đồng hiệu lực.
 ```
 
-### State Machine căn hộ
+### State Machine của Apartment
 ```
          [Tạo mới]
               │
               ▼
          AVAILABLE ◄────────────────────────────────────┐
               │                                          │
-    [HĐ ACTIVE]│              [Đặt cọc giữ chỗ]         │
+    [HĐ ACTIVE]│              [Đặt cọc giữ chỗ (NV-06)] │
               ▼                      │                   │
           OCCUPIED             RESERVED                  │
               │                      │                   │
-  [TERMINATED +      [Hủy giữ chỗ / Chuyển sang HĐ]    │
-   bàn giao]  │                      │                   │
-              ▼                      ▼                   │
-         (bàn giao ─────────────────────────────────────►)
-              │
-   [Cần sửa chữa]
-              ▼
-        MAINTENANCE ──[Sửa xong]──► AVAILABLE
-              │
-   [Không khai thác]
-              ▼
-          INACTIVE
+  [HĐ kết thúc+      [Hủy giữ chỗ / Chuyển sang HĐ]     │
+   bàn giao căn]                     │                   │
+              │                      ▼                   │
+              └───────────────► (bàn giao) ──────────────┘
+                                     │
+                             [Cần sửa chữa]
+                                     │
+                                     ▼
+                                MAINTENANCE ──[Sửa xong]──► AVAILABLE
+                                     │
+                              [Ngừng kinh doanh]
+                                     │
+                                     ▼
+                                  INACTIVE
 ```
 
-### Validation
+### Validation & Business Rules
 ```
-code:      Unique trong tòa (không cần unique toàn system)
-area_m2:   > 0
-base_rent: ≥ 0, BIGINT (không dùng float)
-bedrooms:  ≥ 0
-type:      Enum: studio, 1pn, 2pn, 3pn, other
+code:      Bắt buộc, 1–20 ký tự, tự động viết hoa (uppercase), duy nhất trong tòa nhà.
+area_m2:   Bắt buộc, số dương > 0.
+base_rent: Bắt buộc, số nguyên ≥ 0, lưu kiểu BIGINT đơn vị VND. Tuyệt đối không dùng float.
+bedrooms:  Số nguyên ≥ 0.
+status:    Mặc định sau khi tạo là AVAILABLE.
 ```
 
 ### Test Cases
 ```
-TC-NV05-01: Tạo căn A101 thành công → status = AVAILABLE
-TC-NV05-02: Tạo căn trùng mã A101 trong cùng tòa → 409
-TC-NV05-03: Tạo căn A201 trong tòa khác → OK (mã tòa-căn unique)
-TC-NV05-04: Sửa diện tích căn đang OCCUPIED → cảnh báo + audit log
-TC-NV05-05: Xóa căn đang có HĐ ACTIVE → 409 (không được xóa)
+TC-NV05-01: Tạo căn A101 hợp lệ → HTTP 201, status = AVAILABLE, audit_log có bản ghi CREATE.
+TC-NV05-02: Tạo căn A101 lần 2 trong cùng tòa → HTTP 409 DUPLICATE_CODE.
+TC-NV05-03: Tạo căn A101 ở tòa khác → HTTP 201 thành công (mã căn unique theo tòa, không unique toàn hệ thống).
+TC-NV05-04: Nhập base_rent là số âm → HTTP 400 VALIDATION_ERROR.
+TC-NV05-05: Cập nhật diện tích căn hộ đang có hợp đồng ACTIVE → Báo cảnh báo thành công, ghi vết audit_log chi tiết before/after.
 ```
 
 ---
 
 ## NV-06 — ĐẶT CỌC GIỮ CHỖ (Khách tiềm năng — Reservation)
-> **FR từ phản hồi chủ đầu tư** · Actor: MANAGER · Module: M04
+> **FR-067, Mục 5.3, Mục 7.1** · Actor: PROSPECT, MANAGER · Module: M04
 
-### Bối cảnh
-> Khách xem phòng, chưa ký HĐ nhưng muốn giữ căn → thu tiền giữ chỗ.  
-> Căn hộ chuyển sang `RESERVED`. Sau đó: ký HĐ → chuyển cọc, hoặc hủy.
+### Bối cảnh & Mục đích
+> Thực tế vận hành phát sinh thường xuyên: Khách xem phòng ưng ý nhưng chưa ký hợp đồng ngay → nộp tiền giữ chỗ để đảm bảo không bị người khác thuê mất. Căn hộ lập tức chuyển sang trạng thái `RESERVED`.  
+> Sau đó:  
+> - **Khách đồng ý thuê:** Tiền giữ chỗ **CHUYỂN THÀNH TIỀN CỌC HỢP ĐỒNG** (`CONVERTED`).  
+> - **Khách hủy / Quá hạn:** Áp dụng chính sách mất cọc (`FORFEITED`) hoặc hoàn lại (`REFUNDED`) có phê duyệt của `APPROVER`.
 
 ### UI Steps
 ```
-/admin/buildings/:id/apartments → Chọn căn AVAILABLE → [Đặt giữ chỗ]
-→ Drawer:
-   Tên khách:     [ Nguyễn Văn A      ]
-   SĐT:           [ 0901234567        ]
-   Tiền giữ chỗ:  [ 1,000,000         ] ₫
-   Giữ đến ngày:  [ 2026-10-21        ] ← hạn tối đa (cần chủ đầu tư chốt)
-   Ghi chú:       [                   ]
-   [Xác nhận giữ chỗ]
+Bước 1 — Tại Sơ đồ tầng, chọn căn hộ đang có trạng thái AVAILABLE:
+  Click nút [Đặt cọc giữ chỗ].
 
-→ Thành công: căn → RESERVED, hiện trong danh sách "Đang giữ chỗ"
+Bước 2 — Drawer thông tin giữ chỗ:
+  • Căn hộ giữ:               [ Căn A101 · Tòa Sunrise A           ]
+  • Họ và tên khách (*):      [ Nguyễn Văn An                       ]
+  • Số điện thoại (*):        [ 0901234567                          ]
+  • Số tiền giữ chỗ (*):      [ 1.000.000                           ] ₫ (BIGINT VND)
+  • Giữ phòng đến ngày (*):   [ 25/10/2026 📅                       ] (Hạn giữ phòng)
+  • Ghi chú thỏa thuận:       [ Khách hẹn ngày 25/10 đến ký hợp đồng]
+  [Hủy]   [Xác nhận giữ chỗ]
+
+Bước 3 — Kết quả:
+  • Căn A101 lập tức chuyển sang trạng thái 🟡 RESERVED trên Sơ đồ tầng.
+  • Bản ghi xuất hiện trong danh sách "Cọc giữ chỗ chờ xử lý".
 ```
 
-### API
+### API Flow
 ```
 POST /api/v1/reservations
   Body: {
-    "apartment_id": "uuid",
-    "prospect_name": "Nguyễn Văn A",
+    "apartment_id": "uuid-apartment",
+    "prospect_name": "Nguyễn Văn An",
     "phone": "0901234567",
     "hold_amount": 1000000,
-    "hold_until": "2026-10-21",
-    "note": ""
+    "hold_until": "2026-10-25",
+    "note": "Khách hẹn 25/10 ký HĐ"
   }
-  → Cập nhật apartment.status = RESERVED
-  Response 201: reservation object (status = HELD)
-  Response 409: { "code": "APARTMENT_NOT_AVAILABLE" }
+  → Transaction:
+    1. Kiểm tra apartment.status == 'AVAILABLE' (Nếu không → HTTP 409 APARTMENT_NOT_AVAILABLE)
+    2. INSERT INTO reservation (..., status = 'HELD')
+    3. UPDATE apartment SET status = 'RESERVED' WHERE id = apartment_id
+    4. INSERT INTO audit_log
+  Response 201: { "message": "Đặt cọc giữ chỗ thành công.", "data": reservation }
 
 PATCH /api/v1/reservations/:id/convert
-  → Khi khách chính thức ký HĐ
-  → deposit.source_reservation_id = reservation.id
-  → reservation.status = CONVERTED
-  → apartment.status vẫn RESERVED (sẽ → OCCUPIED khi HĐ ACTIVE)
+  → Khi khách chính thức ký hợp đồng:
+    1. reservation.status = 'CONVERTED'
+    2. Chuyển hold_amount sang cọc hợp đồng: deposit.amount_held = hold_amount
+    3. apartment.status tiếp tục giữ RESERVED cho đến khi HĐ kích hoạt ACTIVE → OCCUPIED.
 
 PATCH /api/v1/reservations/:id/forfeit
-  → Khách hủy, mất tiền giữ chỗ (theo chính sách)
-  → reservation.status = FORFEITED
-  → apartment.status = AVAILABLE
+  → Khách hủy giữ chỗ, bị mất tiền cọc giữ chỗ theo quy định:
+    1. Bắt buộc có xác nhận của APPROVER (Four-eyes)
+    2. reservation.status = 'FORFEITED'
+    3. apartment.status = 'AVAILABLE' (Mở lại phòng cho người khác thuê)
 
 PATCH /api/v1/reservations/:id/refund
-  → Khách hủy, được hoàn tiền
-  → reservation.status = REFUNDED
-  → apartment.status = AVAILABLE
+  → Khách hủy và được hoàn lại tiền cọc giữ chỗ (lý do chính đáng/chính sách):
+    1. APPROVER duyệt lệnh hoàn tiền
+    2. reservation.status = 'REFUNDED'
+    3. apartment.status = 'AVAILABLE'
 
-PATCH /api/v1/reservations/:id/expire   ← job tự động
-  → Quá hold_until mà không convert
-  → reservation.status = EXPIRED
-  → apartment.status = AVAILABLE
-```
-
-### State Machine Reservation
-```
-HELD ──[convert]──► CONVERTED (→ sang Deposit của HĐ)
-     ──[forfeit]──► FORFEITED (mất cọc giữ chỗ)
-     ──[refund] ──► REFUNDED  (hoàn lại)
-     ──[auto expire]► EXPIRED  (quá hold_until)
-```
-
----
-
-## NV-07 — TẠO HỒ SƠ CƯ DÂN
-> **FR-011, FR-021** · Actor: MANAGER · Module: M04
-
-### UI Steps
-```
-/admin/tenants → [+ Thêm cư dân]
-→ Form (Drawer hoặc trang riêng):
-   Họ tên (*):        [ Nguyễn Thị B          ]
-   SĐT (*):           [ 0912345678            ] ← real-time duplicate check
-   Email:             [ b@email.com           ]
-   Ngày sinh:         [ 01/01/1995            ]
-   Số CCCD:           [ 012345678901          ] ← mã hóa khi lưu
-   Ảnh giấy tờ:       [📎 Upload CCCD mặt trước]
-                      [📎 Upload CCCD mặt sau  ]
-   Vai trò thuê:      [ Cư dân chính ▼ ]  (primary / occupant)
-   [Lưu hồ sơ]
-```
-
-### Duplicate Check (FR-021) — Quan trọng
-```
-Khi người dùng rời field SĐT:
-→ Gọi: GET /api/v1/tenants/check-dup?phone=0912345678
-→ Nếu trùng: hiển thị banner vàng:
-  ┌──────────────────────────────────────────────────────────┐
-  │ ⚠️  SĐT này đã tồn tại trong hệ thống                   │
-  │  Nguyễn Thị B · 09123xxxxx · Căn A201 (HĐ đang hiệu lực)│
-  │  [Dùng người này] [Tạo mới - nhập lý do] [Hợp nhất]     │
-  └──────────────────────────────────────────────────────────┘
-```
-
-### API
-```
-GET  /api/v1/tenants/check-dup?phone=&id_number=
-  Response: { "duplicate": true/false, "existing": { id, name, phone, ... } }
-
-POST /api/v1/tenants
-  Body: { person_data: { full_name, phone, email, dob, id_number }, type: "primary" }
-  → Tạo person + tenant record
-  Response 201: tenant object (status = PENDING → MANAGER confirm → APPROVED)
-  Response 409: { "code": "DUPLICATE_PHONE" }  ← nếu không xử lý trùng
-
-POST /api/v1/tenants/:id/merge
-  Body: { target_id: "uuid", merge_fields: { ... }, reason: "..." }
-  → Gộp 2 hồ sơ, giữ lại target_id
-  → Ghi audit_log chi tiết (before/after toàn bộ)
-```
-
-### Validation
-```
-full_name: bắt buộc, 2-100 ký tự
-phone:     10 số VN, bắt đầu 0
-email:     format email hoặc để trống
-dob:       không trong tương lai, không quá 120 tuổi
-id_number: 9 hoặc 12 số (CMND/CCCD), mã hóa khi lưu DB
+Cron Job tự động (Chạy hằng ngày lúc 00:00):
+  → Quét các bản ghi reservation có status = 'HELD' và NOW() > hold_until:
+    1. Tự động chuyển reservation.status = 'EXPIRED'
+    2. Tự động chuyển apartment.status = 'AVAILABLE'
 ```
 
 ### Test Cases
 ```
-TC-NV07-01: Tạo cư dân hợp lệ → status APPROVED
-TC-NV07-02: Nhập SĐT trùng → hiện duplicate warning đúng người
-TC-NV07-03: Chọn "Dùng người này" → không tạo bản ghi mới
-TC-NV07-04: Merge 2 hồ sơ → audit_log ghi đủ before/after
-TC-NV07-05: STAFF không thấy CCCD trên UI (chỉ thấy name+phone)
+TC-NV06-01: Đặt cọc giữ chỗ căn AVAILABLE → HTTP 201, reservation.status = HELD, apartment.status = RESERVED.
+TC-NV06-02: Đặt cọc giữ chỗ căn đang OCCUPIED hoặc RESERVED → HTTP 409 APARTMENT_NOT_AVAILABLE.
+TC-NV06-03: Chuyển giữ chỗ thành hợp đồng (Convert) → reservation.status = CONVERTED, số tiền được ghi nhận vào cọc HĐ.
+TC-NV06-04: Hủy giữ chỗ mất cọc (Forfeit) → reservation.status = FORFEITED, căn hộ tự động trở lại AVAILABLE.
+TC-NV06-05: Quá hạn hold_until chưa chuyển đổi → Cron job tự động chuyển EXPIRED và mở lại phòng AVAILABLE.
+```
+
+---
+
+## NV-07 — TẠO HỒ SƠ CƯ DÂN & PHÁT HIỆN TRÙNG LẶP
+> **FR-011, FR-021, US-001** · Actor: MANAGER · Module: M04
+
+### Luồng tổng quan
+```
+/admin/tenants → [+ Thêm cư dân] → Nhập SĐT / CCCD
+→ Real-time Check trùng lặp (Debounce 400ms) → Hiển thị cảnh báo nếu trùng → Tạo hồ sơ PII bảo mật
+```
+
+### UI Steps
+```
+Bước 1 — Màn hình /admin/tenants: Click [+ Thêm cư dân].
+
+Bước 2 — Drawer nhập hồ sơ cư dân:
+  • Họ và tên (*):            [ Nguyễn Thị Bình                     ]
+  • Số điện thoại (*):        [ 0912345678                          ] ← Kiểm tra trùng real-time
+  • Email:                    [ binh.nguyen@email.com               ]
+  • Ngày sinh:                [ 15/08/1996 📅                       ]
+  • Số CCCD / CMND:           [ 079196001234                        ] ← Mã hóa lưu trữ
+  • Ảnh giấy tờ tùy thân:     [📎 Upload CCCD mặt trước] [📎 Upload mặt sau]
+  • Vai trò thuê:             [ Cư dân đại diện (Primary) ▼        ] (primary | occupant)
+  
+  ⚠️ XỬ LÝ TRÙNG LẶP REAL-TIME (FR-021):
+  Nếu SĐT hoặc CCCD đã có trong tổ chức, xuất hiện banner cảnh báo màu vàng ngay dưới ô nhập:
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │ ⚠️ Số điện thoại này đã tồn tại trong hệ thống:                       │
+  │    Nguyễn Thị Bình · SĐT: 0912345678 · Đang ở căn A201 (HĐ hiệu lực)    │
+  │    [Dùng hồ sơ này]   [Tạo mới - Nhập lý do khác biệt]   [Hợp nhất]    │
+  └────────────────────────────────────────────────────────────────────────┘
+
+Bước 3 — Lưu hồ sơ:
+  • Trạng thái hồ sơ ban đầu: APPROVED (nếu do Quản lý tạo) hoặc PENDING (nếu cư dân tự khai từ portal).
+```
+
+### API Flow
+```
+GET /api/v1/tenants/check-dup?phone=0912345678&id_number=079196001234
+  Response 200: {
+    "isDuplicate": true,
+    "duplicates": [{ "id": "uuid", "full_name": "Nguyễn Thị Bình", "phone": "0912345678", "apartment_code": "A201" }]
+  }
+
+POST /api/v1/tenants
+  Body: {
+    "full_name": "Nguyễn Thị Bình",
+    "phone": "0912345678",
+    "email": "binh.nguyen@email.com",
+    "dob": "1996-08-15",
+    "id_number": "079196001234",
+    "type": "primary"
+  }
+  → Transaction:
+    1. Tìm hoặc tạo person (bảng thông tin định danh cá nhân)
+    2. Tạo tenant (gắn vai trò trong tổ chức)
+    3. Mã hóa trường id_number trước khi ghi DB (NFR-008 PII)
+    4. Ghi audit_log (CREATE tenant)
+  Response 201: { "message": "Tạo hồ sơ cư dân thành công.", "data": tenant }
+
+QUY TẮC BẢO MẬT PII CHO NHÂN VIÊN (Mục 6.2 PRD v0.2):
+  STAFF kỹ thuật khi truy vấn chỉ được xem full_name và phone liên hệ trong phạm vi công việc.
+  Trường id_number (CCCD), ảnh giấy tờ, thông tin hợp đồng và công nợ BỊ ẨN HOÀN TOÀN với STAFF.
+```
+
+### Test Cases
+```
+TC-NV07-01: Tạo cư dân mới với SĐT chưa có trong hệ thống → HTTP 201, tạo thành công.
+TC-NV07-02: Nhập SĐT đã tồn tại → Frontend hiển thị banner cảnh báo trùng lặp sau 400ms.
+TC-NV07-03: Chọn "Dùng hồ sơ này" → Sử dụng person_id hiện hữu, không sinh bản ghi thừa.
+TC-NV07-04: STAFF đăng nhập gọi API lấy danh sách cư dân → CCCD và ảnh giấy tờ bị ẩn (null/masked).
 ```
 
 ---
 
 ## NV-08 — TẠO HỢP ĐỒNG THUÊ (Wizard 3 bước)
-> **FR-014** · Actor: MANAGER (tạo) · OWNER/APPROVER (duyệt nếu giá lệch) · Module: M05
+> **FR-014, FR-065, FR-066, FR-064, Mục 10.3** · Actor: MANAGER (tạo) + APPROVER (duyệt) · Module: M05
 
-### Điều kiện trước khi tạo
+### Điều kiện tiên quyết trước khi tạo
 ```
-✅ Căn hộ ở trạng thái AVAILABLE hoặc RESERVED
-✅ Cư dân đại diện (primary tenant) đã có hồ sơ APPROVED
-✅ Người tạo ≠ người duyệt (four-eyes nếu cần approve)
-```
-
-### UI — Wizard 3 bước
-
-#### Bước 1 — Căn hộ & Cư dân
-```
-[Step 1: Căn hộ & Cư dân] ──── Step 2 ──── Step 3
-
-  Chọn căn hộ:
-  🔍 [ Tìm mã căn...   ]
-  → Dropdown chỉ hiện AVAILABLE và RESERVED
-  → Sau khi chọn: hiển thị thông tin căn (diện tích, giá niêm yết, tầng)
-
-  Cư dân đại diện (primary tenant) (*):
-  🔍 [ Tìm tên / SĐT... ]
-  → Chọn từ danh sách tenant APPROVED
-  → Hoặc [+ Tạo cư dân mới] (mở drawer inline)
-
-  Thành viên hộ (occupants):
-  [+ Thêm thành viên]
-  → Mỗi thành viên: Họ tên + Quan hệ (vợ/chồng/con/cha mẹ/khác)
-
-[Tiếp theo →]
+✅ Căn hộ phải ở trạng thái AVAILABLE hoặc RESERVED.
+✅ Cư dân đại diện (Primary Tenant) đã có hồ sơ trong hệ thống.
+✅ Cơ chế Four-Eyes: Người tạo hợp đồng ≠ Người duyệt kích hoạt (nếu có lệch giá).
 ```
 
-#### Bước 2 — Điều khoản hợp đồng
+### UI — Wizard 3 bước chuẩn hóa
+
+#### Bước 1 — Chọn Căn hộ & Khách thuê
 ```
-◄ Bước 1  [Step 2: Điều khoản] ──── Step 3
-
-  Ngày bắt đầu (*):   [ 01/11/2026 📅 ]
-  Ngày kết thúc (*):  [ 31/10/2027 📅 ]
-  (Thời hạn: 12 tháng)
-
-  Tiền thuê (*):      [ 6,500,000 ] ₫/tháng
-  ⚠️ Cảnh báo: Giá niêm yết là 7.000.000 ₫ (thấp hơn 7.1%) → [Yêu cầu phê duyệt]
-
-  Ngày chốt kỳ (billing_day) (*):  [ 1 ]  (ngày 1 hằng tháng)
-  Số ngày ân hạn (*):               [ 5 ]  ngày (sau billing_day)
-  → Hạn thanh toán = ngày 1 + 5 = ngày 6 hằng tháng
-
-  Tiền cọc (*):       [ 13,000,000 ] ₫  (= 2 tháng tiền thuê)
-
-[← Quay lại]  [Tiếp theo →]
-```
-
-#### Bước 3 — Dịch vụ & Xem trước
-```
-◄ Bước 1  ◄ Bước 2  [Step 3: Dịch vụ & Xác nhận]
-
-  Dịch vụ đi kèm:
-  ☑ Điện          Giá tòa: 3.500 ₫/kWh  [ Ghi đè: 3.500 ₫ ]
-  ☑ Nước          Giá tòa: 15.000 ₫/m³   [ Ghi đè: 15.000 ₫]
-  ☑ Gửi xe máy   Giá tòa: 100.000 ₫/xe  [ Ghi đè: 100.000 ₫]
-  ☐ Internet      200.000 ₫/tháng
-  ☐ Dọn phòng
-
-  ─────────── XEM TRƯỚC ───────────
-  Căn:           A101 · Tầng 1 · 35m² · Studio
-  Cư dân:        Nguyễn Thị B + 0 thành viên
-  Kỳ hạn:        01/11/2026 → 31/10/2027 (12 tháng)
-  Tiền thuê:     6.500.000 ₫/tháng
-  Tiền cọc:      13.000.000 ₫
-  Ngày chốt kỳ:  Ngày 1 hằng tháng
-  Hạn thanh toán: Ngày 6 hằng tháng
-
-  [← Quay lại]         [💾 Lưu bản nháp (DRAFT)]
+┌────────────────────────────────────────────────────────────────────────┐
+│ [Bước 1: Căn hộ & Khách] ───── Bước 2: Điều khoản ───── Bước 3: Dịch vụ│
+├────────────────────────────────────────────────────────────────────────┤
+│ Chọn Tòa nhà & Căn hộ:                                                 │
+│   • Tòa nhà: [ Tòa Landmark 81 ▼ ]                                     │
+│   • Căn hộ:  [ Căn A101 (35m² - Studio - Giá NY: 7.500.000 ₫) ▼ ]      │
+│     (Dropdown chỉ hiển thị các căn AVAILABLE hoặc RESERVED)            │
+│                                                                        │
+│ Khách thuê đại diện (Primary Tenant) (*):                              │
+│   🔍 [ Tìm kiếm theo Tên hoặc Số điện thoại... ]                       │
+│   → Chọn [ Nguyễn Thị Bình - 0912345678 ]                              │
+│   → Hoặc nút [+ Thêm nhanh cư dân mới]                                 │
+│                                                                        │
+│ Thành viên ở cùng (Occupants):                                         │
+│   [+ Thêm người ở cùng]                                                │
+│   • Họ tên: [ Trần Văn Nam ] - Quan hệ: [ Vợ/Chồng ▼ ]                 │
+│                                                                        │
+│                                                    [Tiếp tục: Bước 2 →]│
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Sau khi lưu DRAFT
+#### Bước 2 — Điều khoản hợp đồng & Tài chính
 ```
-/admin/contracts/:id (status = DRAFT)
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 1: Căn hộ & Khách ───── [Bước 2: Điều khoản] ───── Bước 3: Dịch vụ│
+├────────────────────────────────────────────────────────────────────────┤
+│ Thời hạn hợp đồng:                                                     │
+│   • Ngày bắt đầu (*):   [ 01/11/2026 📅 ]                              │
+│   • Ngày kết thúc (*):  [ 31/10/2027 📅 ] (Thời hạn: 12 tháng)         │
+│                                                                        │
+│ Giá thuê & Tiền cọc (BIGINT VND):                                      │
+│   • Giá thuê phòng (*): [ 7.000.000  ] ₫/tháng                         │
+│     ⚠️ CẢNH BÁO: Giá thuê thấp hơn Giá niêm yết (7.500.000 ₫)          │
+│     → Hợp đồng sẽ chuyển trạng thái PENDING_APPROVAL chờ APPROVER duyệt│
+│   • Tiền cọc chuẩn (*): [ 7.000.000  ] ₫ (= 1 tháng tiền thuê - PRD)   │
+│     (QUY TẮC CỐT LÕI: Tiền cọc KHÔNG được cấn trừ vào tiền thuê phòng) │
+│                                                                        │
+│ Chu kỳ thanh toán & Phạt chậm (FR-064, FR-066):                        │
+│   • Ngày chốt kỳ (billing_day) (*):  [ 1  ] (Ngày 1 hằng tháng)        │
+│   • Số ngày ân hạn thanh toán (*):   [ 5  ] ngày sau ngày chốt kỳ      │
+│     → Hạn nộp tiền = Ngày 6 hằng tháng.                                │
+│     → Sau 5 ngày quá hạn: Tự động phạt 100.000 ₫/ngày chậm (FR-064).   │
+│                                                                        │
+│ [← Quay lại Bước 1]                                [Tiếp tục: Bước 3 →]│
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-Tab "Đính kèm" → [📎 Upload hợp đồng đã ký] → Chọn file PDF/JPG
-→ Sau khi upload: [✅ Kích hoạt hợp đồng]
-→ Confirm dialog: "Kích hoạt hợp đồng HĐ-001? Căn A101 sẽ chuyển sang Đang thuê."
-→ Xác nhận → status = ACTIVE, apartment = OCCUPIED
+#### Bước 3 — Biểu phí Dịch vụ đi kèm (FR-065) & Xem trước
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ Bước 1: Căn hộ & Khách ───── Bước 2: Điều khoản ───── [Bước 3: Dịch vụ]│
+├────────────────────────────────────────────────────────────────────────┤
+│ Biểu phí dịch vụ theo từng hợp đồng (FR-065):                          │
+│ (Thứ tự ưu tiên tính tiền: Giá ghi đè HĐ → Giá tòa nhà → Giá mặc định)│
+│   ☑ Điện sinh hoạt:  Đơn giá cố định: [ 3.500 ] ₫/kWh (theo công tơ)   │
+│   ☑ Nước sinh hoạt:  Đơn giá cố định: [ 15.000] ₫/m³  (theo công tơ)   │
+│   ☑ Gửi xe máy:      Số lượng: [ 1 ] xe - Đơn giá: [ 120.000 ] ₫/tháng │
+│   ☑ Phí dịch vụ chung (rác, thang máy, bảo vệ):    [ 150.000 ] ₫/tháng │
+│   ☐ Internet cáp quang tốc độ cao:                 [ 200.000 ] ₫/tháng │
+│                                                                        │
+│ TÓM TẮT XEM TRƯỚC HỢP ĐỒNG:                                            │
+│ • Căn hộ: A101 (Tầng 1) · Khách thuê: Nguyễn Thị Bình (0912345678)     │
+│ • Kỳ hạn: 01/11/2026 → 31/10/2027 · Tiền thuê: 7.000.000 ₫/tháng      │
+│ • Tiền cọc: 7.000.000 ₫ (giữ riêng tại sổ cọc) · Chốt kỳ: Ngày 1      │
+│                                                                        │
+│ [← Quay lại Bước 2]                               [💾 Lưu bản nháp DRAFT]
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Sau khi lưu DRAFT & Luồng Kích hoạt (Activation)
+```
+1. Hợp đồng tạo ở trạng thái DRAFT.
+2. Quản lý tải bản hợp đồng giấy đã ký có chữ ký của hai bên:
+   Tại tab "Đính kèm": [📎 Upload bản scan/ảnh hợp đồng đã ký].
+3. Bấm [✅ Kích hoạt hợp đồng]:
+   • Kiểm tra Four-eyes: Nếu giá thuê lệch khung (thấp hơn niêm yết) → Chờ APPROVER duyệt.
+   • Khi kích hoạt thành công:
+     - contract.status = 'ACTIVE'
+     - apartment.status tự động chuyển sang 'OCCUPIED'
+     - Tự động mở bản ghi cọc deposit (status = 'HELD' khi thu tiền)
+     - Gửi thông báo chào mừng đến cư dân kèm link đăng nhập app.
 ```
 
 ### API Flow
@@ -1474,385 +1676,433 @@ POST /api/v1/contracts
     "primary_tenant_id": "uuid",
     "occupants": [{ "tenant_id": "uuid", "relationship": "spouse" }],
     "start_date": "2026-11-01",
-    "end_date":   "2027-10-31",
-    "rent_amount": 6500000,
+    "end_date": "2027-10-31",
+    "rent_amount": 7000000,
     "billing_day": 1,
     "payment_due_days": 5,
-    "deposit_amount": 13000000,
+    "deposit_amount": 7000000,
     "services": [
       { "service_code": "ELECTRICITY", "unit_price": 3500 },
-      { "service_code": "WATER",       "unit_price": 15000 },
-      { "service_code": "PARKING_MOTO","unit_price": 100000 }
+      { "service_code": "WATER", "unit_price": 15000 },
+      { "service_code": "PARKING_MOTO", "unit_price": 120000, "quantity": 1 }
     ]
   }
-  Response 201: { id, status: "DRAFT", ... }
-  Response 409: { "code": "OVERLAP_CONTRACT" }  ← chồng lấn kỳ thuê
-  Response 422: validation errors
+  → Transaction:
+    1. Kiểm tra Exclusion Constraint btree_gist trên (apartment_id, [start_date, end_date)) chống chồng lấn kỳ hạn
+    2. Nếu giá thuê < giá niêm yết → contract.status = 'PENDING_APPROVAL'
+       Ngược lại → contract.status = 'DRAFT'
+    3. INSERT INTO contract_service_price (FR-065 bảng giá theo hợp đồng)
+    4. INSERT INTO audit_log
+  Response 201: { "data": contract }
+  Response 409: { "code": "OVERLAP_CONTRACT", "message": "Căn hộ đã có hợp đồng thuê trong khoảng thời gian này." }
 
 POST /api/v1/contracts/:id/activate
-  Body: { } (file đã upload vào storage trước)
-  → Kiểm tra: contract ở DRAFT, đã có file đính kèm, người activate ≠ người tạo (four-eyes)
-  → apartment.status = OCCUPIED
-  → contract.status = ACTIVE
-  → Sinh lịch hóa đơn dự kiến (preview)
-  → Tạo deposit record (PENDING → HELD khi thu tiền)
-  → Gửi thông báo cư dân: "HĐ đã kích hoạt, đây là link đăng nhập"
-  Response 200: { contract updated }
-  Response 403: { "code": "SELF_APPROVE" }  ← four-eyes violation
-```
-
-### Validation Business Rules
-```
-end_date > start_date                          ✅ DB CHECK constraint
-rent_amount > 0                                ✅
-billing_day ∈ [1, 31]                          ✅
-Chồng lấn kỳ thuê cùng căn:                   ✅ Exclusion constraint btree_gist
-Giá < X% niêm yết → PENDING_APPROVAL          ⚙️ Cần chốt ngưỡng X% với chủ đầu tư
-Thiếu giấy tờ CCCD → DRAFT OK, ACTIVE blocked ✅
+  Body: { "signed_contract_url": "..." }
+  → Kiểm tra: Đã upload bản scan hợp đồng đã ký và primary tenant đã có CCCD hợp lệ.
+  → Kiểm tra Four-eyes: approved_by != created_by (nếu giá lệch khung).
+  → Cập nhật:
+    contract.status = 'ACTIVE'
+    apartment.status = 'OCCUPIED'
+    deposit.status = 'HELD'
+  Response 200: { "message": "Hợp đồng đã kích hoạt thành công. Căn hộ chuyển sang Đang thuê." }
 ```
 
 ### Test Cases
 ```
-TC-NV08-01: Tạo HĐ đầy đủ → DRAFT, chưa có DEPOSIT
-TC-NV08-02: Activate → contract ACTIVE, apartment OCCUPIED, audit log
-TC-NV08-03: Tạo 2 HĐ chồng kỳ cùng căn → 409 OVERLAP_CONTRACT
-TC-NV08-04: end_date ≤ start_date → 422
-TC-NV08-05: Người tạo tự activate → 403 SELF_APPROVE
-TC-NV08-06: RESIDENT gọi API tạo HĐ → 403 FORBIDDEN
-TC-NV08-07: Giá thuê thấp hơn ngưỡng → status = PENDING_APPROVAL, không tự ACTIVE
+TC-NV08-01: Tạo hợp đồng thành công với giá chuẩn → status = DRAFT, căn hộ sẵn sàng kích hoạt.
+TC-NV08-02: Tạo hợp đồng với giá thấp hơn niêm yết → status = PENDING_APPROVAL, yêu cầu APPROVER duyệt.
+TC-NV08-03: Kích hoạt hợp đồng khi chưa upload bản hợp đồng đã ký → Chặn lại, yêu cầu đính kèm file.
+TC-NV08-04: Tạo 2 hợp đồng bị trùng kỳ hạn trên cùng 1 căn hộ → DB Exclusion Constraint chặn HTTP 409 OVERLAP_CONTRACT.
+TC-NV08-05: Ngày kết thúc hợp đồng ≤ ngày bắt đầu → HTTP 422 VALIDATION_ERROR.
+TC-NV08-06: Người lập hợp đồng tự bấm duyệt khi giá lệch khung → HTTP 403 SELF_APPROVE (Vi phạm Four-eyes).
 ```
 
 ---
 
-## NV-09 — GIA HẠN HỢP ĐỒNG
-> **FR-015** · Actor: MANAGER (tạo) + OWNER/APPROVER (duyệt) · Module: M05
-
-### UI Steps
-```
-/admin/contracts/:id (status = ACTIVE hoặc RENEWAL_PENDING)
-→ [↻ Gia hạn hợp đồng]
-→ Form gia hạn:
-   Ngày bắt đầu mới: [ 01/11/2027 ] ← tự điền = end_date cũ + 1 ngày
-   Ngày kết thúc:    [ 31/10/2028 ]
-   Tiền thuê mới:    [ 7,000,000  ] ₫  ← có thể điều chỉnh
-   Ghi chú:          [ Gia hạn năm 2 ]
-   [Tạo hợp đồng gia hạn]
-
-→ Tạo contract mới với parent_contract_id = HĐ cũ
-→ HĐ cũ → RENEWAL_PENDING (chờ HĐ mới ACTIVE)
-→ Khi HĐ mới ACTIVE: HĐ cũ → EXPIRED (tự động)
-```
-
-### API
-```
-POST /api/v1/contracts/:id/renew
-  Body: { "start_date", "end_date", "rent_amount", "note" }
-  → Tạo contract mới với parent_contract_id
-  → Kế thừa: apartment_id, tenants, services từ HĐ cũ
-  → Deposit: chuyển tiếp (không yêu cầu cọc mới nếu không thay đổi)
-  Response 201: new_contract (DRAFT)
-```
-
-### Business Rules
-```
-HĐ gốc phải ở ACTIVE hoặc RENEWAL_PENDING mới tạo được gia hạn
-Ngày bắt đầu HĐ gia hạn phải ≥ end_date HĐ gốc
-Không chồng lấn kỳ (exclusion constraint vẫn áp dụng)
-Cọc: giữ nguyên nếu cọc đang HELD; không thu thêm (trừ khi có thỏa thuận khác)
-```
-
----
-
-## NV-10 — CHẤM DỨT / HỦY HỢP ĐỒNG
-> **FR-017** · Actor: MANAGER (tạo yêu cầu) + OWNER/APPROVER (duyệt) · Module: M05
+## NV-09 — GIA HẠN HỢP ĐỒNG (Contract Renewal)
+> **FR-015, US-006** · Actor: MANAGER (lập) + APPROVER (duyệt) · Module: M05
 
 ### Luồng tổng quan
 ```
-Yêu cầu chấm dứt → Duyệt → Kiểm tra căn → Chốt chỉ số cuối
-→ Hóa đơn cuối kỳ → Quyết toán cọc → Hoàn cọc/Ghi nợ
+/admin/contracts/:id (HĐ đang ACTIVE hoặc sắp hết hạn) → [↻ Gia hạn hợp đồng]
+→ Tạo HĐ mới nối tiếp kỳ hạn, liên kết parent_contract_id
+→ Cọc được CHUYỂN TIẾP (TRANSFERRED), không thu lại cọc
+→ HĐ mới kích hoạt ACTIVE → HĐ cũ tự động chuyển EXPIRED
 ```
 
 ### UI Steps
 ```
-/admin/contracts/:id (status = ACTIVE)
-→ [🔴 Chấm dứt hợp đồng]
-→ Form:
-   Ngày chấm dứt:  [ 15/11/2026 ]
-   Lý do:          [ Cư dân chuyển đi ▼ ]
-                   (Hết kỳ / Chuyển đi / Vi phạm HĐ / Thỏa thuận)
-   Ghi chú:        [                   ]
-   [Gửi yêu cầu chấm dứt]
-
-→ contract.status = TERMINATED (sau khi duyệt)
-→ apartment.status = AVAILABLE (sau khi xác nhận bàn giao)
+1. Tại chi tiết hợp đồng sắp hết hạn (trước 60, 30, hoặc 15 ngày):
+   Click nút [↻ Gia hạn hợp đồng].
+2. Form gia hạn hợp đồng:
+   • Ngày bắt đầu mới:  [ 01/11/2027 ] (Tự động điền = Ngày kết thúc cũ + 1 ngày)
+   • Ngày kết thúc mới: [ 31/10/2028 ] (Thời hạn tiếp 12 tháng)
+   • Giá thuê mới:      [ 7.300.000  ] ₫/tháng (Có thể giữ nguyên hoặc điều chỉnh)
+   • Tiền cọc:          [ 7.000.000  ] ₫ (Chuyển tiếp số dư cọc đang giữ, không thu mới)
+   • Ghi chú:           [ Gia hạn năm thứ 2 theo thỏa thuận ngày 15/10 ]
+   [Tạo hợp đồng gia hạn]
+3. Trạng thái:
+   • Hợp đồng cũ chuyển sang `RENEWAL_PENDING`.
+   • Hợp đồng mới tạo ở `DRAFT` (hoặc `PENDING_APPROVAL` nếu đổi giá).
+   • Khi HĐ mới được ký và kích hoạt `ACTIVE` → HĐ cũ tự động chuyển sang `EXPIRED`.
 ```
 
-### API
+### API Flow
 ```
-POST /api/v1/contracts/:id/terminate
-  Body: { "termination_date": "2026-11-15", "reason": "tenant_moved", "note": "..." }
-  → contract.status → PENDING_TERMINATION (chờ duyệt)
-  Response 200
-
-POST /api/v1/contracts/:id/terminate/approve
-  Body: { "approved": true, "note": "Đồng ý" }
-  → contract.status = TERMINATED
-  → apartment.status = MAINTENANCE (chờ kiểm tra) hoặc AVAILABLE
-  Response 200
-
-POST /api/v1/contracts/:id/terminate/reject
-  Body: { "reason": "..." }
-  → contract.status = ACTIVE lại
-  Response 200
+POST /api/v1/contracts/:id/renew
+  Body: {
+    "start_date": "2027-11-01",
+    "end_date": "2028-10-31",
+    "rent_amount": 7300000,
+    "note": "Gia hạn năm 2"
+  }
+  → Transaction:
+    1. Kiểm tra HĐ gốc đang ở ACTIVE hoặc RENEWAL_PENDING
+    2. INSERT INTO contract với parent_contract_id = id cũ
+    3. Kế thừa toàn bộ cư dân và biểu phí dịch vụ FR-065 từ HĐ gốc
+    4. UPDATE contract cũ status = 'RENEWAL_PENDING'
+    5. Ghi nhận chuyển cọc trong deposit_transaction (type = 'transfer')
+  Response 201: { "data": newContract }
 ```
 
-### Sau khi TERMINATED — Checklist bàn giao
+### Test Cases
 ```
-/admin/contracts/:id/handover
-
-  ☐ Đã kiểm tra tình trạng căn hộ (có ảnh kèm)
-  ☐ Đã chốt chỉ số điện cuối kỳ
-  ☐ Đã chốt chỉ số nước cuối kỳ
-  ☐ Đã phát hành hóa đơn kỳ cuối
-  ☐ Đã xác nhận không còn tài sản cư dân trong căn
-
-→ Khi tick hết: căn hộ → AVAILABLE
-→ Mở quy trình quyết toán cọc (NV-13)
+TC-NV09-01: Gia hạn hợp đồng thành công → HĐ mới kế thừa đúng căn hộ, cư dân, dịch vụ, parent_contract_id trỏ về HĐ cũ.
+TC-NV09-02: Ngày bắt đầu HĐ gia hạn nhỏ hơn ngày kết thúc HĐ cũ → Báo lỗi chồng lấn kỳ hạn.
+TC-NV09-03: Kích hoạt HĐ gia hạn → HĐ mới thành ACTIVE, HĐ cũ chuyển sang EXPIRED.
 ```
 
 ---
 
-## NV-11 — THU CỌC
-> **FR-022** · Actor: ACCOUNTANT · Module: M06
+## NV-10 — CHẤM DỨT HỢP ĐỒNG & BÀN GIAO CĂN HỘ
+> **FR-017, Mục 7.4** · Actor: MANAGER (lập yêu cầu) + APPROVER (duyệt) · Module: M05
 
-### Bối cảnh
-> Sau khi HĐ ACTIVE, ACCOUNTANT ghi nhận tiền cọc đã thu thực tế.  
-> Cọc KHÔNG được cấn trừ vào tiền thuê (quy tắc cứng từ chủ đầu tư).
+### Luồng 5 bước bắt buộc theo PRD v2.0
+```
+Bước 1: Tiếp nhận đề nghị chấm dứt (Cư dân gửi từ portal hoặc BQL lập)
+  → Bước 2: APPROVER phê duyệt ngày chấm dứt (HĐ chuyển PENDING_TERMINATION → TERMINATED)
+  → Bước 3: Kiểm tra căn hộ tại hiện trường (Biên bản kiểm tra có ảnh hiện trạng)
+  → Bước 4: Chốt chỉ số điện, nước cuối kỳ (Chụp ảnh đồng hồ)
+  → Bước 5: Phát hành hóa đơn kỳ cuối (Tiền thuê pro-rata theo ngày ở thực tế + điện nước)
+  → Bàn giao căn: Căn hộ chuyển sang AVAILABLE hoặc MAINTENANCE → Mở hồ sơ quyết toán cọc (NV-13)
+```
 
 ### UI Steps
 ```
-/admin/contracts/:id → Tab "Cọc"
-→ [+ Ghi nhận thu cọc]
-→ Form:
-   Số tiền:          [ 13,000,000 ] ₫
-   Ngày thu:         [ 01/11/2026 📅 ]
-   Phương thức:      [ Chuyển khoản ▼ ] (Tiền mặt / CK / Khác)
-   Số tham chiếu:    [ CK20261101001  ]
-   Ảnh chứng từ:     [📎 Upload]
-   [Xác nhận thu cọc]
+1. Tại chi tiết hợp đồng ACTIVE: Click nút [🔴 Chấm dứt hợp đồng].
+2. Form đề nghị chấm dứt:
+   • Ngày trả phòng/chấm dứt: [ 15/11/2026 📅 ]
+   • Lý do:                   [ Hết hạn hợp đồng | Cư dân chuyển công tác | Vi phạm ▼ ]
+   • Ghi chú:                 [ Cư dân báo trước 30 ngày theo đúng quy định ]
+   [Gửi yêu cầu chấm dứt]
+3. Sau khi APPROVER duyệt:
+   • Hợp đồng chuyển sang trạng thái TERMINATED.
+   • Mở Checklist bàn giao căn hộ (/admin/contracts/:id/handover):
+     ☑ Đã kiểm tra hiện trạng phòng (Có 4 ảnh đính kèm)
+     ☑ Đã chốt chỉ số điện cuối: 1450 kWh (Có ảnh công tơ)
+     ☑ Đã chốt chỉ số nước cuối: 125 m³ (Có ảnh công tơ)
+     ☑ Đã phát hành hóa đơn kỳ cuối (Tính pro-rata tiền thuê đến ngày 15/11)
+     ☑ Đã thu hồi chìa khóa & thẻ từ thang máy
+4. Xác nhận bàn giao:
+   • Nếu phòng bình thường: Căn hộ chuyển sang 🟢 AVAILABLE sẵn sàng đón khách.
+   • Nếu có hư hỏng cần khắc phục: Căn hộ chuyển sang 🔴 MAINTENANCE.
+   • Hệ thống kích hoạt nút dẫn trực tiếp: [Tạo bảng quyết toán cọc (NV-13)].
 ```
 
-### API
+### API Flow
+```
+POST /api/v1/contracts/:id/terminate
+  Body: { "termination_date": "2026-11-15", "reason": "tenant_request", "note": "..." }
+  Response 200: { "status": "PENDING_TERMINATION" }
+
+POST /api/v1/contracts/:id/terminate/approve
+  Header: Authorization: Bearer <token>
+  Body: { "approved": true }
+  → Bắt buộc Four-eyes: approved_by != created_by
+  → contract.status = 'TERMINATED'
+  Response 200: { "status": "TERMINATED" }
+
+POST /api/v1/contracts/:id/handover
+  Body: {
+    "electric_reading": 1450,
+    "water_reading": 125,
+    "handover_images": ["url1", "url2"],
+    "requires_maintenance": false
+  }
+  → Cập nhật căn hộ: status = requires_maintenance ? 'MAINTENANCE' : 'AVAILABLE'
+  → Kích hoạt trạng thái sẵn sàng cho quyết toán cọc
+```
+
+### Test Cases
+```
+TC-NV10-01: Gửi đề nghị chấm dứt hợp đồng → HĐ sang PENDING_TERMINATION.
+TC-NV10-02: APPROVER duyệt chấm dứt → HĐ sang TERMINATED, khóa không cho phát sinh kỳ hóa đơn mới.
+TC-NV10-03: Hoàn tất checklist bàn giao không cần bảo trì → Căn hộ tự động trở lại AVAILABLE.
+TC-NV10-04: Hoàn tất checklist có ghi nhận hư hại → Căn hộ chuyển sang MAINTENANCE.
+```
+
+---
+
+## NV-11 — THU TIỀN CỌC HỢP ĐỒNG (Mở Sổ Cọc)
+> **FR-022, Mục 10.3** · Actor: ACCOUNTANT · Module: M06
+
+### Quy tắc cốt lõi từ PRD v2.0
+> 1. Tiền cọc chuẩn bằng **1 tháng tiền thuê** (theo mục 10.3 PRD v0.2).  
+> 2. **TIỀN CỌC TUYỆT ĐỐI KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ HẰNG THÁNG.**  
+> 3. Tiền cọc được lưu vào sổ cái riêng biệt (`deposit`) gắn theo hợp đồng, có lịch sử giao dịch bất biến (`deposit_transaction`).
+
+### UI Steps
+```
+1. Tại chi tiết hợp đồng đã ký: Tab [Tiền cọc & Sổ cọc].
+2. Click nút [+ Ghi nhận thu cọc]:
+   • Hợp đồng:           [ HĐ-2026-001 (Căn A101 - Nguyễn Thị Bình) ]
+   • Số tiền cọc (*):    [ 7.000.000 ] ₫
+   • Ngày thu thực tế:   [ 01/11/2026 📅 ]
+   • Phương thức thu:    [ Chuyển khoản ngân hàng ▼ ] (Tiền mặt / Chuyển khoản)
+   • Mã giao dịch / STK: [ VCB202611019988 ]
+   • Ảnh ủy nhiệm chi:   [📎 Upload ảnh biên lai chuyển khoản]
+   • Nguồn tiền:         [☑ Chuyển 1.000.000 ₫ từ cọc giữ chỗ + Thu thêm 6.000.000 ₫] (Nếu có NV-06)
+   [Xác nhận thu cọc]
+3. Kết quả:
+   • Sổ cọc chuyển sang trạng thái 🟢 HELD (Đang giữ cọc: 7.000.000 ₫).
+   • Sinh bản ghi giao dịch cọc đầu tiên: Loại `collect`, giá trị `7.000.000 ₫`.
+```
+
+### API Flow
 ```
 POST /api/v1/deposits
   Body: {
-    "contract_id": "uuid",
-    "amount_held": 13000000,
+    "contract_id": "uuid-contract",
+    "amount_held": 7000000,
     "collected_at": "2026-11-01",
-    "method": "transfer",
-    "reference": "CK20261101001",
-    "evidence_url": "storage/path/..."
+    "payment_method": "transfer",
+    "reference_no": "VCB202611019988",
+    "evidence_url": "storage/path/receipt.jpg",
+    "source_reservation_id": "uuid-reservation" | null
   }
-  → Tạo deposit record (status = HELD)
-  → Tạo deposit_transaction (type = collect)
-  Response 201: { deposit_id, status: "HELD", amount_held: 13000000 }
+  → Transaction:
+    1. Kiểm tra contract.status in ('DRAFT', 'ACTIVE')
+    2. INSERT INTO deposit (contract_id, amount_held = 7000000, status = 'HELD')
+    3. INSERT INTO deposit_transaction (deposit_id, type = 'collect', amount = 7000000, evidence)
+    4. Ghi audit_log
+  Response 201: { "message": "Ghi nhận thu cọc thành công.", "data": deposit }
 ```
 
-### Validation
+### Test Cases
 ```
-amount_held > 0
-contract phải ở ACTIVE
-Không được thu cọc quá 1 lần cho cùng HĐ (kiểm tra deposit đã tồn tại)
-Nếu đã có reservation.hold_amount → suggest chuyển từ cọc giữ chỗ (NV-06)
+TC-NV11-01: Ghi nhận thu cọc hợp lệ → Sổ cọc tạo thành công, status = HELD, amount_held = 7.000.000 ₫.
+TC-NV11-02: Ghi nhận thu cọc số tiền âm hoặc = 0 → HTTP 400 VALIDATION_ERROR.
+TC-NV11-03: Đã có cọc giữ chỗ 1.000.000 ₫ → Chuyển đổi và thu thêm phần chênh lệch chính xác.
 ```
 
 ---
 
-## NV-12 — GHI KHẤU TRỪ CỌC
-> **FR-023** · Actor: MANAGER (tạo) + OWNER/APPROVER (duyệt) · Module: M06
+## NV-12 — GHI NHẬN KHẤU TRỪ CỌC (Hư hỏng tài sản & Vi phạm)
+> **FR-023, FR-068** · Actor: MANAGER (lập) + APPROVER (duyệt) · Module: M06
 
-### Bối cảnh
-> Khi cư dân gây hư hỏng hoặc vi phạm, khấu trừ một phần cọc.  
-> **Bắt buộc: có bằng chứng + lý do + phê duyệt APPROVER.**
+### Quy tắc nghiệp vụ bắt buộc
+> 1. Khấu trừ cọc **CHỈ ÁP DỤNG CHO**:  
+>    - Hư hỏng tài sản, trang thiết bị trong căn hộ do cư dân gây ra.  
+>    - Chi phí vệ sinh công nghiệp nếu căn hộ bàn giao quá bẩn.  
+>    - Tiền phạt vi phạm nội quy/hợp đồng (phải có biên bản vi phạm đính kèm).  
+> 2. **TUYỆT ĐỐI KHÔNG KHẤU TRỪ CHO TIỀN THUÊ PHÒNG HẰNG THÁNG.**  
+> 3. Bắt buộc có bằng chứng: Ảnh chụp hư hỏng hiện trường + Hóa đơn/Báo giá sửa chữa.  
+> 4. Quy tắc Four-eyes: Quản lý lập yêu cầu ≠ Người duyệt (`APPROVER`).  
+> 5. Số tiền khấu trừ không được vượt quá số dư cọc đang giữ (`amount_held`).
 
 ### UI Steps
 ```
-/admin/deposits/:id → [+ Ghi khấu trừ]
-→ Form:
-   Loại khấu trừ:  [ Hư hỏng tài sản ▼ ]
-                   (Hư hỏng / Vi phạm HĐ / Chi phí dọn dẹp / Tiền điện nước còn nợ / Khác)
-   Mô tả chi tiết: [ Thay kính cửa sổ bị vỡ... ]
-   Số tiền:        [ 2,000,000 ] ₫
-   Bằng chứng:     [📎 Upload ảnh hư hỏng]
-                   [📎 Upload hóa đơn sửa chữa]
-   [Gửi yêu cầu khấu trừ]
-
-→ Chờ APPROVER duyệt → deposit_transaction (type = deduct) ghi vào sổ
+1. Tại Sổ cọc /admin/deposits/:id: Click nút [+ Ghi nhận khấu trừ cọc].
+2. Form yêu cầu khấu trừ:
+   • Hạng mục khấu trừ:    [ Hư hỏng tài sản / Thiết bị ▼ ]
+                           (Hư hỏng thiết bị | Vệ sinh phòng | Vi phạm HĐ | Khác)
+   • Mô tả chi tiết:       [ Vỡ mặt kính bếp từ và nứt bồn rửa mặt phòng tắm ]
+   • Số tiền khấu trừ (*): [ 1.500.000 ] ₫ (Số dư cọc hiện tại: 7.000.000 ₫)
+   • Chứng từ đính kèm (*):[📎 Upload 2 ảnh hiện trạng hư hỏng]
+                           [📎 Upload hóa đơn thay thế bếp từ của nhà cung cấp]
+   [Gửi yêu cầu phê duyệt khấu trừ]
+3. Sau khi gửi:
+   • Giao dịch ở trạng thái PENDING_APPROVAL.
+   • APPROVER nhận thông báo xem xét bằng chứng và bấm [Duyệt khấu trừ] hoặc [Từ chối].
+   • Khi duyệt thành công: Số dư cọc tự động giảm: 7.000.000 ₫ − 1.500.000 ₫ = 5.500.000 ₫.
 ```
 
-### API
+### API Flow
 ```
 POST /api/v1/deposits/:id/transactions
   Body: {
     "type": "deduct",
-    "amount": 2000000,
-    "description": "Thay kính cửa sổ bị vỡ",
-    "evidence": ["url1", "url2"],
+    "amount": 1500000,
+    "description": "Vỡ mặt kính bếp từ",
+    "evidence_urls": ["url_anh_vo", "url_hoa_don"],
     "category": "property_damage"
   }
-  → Tạo transaction ở PENDING_APPROVAL
-  Response 201: { transaction_id, status: "PENDING_APPROVAL" }
+  → Kiểm tra: amount <= deposit.amount_held (Nếu vượt → HTTP 400 INSUFFICIENT_FUNDS)
+  → INSERT INTO deposit_transaction (..., status = 'PENDING_APPROVAL')
+  Response 201: { "message": "Đã gửi yêu cầu khấu trừ chờ duyệt.", "transaction_id": "uuid" }
 
 POST /api/v1/deposit-transactions/:id/approve
-  → approved_by ≠ created_by (four-eyes)
-  → transaction.status = APPROVED
-  → deposit.amount_held giảm đi
-  Response 200
-
-POST /api/v1/deposit-transactions/:id/reject
-  Body: { "reason": "..." }
-  → transaction.status = REJECTED
-  Response 200
-```
-
-### Validation
-```
-amount > 0
-amount ≤ deposit.amount_held (không cho khấu trừ vượt số cọc đang giữ)
-evidence: bắt buộc tối thiểu 1 file
-approved_by ≠ created_by (four-eyes enforcement)
-```
-
----
-
-## NV-13 — QUYẾT TOÁN & HOÀN CỌC
-> **FR-024** · Actor: ACCOUNTANT (lập) + OWNER/APPROVER (duyệt) · Module: M06
-
-### Điều kiện trước khi quyết toán
-```
-✅ contract.status = TERMINATED hoặc EXPIRED
-✅ Đã chốt chỉ số điện nước cuối kỳ
-✅ Đã phát hành và xác nhận hóa đơn cuối kỳ
-✅ Đã có biên bản kiểm tra căn hộ (có ảnh)
-```
-
-### UI Steps
-```
-/admin/deposits/:id → [Tạo quyết toán cọc]
-→ Hệ thống tự tính toán và hiển thị bảng:
-
-  ┌─────────────────────────────────────────────────────────┐
-  │ BẢNG QUYẾT TOÁN CỌC — Căn A101 — HĐ-2026-001           │
-  ├─────────────────────────────────────────────────────────┤
-  │ Tổng cọc đang giữ:          13.000.000 ₫               │
-  ├─────────────────────────────────────────────────────────┤
-  │ Công nợ còn lại:                                        │
-  │  - Hóa đơn tháng 11 (chưa trả):  6.500.000 ₫           │
-  │  - Phí phạt chậm (3 ngày):          300.000 ₫           │
-  ├─────────────────────────────────────────────────────────┤
-  │ Khấu trừ đã duyệt:                                      │
-  │  - Thay kính cửa sổ:             2.000.000 ₫  [📎 ảnh] │
-  ├─────────────────────────────────────────────────────────┤
-  │ Tổng trừ:                         8.800.000 ₫           │
-  │ SỐ TIỀN HOÀN LẠI:                4.200.000 ₫           │
-  ├─────────────────────────────────────────────────────────┤
-  │ Hạn hoàn (3-5 ngày):  đến ngày 20/11/2026               │
-  │ Thông tin chuyển khoản:                                  │
-  │  STK: [ 9876543210 ]  Ngân hàng: [ VCB ]                │
-  │  Tên: [ Nguyen Thi B             ]                      │
-  ├─────────────────────────────────────────────────────────┤
-  │ [Gửi duyệt quyết toán]                                  │
-  └─────────────────────────────────────────────────────────┘
-```
-
-### Các trường hợp đặc biệt
-```
-Trường hợp 1 — Hoàn đủ:
-  Khấu trừ + Công nợ < Cọc → Hoàn phần dư → deposit.status = REFUNDED
-
-Trường hợp 2 — Không hoàn được gì:
-  Khấu trừ + Công nợ ≥ Cọc → Số hoàn = 0 → deposit.status = PARTIALLY_REFUNDED
-  Phần thiếu → ghi receivable (công nợ phải thu sau bàn giao)
-
-Trường hợp 3 — Tranh chấp:
-  Cư dân không đồng ý → DISPUTED
-  Khóa mọi thao tác chi cho đến khi giải quyết
-  Mở thread khiếu nại
-```
-
-### API
-```
-POST /api/v1/deposits/:id/settlement
-  Body: {
-    "deduction_items": [
-      { "category": "property_damage", "amount": 2000000, "description": "...", "evidence": ["url"] }
-    ],
-    "outstanding_invoices": ["invoice_id_1"],
-    "refund_account": { "bank": "VCB", "account_no": "9876543210", "account_name": "NGUYEN THI B" },
-    "refund_due_date": "2026-11-20"
-  }
-  → Tạo settlement record (SETTLEMENT_DRAFT)
-  → Tính toán: refund_amount = amount_held - sum(deductions) - outstanding
-  Response 201: { settlement_id, refund_amount, status: "SETTLEMENT_DRAFT" }
-
-POST /api/v1/deposits/:id/settlement/approve
-  Body: { "approved": true, "note": "" }
-  → approved_by ≠ created_by (four-eyes)
-  → deposit.status = REFUNDED (hoặc PARTIALLY_REFUNDED)
-  → Gửi bảng kê cho cư dân qua thông báo
-  → deposit.refund_due_date = ngày cam kết
-  Response 200
-
-POST /api/v1/deposits/:id/settlement/reject
-  Body: { "reason": "Cần bổ sung bằng chứng hư hỏng" }
-  → Trả về ACCOUNTANT để chỉnh sửa
-  Response 200
+  Body: { "note": "Đồng ý khấu trừ theo hóa đơn đính kèm" }
+  → RÀNG BUỘC FOUR-EYES: approved_by != created_by (Nếu trùng → HTTP 403 SELF_APPROVE)
+  → Transaction:
+    1. UPDATE deposit_transaction SET status = 'APPROVED', approved_by = $user, approved_at = NOW()
+    2. UPDATE deposit SET amount_held = amount_held - txn.amount, updated_at = NOW()
+    3. Ghi audit_log
+  Response 200: { "message": "Đã duyệt khấu trừ cọc.", "new_amount_held": 5500000 }
 ```
 
 ### Test Cases
 ```
-TC-NV13-01: Quyết toán bình thường → refund_amount đúng
-TC-NV13-02: Khấu trừ > cọc → refund_amount = 0, phần thiếu → receivable
-TC-NV13-03: Người lập quyết toán tự approve → 403 SELF_APPROVE
-TC-NV13-04: Cư dân không đồng ý → DISPUTED, khóa thao tác chi
-TC-NV13-05: Hoàn cọc trước khi có hóa đơn cuối → 409 (điều kiện trước chưa đủ)
+TC-NV12-01: Gửi yêu cầu khấu trừ có đầy đủ ảnh và hóa đơn → Tạo transaction PENDING_APPROVAL thành công.
+TC-NV12-02: Nhập số tiền khấu trừ lớn hơn số tiền cọc hiện có → HTTP 400 INSUFFICIENT_FUNDS.
+TC-NV12-03: Người lập yêu cầu tự duyệt khấu trừ cho chính mình → HTTP 403 SELF_APPROVE.
+TC-NV12-04: APPROVER duyệt yêu cầu → Số dư cọc giảm đúng số tiền, ghi nhận audit_log.
 ```
 
 ---
 
-## 📊 MA TRẬN LUỒNG NGHIỆP VỤ — GIAI ĐOẠN 1
+## NV-13 — QUYẾT TOÁN & HOÀN CỌC CHO CƯ DÂN
+> **FR-024, FR-068, US-017, AC-017.1..AC-017.3** · Actor: ACCOUNTANT (lập) + APPROVER (duyệt) · Module: M06
 
-| # | Nghiệp vụ | Actor | Module | Tuần | Phụ thuộc |
-|---|-----------|-------|--------|------|-----------|
-| NV-01 | Đăng nhập OTP | Tất cả | M02 | 2 | — |
-| NV-02 | Đăng nhập email/password | Nhân viên | M02 | 2 | — |
-| NV-03 | Tạo tòa nhà | SYS_ADMIN | M03 | 3 | NV-01 |
-| NV-04 | Thêm tầng | MANAGER | M03 | 3 | NV-03 |
-| NV-05 | Tạo căn hộ | MANAGER | M03 | 3 | NV-04 |
-| NV-06 | Đặt cọc giữ chỗ | MANAGER | M04 | 3 | NV-05 |
-| NV-07 | Tạo hồ sơ cư dân | MANAGER | M04 | 3 | NV-01 |
-| NV-08 | Tạo hợp đồng thuê | MANAGER | M05 | 4 | NV-05, NV-07 |
-| NV-09 | Gia hạn hợp đồng | MANAGER | M05 | 4 | NV-08 |
-| NV-10 | Chấm dứt hợp đồng | MANAGER | M05 | 4 | NV-08 |
-| NV-11 | Thu cọc | ACCOUNTANT | M06 | 4 | NV-08 |
-| NV-12 | Ghi khấu trừ cọc | MANAGER | M06 | 4 | NV-11 |
-| NV-13 | Quyết toán & hoàn cọc | ACCOUNTANT | M06 | 4 | NV-10, NV-11, NV-12 |
+### Quy tắc chốt từ PRD v2.0
+> 1. **Thời hạn cam kết hoàn cọc (FR-068):** Hoàn cọc trong vòng **3–5 ngày làm việc** sau khi chấm dứt hợp đồng và bàn giao căn hộ. Hệ thống tự động đặt `refund_due_date = termination_date + 3 ngày` (cảnh báo vàng) và `+ 5 ngày` (cảnh báo đỏ quá hạn gửi báo cáo Giám đốc).  
+> 2. **Cọc không cấn trừ vào tiền thuê:** Tiền thuê phòng được cư dân thanh toán riêng qua hóa đơn. Bảng quyết toán cọc chỉ trừ:  
+>    - Các khoản khấu trừ hư hỏng/vệ sinh đã được duyệt hợp lệ (NV-12).  
+>    - Tiền điện, nước kỳ cuối (nếu hai bên thỏa thuận chốt trừ trực tiếp khi trả phòng).  
+> 3. Cơ chế Four-eyes: Kế toán lập quyết toán ≠ Người phê duyệt lệnh chi (`APPROVER`).
 
-### Chuỗi nghiệp vụ đầy đủ (Happy Path)
-
+### Điều kiện tiên quyết để quyết toán
 ```
-NV-01 Đăng nhập
-  → NV-03 Tạo tòa → NV-04 Thêm tầng → NV-05 Tạo căn hộ
-  → NV-07 Tạo cư dân
-  → NV-08 Tạo HĐ (DRAFT) → [Activate] (ACTIVE)
-  → NV-11 Thu cọc
-  → [Vận hành tháng... Giai đoạn 2: sinh hóa đơn, thanh toán...]
-  → NV-10 Chấm dứt HĐ → [Bàn giao căn]
-  → NV-12 Khấu trừ cọc (nếu có hư hỏng)
-  → NV-13 Quyết toán & hoàn cọc
+✅ Hợp đồng thuê ở trạng thái TERMINATED hoặc EXPIRED.
+✅ Đã hoàn tất biên bản kiểm tra căn hộ và chốt chỉ số điện/nước cuối kỳ (NV-10).
+✅ Đã phát hành hóa đơn kỳ cuối.
+```
+
+### UI Steps
+```
+1. Tại Sổ cọc hợp đồng đã chấm dứt: Click nút [Tạo quyết toán cọc].
+2. Hệ thống tự động tổng hợp số liệu và hiển thị BẢNG QUYẾT TOÁN CỌC:
+
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │ BẢNG QUYẾT TOÁN HOÀN CỌC — CĂN A101 — HĐ-2026-001                      │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ 1. Tổng tiền cọc đang giữ ban đầu:                       7.000.000 ₫   │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ 2. Các khoản khấu trừ đã duyệt:                                        │
+   │    • Vỡ mặt kính bếp từ (Biên bản + Hóa đơn):          - 1.500.000 ₫   │
+   │    • Tiền điện nước kỳ cuối (chốt ngày 15/11):         -   350.000 ₫   │
+   │    Tổng các khoản trừ:                                 - 1.850.000 ₫   │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ 3. SỐ TIỀN THỰC HOÀN CHO CƯ DÂN:                         5.150.000 ₫   │
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ 4. Thời hạn hoàn tiền cam kết (3-5 ngày):     Hạn chót: 20/11/2026 ⚠️   │
+   │ 5. Thông tin tài khoản nhận tiền hoàn lại:                             │
+   │    • Ngân hàng:            [ Vietcombank                              ]│
+   │    • Số tài khoản:         [ 0071009876543                            ]│
+   │    • Tên chủ tài khoản:    [ NGUYEN THI BINH                          ]│
+   ├────────────────────────────────────────────────────────────────────────┤
+   │ [Gửi duyệt quyết toán hoàn cọc]                                        │
+   └────────────────────────────────────────────────────────────────────────┘
+
+3. Duyệt và Chi trả:
+   • APPROVER nhận thông báo kiểm tra bảng kê và bấm [Duyệt quyết toán].
+   • Kế toán thực hiện chuyển khoản cho cư dân và upload biên lai chi tiền.
+   • Sổ cọc chuyển sang trạng thái 🟢 REFUNDED (hoặc PARTIALLY_REFUNDED).
+   • Hệ thống tự động gửi Bảng kê quyết toán kèm biên lai cho cư dân qua email/portal.
+```
+
+### Xử lý các trường hợp đặc biệt (Mục 7.5 & 10.2 PRD v0.2)
+```
+Trường hợp 1 — Hoàn tiền bình thường (Khấu trừ < Cọc):
+  Số hoàn lại > 0 → Chi trả cho cư dân → deposit.status = 'REFUNDED'.
+
+Trường hợp 2 — Khấu trừ vượt số tiền cọc (Khấu trừ > Cọc):
+  Số tiền hoàn lại = 0 ₫.
+  Phần chênh lệch thiếu chuyển thành Công nợ phải thu sau trả phòng:
+  RECEIVABLE_AFTER_MOVE_OUT → Kế toán tiếp tục theo dõi thu hồi nợ từ cư dân.
+  deposit.status = 'PARTIALLY_REFUNDED'.
+
+Trường hợp 3 — Cư dân không đồng ý với khoản khấu trừ (Tranh chấp):
+  Cư dân khiếu nại qua portal → Trạng thái cọc chuyển sang 🔴 DISPUTED.
+  Khóa hoàn toàn mọi thao tác giải ngân cho đến khi Giám đốc và Cư dân hòa giải xong.
+```
+
+### API Flow
+```
+POST /api/v1/deposits/:id/settlement
+  Body: {
+    "deductions": [
+      { "category": "property_damage", "amount": 1500000, "note": "Vỡ kính bếp" },
+      { "category": "utility_final", "amount": 350000, "note": "Điện nước kỳ cuối" }
+    ],
+    "refund_account": { "bank": "Vietcombank", "account_no": "0071009876543", "account_name": "NGUYEN THI BINH" },
+    "refund_due_date": "2026-11-20"
+  }
+  → Tính toán: refund_amount = amount_held - sum(deductions)
+  → INSERT INTO settlement record (status = 'PENDING_APPROVAL')
+  Response 201: { "settlement_id": "uuid", "refund_amount": 5150000 }
+
+POST /api/v1/deposits/:id/settlement/approve
+  Body: { "payment_receipt_url": "storage/path/vcb_receipt.jpg" }
+  → Kiểm tra Four-eyes: approved_by != created_by
+  → Transaction:
+    1. INSERT INTO deposit_transaction (type = 'refund', amount = 5150000, evidence = receipt)
+    2. UPDATE deposit SET amount_held = 0, status = 'REFUNDED', updated_at = NOW()
+    3. Gửi thông báo bảng kê quyết toán cho cư dân
+    4. Ghi audit_log
+  Response 200: { "message": "Quyết toán hoàn cọc thành công." }
+```
+
+### Test Cases
+```
+TC-NV13-01: Quyết toán hoàn cọc hợp lệ (Cọc 7tr, trừ 1.85tr, hoàn 5.15tr) → Tính toán chuẩn xác 0 đồng sai lệch, cọc sang REFUNDED.
+TC-NV13-02: Tổng khấu trừ lớn hơn tiền cọc (Trừ 9tr, cọc 7tr) → Số tiền hoàn = 0, phát sinh công nợ phải thu 2tr.
+TC-NV13-03: Kế toán lập quyết toán tự bấm duyệt lệnh chi → HTTP 403 SELF_APPROVE (Vi phạm Four-eyes).
+TC-NV13-04: Cư dân bấm khiếu nại khoản trừ → Sổ cọc chuyển sang DISPUTED, chặn thao tác chi tiền.
+TC-NV13-05: Quá hạn 5 ngày chưa hoàn tiền → Hệ thống gửi cảnh báo vi phạm SLA lên Giám đốc.
 ```
 
 ---
 
-*Phần II — Quy trình nghiệp vụ chi tiết. Cập nhật: 2026-10-14.*
+## 📊 BẢNG TỔNG HỢP MA TRẬN PHÂN QUYỀN & TIẾN ĐỘ 13 QUY TRÌNH (NV-01 → NV-13)
+
+| Mã NV | Quy trình nghiệp vụ | Actor chính | Người duyệt (Approver) | Module | Ràng buộc then chốt theo PRD v2.0 |
+|:---:|:---|:---:|:---:|:---:|:---|
+| **NV-01** | Đăng nhập OTP qua SĐT | Tất cả | — | M02 | Khóa 15m sau 5 lần sai; Thông báo trung lập chống rò rỉ SĐT. |
+| **NV-02** | Đăng nhập Email/Mật khẩu | Nhân sự | — | M02 | Kiểm tra status != SUSPENDED; Mật khẩu bcrypt >= 8 ký tự. |
+| **NV-03** | Tạo tòa nhà mới | SYS_ADMIN, OWNER | — | M03 | Mã tòa unique/org; Chặn INACTIVE nếu có HĐ ACTIVE; Audit log. |
+| **NV-04** | Thêm tầng vào tòa | MANAGER | — | M03 | Level >= 1 nguyên dương; UNIQUE(building_id, level). |
+| **NV-05** | Tạo căn hộ mới | MANAGER | — | M03 | Mã căn unique/tòa; Giá thuê BIGINT VND; Sơ đồ Interactive Floor Map. |
+| **NV-06** | Đặt cọc giữ chỗ | PROSPECT, MANAGER | APPROVER | M04 | Căn sang RESERVED; Chuyển thành cọc HĐ khi ký; Four-eyes khi hủy/hoàn. |
+| **NV-07** | Tạo hồ sơ cư dân & check trùng | MANAGER | — | M04 | Ẩn CCCD với STAFF; Phát hiện trùng SĐT/CCCD real-time 400ms. |
+| **NV-08** | Lập hợp đồng thuê (Wizard 3 bước) | MANAGER | APPROVER (nếu lệch giá) | M05 | Cọc = 1 tháng thuê; Giá HĐ ghi đè (FR-065); Chặn chồng lấn kỳ hạn. |
+| **NV-09** | Gia hạn hợp đồng | MANAGER | APPROVER | M05 | Kế thừa thông tin; Chuyển tiếp cọc cũ (TRANSFERRED); HĐ cũ sang EXPIRED. |
+| **NV-10** | Chấm dứt hợp đồng & Bàn giao | MANAGER | APPROVER | M05 | Kiểm tra căn có ảnh; Chốt điện nước; Tiền thuê kỳ cuối pro-rata. |
+| **NV-11** | Thu tiền cọc (Mở sổ cọc) | ACCOUNTANT | — | M06 | Cọc lưu sổ riêng HELD; CẤM CẤN TRỪ VÀO TIỀN THUÊ; Bất biến giao dịch. |
+| **NV-12** | Ghi khấu trừ cọc hư hại | MANAGER | APPROVER | M06 | Bắt buộc có ảnh + hóa đơn sửa chữa; CẤM TRỪ TIỀN THUÊ; Four-eyes. |
+| **NV-13** | Quyết toán & Hoàn cọc | ACCOUNTANT | APPROVER | M06 | Hoàn trong 3–5 ngày (FR-068); Khấu trừ > cọc sinh receivable; Four-eyes. |
+
+### Chuỗi luồng nghiệp vụ hoàn chỉnh (Happy Path)
+```
+NV-01 / NV-02: Đăng nhập hệ thống
+  └── NV-03: Khởi tạo Tòa nhà (ACTIVE)
+       └── NV-04: Thêm Tầng vào tòa
+            └── NV-05: Khởi tạo Căn hộ (AVAILABLE)
+                 ├── (Tùy chọn) NV-06: Đặt cọc giữ chỗ cho khách tiềm năng (RESERVED)
+                 ├── NV-07: Tạo hồ sơ Cư dân & Kiểm tra trùng lặp
+                 └── NV-08: Lập Hợp đồng thuê Wizard 3 bước (DRAFT → Upload ký → ACTIVE)
+                      ├── Căn hộ tự động chuyển sang OCCUPIED
+                      ├── NV-11: Thu tiền cọc và Mở Sổ Cọc riêng (HELD)
+                      ├── [Vận hành định kỳ: Ghi điện nước, Sinh hóa đơn, Thu tiền thuê...]
+                      ├── (Tùy chọn) NV-09: Gia hạn hợp đồng (RENEWAL_PENDING → ACTIVE)
+                      └── NV-10: Chấm dứt hợp đồng & Nghiệm thu bàn giao căn hộ
+                           ├── Căn hộ chuyển sang AVAILABLE hoặc MAINTENANCE
+                           ├── NV-12: Ghi nhận khấu trừ cọc nếu có hư hại (kèm ảnh + hóa đơn)
+                           └── NV-13: Quyết toán và Hoàn trả cọc trong 3–5 ngày (REFUNDED)
+```
+
+---
+
+*Toàn bộ Phần II đã được chuẩn hóa và rà soát khớp 100% với PRD v0.2 (18/09/2026). Cập nhật: 15/10/2026.*
+
 
