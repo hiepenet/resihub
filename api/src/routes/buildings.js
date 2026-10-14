@@ -6,6 +6,46 @@ import { requireRole } from '../middleware/rbac.js';
 const router = express.Router();
 
 /**
+ * GET /api/v1/buildings/check-code?code=TN-A
+ * Kiểm tra mã tòa có sẵn hay đã trùng (FR-007 / NV-03)
+ */
+router.get('/check-code', authenticateToken, async (req, res) => {
+  const { code } = req.query;
+  const orgId = req.user.org_id;
+
+  if (!code || !code.trim()) {
+    return res.status(400).json({ code: 'MISSING_CODE', message: 'Thiếu mã tòa cần kiểm tra.' });
+  }
+
+  const cleanCode = code.trim().toUpperCase();
+
+  // Validate format: A-Z, 0-9, dấu gạch ngang (-)
+  if (!/^[A-Z0-9-]+$/.test(cleanCode)) {
+    return res.json({
+      available: false,
+      code: cleanCode,
+      message: 'Mã tòa chỉ được chứa chữ cái, số và dấu gạch ngang (-).',
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id FROM building WHERE org_id = $1 AND code = $2',
+      [orgId, cleanCode]
+    );
+
+    return res.json({
+      available: result.rows.length === 0,
+      code: cleanCode,
+      message: result.rows.length === 0 ? 'Mã tòa hợp lệ và chưa được dùng.' : 'Mã tòa đã tồn tại trong tổ chức.',
+    });
+  } catch (err) {
+    console.error('[Check Code Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi kiểm tra mã tòa.' });
+  }
+});
+
+/**
  * GET /api/v1/buildings
  * Lấy danh sách tòa nhà theo quyền của user
  */
@@ -16,7 +56,8 @@ router.get('/', authenticateToken, async (req, res) => {
       `SELECT b.*, 
         (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id) as total_apartments,
         (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id AND a.status = 'AVAILABLE') as available_apartments,
-        (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id AND a.status = 'OCCUPIED') as occupied_apartments
+        (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id AND a.status = 'OCCUPIED') as occupied_apartments,
+        (SELECT COUNT(*) FROM floor f WHERE f.building_id = b.id) as total_floors
        FROM building b
        WHERE b.org_id = $1
        ORDER BY b.created_at DESC`,
@@ -31,55 +72,97 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/buildings
- * Tạo mới tòa nhà
+ * POST /api/v1/buildings (NV-03 — TẠO TÒA NHÀ MỚI)
+ * Actor: SYS_ADMIN, OWNER (FR-007)
  */
-router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
-  const { name, code, address, timezone, lease_terms } = req.body;
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+  const { name, code, address, owner_id, timezone, lease_terms, payment_account } = req.body;
 
-  if (!name || !code) {
-    return res.status(400).json({
+  // Validation rules (Phần 5: Validation Rules)
+  if (!name || name.trim().length < 2 || name.trim().length > 100) {
+    return res.status(422).json({
       code: 'VALIDATION_ERROR',
-      message: 'Tên và mã tòa nhà là bắt buộc.',
+      message: 'Tên tòa nhà phải từ 2 đến 100 ký tự.',
+    });
+  }
+
+  const cleanCode = (code || '').trim().toUpperCase();
+  if (!cleanCode || cleanCode.length < 2 || cleanCode.length > 20) {
+    return res.status(422).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Mã tòa nhà phải từ 2 đến 20 ký tự.',
+    });
+  }
+
+  if (!/^[A-Z0-9-]+$/.test(cleanCode)) {
+    return res.status(422).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Mã tòa chỉ được chứa chữ cái in hoa (A-Z), chữ số (0-9) và dấu gạch ngang (-).',
     });
   }
 
   try {
     const orgId = req.user.org_id;
-    const checkDup = await pool.query('SELECT id FROM building WHERE org_id = $1 AND code = $2', [orgId, code]);
+
+    // Rule B1: Mã tòa unique trong org
+    const checkDup = await pool.query('SELECT id FROM building WHERE org_id = $1 AND code = $2', [orgId, cleanCode]);
     if (checkDup.rows.length > 0) {
       return res.status(409).json({
-        code: 'DUPLICATE_CODE',
-        message: `Mã tòa nhà "${code}" đã tồn tại trong tổ chức.`,
+        code: 'BUILDING_CODE_EXISTS',
+        message: `Mã tòa "${cleanCode}" đã tồn tại trong tổ chức.`,
       });
     }
 
-    const result = await pool.query(
-      `INSERT INTO building (org_id, name, code, address, timezone, lease_terms, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE')
-       RETURNING *`,
-      [
-        orgId,
-        name,
-        code.toUpperCase(),
-        address || '',
-        timezone || 'Asia/Ho_Chi_Minh',
-        JSON.stringify(lease_terms || {}),
-      ]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Ghi audit log
-    await pool.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-       VALUES ($1, 'CREATE', 'building', $2, $3)`,
-      [req.user.sub, result.rows[0].id, JSON.stringify(result.rows[0])]
-    );
+      const result = await client.query(
+        `INSERT INTO building (org_id, owner_id, name, code, address, timezone, lease_terms, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
+         RETURNING *`,
+        [
+          orgId,
+          owner_id || null,
+          name.trim(),
+          cleanCode,
+          address?.trim() || '',
+          timezone || 'Asia/Ho_Chi_Minh',
+          JSON.stringify({
+            ...(lease_terms || {}),
+            payment_account: payment_account || {},
+          }),
+        ]
+      );
 
-    res.status(201).json({
-      message: 'Tạo tòa nhà thành công.',
-      data: result.rows[0],
-    });
+      const newBuilding = result.rows[0];
+
+      // Ghi audit log (Bắt buộc theo NFR-010)
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'CREATE', 'building', $2, NULL, $3)`,
+        [req.user.sub, newBuilding.id, JSON.stringify(newBuilding)]
+      );
+
+      await client.query('COMMIT');
+
+      res.status(201).json({
+        message: `Đã tạo tòa nhà ${newBuilding.name} (${newBuilding.code}) thành công.`,
+        data: newBuilding,
+      });
+    } catch (dbErr) {
+      await client.query('ROLLBACK');
+      throw dbErr;
+    } finally {
+      client.release();
+    }
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({
+        code: 'BUILDING_CODE_EXISTS',
+        message: `Mã tòa "${cleanCode}" đã tồn tại trong tổ chức.`,
+      });
+    }
     console.error('[Create Building Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo tòa nhà.' });
   }
@@ -98,6 +181,70 @@ router.get('/:id', authenticateToken, async (req, res) => {
     res.json({ data: result.rows[0] });
   } catch (err) {
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi truy vấn.' });
+  }
+});
+
+/**
+ * PATCH /api/v1/buildings/:id/status
+ * Đổi trạng thái tòa nhà: ACTIVE <-> INACTIVE (State Machine NV-03)
+ * Rule: Không thể INACTIVE khi đang có hợp đồng ACTIVE trên tòa đó!
+ */
+router.patch('/:id/status', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!['ACTIVE', 'INACTIVE'].includes(status)) {
+    return res.status(400).json({ code: 'INVALID_STATUS', message: 'Trạng thái chỉ có thể là ACTIVE hoặc INACTIVE.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const bRes = await client.query('SELECT * FROM building WHERE id = $1', [id]);
+    if (bRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+    }
+    const before = bRes.rows[0];
+
+    // Kiểm tra ràng buộc hợp đồng hiệu lực khi Deactivate
+    if (status === 'INACTIVE') {
+      const activeContractsRes = await client.query(
+        `SELECT COUNT(*) FROM contract WHERE building_id = $1 AND status = 'ACTIVE'`,
+        [id]
+      );
+      const activeCount = parseInt(activeContractsRes.rows[0].count, 10);
+      if (activeCount > 0) {
+        return res.status(400).json({
+          code: 'ACTIVE_CONTRACTS_EXIST',
+          message: `Không thể tạm dừng hoạt động tòa nhà này vì đang có ${activeCount} hợp đồng đang có hiệu lực. Vui lòng thanh lý hết hợp đồng trước.`,
+        });
+      }
+    }
+
+    const updateRes = await client.query(
+      `UPDATE building SET status = $1, created_at = created_at WHERE id = $2 RETURNING *`,
+      [status, id]
+    );
+
+    // Audit log
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'UPDATE', 'building', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(before), JSON.stringify(updateRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      message: `Đã chuyển trạng thái tòa nhà sang ${status === 'ACTIVE' ? 'Đang hoạt động' : 'Tạm ngừng'}.`,
+      data: updateRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Update Status Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật trạng thái tòa nhà.' });
+  } finally {
+    client.release();
   }
 });
 
