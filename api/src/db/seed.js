@@ -60,17 +60,20 @@ async function seedData() {
       personId = personRows[0].id;
     }
 
+    const passwordHash = '$2a$10$wTqgI7Xk9BqL/x.7X4XG8O2Psm14cQyYp1R9X60r3e8D7D6g3jM9m'; // bcrypt of 'password123'
+
     let { rows: userRows } = await client.query('SELECT id FROM app_user WHERE person_id = $1', [personId]);
     let userId;
     if (userRows.length === 0) {
       const uRes = await client.query(`
-        INSERT INTO app_user (person_id, auth_uid, status)
-        VALUES ($1, 'mock-auth-uid-0901234567', 'ACTIVE')
+        INSERT INTO app_user (person_id, auth_uid, password_hash, status)
+        VALUES ($1, 'mock-auth-uid-0901234567', $2, 'ACTIVE')
         RETURNING id;
-      `, [personId]);
+      `, [personId, passwordHash]);
       userId = uRes.rows[0].id;
     } else {
       userId = userRows[0].id;
+      await client.query('UPDATE app_user SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
     }
 
     // Assign MANAGER & OWNER roles

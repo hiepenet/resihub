@@ -1,6 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Building2, Phone, KeyRound, ArrowRight, ShieldCheck, RefreshCw } from 'lucide-react';
+import {
+  Building2,
+  Phone,
+  KeyRound,
+  Mail,
+  Lock,
+  ArrowRight,
+  ShieldCheck,
+  RefreshCw,
+  Eye,
+  EyeOff,
+  UserCheck,
+} from 'lucide-react';
 import Button from '../../components/ui/Button';
 import Input from '../../components/ui/Input';
 import FormField from '../../components/ui/FormField';
@@ -9,41 +21,67 @@ import { useAuthStore } from '../../stores/authStore';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { setAuthData, isAuthenticated } = useAuthStore();
+  const { setAuthData } = useAuthStore();
 
+  // Active Login Method: 'otp' (NV-01) or 'password' (NV-02)
+  const [authMethod, setAuthMethod] = useState('otp');
+
+  // NV-01: OTP State
   const [step, setStep] = useState(1); // 1: Phone, 2: OTP
   const [phone, setPhone] = useState('0901234567');
   const [otp, setOtp] = useState('');
   const [devOtpHint, setDevOtpHint] = useState('');
   const [countdown, setCountdown] = useState(300); // 5 mins
   const [resendCooldown, setResendCooldown] = useState(60);
+
+  // NV-02: Email/Password State
+  const [email, setEmail] = useState('manager@resihub.vn');
+  const [password, setPassword] = useState('password123');
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Shared Form State
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Countdown timer for OTP expiry
+  // Countdown timer for OTP expiry (5 mins)
   useEffect(() => {
     let timer;
-    if (step === 2 && countdown > 0) {
+    if (authMethod === 'otp' && step === 2 && countdown > 0) {
       timer = setInterval(() => setCountdown((c) => c - 1), 1000);
     }
     return () => clearInterval(timer);
-  }, [step, countdown]);
+  }, [authMethod, step, countdown]);
 
-  // Resend cooldown timer
+  // Resend cooldown timer (60s)
   useEffect(() => {
     let timer;
-    if (step === 2 && resendCooldown > 0) {
+    if (authMethod === 'otp' && step === 2 && resendCooldown > 0) {
       timer = setInterval(() => setResendCooldown((c) => c - 1), 1000);
     }
     return () => clearInterval(timer);
-  }, [step, resendCooldown]);
+  }, [authMethod, step, resendCooldown]);
 
+  // Handle redirect by user roles
+  const redirectByRole = (user) => {
+    const roleCodes = user.roles?.map((r) => (typeof r === 'string' ? r : r.code)) || [];
+    if (roleCodes.includes('RESIDENT') && roleCodes.length === 1) {
+      navigate('/resident/apartment');
+    } else if (roleCodes.includes('SYS_ADMIN')) {
+      navigate('/admin/buildings');
+    } else {
+      navigate('/admin/dashboard');
+    }
+  };
+
+  /**
+   * NV-01: Gửi yêu cầu mã OTP
+   */
   const handleRequestOtp = async (e) => {
     e?.preventDefault();
     setError('');
 
     if (!phone || phone.trim().length < 10) {
-      setError('Vui lòng nhập số điện thoại hợp lệ (10 chữ số).');
+      setError('Vui lòng nhập số điện thoại hợp lệ (định dạng 10 số VN).');
       return;
     }
 
@@ -52,7 +90,7 @@ export default function LoginPage() {
       const res = await api.post('/api/v1/auth/otp/request', { phone });
       if (res.data?.devOtp) {
         setDevOtpHint(res.data.devOtp);
-        setOtp(res.data.devOtp); // Auto-fill in dev for convenience!
+        setOtp(res.data.devOtp); // Auto-fill test code in dev
       }
       setStep(2);
       setCountdown(300);
@@ -64,12 +102,15 @@ export default function LoginPage() {
     }
   };
 
+  /**
+   * NV-01: Xác thực mã OTP
+   */
   const handleVerifyOtp = async (e) => {
     e?.preventDefault();
     setError('');
 
     if (!otp || otp.length !== 6) {
-      setError('Vui lòng nhập đầy đủ 6 chữ số OTP.');
+      setError('Vui lòng nhập đủ 6 chữ số OTP.');
       return;
     }
 
@@ -79,16 +120,40 @@ export default function LoginPage() {
       const { accessToken, refreshToken, user } = res.data;
 
       setAuthData(accessToken, refreshToken, user);
-
-      // Redirect by role according to plan
-      const roleCodes = user.roles?.map((r) => r.code) || [];
-      if (roleCodes.includes('RESIDENT') && roleCodes.length === 1) {
-        navigate('/resident/apartment');
-      } else {
-        navigate('/admin/dashboard');
-      }
+      redirectByRole(user);
     } catch (err) {
       setError(err.response?.data?.message || 'Mã OTP không đúng hoặc đã hết hạn.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /**
+   * NV-02: Đăng nhập Email & Mật khẩu (Nhân viên nội bộ)
+   */
+  const handlePasswordLogin = async (e) => {
+    e?.preventDefault();
+    setError('');
+
+    if (!email || !password) {
+      setError('Vui lòng nhập đầy đủ email và mật khẩu.');
+      return;
+    }
+
+    if (password.length < 8) {
+      setError('Mật khẩu phải có tối thiểu 8 ký tự.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const res = await api.post('/api/v1/auth/login', { email, password });
+      const { accessToken, refreshToken, user } = res.data;
+
+      setAuthData(accessToken, refreshToken, user);
+      redirectByRole(user);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Email hoặc mật khẩu không chính xác.');
     } finally {
       setIsLoading(false);
     }
@@ -102,118 +167,221 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 p-4">
-      {/* Decorative gradient blur */}
+      {/* Decorative gradient blur background */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-primary-500/20 rounded-full blur-3xl pointer-events-none" />
 
       <div className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-100 p-8 sm:p-10 backdrop-blur-sm">
-        {/* Logo and Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-600 text-white shadow-lg shadow-primary-500/30 mb-4">
+        {/* Brand Header */}
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-primary-600 to-indigo-600 text-white shadow-lg shadow-primary-500/30 mb-3">
             <Building2 className="w-7 h-7" />
           </div>
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
             Đăng nhập ResiHub
           </h2>
-          <p className="text-xs text-slate-500 mt-1.5">
-            Hệ thống Quản lý Bất động sản & Căn hộ Dịch vụ
+          <p className="text-xs text-slate-500 mt-1">
+            Nền tảng Quản lý Bất động sản & Căn hộ Dịch vụ
           </p>
         </div>
 
-        {/* Step 1: Input Phone */}
-        {step === 1 && (
-          <form onSubmit={handleRequestOtp} className="space-y-5">
-            <FormField
-              label="Số điện thoại đăng nhập"
-              required
-              hint="Nhập số điện thoại đã được đăng ký hoặc số test (vd: 0901234567)"
-              error={error}
-            >
-              <Input
-                type="tel"
-                placeholder="090 123 4567"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                leftIcon={Phone}
-                autoFocus
-              />
-            </FormField>
+        {/* Tab Switcher: NV-01 (OTP) vs NV-02 (Email/Password) */}
+        <div className="flex bg-slate-100 p-1 rounded-xl mb-6 text-xs font-semibold">
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMethod('otp');
+              setError('');
+            }}
+            className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all duration-150 ${
+              authMethod === 'otp'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Phone className="w-3.5 h-3.5" />
+            <span>Mã OTP (SĐT)</span>
+          </button>
 
-            <Button
-              type="submit"
-              className="w-full py-2.5"
-              isLoading={isLoading}
-              rightIcon={ArrowRight}
-            >
-              Gửi mã xác thực OTP
-            </Button>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMethod('password');
+              setError('');
+            }}
+            className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all duration-150 ${
+              authMethod === 'password'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Mail className="w-3.5 h-3.5" />
+            <span>Nhân viên (Email)</span>
+          </button>
+        </div>
 
-            <div className="pt-2 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
-              <ShieldCheck className="w-4 h-4 text-emerald-500" />
-              <span>Bảo mật theo tiêu chuẩn OTP SMS & JWT</span>
-            </div>
-          </form>
+        {/* Error Notification */}
+        {error && (
+          <div className="mb-5 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
+            <span className="flex-shrink-0 font-bold">⚠️</span>
+            <span>{error}</span>
+          </div>
         )}
 
-        {/* Step 2: Input OTP */}
-        {step === 2 && (
-          <form onSubmit={handleVerifyOtp} className="space-y-5">
-            <div className="text-center p-3 bg-slate-50 rounded-xl border border-slate-100 mb-2">
-              <p className="text-xs text-slate-500">Mã xác thực đã được gửi đến số</p>
-              <p className="text-sm font-bold text-slate-800 mt-0.5">{phone}</p>
-            </div>
+        {/* ================================================================= */}
+        {/* NV-01: ĐĂNG NHẬP OTP (Cư dân & Nhân viên qua SĐT)                 */}
+        {/* ================================================================= */}
+        {authMethod === 'otp' && (
+          <>
+            {/* Step 1: Input Phone */}
+            {step === 1 && (
+              <form onSubmit={handleRequestOtp} className="space-y-5">
+                <FormField
+                  label="Số điện thoại nhận OTP"
+                  required
+                  hint="Nhập SĐT đã đăng ký hoặc số test (vd: 0901234567)"
+                >
+                  <Input
+                    type="tel"
+                    placeholder="090 123 4567"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    leftIcon={Phone}
+                    autoFocus
+                  />
+                </FormField>
 
-            {devOtpHint && (
-              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center justify-between">
-                <span>Mã OTP giả lập (Dev): <strong>{devOtpHint}</strong></span>
-                <span className="text-[10px] bg-amber-200 px-2 py-0.5 rounded font-mono font-bold">MOCK SMS</span>
-              </div>
+                <Button
+                  type="submit"
+                  className="w-full py-2.5"
+                  isLoading={isLoading}
+                  rightIcon={ArrowRight}
+                >
+                  Gửi mã xác thực OTP
+                </Button>
+
+                <div className="pt-2 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                  <span>Bảo mật chống enumeration · Rate-limit 3 req/giờ</span>
+                </div>
+              </form>
             )}
 
-            <FormField
-              label="Nhập mã OTP 6 số"
-              required
-              hint={`Hiệu lực còn lại: ${formatCountdown(countdown)}`}
-              error={error}
-            >
+            {/* Step 2: Input 6-digit OTP */}
+            {step === 2 && (
+              <form onSubmit={handleVerifyOtp} className="space-y-5">
+                <div className="text-center p-3 bg-slate-50 rounded-xl border border-slate-100 mb-1">
+                  <p className="text-xs text-slate-500">Mã xác thực 6 số đã gửi tới</p>
+                  <p className="text-sm font-bold text-slate-800 mt-0.5">{phone}</p>
+                </div>
+
+                {devOtpHint && (
+                  <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center justify-between">
+                    <span>Mã OTP giả lập (Dev): <strong>{devOtpHint}</strong></span>
+                    <span className="text-[10px] bg-amber-200 px-2 py-0.5 rounded font-mono font-bold">MOCK SMS</span>
+                  </div>
+                )}
+
+                <FormField
+                  label="Nhập mã OTP 6 số"
+                  required
+                  hint={`Hiệu lực còn lại: ${formatCountdown(countdown)}`}
+                >
+                  <Input
+                    type="text"
+                    maxLength={6}
+                    placeholder="------"
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                    leftIcon={KeyRound}
+                    className="text-center text-xl tracking-widest font-mono font-bold"
+                    autoFocus
+                  />
+                </FormField>
+
+                <Button
+                  type="submit"
+                  className="w-full py-2.5"
+                  isLoading={isLoading}
+                >
+                  Xác thực & Đăng nhập
+                </Button>
+
+                <div className="flex items-center justify-between pt-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStep(1);
+                      setError('');
+                    }}
+                    className="text-slate-500 hover:text-slate-800 font-medium"
+                  >
+                    ← Đổi số điện thoại
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={resendCooldown > 0 || isLoading}
+                    onClick={handleRequestOtp}
+                    className="text-primary-600 hover:text-primary-700 font-semibold disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    {resendCooldown > 0 ? `Gửi lại sau ${resendCooldown}s` : 'Gửi lại OTP'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </>
+        )}
+
+        {/* ================================================================= */}
+        {/* NV-02: ĐĂNG NHẬP EMAIL/MẬT KHẨU (Nhân viên nội bộ)               */}
+        {/* ================================================================= */}
+        {authMethod === 'password' && (
+          <form onSubmit={handlePasswordLogin} className="space-y-4">
+            <FormField label="Email nhân sự" required>
               <Input
-                type="text"
-                maxLength={6}
-                placeholder="------"
-                value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                leftIcon={KeyRound}
-                className="text-center text-lg tracking-widest font-mono font-bold"
+                type="email"
+                placeholder="manager@resihub.vn"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                leftIcon={Mail}
                 autoFocus
               />
             </FormField>
 
+            <FormField label="Mật khẩu (≥ 8 ký tự)" required>
+              <div className="relative">
+                <Input
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  leftIcon={Lock}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </FormField>
+
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-500">
+              💡 <strong>Tài khoản nội bộ thử nghiệm:</strong><br />
+              Email: <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200">manager@resihub.vn</code><br />
+              Mật khẩu: <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200">password123</code>
+            </div>
+
             <Button
               type="submit"
-              className="w-full py-2.5"
+              className="w-full py-2.5 mt-2"
               isLoading={isLoading}
+              leftIcon={UserCheck}
             >
-              Xác thực & Đăng nhập
+              Đăng nhập Quản trị viên
             </Button>
-
-            <div className="flex items-center justify-between pt-2 text-xs">
-              <button
-                type="button"
-                onClick={() => setStep(1)}
-                className="text-slate-500 hover:text-slate-800 font-medium"
-              >
-                ← Đổi số điện thoại
-              </button>
-
-              <button
-                type="button"
-                disabled={resendCooldown > 0 || isLoading}
-                onClick={handleRequestOtp}
-                className="text-primary-600 hover:text-primary-700 font-semibold disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                {resendCooldown > 0 ? `Gửi lại sau ${resendCooldown}s` : 'Gửi lại OTP'}
-              </button>
-            </div>
           </form>
         )}
       </div>
