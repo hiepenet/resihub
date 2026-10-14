@@ -647,129 +647,138 @@ SELECT * FROM contract WHERE id = '<hd_khac>';   -- trả về empty (không ph�
 
 ### ✅ Task List Tuần 2
 
-#### Ngày 8-9: Backend Auth
+#### Ngày 8-9: Backend Auth (M02)
 - [ ] Cài: `jsonwebtoken`, `bcryptjs`, `express-rate-limit`, `ioredis`
-- [ ] Viết `POST /auth/otp/request` (mock OTP log console)
-- [ ] Viết `POST /auth/otp/verify` + tạo JWT
-- [ ] Viết `POST /auth/login` (email/password)
-- [ ] Viết `POST /auth/refresh` + `POST /auth/logout`
-- [ ] Middleware `auth.js` (verify JWT → `req.user`)
-- [ ] Middleware `rbac.js` (requireRole)
+- [ ] Viết `POST /auth/otp/request` (Mock OTP console, rate limit 3 lần/giờ/SĐT, thông điệp trung lập chống leak số điện thoại - AC-001.3)
+- [ ] Viết `POST /auth/otp/verify` (Kiểm tra OTP, max 5 lần thử sai → khóa 15 phút kèm countdown - AC-001.2, cấp JWT + refresh token)
+- [ ] Viết `POST /auth/login` (Email/mật khẩu bcrypt >= 8 ký tự cho nhân sự nội bộ)
+- [ ] Viết `POST /auth/refresh` + `POST /auth/logout` (Thu hồi refresh token)
+- [ ] Middleware `auth.js` (Verify JWT → gán `req.user`, TTL: Access 15m, Refresh 7d, riêng ACCOUNTANT 30m - NFR-008)
+- [ ] Middleware `rbac.js` (`requireRole` kiểm tra quyền theo module và tòa nhà được gán)
 
-#### Ngày 10-11: Frontend Auth
-- [ ] Trang `/login`: input SĐT → send OTP → input OTP → redirect
+#### Ngày 10-11: Frontend Auth & Khung Admin
+- [ ] Trang `/login`: 2 tab rõ ràng (Tab "Cư dân & Nhân viên" đăng nhập OTP SĐT, Tab "Nhân sự nội bộ" đăng nhập Email/Mật khẩu)
+- [ ] Auto-focus 6 ô nhập mã OTP + countdown đếm ngược 5 phút + nút gửi lại sau 60s
+- [ ] Điều hướng sau đăng nhập: RESIDENT → `/resident/apartment`, SYS_ADMIN → `/admin/buildings`, MANAGER/ACCOUNTANT/OWNER → `/admin/dashboard`
 - [ ] Zustand `authStore`: `{ user, tokens, login(), logout(), refresh() }`
-- [ ] Axios instance với interceptor gắn Bearer + auto-refresh khi 401
-- [ ] Protected route (redirect `/login` nếu chưa auth)
-- [ ] Sidebar render nav items theo role từ JWT
+- [ ] Axios instance với interceptor gắn Bearer + tự động gọi refresh khi gặp lỗi 401
+- [ ] Protected Route (redirect về `/login` nếu chưa xác thực hoặc token hết hạn)
+- [ ] Sidebar phân quyền động theo Role từ JWT (Chỉ hiện menu người dùng có quyền xem)
 
-#### Ngày 12-13: RLS + Seed Data
-- [ ] Seed: 1 org, 5 roles, 4 test users (OWNER, MANAGER, ACCOUNTANT, RESIDENT)
-- [ ] Viết RLS policies cho 5 bảng
-- [ ] Viết SQL test script, chạy và verify từng policy
-- [ ] **Zero data leak:** mỗi user chỉ thấy dữ liệu đúng scope
+#### Ngày 12-13: RLS + Seed Data & Security
+- [ ] Seed script: 1 org, 6 roles, đủ test users (`SYS_ADMIN`, `OWNER`, `MANAGER`, `ACCOUNTANT`, `STAFF`, `RESIDENT`)
+- [ ] Thiết lập Row-Level Security (RLS) trên PostgreSQL cho các bảng lõi (`building`, `apartment`, `contract`, `deposit`, `person`)
+- [ ] Viết SQL test script, chạy verify từng policy: Đảm bảo zero data leak giữa các tổ chức và giữa các tòa nhà khác nhau
+- [ ] Kiểm tra cách ly dữ liệu cư dân: Cư dân căn A không thể query hay thấy hợp đồng/căn hộ của cư dân căn B
 
-#### Ngày 14: Integration & Review
-- [ ] E2E: Đăng nhập → sidebar đúng role → gọi API protected → 200
-- [ ] Test 403: role không đủ quyền → message đúng
-- [ ] Audit trigger cho app_user INSERT/UPDATE
-- [ ] Code review naming + folder structure
+#### Ngày 14: Integration & Review Tuần 2
+- [ ] E2E Test: Đăng nhập OTP → Redirect đúng trang chủ của vai trò → Gọi API được bảo vệ → 200 OK
+- [ ] Test 403: Role không đủ quyền hoặc truy cập sai tòa nhà → Chặn 403 Forbidden và ghi audit_log cảnh báo
+- [ ] Audit trigger tự động ghi nhận mọi sự kiện thêm/sửa trên bảng `app_user`
+- [ ] Code review kiến trúc thư mục, chuẩn hóa mã lỗi HTTP RESTful
 
 #### 📦 Deliverable Tuần 2
-> ✅ OTP mock login · ✅ JWT hoạt động · ✅ Sidebar đúng role · ✅ RLS có test pass · ✅ 0 data leak
+> ✅ OTP mock login + Khóa 15m sau 5 lần sai · ✅ Đăng nhập email nội bộ · ✅ JWT + Refresh token chuẩn TTL · ✅ Sidebar render theo Role · ✅ RLS phân quyền DB đạt chuẩn zero leak · ✅ Đủ 6 tài khoản kiểm thử seed sẵn
 
 ---
 
 ## 📅 TUẦN 3: MODULE BẤT ĐỘNG SẢN (M03) + CƯ DÂN (M04)
-> **Ngày 15–21** | Mục tiêu: CRUD tòa/tầng/căn hộ + sơ đồ tầng + hồ sơ cư dân
+> **Ngày 15–21** | Mục tiêu: CRUD tòa/tầng/căn hộ + sơ đồ tầng + hồ sơ cư dân + cọc giữ chỗ
 
 ### 🏢 M03 — API Endpoints
-
 ```
-GET    /api/v1/buildings                    → Danh sách (theo scope)
-POST   /api/v1/buildings                    → Tạo tòa
-PATCH  /api/v1/buildings/:id
-GET    /api/v1/buildings/:id/floors         → Danh sách tầng
-POST   /api/v1/buildings/:id/floors         → Tạo tầng
-GET    /api/v1/buildings/:id/apartments     → Danh sách căn (?status=)
-POST   /api/v1/buildings/:id/apartments     → Tạo căn
-PATCH  /api/v1/apartments/:id
-GET    /api/v1/buildings/:id/floor-map      → [{floor, apartments:[{id,code,status}]}]
+GET    /api/v1/buildings                    → Danh sách tòa nhà (lọc theo quyền)
+POST   /api/v1/buildings                    → Tạo tòa nhà mới (SYS_ADMIN, OWNER)
+GET    /api/v1/buildings/check-code         → Kiểm tra mã tòa khả dụng real-time
+PATCH  /api/v1/buildings/:id                → Cập nhật thông tin tòa nhà
+PATCH  /api/v1/buildings/:id/status         → Đổi trạng thái ACTIVE/INACTIVE (Chặn nếu có HĐ ACTIVE)
+GET    /api/v1/buildings/:id/floors         → Danh sách tầng (ORDER BY level ASC/DESC)
+POST   /api/v1/buildings/:id/floors         → Tạo tầng (level INTEGER, hỗ trợ hầm/trệt)
+GET    /api/v1/buildings/:id/apartments     → Danh sách căn (?status=&floor_id=)
+POST   /api/v1/buildings/:id/apartments     → Tạo căn hộ (base_rent BIGINT VND)
+PATCH  /api/v1/apartments/:id               → Cập nhật căn (Cảnh báo khi sửa diện tích căn OCCUPIED)
+GET    /api/v1/buildings/:id/floor-map      → Lưới sơ đồ tầng [{floor, apartments:[{id,code,status}]}]
 ```
 
 ### 🏢 M03 — Sơ đồ tầng (FR-010)
-
 ```
-Tab "Sơ đồ tầng" trong trang Buildings:
+Tab "Sơ đồ tầng" trong trang Quản lý Bất động sản:
 
 TẦNG 3  [ A301 🟢 ] [ A302 🔵 ] [ A303 🟡 ] [ A304 🔵 ]
 TẦNG 2  [ A201 🟢 ] [ A202 🔵 ] [ A203 🟢 ] [ A204 ⚫ ]
 TẦNG 1  [ A101 🔵 ] [ A102 🔵 ] [ A103 🟢 ] [ A104 🔴 ]
 
-🟢 Có sẵn  🔵 Đang thuê  🟡 Đã đặt  🔴 Bảo trì  ⚫ Không KD
+5 màu trạng thái chuẩn:
+🟢 Có sẵn (AVAILABLE)     🔵 Đang thuê (OCCUPIED)     🟡 Đã cọc giữ chỗ (RESERVED)
+🔴 Đang bảo trì (MAINTENANCE)                         ⚫ Tạm ngừng KD (INACTIVE)
 
-→ Click vào ô: mở slide-over panel chi tiết căn hộ
+→ Click vào ô căn hộ: mở slide-over panel xem nhanh thông tin, tiền thuê, tiện ích và lịch sử audit
 ```
 
 ### 👤 M04 — API Endpoints
-
 ```
-GET    /api/v1/tenants                  → Danh sách cư dân (scope tòa)
-POST   /api/v1/tenants                  → Tạo hồ sơ
-GET    /api/v1/tenants/:id
-PATCH  /api/v1/tenants/:id
-GET    /api/v1/tenants/check-dup        → ?phone=&id_number= (FR-021)
-POST   /api/v1/tenants/:id/merge        → Hợp nhất trùng
+GET    /api/v1/tenants                      → Danh sách cư dân (theo phạm vi tòa)
+POST   /api/v1/tenants                      → Tạo hồ sơ cư dân mới
+GET    /api/v1/tenants/:id                  → Chi tiết cư dân (che CCCD với STAFF)
+PATCH  /api/v1/tenants/:id                  → Cập nhật hồ sơ cư dân
+GET    /api/v1/tenants/check-dup            → Kiểm tra trùng SĐT/CCCD real-time (FR-021)
+POST   /api/v1/tenants/:id/merge            → Hợp nhất 2 hồ sơ trùng + ghi vết audit
 
-POST   /api/v1/reservations             → Đặt cọc giữ chỗ
-PATCH  /api/v1/reservations/:id/convert → Chuyển → cọc HĐ
-PATCH  /api/v1/reservations/:id/forfeit → Hủy (mất cọc)
-PATCH  /api/v1/reservations/:id/refund  → Hoàn cọc giữ chỗ
+POST   /api/v1/reservations                 → Đặt cọc giữ chỗ (căn chuyển RESERVED)
+PATCH  /api/v1/reservations/:id/convert     → Chuyển tiền giữ chỗ sang cọc hợp đồng khi ký HĐ
+PATCH  /api/v1/reservations/:id/forfeit     → Khách hủy, mất tiền giữ chỗ (yêu cầu duyệt Four-eyes)
+PATCH  /api/v1/reservations/:id/refund      → Hoàn tiền giữ chỗ cho khách (yêu cầu duyệt Four-eyes)
 ```
 
 ### 👤 M04 — Duplicate Check (FR-021)
-
 ```
-Khi nhập SĐT trên form tạo cư dân:
-→ Real-time check: GET /tenants/check-dup?phone=09...
-→ Nếu tồn tại: hiển thị banner cảnh báo + thông tin người trùng
-→ User chọn:
-   (A) Dùng người đã có → không tạo mới
-   (B) Tạo mới (nhập lý do) → audit log ghi rõ
-   (C) Merge → dialog hợp nhất field-by-field + audit
+Khi nhập SĐT hoặc CCCD trên form tạo cư dân:
+→ Real-time check: GET /api/v1/tenants/check-dup?phone=...&id_number=...
+→ Nếu phát hiện trùng lặp: hiển thị banner cảnh báo màu vàng kèm thông tin hồ sơ hiện có
+→ Người quản trị chọn 1 trong 3 hành động:
+   (A) Dùng hồ sơ đã có: Không tạo mới, tái sử dụng định danh
+   (B) Tạo mới có chủ đích: Bắt buộc nhập lý do vào ô text → ghi nhận vào audit_log
+   (C) Hợp nhất hồ sơ (Merge): Mở dialog so sánh từng trường dữ liệu, hợp nhất và lưu vết
 ```
 
 ### ✅ Task List Tuần 3
 
-#### Ngày 15-16: M03 Backend
-- [ ] Controller + service cho buildings, floors, apartments
-- [ ] `GET /floor-map` → grouped by floor, mảng apartments
-- [ ] Validation: mã căn unique trong tòa, area > 0, base_rent >= 0
-- [ ] Audit trigger cho apartment
+#### Ngày 15-16: M03 Backend (Tòa nhà, Tầng, Căn hộ)
+- [ ] Viết Controller + Service cho buildings, floors, apartments
+- [ ] Triển khai `GET /api/v1/buildings/check-code` (kiểm tra unique code theo tổ chức)
+- [ ] Triển khai `PATCH /api/v1/buildings/:id/status` kèm ràng buộc chặn INACTIVE nếu tồn tại hợp đồng `ACTIVE` (NFR-016)
+- [ ] Xử lý tầng: Ràng buộc `UNIQUE(building_id, level)`, `level` kiểu `INTEGER` (hỗ trợ hầm B1/B2 level < 0 và trệt level = 0), chặn xóa tầng nếu còn căn hộ
+- [ ] Xử lý căn hộ: Validate `base_rent` là `BIGINT` VND (không dùng float), `code` duy nhất theo tòa
+- [ ] API `GET /api/v1/buildings/:id/floor-map` nhóm căn hộ theo tầng phục vụ giao diện sơ đồ
+- [ ] Audit trigger tự động ghi log cho mọi thao tác thêm/sửa/đổi trạng thái tòa nhà và căn hộ
 
-#### Ngày 17-18: M03 Frontend
-- [ ] Trang danh sách buildings (DataTable + filter)
-- [ ] Form tạo/sửa building (Drawer)
-- [ ] Trang apartments: Tab "Danh sách" + Tab "Sơ đồ tầng"
-- [ ] Sơ đồ tầng: Grid màu theo status, click → slide-over chi tiết
-- [ ] Chi tiết căn hộ: tab Thông tin + tab Lịch sử Audit
+#### Ngày 17-18: M03 Frontend (Quản lý Bất động sản & Sơ đồ tầng)
+- [ ] Trang danh sách Tòa nhà (Card grid & DataTable, tìm kiếm mã/tên, lọc theo trạng thái)
+- [ ] Form tạo/sửa Tòa nhà (Drawer): Real-time check mã tòa khi blur, cấu hình tài khoản nhận tiền (FR-070)
+- [ ] Onboarding Banner: Hiển thị checklist cấu hình màu vàng khi tòa chưa có tầng hoặc căn hộ
+- [ ] Modal thêm Tầng: Nhập level và tên tầng, tự động gợi ý level kế tiếp, thêm liên tiếp không reload
+- [ ] Drawer tạo Căn hộ: Chọn tầng, diện tích m², tiện ích, định dạng tiền tệ tự động với dấu phân cách
+- [ ] Interactive Floor Map (FR-010): Hiển thị lưới căn hộ theo tầng với 5 màu trạng thái chuẩn, bộ lọc nhanh theo tầng & trạng thái
+- [ ] Slide-over panel chi tiết căn hộ: Xem nhanh cư dân đang thuê, giá thuê, tiện ích, cảnh báo khi sửa diện tích căn `OCCUPIED`
 
-#### Ngày 19-20: M04 Backend + Frontend
-- [ ] API tenants CRUD + check-dup + merge
-- [ ] API reservations CRUD + convert/forfeit/refund
-- [ ] Trang danh sách cư dân (search: tên, SĐT)
-- [ ] Form tạo cư dân + duplicate check real-time
-- [ ] Hiển thị cảnh báo trùng + 3 lựa chọn xử lý
-- [ ] Form đặt cọc giữ chỗ (chọn căn + thông tin khách)
+#### Ngày 19-20: M04 Backend & Frontend (Cư dân & Cọc giữ chỗ)
+- [ ] Backend Tenants: CRUD hồ sơ, mã hóa CCCD trong DB, ẩn CCCD đối với vai trò STAFF (PRD 6.2)
+- [ ] Backend Duplicate Check: API `check-dup` và luồng gộp hồ sơ `merge` ghi rõ before/after audit
+- [ ] Backend Reservations: CRUD đặt cọc giữ chỗ, chuyển cọc `convert`, hủy mất cọc `forfeit`, hoàn cọc `refund` kèm duyệt Four-eyes
+- [ ] Cron job tự động quét và chuyển trạng thái cọc giữ chỗ sang `EXPIRED`, trả phòng về `AVAILABLE` khi quá hạn `hold_until`
+- [ ] Frontend Tenants: Danh sách cư dân (tìm kiếm theo tên, SĐT, mã phòng)
+- [ ] Frontend Tenant Form: Tích hợp check trùng SĐT/CCCD real-time với debounce 400ms, hiển thị banner cảnh báo và 3 nút lựa chọn
+- [ ] Frontend Reservation: Drawer đặt cọc giữ chỗ ngay từ căn hộ `AVAILABLE` trên Floor Map
 
-#### Ngày 21: Test & Integration
-- [ ] E2E: Tạo tòa → tầng → căn → xem sơ đồ tầng
-- [ ] Test trùng SĐT → cảnh báo đúng
-- [ ] Test RLS: MANAGER tòa A không thấy tòa B
-- [ ] Responsive: sơ đồ tầng trên tablet (1024px)
+#### Ngày 21: Test & Integration Tuần 3
+- [ ] E2E Test: Tạo tòa nhà → Thêm tầng → Tạo căn hộ → Căn hộ hiển thị đúng màu trên Floor Map
+- [ ] Test Đặt cọc giữ chỗ: Căn chuyển sang màu vàng `RESERVED` → Hết hạn trả về xanh `AVAILABLE`
+- [ ] Test trùng cư dân: Nhập SĐT trùng → Hiện cảnh báo tức thì, kiểm tra luồng Merge hồ sơ
+- [ ] Test RLS & Security: MANAGER của tòa A tuyệt đối không xem được danh sách căn hộ hay cư dân của tòa B
+- [ ] Kiểm thử Responsive: Giao diện Sơ đồ tầng hiển thị chuẩn trên màn hình Tablet (1024px) và Laptop
 
 #### 📦 Deliverable Tuần 3
-> ✅ CRUD tòa/tầng/căn · ✅ Sơ đồ tầng màu sắc · ✅ Cư dân + duplicate check · ✅ Đặt cọc giữ chỗ
+> ✅ Quản lý Tòa/Tầng/Căn hộ đầy đủ ràng buộc · ✅ Interactive Floor Map 5 màu trạng thái · ✅ Onboarding banner hướng dẫn hoàn thiện cấu hình · ✅ Hồ sơ cư dân + Duplicate Check thời gian thực · ✅ Đặt cọc giữ chỗ (Reservation) tự động hoàn/hết hạn · ✅ Bảo mật PII và phân quyền RLS chuẩn xác
 
 ---
 
@@ -1261,7 +1270,7 @@ TC-NV03-07: Chuyển trạng thái tòa sang INACTIVE khi không có hợp đồ
 ### Luồng tổng quan
 ```
 /admin/buildings/:id → Tab "Sơ đồ tầng" hoặc nút [+ Thêm tầng]
-→ Nhập số tầng (level) & Tên hiển thị → Lưu → Danh sách tầng tự động sắp xếp theo thứ tự tăng dần
+→ Nhập số tầng (level) & Tên hiển thị → Lưu → Danh sách tầng tự động sắp xếp theo thứ tự level tăng dần (hoặc giảm dần theo sơ đồ nhà cao tầng)
 ```
 
 ### UI Steps
@@ -1269,8 +1278,8 @@ TC-NV03-07: Chuyển trạng thái tòa sang INACTIVE khi không có hợp đồ
 1. Chọn tòa nhà cần cấu hình trên thanh điều hướng.
 2. Click nút [+ Thêm tầng].
 3. Modal form thêm tầng:
-   • Số tầng (Level) (*):    [ 1            ] (Số nguyên ≥ 1, không âm)
-   • Tên hiển thị của tầng:  [ Tầng 1 (Trệt)] (Nếu để trống tự động điền "Tầng 1")
+   • Số tầng (Level) (*):    [ 1            ] (Số nguyên INTEGER: < 0 nếu là hầm, = 0 nếu là trệt, > 0 nếu là tầng lầu)
+   • Tên hiển thị của tầng:  [ Tầng 1       ] (Nếu để trống tự động sinh theo quy tắc bên dưới)
    [Hủy]   [Thêm tầng]
 4. Sau khi thêm thành công:
    • Tầng hiển thị ngay trong danh sách/sơ đồ mà không cần reload trang.
@@ -1280,32 +1289,47 @@ TC-NV03-07: Chuyển trạng thái tòa sang INACTIVE khi không có hợp đồ
 ### API Flow
 ```
 POST /api/v1/buildings/:building_id/floors
-  Body: { "level": 1, "name": "Tầng 1 (Trệt)" }
-  → Kiểm tra UNIQUE(building_id, level)
-  Response 201: { "data": { "id": "uuid", "building_id": "...", "level": 1, "name": "Tầng 1 (Trệt)" } }
-  Response 409: { "code": "FLOOR_EXISTS", "message": "Tầng 1 đã tồn tại trong tòa nhà này." }
-  Response 400: { "code": "VALIDATION_ERROR", "message": "Số tầng phải là số nguyên dương." }
+  Body: { "level": 1, "name": "Tầng 1" }
+  → Transaction:
+    1. Kiểm tra UNIQUE(building_id, level)
+    2. INSERT INTO floor (building_id, level, name)
+  Response 201: { "data": { "id": "uuid", "building_id": "...", "level": 1, "name": "Tầng 1" } }
+  Response 409: { "code": "FLOOR_EXISTS", "message": "Tầng có level này đã tồn tại trong tòa nhà." }
+  Response 400: { "code": "VALIDATION_ERROR", "message": "Số tầng phải là số nguyên (INTEGER)." }
 
 GET /api/v1/buildings/:building_id/floors
   Response: { "data": [{ "id": "...", "level": 1, "name": "Tầng 1", "apartment_count": 4 }] }
   Sắp xếp: ORDER BY level ASC
+
+DELETE /api/v1/floors/:id
+  → RÀNG BUỘC NGHIỆP VỤ:
+    Kiểm tra SELECT COUNT(*) FROM apartment WHERE floor_id = $1.
+    Nếu count > 0 → CHẶN XÓA: HTTP 400 FLOOR_HAS_APARTMENTS ("Không thể xóa tầng đang chứa căn hộ").
+    Chỉ xóa được tầng khi số căn hộ = 0.
 ```
 
 ### Validation & Business Rules
 ```
 level:
-  ✅ Bắt buộc, số nguyên dương ≥ 1
-  ✅ Duy nhất trong cùng một tòa nhà (UNIQUE constraint)
+  ✅ Bắt buộc, kiểu INTEGER (hỗ trợ toàn diện thực tế: level < 0 là tầng hầm, level = 0 là tầng trệt/G, level > 0 là tầng lầu).
+  ✅ Duy nhất trong cùng một tòa nhà (UNIQUE constraint: UNIQUE(building_id, level)).
 name:
-  ✅ Tối đa 50 ký tự. Nếu để trống, hệ thống tự động sinh: "Tầng {level}"
+  ✅ Tối đa 50 ký tự.
+  ✅ Nếu để trống, hệ thống tự động sinh tên thông minh:
+     • level < 0: "Tầng hầm B{abs(level)}" (ví dụ: level = -1 → "Tầng hầm B1")
+     • level = 0: "Tầng Trệt" (hoặc Tầng G)
+     • level > 0: "Tầng {level}" (ví dụ: level = 2 → "Tầng 2")
+Ràng buộc xóa tầng:
+  ✅ Chặn xóa tầng khi đang chứa bất kỳ căn hộ nào (apartment_count > 0).
 ```
 
 ### Test Cases
 ```
 TC-NV04-01: Tạo tầng 1 với tên hợp lệ → HTTP 201, lưu thành công.
-TC-NV04-02: Tạo tầng để trống tên → Tự động lưu tên "Tầng 1".
-TC-NV04-03: Tạo tầng có level đã tồn tại trong tòa → HTTP 409 FLOOR_EXISTS.
-TC-NV04-04: Nhập level là số âm hoặc chữ cái → HTTP 400 VALIDATION_ERROR.
+TC-NV04-02: Tạo tầng level = -1 để trống tên → Tự động lưu tên "Tầng hầm B1".
+TC-NV04-03: Tạo tầng level = 0 để trống tên → Tự động lưu tên "Tầng Trệt".
+TC-NV04-04: Tạo tầng có level đã tồn tại trong tòa → HTTP 409 FLOOR_EXISTS.
+TC-NV04-05: Xóa tầng đang có căn hộ bên trong → HTTP 400 FLOOR_HAS_APARTMENTS.
 ```
 
 ---
@@ -1399,11 +1423,16 @@ PATCH /api/v1/apartments/:id
 
 ### Validation & Business Rules
 ```
-code:      Bắt buộc, 1–20 ký tự, tự động viết hoa (uppercase), duy nhất trong tòa nhà.
+code:      Bắt buộc, 1–20 ký tự, tự động viết hoa (uppercase), duy nhất trong tòa nhà (UNIQUE(building_id, code)).
 area_m2:   Bắt buộc, số dương > 0.
 base_rent: Bắt buộc, số nguyên ≥ 0, lưu kiểu BIGINT đơn vị VND. Tuyệt đối không dùng float.
 bedrooms:  Số nguyên ≥ 0.
 status:    Mặc định sau khi tạo là AVAILABLE.
+Ràng buộc giá niêm yết:
+  ✅ Giá niêm yết (base_rent) là giá chào thuê tham chiếu. Khi sửa base_rent, tiền thuê của các hợp đồng đang hiệu lực (contract.rent_amount) KHÔNG bị ảnh hưởng (hai trường lưu trữ độc lập).
+Ràng buộc xóa & sửa căn hộ (NFR-016):
+  ✅ TUYỆT ĐỐI KHÔNG XÓA CỨNG căn hộ đã từng phát sinh hợp đồng hoặc giao dịch. Nếu ngừng khai thác → chuyển status sang INACTIVE.
+  ✅ Sửa diện tích căn hộ đang OCCUPIED → Cảnh báo ảnh hưởng tính tiền phí dịch vụ/pro-rata và bắt buộc ghi nhận audit_log chi tiết before/after.
 ```
 
 ### Test Cases
@@ -1413,6 +1442,8 @@ TC-NV05-02: Tạo căn A101 lần 2 trong cùng tòa → HTTP 409 DUPLICATE_CODE
 TC-NV05-03: Tạo căn A101 ở tòa khác → HTTP 201 thành công (mã căn unique theo tòa, không unique toàn hệ thống).
 TC-NV05-04: Nhập base_rent là số âm → HTTP 400 VALIDATION_ERROR.
 TC-NV05-05: Cập nhật diện tích căn hộ đang có hợp đồng ACTIVE → Báo cảnh báo thành công, ghi vết audit_log chi tiết before/after.
+TC-NV05-06: Sửa giá niêm yết căn hộ → Hợp đồng ACTIVE đang chạy giữ nguyên rent_amount cũ không đổi.
+TC-NV05-07: Xóa căn hộ đang có hợp đồng hiệu lực → HTTP 400/409 CHẶN XÓA (Yêu cầu chuyển INACTIVE).
 ```
 
 ---
