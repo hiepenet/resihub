@@ -37,48 +37,49 @@ async function runRlsTests() {
     const orgRes = await client.query('SELECT id FROM organization LIMIT 1');
     const orgId = orgRes.rows[0].id;
 
+    const suffix = Date.now().toString().slice(-6);
+    const codeA = `RLS-A-${suffix}`;
+    const codeB = `RLS-B-${suffix}`;
+    const phoneA = `0981${suffix}`;
+    const phoneB = `0982${suffix}`;
+    const phoneMgr = `0983${suffix}`;
+
     // Tòa nhà A và Tòa nhà B
     const bldARes = await client.query(
       `INSERT INTO building (org_id, name, code, address, status)
-       VALUES ($1, 'RLS Tòa Nhà Alpha', 'RLS-ALPHA', 'Khu A', 'ACTIVE')
-       ON CONFLICT (org_id, code) DO UPDATE SET name = EXCLUDED.name
+       VALUES ($1, 'RLS Tòa Nhà Alpha', $2, 'Khu A', 'ACTIVE')
        RETURNING id`,
-      [orgId]
+      [orgId, codeA]
     );
     const bldAId = bldARes.rows[0].id;
 
     const bldBRes = await client.query(
       `INSERT INTO building (org_id, name, code, address, status)
-       VALUES ($1, 'RLS Tòa Nhà Beta', 'RLS-BETA', 'Khu B', 'ACTIVE')
-       ON CONFLICT (org_id, code) DO UPDATE SET name = EXCLUDED.name
+       VALUES ($1, 'RLS Tòa Nhà Beta', $2, 'Khu B', 'ACTIVE')
        RETURNING id`,
-      [orgId]
+      [orgId, codeB]
     );
     const bldBId = bldBRes.rows[0].id;
 
     // Tầng & Căn hộ A101 (Tòa Alpha) và B201 (Tòa Beta)
     const flARes = await client.query(
-      `INSERT INTO floor (building_id, level, name) VALUES ($1, 1, 'Tầng 1')
-       ON CONFLICT (building_id, level) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
+      `INSERT INTO floor (building_id, level, name) VALUES ($1, 1, 'Tầng 1') RETURNING id`,
       [bldAId]
     );
     const aptARes = await client.query(
       `INSERT INTO apartment (building_id, floor_id, code, area_m2, base_rent, status)
-       VALUES ($1, $2, 'ALPHA-101', 50, 8000000, 'OCCUPIED')
-       ON CONFLICT (building_id, code) DO UPDATE SET status = 'OCCUPIED' RETURNING id`,
+       VALUES ($1, $2, 'ALPHA-101', 50, 8000000, 'OCCUPIED') RETURNING id`,
       [bldAId, flARes.rows[0].id]
     );
     const aptAId = aptARes.rows[0].id;
 
     const flBRes = await client.query(
-      `INSERT INTO floor (building_id, level, name) VALUES ($1, 2, 'Tầng 2')
-       ON CONFLICT (building_id, level) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
+      `INSERT INTO floor (building_id, level, name) VALUES ($1, 2, 'Tầng 2') RETURNING id`,
       [bldBId]
     );
     const aptBRes = await client.query(
       `INSERT INTO apartment (building_id, floor_id, code, area_m2, base_rent, status)
-       VALUES ($1, $2, 'BETA-201', 60, 12000000, 'OCCUPIED')
-       ON CONFLICT (building_id, code) DO UPDATE SET status = 'OCCUPIED' RETURNING id`,
+       VALUES ($1, $2, 'BETA-201', 60, 12000000, 'OCCUPIED') RETURNING id`,
       [bldBId, flBRes.rows[0].id]
     );
     const aptBId = aptBRes.rows[0].id;
@@ -86,9 +87,9 @@ async function runRlsTests() {
     // Người & Cư dân A (Căn ALPHA-101)
     const personARes = await client.query(
       `INSERT INTO person (org_id, full_name, phone, email)
-       VALUES ($1, 'Cư Dân Alpha (A101)', '0981111111', 'cudan_a@gmail.com')
+       VALUES ($1, 'Cư Dân Alpha (A101)', $2, 'cudan_a_${suffix}@gmail.com')
        RETURNING id`,
-      [orgId]
+      [orgId, phoneA]
     );
     const personAId = personARes.rows[0].id;
 
@@ -101,7 +102,7 @@ async function runRlsTests() {
 
     const userARes = await client.query(
       `INSERT INTO app_user (person_id, auth_uid, status)
-       VALUES ($1, 'auth-resident-alpha', 'ACTIVE') RETURNING id`,
+       VALUES ($1, 'auth-resident-alpha-${suffix}', 'ACTIVE') RETURNING id`,
       [personAId]
     );
     const userAId = userARes.rows[0].id;
@@ -109,9 +110,9 @@ async function runRlsTests() {
     // Người & Cư dân B (Căn BETA-201)
     const personBRes = await client.query(
       `INSERT INTO person (org_id, full_name, phone, email)
-       VALUES ($1, 'Cư Dân Beta (B201)', '0982222222', 'cudan_b@gmail.com')
+       VALUES ($1, 'Cư Dân Beta (B201)', $2, 'cudan_b_${suffix}@gmail.com')
        RETURNING id`,
-      [orgId]
+      [orgId, phoneB]
     );
     const personBId = personBRes.rows[0].id;
 
@@ -124,7 +125,7 @@ async function runRlsTests() {
 
     const userBRes = await client.query(
       `INSERT INTO app_user (person_id, auth_uid, status)
-       VALUES ($1, 'auth-resident-beta', 'ACTIVE') RETURNING id`,
+       VALUES ($1, 'auth-resident-beta-${suffix}', 'ACTIVE') RETURNING id`,
       [personBId]
     );
     const userBId = userBRes.rows[0].id;
@@ -147,12 +148,12 @@ async function runRlsTests() {
     // Quản lý Manager Alpha: Chỉ được gán quyền trên Tòa Alpha
     const personMgrRes = await client.query(
       `INSERT INTO person (org_id, full_name, phone, email)
-       VALUES ($1, 'Quản Lý Tòa Alpha', '0983333333', 'manager_alpha@resihub.vn') RETURNING id`,
-      [orgId]
+       VALUES ($1, 'Quản Lý Tòa Alpha', $2, 'manager_alpha_${suffix}@resihub.vn') RETURNING id`,
+      [orgId, phoneMgr]
     );
     const userMgrRes = await client.query(
       `INSERT INTO app_user (person_id, auth_uid, status)
-       VALUES ($1, 'auth-manager-alpha', 'ACTIVE') RETURNING id`,
+       VALUES ($1, 'auth-manager-alpha-${suffix}', 'ACTIVE') RETURNING id`,
       [personMgrRes.rows[0].id]
     );
     const userMgrId = userMgrRes.rows[0].id;
@@ -274,7 +275,15 @@ async function runRlsTests() {
       adminSeesAlpha && adminSeesBeta,
       'Chủ đầu tư / SYS_ADMIN nhìn thấy toàn bộ tòa nhà trong tổ chức'
     );
-    await client.query('ROLLBACK');
+    // Dọn dẹp dữ liệu kiểm thử
+    await client.query('DELETE FROM contract WHERE id IN ($1, $2)', [contractAId, contractBId]);
+    await client.query('DELETE FROM apartment WHERE id IN ($1, $2)', [aptAId, aptBId]);
+    await client.query('DELETE FROM floor WHERE building_id IN ($1, $2)', [bldAId, bldBId]);
+    await client.query('DELETE FROM building WHERE id IN ($1, $2)', [bldAId, bldBId]);
+    await client.query('DELETE FROM user_role WHERE user_id IN ($1, $2, $3)', [userAId, userBId, userMgrId]);
+    await client.query('DELETE FROM app_user WHERE id IN ($1, $2, $3)', [userAId, userBId, userMgrId]);
+    await client.query('DELETE FROM tenant WHERE id IN ($1, $2)', [tenantAId, tenantBId]);
+    await client.query('DELETE FROM person WHERE id IN ($1, $2, $3)', [personAId, personBId, personMgrRes.rows[0].id]);
 
   } catch (err) {
     console.error('Lỗi ngoại lệ trong quá trình test RLS:', err);
