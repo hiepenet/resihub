@@ -1,0 +1,6 @@
+# Docker Compose development overrides (e.g. for local hot reload)
+services:
+  api:
+    command: npm run dev
+  frontend:
+    command: npm run dev -- --host
