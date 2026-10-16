@@ -6,10 +6,29 @@ import FormField from '../../../components/ui/FormField';
 import DataTable from '../../../components/ui/DataTable';
 import StatusBadge from '../../../components/ui/StatusBadge';
 import Money from '../../../components/ui/Money';
+import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
+import { useAuthStore } from '../../../stores/authStore';
 
 export default function DepositsPage() {
+  const { getCurrentRole } = useAuthStore();
+  const currentRole = getCurrentRole();
+
+  // RBAC PRD 6.2 - Module Cọc:
+  // OWNER: R + A(hoàn cọc) | MANAGER: CRU | ACCOUNTANT: CRU | SYS_ADMIN: R | STAFF: '-' | RESIDENT: R(của mình)
+  const canManageDeposit = ['MANAGER', 'ACCOUNTANT', 'OWNER', 'SYS_ADMIN'].includes(currentRole);
+
+  if (['STAFF', 'RESIDENT'].includes(currentRole)) {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN']}
+      />
+    );
+  }
+
   const [deposits, setDeposits] = useState([]);
+
   const [isLoading, setIsLoading] = useState(false);
   const [selectedDeposit, setSelectedDeposit] = useState(null);
   const [isTxnModalOpen, setIsTxnModalOpen] = useState(false);
@@ -100,7 +119,7 @@ export default function DepositsPage() {
     {
       title: 'Thao tác',
       key: 'actions',
-      render: (_, row) => (
+      render: (_, row) => canManageDeposit ? (
         <Button
           variant="outline"
           size="sm"
@@ -109,9 +128,12 @@ export default function DepositsPage() {
         >
           Xử lý cọc
         </Button>
+      ) : (
+        <span className="text-xs text-slate-400 italic">Chỉ xem</span>
       ),
     },
   ];
+
 
   return (
     <div className="space-y-6">

@@ -5,12 +5,30 @@ import Input from '../../../components/ui/Input';
 import FormField from '../../../components/ui/FormField';
 import DataTable from '../../../components/ui/DataTable';
 import StatusBadge from '../../../components/ui/StatusBadge';
+import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
+import { useAuthStore } from '../../../stores/authStore';
 
 export default function TenantsPage() {
+  const { getCurrentRole } = useAuthStore();
+  const currentRole = getCurrentRole();
+
+  // RBAC PRD 6.2 - Module Cư dân: SYS_ADMIN (CRUD), MANAGER (CRU), OWNER (R), STAFF (R hạn chế PII), ACCOUNTANT (R), RESIDENT (RU của mình)
+  const canCreateTenant = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
+
+  if (currentRole === 'RESIDENT') {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}
+      />
+    );
+  }
+
   const [tenants, setTenants] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+
 
   // Form State
   const [formData, setFormData] = useState({
@@ -95,7 +113,13 @@ export default function TenantsPage() {
       ),
     },
     { title: 'Số điện thoại', key: 'phone', sortable: true },
-    { title: 'Số CCCD/CMND', key: 'id_number', render: (val) => val || '---' },
+    { 
+      title: 'Số CCCD/CMND', 
+      key: 'id_number', 
+      render: (val) => currentRole === 'STAFF' ? (
+        <span className="text-slate-400 italic font-mono text-xs">•••••••••••• (Ẩn PII)</span>
+      ) : (val || '---') 
+    },
     {
       title: 'Vai trò thuê',
       key: 'type',
@@ -126,15 +150,18 @@ export default function TenantsPage() {
           </p>
         </div>
 
-        <Button
-          variant="primary"
-          size="md"
-          onClick={() => setIsModalOpen(true)}
-          leftIcon={Plus}
-        >
-          Thêm cư dân mới
-        </Button>
+        {canCreateTenant && (
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => setIsModalOpen(true)}
+            leftIcon={Plus}
+          >
+            Thêm cư dân mới
+          </Button>
+        )}
       </div>
+
 
       <DataTable
         columns={columns}

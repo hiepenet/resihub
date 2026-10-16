@@ -76,18 +76,17 @@ async function seedData() {
       await client.query('UPDATE app_user SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
     }
 
-    // Assign MANAGER & OWNER roles
-    const { rows: roleRows } = await client.query('SELECT id, code FROM role WHERE org_id = $1', [orgId]);
-    for (const r of roleRows) {
-      if (['OWNER', 'MANAGER', 'SYS_ADMIN'].includes(r.code)) {
-        await client.query(`
-          INSERT INTO user_role (user_id, role_id, building_id)
-          VALUES ($1, $2, NULL)
-          ON CONFLICT (user_id, role_id, building_id) DO NOTHING;
-        `, [userId, r.id]);
-      }
+    // Assign exactly 1 fixed role: MANAGER
+    const { rows: roleRows } = await client.query("SELECT id FROM role WHERE org_id = $1 AND code = 'MANAGER'", [orgId]);
+    if (roleRows.length > 0) {
+      await client.query('DELETE FROM user_role WHERE user_id = $1', [userId]);
+      await client.query(`
+        INSERT INTO user_role (user_id, role_id, building_id)
+        VALUES ($1, $2, NULL)
+        ON CONFLICT (user_id, role_id, building_id) DO NOTHING;
+      `, [userId, roleRows[0].id]);
     }
-    console.log('[Seed] Admin user seeded: phone 0901234567');
+    console.log('[Seed] Manager user seeded with fixed role MANAGER: phone 0901234567');
 
     // 4. Demo Building
     let { rows: bRows } = await client.query('SELECT id FROM building WHERE code = $1', ['RH-THAODIEN']);

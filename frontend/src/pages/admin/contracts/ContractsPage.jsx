@@ -6,10 +6,29 @@ import FormField from '../../../components/ui/FormField';
 import DataTable from '../../../components/ui/DataTable';
 import StatusBadge from '../../../components/ui/StatusBadge';
 import Money from '../../../components/ui/Money';
+import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
+import { useAuthStore } from '../../../stores/authStore';
 
 export default function ContractsPage() {
+  const { getCurrentRole } = useAuthStore();
+  const currentRole = getCurrentRole();
+
+  // RBAC PRD 6.2 - Module Hợp đồng:
+  // SYS_ADMIN: R | OWNER: R | MANAGER: CRU + A | STAFF: '-' | ACCOUNTANT: R | RESIDENT: R(của mình)
+  const canCreateContract = ['MANAGER', 'SYS_ADMIN'].includes(currentRole);
+
+  if (['STAFF', 'RESIDENT'].includes(currentRole)) {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN']}
+      />
+    );
+  }
+
   const [contracts, setContracts] = useState([]);
+
   const [buildings, setBuildings] = useState([]);
   const [apartments, setApartments] = useState([]);
   const [tenants, setTenants] = useState([]);
@@ -173,15 +192,18 @@ export default function ContractsPage() {
           </p>
         </div>
 
-        <Button
-          variant="primary"
-          size="md"
-          onClick={() => setIsModalOpen(true)}
-          leftIcon={Plus}
-        >
-          Lập hợp đồng mới
-        </Button>
+        {canCreateContract && (
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => setIsModalOpen(true)}
+            leftIcon={Plus}
+          >
+            Lập hợp đồng mới
+          </Button>
+        )}
       </div>
+
 
       <DataTable
         columns={columns}

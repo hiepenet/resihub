@@ -21,13 +21,13 @@ export const NAV_ITEMS = [
     name: 'Bất động sản',
     path: '/admin/buildings',
     icon: Building2,
-    roles: ['OWNER', 'MANAGER', 'SYS_ADMIN'],
+    roles: ['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN'],
   },
   {
     name: 'Cư dân & Khách',
     path: '/admin/tenants',
     icon: Users,
-    roles: ['MANAGER', 'STAFF', 'SYS_ADMIN'],
+    roles: ['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN'],
   },
   {
     name: 'Hợp đồng thuê',
@@ -39,6 +39,7 @@ export const NAV_ITEMS = [
     name: 'Sổ quản lý cọc',
     path: '/admin/deposits',
     icon: ShieldCheck,
-    roles: ['OWNER', 'ACCOUNTANT', 'MANAGER', 'SYS_ADMIN'],
+    roles: ['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN'],
   },
 ];
+

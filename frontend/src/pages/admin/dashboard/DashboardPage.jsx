@@ -30,12 +30,32 @@ import { Doughnut, Bar } from 'react-chartjs-2';
 import Button from '../../../components/ui/Button';
 import Money from '../../../components/ui/Money';
 import StatusBadge from '../../../components/ui/StatusBadge';
+import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
+import { useAuthStore } from '../../../stores/authStore';
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title);
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+  const { getCurrentRole } = useAuthStore();
+  const currentRole = getCurrentRole();
+
+  // RBAC PRD 6.2 - Module Báo cáo & Dashboard:
+  // OWNER (toàn bộ) | MANAGER (tòa) | STAFF (việc) | ACCOUNTANT (tài chính) | RESIDENT: '-' (Không có quyền)
+  if (currentRole === 'RESIDENT') {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'STAFF', 'SYS_ADMIN']}
+      />
+    );
+  }
+
+  const canViewContracts = ['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN'].includes(currentRole);
+  const canViewFinancials = ['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN'].includes(currentRole);
+  const canCreateBuilding = ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(currentRole);
+  const canCreateContract = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
 
   // Raw data from database
   const [buildings, setBuildings] = useState([]);
@@ -51,25 +71,37 @@ export default function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Load all live data from backend
+  // Load live data from backend based on role
   const loadData = async (showRefresh = false) => {
     if (showRefresh) setIsRefreshing(true);
     else setIsLoading(true);
 
     try {
-      const [bRes, aRes, cRes, dRes, tRes, rRes] = await Promise.all([
+      const promises = [
         api.get('/api/v1/buildings'),
         api.get('/api/v1/apartments'),
-        api.get('/api/v1/contracts'),
-        api.get('/api/v1/deposits').catch(() => ({ data: { data: [] } })),
-        api.get('/api/v1/tenants').catch(() => ({ data: { data: [] } })),
-        api.get('/api/v1/reservations').catch(() => ({ data: { data: [] } })),
-      ]);
+      ];
+
+      // Chỉ tải hợp đồng và cọc nếu vai trò được phép (tránh lỗi 403 cho STAFF theo PRD 6.2)
+      if (canViewContracts) {
+        promises.push(api.get('/api/v1/contracts').catch(() => ({ data: { data: [] } })));
+        promises.push(api.get('/api/v1/deposits').catch(() => ({ data: { data: [] } })));
+        promises.push(api.get('/api/v1/reservations').catch(() => ({ data: { data: [] } })));
+      } else {
+        promises.push(Promise.resolve({ data: { data: [] } }));
+        promises.push(Promise.resolve({ data: { data: [] } }));
+        promises.push(Promise.resolve({ data: { data: [] } }));
+      }
+      promises.push(api.get('/api/v1/tenants').catch(() => ({ data: { data: [] } })));
+
+      const [bRes, aRes, cRes, dRes, rRes, tRes] = await Promise.all(promises);
 
       setBuildings(bRes.data?.data || []);
       setApartments(aRes.data?.data || []);
       setContracts(cRes.data?.data || []);
       setDeposits(dRes.data?.data || []);
+      setReservations(rRes.data?.data || []);
+      setTenants(tRes.data?.data || []);
       setTenants(tRes.data?.data || []);
       setReservations(rRes.data?.data || []);
     } catch (err) {
@@ -320,25 +352,29 @@ export default function DashboardPage() {
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-indigo-400' : ''}`} />
             </button>
 
-            {/* Quick Actions */}
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => navigate('/admin/buildings')}
-              leftIcon={PlusCircle}
-              className="text-xs bg-white/10 hover:bg-white/20 text-white border-white/20"
-            >
-              Tạo tòa nhà
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => navigate('/admin/contracts')}
-              leftIcon={PlusCircle}
-              className="text-xs shadow-md"
-            >
-              Lập hợp đồng
-            </Button>
+            {/* Quick Actions (Phân quyền theo PRD 6.2) */}
+            {canCreateBuilding && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => navigate('/admin/buildings')}
+                leftIcon={PlusCircle}
+                className="text-xs bg-white/10 hover:bg-white/20 text-white border-white/20"
+              >
+                Tạo tòa nhà
+              </Button>
+            )}
+            {canCreateContract && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => navigate('/admin/contracts')}
+                leftIcon={PlusCircle}
+                className="text-xs shadow-md"
+              >
+                Lập hợp đồng
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -403,59 +439,114 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Card 4: Monthly Rent Revenue */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-amber-300 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Thu thuê/tháng</span>
-            <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
-              <DollarSign className="w-4 h-4" />
+        {/* Financial Cards (Ẩn với STAFF theo PRD 6.2 - Module Báo cáo/Tài chính) */}
+        {canViewFinancials ? (
+          <>
+            {/* Card 4: Monthly Rent Revenue */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-amber-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Thu thuê/tháng</span>
+                <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                  <DollarSign className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-lg font-bold text-slate-800 truncate">
+                  <Money amount={stats.monthlyRevenue} />
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-1 truncate">
+                  {stats.activeContractsCount} hợp đồng hiệu lực
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="mt-2">
-            <h3 className="text-lg font-bold text-slate-800 truncate">
-              <Money amount={stats.monthlyRevenue} />
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-1 truncate">
-              {stats.activeContractsCount} hợp đồng hiệu lực
-            </p>
-          </div>
-        </div>
 
-        {/* Card 5: Held Deposits */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-violet-300 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Cọc giữ (HELD)</span>
-            <div className="w-8 h-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
-              <ShieldCheck className="w-4 h-4" />
+            {/* Card 5: Held Deposits */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-violet-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Cọc giữ (HELD)</span>
+                <div className="w-8 h-8 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
+                  <ShieldCheck className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-lg font-bold text-slate-800 truncate">
+                  <Money amount={stats.totalDepositHeld} />
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-1 truncate">
+                  {stats.heldDepositsCount} sổ cọc đang quản lý
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="mt-2">
-            <h3 className="text-lg font-bold text-slate-800 truncate">
-              <Money amount={stats.totalDepositHeld} />
-            </h3>
-            <p className="text-[11px] text-slate-500 mt-1 truncate">
-              {stats.heldDepositsCount} sổ cọc đang quản lý
-            </p>
-          </div>
-        </div>
 
-        {/* Card 6: Active Reservations */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-rose-300 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Cọc giữ chỗ</span>
-            <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
-              <Clock className="w-4 h-4" />
+            {/* Card 6: Active Reservations */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-rose-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Cọc giữ chỗ</span>
+                <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
+                  <Clock className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-lg font-bold text-slate-800 truncate">
+                  <Money amount={stats.totalReservationAmount} />
+                </h3>
+                <p className="text-[11px] text-rose-600 font-medium mt-1 truncate">
+                  {stats.activeReservationsCount} căn giữ cọc chờ ký HĐ
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="mt-2">
-            <h3 className="text-lg font-bold text-slate-800 truncate">
-              <Money amount={stats.totalReservationAmount} />
-            </h3>
-            <p className="text-[11px] text-rose-600 font-medium mt-1 truncate">
-              {stats.activeReservationsCount} căn giữ cọc chờ ký HĐ
-            </p>
-          </div>
-        </div>
+          </>
+        ) : (
+          <>
+            {/* Operational Card 4 for STAFF: Available Units */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-emerald-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Phòng có sẵn</span>
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-2xl font-bold text-slate-800">{stats.availableCount}</h3>
+                <p className="text-[11px] text-emerald-600 font-medium mt-1 truncate">
+                  Căn trống sẵn sàng bàn giao
+                </p>
+              </div>
+            </div>
+
+            {/* Operational Card 5 for STAFF: Maintenance Units */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-rose-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Đang bảo trì</span>
+                <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center">
+                  <Briefcase className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-2xl font-bold text-slate-800">{stats.maintenanceCount}</h3>
+                <p className="text-[11px] text-rose-600 font-medium mt-1 truncate">
+                  Cần xử lý sửa chữa/kỹ thuật
+                </p>
+              </div>
+            </div>
+
+            {/* Operational Card 6 for STAFF: Occupied Units */}
+            <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm flex flex-col justify-between hover:border-indigo-300 transition-all">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Đang có khách</span>
+                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                  <Users className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-2">
+                <h3 className="text-2xl font-bold text-slate-800">{stats.occupiedCount}</h3>
+                <p className="text-[11px] text-indigo-600 font-medium mt-1 truncate">
+                  Căn hộ có cư dân sinh sống
+                </p>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Middle Section: 2 Charts side by side */}
@@ -641,7 +732,7 @@ export default function DashboardPage() {
                 Quản lý căn hộ <ArrowRight className="w-3.5 h-3.5" />
               </button>
             )}
-            {activeTab === 'contracts' && (
+            {activeTab === 'contracts' && canViewContracts && (
               <button
                 onClick={() => navigate('/admin/contracts')}
                 className="text-xs text-primary-600 hover:text-primary-700 font-semibold inline-flex items-center gap-1"
@@ -649,6 +740,7 @@ export default function DashboardPage() {
                 Quản lý hợp đồng <ArrowRight className="w-3.5 h-3.5" />
               </button>
             )}
+
             {activeTab === 'reservations' && (
               <button
                 onClick={() => navigate('/admin/buildings')}

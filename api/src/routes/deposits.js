@@ -7,12 +7,15 @@ const router = express.Router();
 
 /**
  * GET /api/v1/deposits
+ * PRD 6.2: OWNER(R+A), MANAGER(CRU), ACCOUNTANT(CRU), SYS_ADMIN(R), RESIDENT(R của mình), STAFF(– BỊ CHẶN)
  */
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const result = await pool.query(
-      `SELECT d.*, 
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isResidentOnly = userRoles.includes('RESIDENT') && !userRoles.some((r) => ['SYS_ADMIN', 'MANAGER', 'OWNER', 'ACCOUNTANT'].includes(r));
+
+    let sql = `SELECT d.*, 
         c.rent_amount, 
         c.start_date, 
         c.end_date, 
@@ -26,10 +29,16 @@ router.get('/', authenticateToken, async (req, res) => {
        JOIN building b ON b.id = c.building_id
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN person p ON p.id = t.person_id
-       WHERE b.org_id = $1
-       ORDER BY d.created_at DESC`,
-      [orgId]
-    );
+       WHERE b.org_id = $1`;
+    const params = [orgId];
+
+    if (isResidentOnly) {
+      params.push(req.user.person_id);
+      sql += ` AND p.id = $2`;
+    }
+
+    sql += ` ORDER BY d.created_at DESC`;
+    const result = await pool.query(sql, params);
 
     res.json({ data: result.rows });
   } catch (err) {

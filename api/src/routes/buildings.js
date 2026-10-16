@@ -75,7 +75,7 @@ router.get('/', authenticateToken, async (req, res) => {
  * POST /api/v1/buildings (NV-03 — TẠO TÒA NHÀ MỚI)
  * Actor: SYS_ADMIN, OWNER (FR-007)
  */
-router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { name, code, address, owner_id, timezone, lease_terms, payment_account } = req.body;
 
   // Validation rules (Phần 5: Validation Rules)
@@ -189,7 +189,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
  * Đổi trạng thái tòa nhà: ACTIVE <-> INACTIVE (State Machine NV-03)
  * Rule: Không thể INACTIVE khi đang có hợp đồng ACTIVE trên tòa đó!
  */
-router.patch('/:id/status', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+router.patch('/:id/status', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
@@ -304,8 +304,9 @@ router.get('/:id/floors', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/buildings/:id/floors (NV-04)
+ * PRD 6.2: Chỉ MANAGER và SYS_ADMIN được thêm tầng (OWNER: R, STAFF: R, ACCOUNTANT: R)
  */
-router.post('/:id/floors', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/:id/floors', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
   const { level, name } = req.body;
 
@@ -356,7 +357,7 @@ router.post('/:id/floors', authenticateToken, requireRole(['OWNER', 'MANAGER', '
  * DELETE /api/v1/buildings/:id/floors/:floor_id
  * Xóa tầng khỏi tòa nhà (Chặn nếu tầng đang chứa căn hộ)
  */
-router.delete('/:id/floors/:floor_id', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), async (req, res) => {
+router.delete('/:id/floors/:floor_id', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id, floor_id } = req.params;
 
   try {

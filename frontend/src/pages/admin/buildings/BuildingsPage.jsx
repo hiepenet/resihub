@@ -24,13 +24,31 @@ import StatusBadge from '../../../components/ui/StatusBadge';
 import Money from '../../../components/ui/Money';
 import DataTable from '../../../components/ui/DataTable';
 import ConfirmDialog from '../../../components/ui/ConfirmDialog';
+import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
 import { useAuthStore } from '../../../stores/authStore';
 
 export default function BuildingsPage() {
-  const { user, activeRole } = useAuthStore();
-  const currentRole = activeRole || user?.roles?.[0]?.code || 'OWNER';
-  const isSysAdmin = currentRole === 'SYS_ADMIN' || currentRole === 'OWNER';
+  const { user, getCurrentRole } = useAuthStore();
+  const currentRole = getCurrentRole();
+
+  // Phân quyền chuẩn PRD 6.2 - Module: Tòa/khu/tầng/căn hộ
+  // SYS_ADMIN: CRUD | MANAGER: CRU | OWNER: R (NV-03 tạo tòa) | STAFF: R | ACCOUNTANT: R | RESIDENT: R(căn của mình)
+  const canCreateBuilding = ['SYS_ADMIN', 'OWNER'].includes(currentRole);
+  const canManageUnits = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
+  const canChangeBuildingStatus = ['SYS_ADMIN', 'OWNER'].includes(currentRole);
+  const isSysAdmin = currentRole === 'SYS_ADMIN';
+
+  // Nếu người dùng là RESIDENT -> chặn hiển thị trang quản trị tòa nhà chung
+  if (currentRole === 'RESIDENT') {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}
+      />
+    );
+  }
+
 
   const [buildings, setBuildings] = useState([]);
   const [selectedBuilding, setSelectedBuilding] = useState(null);
@@ -365,7 +383,7 @@ export default function BuildingsPage() {
     {
       title: 'Thao tác',
       key: 'actions',
-      render: (_, row) => isSysAdmin && (
+      render: (_, row) => canChangeBuildingStatus ? (
         <button
           onClick={() => setConfirmStatusModal({
             isOpen: true,
@@ -380,6 +398,8 @@ export default function BuildingsPage() {
         >
           {row.status === 'ACTIVE' ? 'Tạm dừng' : 'Kích hoạt lại'}
         </button>
+      ) : (
+        <span className="text-xs text-slate-400 italic">Chỉ xem</span>
       ),
     },
   ];
@@ -400,7 +420,7 @@ export default function BuildingsPage() {
         </div>
 
         <div className="flex items-center gap-2.5">
-          {isSysAdmin && (
+          {canCreateBuilding && (
             <Button
               variant="primary"
               size="md"
@@ -411,27 +431,32 @@ export default function BuildingsPage() {
             </Button>
           )}
 
-          <Button
-            variant="secondary"
-            size="md"
-            onClick={() => setIsFloorModalOpen(true)}
-            leftIcon={Layers}
-            disabled={!selectedBuilding}
-          >
-            Thêm tầng
-          </Button>
+          {canManageUnits && (
+            <>
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={() => setIsFloorModalOpen(true)}
+                leftIcon={Layers}
+                disabled={!selectedBuilding}
+              >
+                Thêm tầng
+              </Button>
 
-          <Button
-            variant="secondary"
-            size="md"
-            onClick={() => setIsApartmentModalOpen(true)}
-            leftIcon={Plus}
-            disabled={!selectedBuilding || floorMap.length === 0}
-          >
-            Thêm căn hộ
-          </Button>
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={() => setIsApartmentModalOpen(true)}
+                leftIcon={Plus}
+                disabled={!selectedBuilding || floorMap.length === 0}
+              >
+                Thêm căn hộ
+              </Button>
+            </>
+          )}
         </div>
       </div>
+
 
       {/* Checklist "Hoàn thiện cấu hình tòa" (Phần 7 của Quy Trình Tạo Tòa Nhà) */}
       {needsFloorConfig && (

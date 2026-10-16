@@ -187,6 +187,7 @@ export default function LoginPage() {
         {/* Tab Switcher: NV-01 (OTP) vs NV-02 (Email/Password) */}
         <div className="flex bg-slate-100 p-1 rounded-xl mb-6 text-xs font-semibold">
           <button
+            id="tab-otp"
             type="button"
             onClick={() => {
               setAuthMethod('otp');
@@ -203,6 +204,7 @@ export default function LoginPage() {
           </button>
 
           <button
+            id="tab-password"
             type="button"
             onClick={() => {
               setAuthMethod('password');
@@ -368,13 +370,71 @@ export default function LoginPage() {
               </div>
             </FormField>
 
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-500">
-              💡 <strong>Tài khoản nội bộ thử nghiệm:</strong><br />
-              Email: <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200">manager@resihub.vn</code><br />
-              Mật khẩu: <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200">password123</code>
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-500 space-y-2">
+              <div className="flex items-center justify-between font-semibold text-slate-700">
+                <span>💡 Tài khoản kiểm thử theo vai trò cố định:</span>
+                <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">pass: password123</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                <button
+                  id="btn-quick-admin"
+                  type="button"
+                  onClick={() => { setEmail('admin@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-slate-800 block">SYS_ADMIN</strong>
+                  <span className="text-slate-400">admin@resihub.vn</span>
+                </button>
+                <button
+                  id="btn-quick-manager"
+                  type="button"
+                  onClick={() => { setEmail('manager@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-indigo-600 block">MANAGER</strong>
+                  <span className="text-slate-400">manager@resihub.vn</span>
+                </button>
+                <button
+                  id="btn-quick-owner"
+                  type="button"
+                  onClick={() => { setEmail('owner@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-amber-600 block">OWNER</strong>
+                  <span className="text-slate-400">owner@resihub.vn</span>
+                </button>
+                <button
+                  id="btn-quick-accountant"
+                  type="button"
+                  onClick={() => { setEmail('accountant@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-emerald-600 block">ACCOUNTANT</strong>
+                  <span className="text-slate-400">accountant@resihub.vn</span>
+                </button>
+                <button
+                  id="btn-quick-staff"
+                  type="button"
+                  onClick={() => { setEmail('staff@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-sky-600 block">STAFF</strong>
+                  <span className="text-slate-400">staff@resihub.vn</span>
+                </button>
+                <button
+                  id="btn-quick-resident"
+                  type="button"
+                  onClick={() => { setEmail('resident@resihub.vn'); setPassword('password123'); }}
+                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                >
+                  <strong className="text-purple-600 block">RESIDENT</strong>
+                  <span className="text-slate-400">resident@resihub.vn</span>
+                </button>
+              </div>
             </div>
 
             <Button
+              id="btn-submit-password-login"
               type="submit"
               className="w-full py-2.5 mt-2"
               isLoading={isLoading}

@@ -43,8 +43,9 @@ router.get('/', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/apartments
+ * PRD 6.2: Chỉ MANAGER (CRU) và SYS_ADMIN (CRUD) được tạo căn hộ (OWNER: R, STAFF: R, ACCOUNTANT: R)
  */
-router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note } = req.body;
 
   if (!building_id || !code) {
@@ -93,8 +94,9 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN'
 
 /**
  * PATCH /api/v1/apartments/:id
+ * PRD 6.2: Chỉ MANAGER và SYS_ADMIN được cập nhật căn hộ (OWNER: R, STAFF: R, ACCOUNTANT: R)
  */
-router.patch('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.patch('/:id', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
   const { status, base_rent, area_m2, amenities, note } = req.body;
 
