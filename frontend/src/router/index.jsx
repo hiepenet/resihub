@@ -7,6 +7,8 @@ import BuildingsPage from '../pages/admin/buildings/BuildingsPage';
 import TenantsPage from '../pages/admin/tenants/TenantsPage';
 import ContractsPage from '../pages/admin/contracts/ContractsPage';
 import DepositsPage from '../pages/admin/deposits/DepositsPage';
+import ResidentLayout from '../components/layout/ResidentLayout';
+import ResidentPortalPage from '../pages/resident/ResidentPortalPage';
 import AccessDenied from '../components/common/AccessDenied';
 import { useAuthStore } from '../stores/authStore';
 
@@ -37,11 +39,39 @@ function RoleRoute({ allowedRoles, children }) {
   return children;
 }
 
+// Smart Root / Fallback Redirection based on user role
+function RootRedirect() {
+  const { isAuthenticated, getCurrentRole } = useAuthStore();
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+  const role = getCurrentRole();
+  if (role === 'RESIDENT') {
+    return <Navigate to="/resident" replace />;
+  }
+  return <Navigate to="/admin/dashboard" replace />;
+}
+
 export default function AppRouter() {
   return (
     <Routes>
       {/* Public Auth Routes */}
       <Route path="/login" element={<LoginPage />} />
+
+      {/* Protected Resident Routes */}
+      <Route
+        path="/resident"
+        element={
+          <ProtectedRoute>
+            <RoleRoute allowedRoles={['RESIDENT']}>
+              <ResidentLayout />
+            </RoleRoute>
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<ResidentPortalPage />} />
+        <Route path="apartment" element={<ResidentPortalPage />} />
+      </Route>
 
       {/* Protected Admin Routes */}
       <Route
@@ -52,7 +82,7 @@ export default function AppRouter() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="/admin/dashboard" replace />} />
+        <Route index element={<RootRedirect />} />
         
         <Route
           path="dashboard"
@@ -101,8 +131,8 @@ export default function AppRouter() {
       </Route>
 
       {/* Default Fallback */}
-      <Route path="/" element={<Navigate to="/admin/dashboard" replace />} />
-      <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
+      <Route path="/" element={<RootRedirect />} />
+      <Route path="*" element={<RootRedirect />} />
     </Routes>
   );
 }

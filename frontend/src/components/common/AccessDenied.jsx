@@ -66,11 +66,11 @@ export default function AccessDenied({ allowedRoles = [], currentRole }) {
           <Button
             variant="secondary"
             size="md"
-            onClick={() => navigate('/admin/dashboard')}
+            onClick={() => navigate(role === 'RESIDENT' ? '/resident' : '/admin/dashboard')}
             leftIcon={ArrowLeft}
             className="w-full sm:w-auto"
           >
-            Về Dashboard
+            {role === 'RESIDENT' ? 'Về Cổng Cư Dân' : 'Về Dashboard'}
           </Button>
 
           <Button

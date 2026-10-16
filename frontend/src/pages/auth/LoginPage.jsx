@@ -64,10 +64,8 @@ export default function LoginPage() {
   // Handle redirect by user roles
   const redirectByRole = (user) => {
     const roleCodes = user.roles?.map((r) => (typeof r === 'string' ? r : r.code)) || [];
-    if (roleCodes.includes('RESIDENT') && roleCodes.length === 1) {
-      navigate('/resident/apartment');
-    } else if (roleCodes.includes('SYS_ADMIN')) {
-      navigate('/admin/buildings');
+    if (roleCodes.includes('RESIDENT') && !roleCodes.includes('MANAGER') && !roleCodes.includes('OWNER')) {
+      navigate('/resident');
     } else {
       navigate('/admin/dashboard');
     }
@@ -375,7 +373,7 @@ export default function LoginPage() {
                 <span>💡 Tài khoản kiểm thử theo vai trò cố định:</span>
                 <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">pass: password123</span>
               </div>
-              <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                 <button
                   id="btn-quick-owner"
                   type="button"
@@ -400,8 +398,17 @@ export default function LoginPage() {
                   onClick={() => { setEmail('resident@resihub.vn'); setPassword('password123'); }}
                   className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-purple-600 block font-bold">RESIDENT</strong>
-                  <span className="text-slate-400 text-[10px]">Cư dân</span>
+                  <strong className="text-purple-600 block font-bold truncate">CƯ DÂN (Chưa HĐ)</strong>
+                  <span className="text-slate-400 text-[10px]">Cọc phòng A202</span>
+                </button>
+                <button
+                  id="btn-quick-resident-active"
+                  type="button"
+                  onClick={() => { setEmail('resident_active@resihub.vn'); setPassword('password123'); }}
+                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
+                >
+                  <strong className="text-emerald-600 block font-bold truncate">CƯ DÂN (Đã ký HĐ)</strong>
+                  <span className="text-slate-400 text-[10px]">Đang thuê A102</span>
                 </button>
               </div>
             </div>
