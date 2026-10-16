@@ -87,7 +87,7 @@ Hệ thống chuẩn hóa 3 vai trò cố định:
 ## 3. Cấu trúc thư mục
 
 ```
-resihub2/
+resihub/
 ├── .env.example                     # Mẫu biến môi trường dùng chung
 ├── docker-compose.yml               # Cấu hình khởi chạy trọn gói Docker (DB, API, Frontend)
 ├── docker-compose.dev.yml           # Cấu hình Docker dành cho môi trường dev
