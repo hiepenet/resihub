@@ -7,13 +7,15 @@ const router = express.Router();
 
 /**
  * GET /api/v1/deposits
- * PRD 6.2: OWNER(R+A), MANAGER(CRU), ACCOUNTANT(CRU), SYS_ADMIN(R), RESIDENT(R của mình), STAFF(– BỊ CHẶN)
+ * Quyền: OWNER (R+A), MANAGER (CRU), RESIDENT (R của mình)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN', 'RESIDENT']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const isResidentOnly = userRoles.includes('RESIDENT') && !userRoles.some((r) => ['SYS_ADMIN', 'MANAGER', 'OWNER', 'ACCOUNTANT'].includes(r));
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
+    const isResident = userRoles.includes('RESIDENT');
 
     let sql = `SELECT d.*, 
         c.rent_amount, 
@@ -32,9 +34,14 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT'
        WHERE b.org_id = $1`;
     const params = [orgId];
 
-    if (isResidentOnly) {
+    if (isManager && !isOwner) {
+      params.push(req.user.sub);
+      sql += ` AND c.building_id IN (
+        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
+      )`;
+    } else if (isResident && !isOwner && !isManager) {
       params.push(req.user.person_id);
-      sql += ` AND p.id = $2`;
+      sql += ` AND p.id = $${params.length}`;
     }
 
     sql += ` ORDER BY d.created_at DESC`;
@@ -51,7 +58,7 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT'
  * POST /api/v1/deposits/:id/transactions
  * Thêm giao dịch cọc (collect, deduct, refund, transfer)
  */
-router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'ACCOUNTANT', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { type, amount, description, category } = req.body;
 

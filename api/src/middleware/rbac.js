@@ -9,12 +9,6 @@ export function requireRole(allowedRoles) {
 
     const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
     const userRoleCodes = req.user.roles.map((r) => (typeof r === 'string' ? r : r.code));
-    
-    // SYS_ADMIN bypass
-    if (userRoleCodes.includes('SYS_ADMIN')) {
-      return next();
-    }
-
     const hasRole = userRoleCodes.some((code) => roles.includes(code));
     if (!hasRole) {
       return res.status(403).json({

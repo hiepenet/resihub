@@ -39,7 +39,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 
--- 3. Hàm kiểm tra quyền quản trị toàn tổ chức (SYS_ADMIN hoặc OWNER)
+-- 3. Hàm kiểm tra quyền quản trị toàn tổ chức (OWNER)
 CREATE OR REPLACE FUNCTION is_org_admin()
 RETURNS BOOLEAN AS $$
 DECLARE
@@ -56,7 +56,7 @@ BEGIN
     FROM user_role ur
     JOIN role r ON r.id = ur.role_id
     WHERE ur.user_id = v_user_id 
-      AND r.code IN ('SYS_ADMIN', 'OWNER')
+      AND r.code = 'OWNER'
   );
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
@@ -73,11 +73,11 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Nếu có quyền cấp tổ chức (building_id IS NULL)
+  -- Nếu có quyền cấp tổ chức (OWNER)
   IF EXISTS (
     SELECT 1 FROM user_role ur
     JOIN role r ON r.id = ur.role_id
-    WHERE ur.user_id = v_user_id AND (r.code IN ('SYS_ADMIN', 'OWNER') OR ur.building_id IS NULL)
+    WHERE ur.user_id = v_user_id AND r.code = 'OWNER'
   ) THEN
     RETURN QUERY 
     SELECT b.id 

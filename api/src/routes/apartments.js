@@ -7,9 +7,17 @@ const router = express.Router();
 
 /**
  * GET /api/v1/apartments
+ * - OWNER: Xem toàn bộ căn hộ trong tổ chức (R)
+ * - MANAGER: Xem các căn hộ thuộc các tòa do mình quản lý (CRU)
+ * - RESIDENT: Xem căn hộ của chính mình (R)
  */
 router.get('/', authenticateToken, async (req, res) => {
   const { building_id, status } = req.query;
+  const orgId = req.user.org_id;
+  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+  const isOwner = userRoleCodes.includes('OWNER');
+  const isManager = userRoleCodes.includes('MANAGER');
+  const isResident = userRoleCodes.includes('RESIDENT');
 
   try {
     let sql = `
@@ -19,7 +27,23 @@ router.get('/', authenticateToken, async (req, res) => {
       LEFT JOIN floor f ON f.id = a.floor_id
       WHERE b.org_id = $1
     `;
-    const params = [req.user.org_id];
+    const params = [orgId];
+
+    if (isManager && !isOwner) {
+      // MANAGER: Chỉ xem căn hộ thuộc tòa mình quản lý
+      params.push(req.user.sub);
+      sql += ` AND a.building_id IN (
+        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
+      )`;
+    } else if (isResident && !isOwner && !isManager) {
+      // RESIDENT: Chỉ xem căn hộ mình đang thuê
+      params.push(req.user.person_id);
+      sql += ` AND a.id IN (
+        SELECT c.apartment_id FROM contract c
+        JOIN tenant t ON t.id = c.primary_tenant_id
+        WHERE t.person_id = $${params.length}
+      )`;
+    }
 
     if (building_id) {
       params.push(building_id);
@@ -43,9 +67,9 @@ router.get('/', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/apartments
- * PRD 6.2: Chỉ MANAGER (CRU) và SYS_ADMIN (CRUD) được tạo căn hộ (OWNER: R, STAFF: R, ACCOUNTANT: R)
+ * Quyền: Chỉ MANAGER có quyền tạo căn hộ trên tòa mình quản lý (CRU). OWNER có quyền R (bị chặn).
  */
-router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note } = req.body;
 
   if (!building_id || !code) {
@@ -57,6 +81,18 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
   }
 
   try {
+    // Kiểm tra quyền quản lý tòa nhà của Manager
+    const checkMgr = await pool.query(
+      `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+      [req.user.sub, building_id]
+    );
+    if (checkMgr.rows.length === 0) {
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không có quyền quản lý tòa nhà này để tạo căn hộ.',
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO apartment (building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -94,18 +130,29 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
 
 /**
  * PATCH /api/v1/apartments/:id
- * PRD 6.2: Chỉ MANAGER và SYS_ADMIN được cập nhật căn hộ (OWNER: R, STAFF: R, ACCOUNTANT: R)
+ * Quyền: Chỉ MANAGER có quyền cập nhật căn hộ thuộc tòa mình quản lý (CRU).
  */
-router.patch('/:id', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { status, base_rent, area_m2, amenities, note } = req.body;
 
   try {
-    const beforeRes = await pool.query('SELECT * FROM apartment WHERE id = $1', [id]);
-    if (beforeRes.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    // Kiểm tra căn hộ có thuộc tòa nhà do Manager này quản lý không
+    const aptRes = await pool.query(
+      `SELECT a.* FROM apartment a
+       JOIN user_role ur ON ur.building_id = a.building_id
+       WHERE a.id = $1 AND ur.user_id = $2`,
+      [id, req.user.sub]
+    );
+
+    if (aptRes.rows.length === 0) {
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không có quyền quản lý căn hộ này.',
+      });
     }
-    const before = beforeRes.rows[0];
+
+    const before = aptRes.rows[0];
 
     const result = await pool.query(
       `UPDATE apartment
@@ -139,6 +186,17 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), a
     console.error('[Update Apartment Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật căn hộ.' });
   }
+});
+
+/**
+ * DELETE /api/v1/apartments/:id
+ * Quyền: Bị chặn (Manager CRU không xóa)
+ */
+router.delete('/:id', authenticateToken, async (req, res) => {
+  return res.status(403).json({
+    code: 'DELETE_PROHIBITED',
+    message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa căn hộ.',
+  });
 });
 
 export default router;

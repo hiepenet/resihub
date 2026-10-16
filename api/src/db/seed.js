@@ -27,14 +27,11 @@ async function seedData() {
       console.log(`[Seed] Using existing Organization: ${orgId}`);
     }
 
-    // 2. Roles
+    // 2. Roles (Chỉ 3 vai trò: OWNER, MANAGER, RESIDENT)
     const roles = [
       { code: 'OWNER', name: 'Chủ đầu tư / Chủ nhà', scope: 'org' },
       { code: 'MANAGER', name: 'Quản lý tòa nhà', scope: 'building' },
-      { code: 'ACCOUNTANT', name: 'Kế toán', scope: 'org' },
-      { code: 'STAFF', name: 'Nhân viên kỹ thuật / lễ tân', scope: 'building' },
       { code: 'RESIDENT', name: 'Cư dân', scope: 'building' },
-      { code: 'SYS_ADMIN', name: 'Quản trị viên hệ thống', scope: 'org' },
     ];
 
     for (const r of roles) {

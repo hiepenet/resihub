@@ -14,15 +14,14 @@ export default function DepositsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // RBAC PRD 6.2 - Module Cọc:
-  // OWNER: R + A(hoàn cọc) | MANAGER: CRU | ACCOUNTANT: CRU | SYS_ADMIN: R | STAFF: '-' | RESIDENT: R(của mình)
-  const canManageDeposit = ['MANAGER', 'ACCOUNTANT', 'OWNER', 'SYS_ADMIN'].includes(currentRole);
+  // Phân quyền Cọc: OWNER (R+A hoàn cọc), MANAGER (CRU), RESIDENT (chặn truy cập)
+  const canManageDeposit = ['MANAGER', 'OWNER'].includes(currentRole);
 
-  if (['STAFF', 'RESIDENT'].includes(currentRole)) {
+  if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN']}
+        allowedRoles={['OWNER', 'MANAGER']}
       />
     );
   }

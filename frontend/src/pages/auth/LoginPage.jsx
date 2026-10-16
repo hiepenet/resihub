@@ -375,60 +375,33 @@ export default function LoginPage() {
                 <span>💡 Tài khoản kiểm thử theo vai trò cố định:</span>
                 <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">pass: password123</span>
               </div>
-              <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
                 <button
-                  id="btn-quick-admin"
+                  id="btn-quick-owner"
                   type="button"
-                  onClick={() => { setEmail('admin@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                  onClick={() => { setEmail('owner@resihub.vn'); setPassword('password123'); }}
+                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-slate-800 block">SYS_ADMIN</strong>
-                  <span className="text-slate-400">admin@resihub.vn</span>
+                  <strong className="text-amber-600 block font-bold">OWNER</strong>
+                  <span className="text-slate-400 text-[10px]">Chủ sở hữu</span>
                 </button>
                 <button
                   id="btn-quick-manager"
                   type="button"
                   onClick={() => { setEmail('manager@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-indigo-600 block">MANAGER</strong>
-                  <span className="text-slate-400">manager@resihub.vn</span>
-                </button>
-                <button
-                  id="btn-quick-owner"
-                  type="button"
-                  onClick={() => { setEmail('owner@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
-                >
-                  <strong className="text-amber-600 block">OWNER</strong>
-                  <span className="text-slate-400">owner@resihub.vn</span>
-                </button>
-                <button
-                  id="btn-quick-accountant"
-                  type="button"
-                  onClick={() => { setEmail('accountant@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
-                >
-                  <strong className="text-emerald-600 block">ACCOUNTANT</strong>
-                  <span className="text-slate-400">accountant@resihub.vn</span>
-                </button>
-                <button
-                  id="btn-quick-staff"
-                  type="button"
-                  onClick={() => { setEmail('staff@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
-                >
-                  <strong className="text-sky-600 block">STAFF</strong>
-                  <span className="text-slate-400">staff@resihub.vn</span>
+                  <strong className="text-indigo-600 block font-bold">MANAGER</strong>
+                  <span className="text-slate-400 text-[10px]">Quản lý tòa</span>
                 </button>
                 <button
                   id="btn-quick-resident"
                   type="button"
                   onClick={() => { setEmail('resident@resihub.vn'); setPassword('password123'); }}
-                  className="p-1.5 rounded bg-white hover:bg-slate-100 border border-slate-200 text-left transition"
+                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-purple-600 block">RESIDENT</strong>
-                  <span className="text-slate-400">resident@resihub.vn</span>
+                  <strong className="text-purple-600 block font-bold">RESIDENT</strong>
+                  <span className="text-slate-400 text-[10px]">Cư dân</span>
                 </button>
               </div>
             </div>

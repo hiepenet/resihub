@@ -41,21 +41,26 @@ export default function DashboardPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // RBAC PRD 6.2 - Module Báo cáo & Dashboard:
-  // OWNER (toàn bộ) | MANAGER (tòa) | STAFF (việc) | ACCOUNTANT (tài chính) | RESIDENT: '-' (Không có quyền)
+  // Phân quyền Dashboard theo yêu cầu:
+  // - MANAGER: R (tòa của mình quản lý), CRU (tạo tòa, tạo hợp đồng)
+  // - OWNER: R (toàn bộ tòa thuộc sở hữu - Read-only, không được tạo)
+  // - RESIDENT: Chặn truy cập
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'STAFF', 'SYS_ADMIN']}
+        allowedRoles={['OWNER', 'MANAGER']}
       />
     );
   }
 
-  const canViewContracts = ['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN'].includes(currentRole);
-  const canViewFinancials = ['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN'].includes(currentRole);
-  const canCreateBuilding = ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(currentRole);
-  const canCreateContract = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
+  const isOwner = currentRole === 'OWNER';
+  const isManager = currentRole === 'MANAGER';
+
+  const canViewContracts = true;
+  const canViewFinancials = true;
+  const canCreateBuilding = isManager; // Manager CRU, Owner R
+  const canCreateContract = isManager; // Manager CRU, Owner R
 
   // Raw data from database
   const [buildings, setBuildings] = useState([]);
@@ -314,10 +319,14 @@ export default function DashboardPage() {
                 </span>
               )}
             </div>
-            <h2 className="text-xl sm:text-2xl font-bold tracking-tight">Tổng quan Vận hành ResiHub</h2>
+            <h2 className="text-xl sm:text-2xl font-bold tracking-tight">
+              {isManager ? 'Tổng quan Vận hành Tòa nhà (Quản lý)' : 'Tổng quan Bất động sản (Chủ sở hữu)'}
+            </h2>
             <p className="text-xs sm:text-sm text-slate-300 mt-1">
               {selectedBuildingId === 'ALL'
-                ? `Toàn bộ ${buildings.length} tòa nhà trong tổ hợp quản lý`
+                ? (isManager
+                    ? `Toàn bộ ${buildings.length} tòa nhà do bạn quản lý`
+                    : `Toàn bộ ${buildings.length} tòa nhà thuộc sở hữu trong tổ chức`)
                 : `Thống kê chi tiết riêng cho ${selectedBuildingObj?.name || 'tòa nhà được chọn'}`}
             </p>
           </div>
@@ -332,7 +341,7 @@ export default function DashboardPage() {
                 className="bg-transparent text-xs text-white focus:outline-none cursor-pointer pr-4"
               >
                 <option value="ALL" className="bg-slate-900 text-white">
-                  🏢 Tất cả tòa nhà ({buildings.length} tòa)
+                  🏢 {isManager ? 'Tất cả tòa của tôi' : 'Tất cả tòa nhà'} ({buildings.length} tòa)
                 </option>
                 {buildings.map((b) => (
                   <option key={b.id} value={b.id} className="bg-slate-900 text-white">

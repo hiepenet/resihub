@@ -10,9 +10,8 @@ export default function Sidebar({ isOpen, onClose }) {
   const currentRole = getCurrentRole();
   const currentRoleInfo = getCurrentRoleInfo();
 
-  // Filter nav items based on current role
   const visibleNavItems = NAV_ITEMS.filter((item) =>
-    item.roles.includes(currentRole) || currentRole === 'SYS_ADMIN'
+    item.roles.includes(currentRole)
   );
 
   return (

@@ -45,9 +45,7 @@ export const useAuthStore = create((set, get) => ({
 
   hasRole: (allowedRoles) => {
     const { user } = get();
-    if (!user) return false;
     const currentRole = user?.roles?.[0]?.code || 'RESIDENT';
-    if (currentRole === 'SYS_ADMIN') return true;
     const rolesArr = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
     return rolesArr.includes(currentRole);
   },

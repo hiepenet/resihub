@@ -16,13 +16,10 @@ const phoneRequestTracker = new Map();
 const JWT_SECRET = process.env.JWT_SECRET || 'resihub_dev_jwt_secret_key_very_secure_12345';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'resihub_dev_jwt_refresh_secret_key_very_secure_67890';
 
-// Helper to sign JWT with dynamic refresh token expiration (30m for ACCOUNTANT, 7d for others)
+// Helper to sign JWT (15m Access Token, 7d Refresh Token)
 function generateTokens(payload) {
-  const isAccountant = payload.roles && payload.roles.some((r) => (r.code || r) === 'ACCOUNTANT');
-  const refreshExpiresIn = isAccountant ? '30m' : '7d';
-
   const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '15m' });
-  const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: refreshExpiresIn });
+  const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: '7d' });
   return { accessToken, refreshToken };
 }
 

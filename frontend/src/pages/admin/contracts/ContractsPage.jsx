@@ -14,15 +14,14 @@ export default function ContractsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // RBAC PRD 6.2 - Module Hợp đồng:
-  // SYS_ADMIN: R | OWNER: R | MANAGER: CRU + A | STAFF: '-' | ACCOUNTANT: R | RESIDENT: R(của mình)
-  const canCreateContract = ['MANAGER', 'SYS_ADMIN'].includes(currentRole);
+  // Phân quyền Hợp đồng: MANAGER (CRU+A - được tạo), OWNER (R - chỉ xem), RESIDENT (chặn truy cập)
+  const canCreateContract = currentRole === 'MANAGER';
 
-  if (['STAFF', 'RESIDENT'].includes(currentRole)) {
+  if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN']}
+        allowedRoles={['OWNER', 'MANAGER']}
       />
     );
   }

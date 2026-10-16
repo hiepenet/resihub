@@ -13,14 +13,14 @@ export default function TenantsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // RBAC PRD 6.2 - Module Cư dân: SYS_ADMIN (CRUD), MANAGER (CRU), OWNER (R), STAFF (R hạn chế PII), ACCOUNTANT (R), RESIDENT (RU của mình)
-  const canCreateTenant = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
+  // Phân quyền Cư dân: MANAGER (CRU - được tạo), OWNER (R - chỉ xem), RESIDENT (chặn truy cập)
+  const canCreateTenant = currentRole === 'MANAGER';
 
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}
+        allowedRoles={['OWNER', 'MANAGER']}
       />
     );
   }

@@ -7,10 +7,7 @@ import Button from '../ui/Button';
 const ROLE_NAMES = {
   OWNER: 'Chủ đầu tư / Chủ nhà (OWNER)',
   MANAGER: 'Quản lý tòa nhà (MANAGER)',
-  ACCOUNTANT: 'Kế toán (ACCOUNTANT)',
-  STAFF: 'Nhân viên vận hành (STAFF)',
   RESIDENT: 'Cư dân (RESIDENT)',
-  SYS_ADMIN: 'Quản trị viên hệ thống (SYS_ADMIN)',
 };
 
 export default function AccessDenied({ allowedRoles = [], currentRole }) {

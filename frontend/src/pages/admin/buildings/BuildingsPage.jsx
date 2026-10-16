@@ -32,19 +32,22 @@ export default function BuildingsPage() {
   const { user, getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // Phân quyền chuẩn PRD 6.2 - Module: Tòa/khu/tầng/căn hộ
-  // SYS_ADMIN: CRUD | MANAGER: CRU | OWNER: R (NV-03 tạo tòa) | STAFF: R | ACCOUNTANT: R | RESIDENT: R(căn của mình)
-  const canCreateBuilding = ['SYS_ADMIN', 'OWNER'].includes(currentRole);
-  const canManageUnits = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
-  const canChangeBuildingStatus = ['SYS_ADMIN', 'OWNER'].includes(currentRole);
-  const isSysAdmin = currentRole === 'SYS_ADMIN';
+  // Phân quyền theo yêu cầu:
+  // Tòa/khu/tầng/căn hộ: Manager: CRU (tòa của mình quản lý), Owner: R, RESIDENT (căn của mình)
+  const isManager = currentRole === 'MANAGER';
+  const isOwner = currentRole === 'OWNER';
+
+  const canCreateBuilding = isManager; // Manager CRU, Owner R
+  const canManageUnits = isManager;    // Manager CRU, Owner R
+  const canChangeBuildingStatus = isManager;
+  const isSysAdmin = false; // SYS_ADMIN đã xóa khỏi hệ thống
 
   // Nếu người dùng là RESIDENT -> chặn hiển thị trang quản trị tòa nhà chung
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}
+        allowedRoles={['OWNER', 'MANAGER']}
       />
     );
   }

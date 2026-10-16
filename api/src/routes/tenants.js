@@ -46,9 +46,9 @@ router.get('/check-dup', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/v1/tenants
- * PRD 6.2: OWNER(R), MANAGER(CRU), STAFF(R hạn chế PII), ACCOUNTANT(R), SYS_ADMIN(CRUD)
+ * Quyền: OWNER (R), MANAGER (CRU)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const result = await pool.query(
@@ -60,22 +60,7 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'STAFF', 'AC
       [orgId]
     );
 
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const isStaffOnly = userRoles.includes('STAFF') && !userRoles.some((r) => ['SYS_ADMIN', 'MANAGER', 'OWNER', 'ACCOUNTANT'].includes(r));
-
-    // PRD 6.2: Ẩn PII (CCCD/CMND) đối với nhân sự kỹ thuật / vận hành (STAFF)
-    const sanitizedRows = result.rows.map((row) => {
-      if (isStaffOnly) {
-        return {
-          ...row,
-          id_number: null,
-          id_images: [],
-        };
-      }
-      return row;
-    });
-
-    res.json({ data: sanitizedRows });
+    res.json({ data: result.rows });
   } catch (err) {
     console.error('[Tenants Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi lấy danh sách cư dân.' });
@@ -84,9 +69,9 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'STAFF', 'AC
 
 /**
  * POST /api/v1/tenants
- * PRD 6.2: Chỉ MANAGER và SYS_ADMIN được tạo hồ sơ cư dân (OWNER: R, STAFF: R, ACCOUNTANT: R)
+ * Quyền: Chỉ MANAGER có quyền tạo hồ sơ cư dân (CRU)
  */
-router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { full_name, phone, email, dob, id_number, type } = req.body;
   const orgId = req.user.org_id;
 

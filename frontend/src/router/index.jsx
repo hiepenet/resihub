@@ -28,7 +28,7 @@ function RoleRoute({ allowedRoles, children }) {
   }
 
   const currentRole = getCurrentRole();
-  const isAllowed = currentRole === 'SYS_ADMIN' || (allowedRoles && allowedRoles.includes(currentRole));
+  const isAllowed = allowedRoles && allowedRoles.includes(currentRole);
 
   if (!isAllowed) {
     return <AccessDenied currentRole={currentRole} allowedRoles={allowedRoles} />;
@@ -57,7 +57,7 @@ export default function AppRouter() {
         <Route
           path="dashboard"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'STAFF', 'SYS_ADMIN']}>
+            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
               <DashboardPage />
             </RoleRoute>
           }
@@ -66,7 +66,7 @@ export default function AppRouter() {
         <Route
           path="buildings"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}>
+            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
               <BuildingsPage />
             </RoleRoute>
           }
@@ -75,17 +75,16 @@ export default function AppRouter() {
         <Route
           path="tenants"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT', 'SYS_ADMIN']}>
+            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
               <TenantsPage />
             </RoleRoute>
           }
         />
 
-
         <Route
           path="contracts"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN']}>
+            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
               <ContractsPage />
             </RoleRoute>
           }
@@ -94,7 +93,7 @@ export default function AppRouter() {
         <Route
           path="deposits"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'ACCOUNTANT', 'MANAGER', 'SYS_ADMIN']}>
+            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
               <DepositsPage />
             </RoleRoute>
           }
@@ -107,4 +106,3 @@ export default function AppRouter() {
     </Routes>
   );
 }
-

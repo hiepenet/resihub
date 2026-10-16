@@ -52,7 +52,7 @@ router.get('/', authenticateToken, async (req, res) => {
  * POST /api/v1/reservations
  * Tạo đặt cọc giữ chỗ cho khách tiềm năng (NV-06)
  */
-router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { apartment_id, prospect_name, phone, hold_amount, hold_until, note } = req.body;
   const orgId = req.user.org_id;
 
@@ -142,7 +142,7 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN'
  * PATCH /api/v1/reservations/:id/convert
  * Chuyển cọc giữ chỗ thành cọc hợp đồng khi ký HĐ (NV-06)
  */
-router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const client = await pool.connect();
   try {
@@ -189,7 +189,7 @@ router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER',
  * PATCH /api/v1/reservations/:id/forfeit
  * Khách hủy giữ chỗ, mất tiền cọc (NV-06)
  */
-router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const client = await pool.connect();
   try {
@@ -242,7 +242,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER',
  * PATCH /api/v1/reservations/:id/refund
  * Khách hủy và được hoàn lại cọc giữ chỗ (NV-06)
  */
-router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const client = await pool.connect();
   try {

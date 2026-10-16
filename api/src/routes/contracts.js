@@ -7,13 +7,17 @@ const router = express.Router();
 
 /**
  * GET /api/v1/contracts
- * PRD 6.2: OWNER(R), MANAGER(CRU+A), ACCOUNTANT(R), SYS_ADMIN(R), RESIDENT(R của mình), STAFF(– BỊ CHẶN)
+ * - OWNER: Xem toàn bộ hợp đồng trong tổ chức (R)
+ * - MANAGER: Xem hợp đồng thuộc các tòa do mình quản lý (CRU)
+ * - RESIDENT: Xem hợp đồng của chính mình (R)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN', 'RESIDENT']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const isResidentOnly = userRoles.includes('RESIDENT') && !userRoles.some((r) => ['SYS_ADMIN', 'MANAGER', 'OWNER', 'ACCOUNTANT'].includes(r));
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
+    const isResident = userRoles.includes('RESIDENT');
 
     let sql = `SELECT c.*, 
         a.code as apartment_code, 
@@ -28,9 +32,14 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT'
        WHERE b.org_id = $1`;
     const params = [orgId];
 
-    if (isResidentOnly) {
+    if (isManager && !isOwner) {
+      params.push(req.user.sub);
+      sql += ` AND c.building_id IN (
+        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
+      )`;
+    } else if (isResident && !isOwner && !isManager) {
       params.push(req.user.person_id);
-      sql += ` AND p.id = $2`;
+      sql += ` AND p.id = $${params.length}`;
     }
 
     sql += ` ORDER BY c.created_at DESC`;
@@ -46,7 +55,7 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT'
 /**
  * GET /api/v1/contracts/:id
  */
-router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTANT', 'SYS_ADMIN', 'RESIDENT']), async (req, res) => {
+router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query(
@@ -71,9 +80,22 @@ router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTA
 
     const row = result.rows[0];
     const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const isResidentOnly = userRoles.includes('RESIDENT') && !userRoles.some((r) => ['SYS_ADMIN', 'MANAGER', 'OWNER', 'ACCOUNTANT'].includes(r));
-    if (isResidentOnly && row.tenant_phone !== req.user.phone && row.tenant_email !== req.user.email) {
-      return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn chỉ có quyền xem hợp đồng của chính mình.' });
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
+    const isResident = userRoles.includes('RESIDENT');
+
+    if (isManager && !isOwner) {
+      const checkMgr = await pool.query(
+        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+        [req.user.sub, row.building_id]
+      );
+      if (checkMgr.rows.length === 0) {
+        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' });
+      }
+    } else if (isResident && !isOwner && !isManager) {
+      if (row.tenant_phone !== req.user.phone && row.tenant_email !== req.user.email) {
+        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn chỉ có quyền xem hợp đồng của chính mình.' });
+      }
     }
 
     res.json({ data: row });
@@ -85,9 +107,9 @@ router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'ACCOUNTA
 
 /**
  * POST /api/v1/contracts (NV-08 — TẠO HỢP ĐỒNG THUÊ)
- * PRD 6.2: Chỉ MANAGER và SYS_ADMIN được tạo hợp đồng (OWNER: R, STAFF: –)
+ * Quyền: Chỉ MANAGER có quyền tạo hợp đồng (CRU)
  */
-router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const {
     apartment_id,
     building_id,
@@ -95,24 +117,38 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
     start_date,
     end_date,
     rent_amount,
-    billing_cycle,
     billing_day,
     deposit_amount,
+    deposit_months,
     note,
   } = req.body;
 
   if (!apartment_id || !building_id || !primary_tenant_id || !start_date || !end_date || !rent_amount) {
-    return res.status(400).json({
+    return res.status(422).json({
       code: 'VALIDATION_ERROR',
-      message: 'Thiếu các trường bắt buộc (phòng, tòa nhà, người thuê, ngày bắt đầu, ngày kết thúc, giá thuê).',
+      message: 'Thiếu thông tin bắt buộc: Căn hộ, Tòa nhà, Khách thuê, Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
     });
   }
 
-  // Validate end_date > start_date
-  if (new Date(end_date) <= new Date(start_date)) {
+  // Kiểm tra quyền quản lý tòa nhà của Manager
+  const checkMgr = await pool.query(
+    'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+    [req.user.sub, building_id]
+  );
+  if (checkMgr.rows.length === 0) {
+    return res.status(403).json({
+      code: 'ACCESS_DENIED',
+      message: 'Bạn không có quyền quản lý tòa nhà này để lập hợp đồng.',
+    });
+  }
+
+  // Rule C2: Ngày kết thúc phải sau ngày bắt đầu
+  const start = new Date(start_date);
+  const end = new Date(end_date);
+  if (end <= start) {
     return res.status(422).json({
-      code: 'VALIDATION_ERROR',
-      message: 'Ngày kết thúc hợp đồng phải lớn hơn ngày bắt đầu.',
+      code: 'INVALID_DATE_RANGE',
+      message: 'Ngày kết thúc hợp đồng phải sau ngày bắt đầu hợp đồng.',
     });
   }
 
@@ -120,11 +156,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
   try {
     await client.query('BEGIN');
 
-    // Rule: Chặn trùng lấn kỳ hạn trên cùng căn hộ (FR-014 / NV-08)
+    // Rule C1 & NV-08: Chống chồng lấn kỳ hạn trên cùng căn hộ
     const overlapCheck = await client.query(
       `SELECT id, start_date, end_date FROM contract
-       WHERE apartment_id = $1 AND status = 'ACTIVE'
-         AND NOT (end_date <= $2 OR start_date >= $3)`,
+       WHERE apartment_id = $1 
+         AND status IN ('ACTIVE', 'PENDING')
+         AND (start_date <= $3 AND end_date >= $2)`,
       [apartment_id, start_date, end_date]
     );
 
@@ -132,22 +169,25 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
       await client.query('ROLLBACK');
       return res.status(409).json({
         code: 'OVERLAP_CONTRACT',
-        message: 'Đã tồn tại hợp đồng đang hiệu lực chồng lấn kỳ hạn trên căn hộ này.',
-        conflicting_contract: overlapCheck.rows[0],
+        message: 'Căn hộ đã có hợp đồng hiệu lực hoặc chờ ký trong khoảng thời gian đã chọn.',
       });
     }
 
-    // Tiền cọc mặc định là 1 tháng tiền thuê (PRD mục 10.3) nếu không nhập
-    const finalDeposit = deposit_amount !== undefined ? deposit_amount : rent_amount;
+    // Tính toán tiền cọc
+    let finalDeposit = 0;
+    if (deposit_amount !== undefined && deposit_amount !== null) {
+      finalDeposit = Number(deposit_amount);
+    } else if (deposit_months) {
+      finalDeposit = Number(rent_amount) * Number(deposit_months);
+    }
 
-    // 1. Tạo hợp đồng
+    // 1. Tạo bản ghi contract
     const contractRes = await client.query(
       `INSERT INTO contract (
-        apartment_id, building_id, primary_tenant_id, start_date, end_date,
-        rent_amount, billing_cycle, billing_day, deposit_amount, status,
-        created_by, note
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, $11)
-      RETURNING *`,
+        apartment_id, building_id, primary_tenant_id, start_date, end_date, 
+        rent_amount, billing_day, deposit_amount, status, created_by, note
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, $10)
+       RETURNING *`,
       [
         apartment_id,
         building_id,
@@ -155,7 +195,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
         start_date,
         end_date,
         rent_amount,
-        billing_cycle || 'monthly',
         billing_day || 1,
         finalDeposit,
         req.user.sub,
@@ -201,8 +240,9 @@ router.post('/', authenticateToken, requireRole(['MANAGER', 'SYS_ADMIN']), async
 /**
  * POST /api/v1/contracts/:id/terminate
  * Chấm dứt hợp đồng thuê (NV-10)
+ * Quyền: OWNER (R), MANAGER (CRU)
  */
-router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { reason, note } = req.body;
 
