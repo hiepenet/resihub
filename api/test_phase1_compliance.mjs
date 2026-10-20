@@ -27,7 +27,7 @@ async function run() {
     const otpReq = await fetch(`${API_URL}/auth/otp/request`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: '0901234567' }),
+      body: JSON.stringify({ phone: '0907778899' }),
     });
     const otpReqData = await otpReq.json();
     assert(otpReq.status === 200, 'Yêu cầu gửi mã OTP thành công (HTTP 200)');
@@ -36,7 +36,7 @@ async function run() {
     const otpVer = await fetch(`${API_URL}/auth/otp/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone: '0901234567', otp: '123456' }),
+      body: JSON.stringify({ phone: '0907778899', otp: '123456' }),
     });
     const otpVerData = await otpVer.json();
     assert(otpVer.status === 200, 'Xác thực OTP thành công (HTTP 200)');

@@ -71,6 +71,22 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     });
   }
 
+  // D6 / AC-001.3: Kiểm tra người dùng có tồn tại trong hệ thống và ở trạng thái ACTIVE không
+  const acct = await pool.query(
+    `SELECT au.status 
+     FROM person p 
+     JOIN app_user au ON au.person_id = p.id 
+     WHERE p.phone = $1`,
+    [cleanPhone]
+  );
+
+  // Nếu không tồn tại hoặc không ACTIVE: trả thông điệp trung lập, KHÔNG sinh và không lưu OTP (chống dò số)
+  if (acct.rows.length === 0 || acct.rows[0].status !== 'ACTIVE') {
+    return res.json({
+      message: 'OTP đã được gửi thành công.',
+    });
+  }
+
   // Sinh mã OTP 6 số ngẫu nhiên
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = now + 5 * 60 * 1000; // TTL: 5 phút
@@ -145,6 +161,15 @@ router.post('/otp/verify', async (req, res) => {
       record.attempts += 1;
       if (record.attempts >= 5) {
         record.lockedUntil = now + 15 * 60 * 1000; // Khóa 15 phút
+        try {
+          await pool.query(
+            `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+             VALUES ($1, 'AUTH_LOCK', 'phone', gen_random_uuid(), $2)`,
+            [null, JSON.stringify({ phone: cleanPhone })]
+          );
+        } catch (auditErr) {
+          console.error('[Audit Lock Error]:', auditErr);
+        }
         return res.status(429).json({
           code: 'TOO_MANY_ATTEMPTS',
           message: 'Bạn đã nhập sai quá 5 lần. Số điện thoại bị tạm khóa 15 phút.',
@@ -162,62 +187,35 @@ router.post('/otp/verify', async (req, res) => {
   }
 
   try {
-    // Tìm hoặc tạo người dùng trong database
-    let personRes = await pool.query('SELECT * FROM person WHERE phone = $1', [cleanPhone]);
-    let person;
-    let orgId;
-
+    // D6: Chỉ cho phép người dùng đã tồn tại trong CSDL
+    const personRes = await pool.query('SELECT * FROM person WHERE phone = $1', [cleanPhone]);
     if (personRes.rows.length === 0) {
-      const orgRes = await pool.query('SELECT id FROM organization LIMIT 1');
-      if (orgRes.rows.length === 0) {
-        return res.status(500).json({ code: 'DB_ERROR', message: 'Hệ thống chưa khởi tạo tổ chức.' });
-      }
-      orgId = orgRes.rows[0].id;
-
-      const newPerson = await pool.query(
-        `INSERT INTO person (org_id, full_name, phone)
-         VALUES ($1, $2, $3)
-         RETURNING *`,
-        [orgId, `Người dùng ${cleanPhone.slice(-4)}`, cleanPhone]
-      );
-      person = newPerson.rows[0];
-    } else {
-      person = personRes.rows[0];
-      orgId = person.org_id;
+      return res.status(400).json({
+        code: 'OTP_NOT_FOUND',
+        message: 'Mã OTP không tồn tại hoặc đã hết hạn. Vui lòng gửi lại yêu cầu.',
+      });
     }
+    const person = personRes.rows[0];
+    const orgId = person.org_id;
 
-    // Tìm hoặc tạo app_user
-    let userRes = await pool.query('SELECT * FROM app_user WHERE person_id = $1', [person.id]);
-    let appUser;
+    const userRes = await pool.query('SELECT * FROM app_user WHERE person_id = $1', [person.id]);
     if (userRes.rows.length === 0) {
-      const newUser = await pool.query(
-        `INSERT INTO app_user (person_id, auth_uid, status)
-         VALUES ($1, $2, 'ACTIVE')
-         RETURNING *`,
-        [person.id, `user_${person.id}`]
-      );
-      appUser = newUser.rows[0];
-
-      const defaultRoleRes = await pool.query("SELECT id FROM role WHERE code = 'RESIDENT' AND org_id = $1", [orgId]);
-      if (defaultRoleRes.rows.length > 0) {
-        await pool.query(
-          `INSERT INTO user_role (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [appUser.id, defaultRoleRes.rows[0].id]
-        );
-      }
-    } else {
-      appUser = userRes.rows[0];
-
-      // Kiểm tra trạng thái tài khoản
-      if (appUser.status === 'SUSPENDED') {
-        return res.status(403).json({
-          code: 'ACCOUNT_SUSPENDED',
-          message: 'Tài khoản của bạn đã bị tạm khóa. Vui lòng liên hệ ban quản lý.',
-        });
-      }
-
-      await pool.query('UPDATE app_user SET last_login_at = NOW() WHERE id = $1', [appUser.id]);
+      return res.status(400).json({
+        code: 'OTP_NOT_FOUND',
+        message: 'Mã OTP không tồn tại hoặc đã hết hạn. Vui lòng gửi lại yêu cầu.',
+      });
     }
+    const appUser = userRes.rows[0];
+
+    // Kiểm tra trạng thái tài khoản
+    if (appUser.status === 'SUSPENDED') {
+      return res.status(403).json({
+        code: 'ACCOUNT_SUSPENDED',
+        message: 'Tài khoản của bạn đã bị tạm khóa. Vui lòng liên hệ ban quản lý.',
+      });
+    }
+
+    await pool.query('UPDATE app_user SET last_login_at = NOW() WHERE id = $1', [appUser.id]);
 
     // Lấy danh sách roles của user
     const rolesRes = await pool.query(`
