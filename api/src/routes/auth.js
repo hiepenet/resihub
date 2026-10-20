@@ -370,33 +370,64 @@ router.post('/login', async (req, res) => {
  * POST /api/v1/auth/refresh (Làm mới Token)
  * =========================================================================
  */
-router.post('/refresh', (req, res) => {
+router.post('/refresh', async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken) {
     return res.status(401).json({ code: 'MISSING_TOKEN', message: 'Thiếu Refresh Token.' });
   }
 
-  jwt.verify(refreshToken, JWT_REFRESH_SECRET, (err, decoded) => {
-    if (err) {
+  try {
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+
+    // 1. Kiểm tra trạng thái app_user trong CSDL
+    const userRes = await pool.query(
+      `SELECT au.status, au.person_id, p.org_id, p.phone, p.email, p.full_name
+       FROM app_user au
+       LEFT JOIN person p ON p.id = au.person_id
+       WHERE au.id = $1`,
+      [decoded.sub]
+    );
+
+    if (userRes.rows.length === 0 || userRes.rows[0].status !== 'ACTIVE') {
+      return res.status(403).json({
+        code: 'ACCOUNT_SUSPENDED',
+        message: 'Tài khoản của bạn đã bị tạm khóa hoặc không tồn tại.',
+      });
+    }
+
+    // 2. Reload roles mới nhất từ CSDL
+    const rolesRes = await pool.query(
+      `SELECT r.code 
+       FROM user_role ur 
+       JOIN role r ON r.id = ur.role_id 
+       WHERE ur.user_id = $1`,
+      [decoded.sub]
+    );
+    const freshRoles = rolesRes.rows.map((r) => r.code);
+
+    const userRow = userRes.rows[0];
+    const newPayload = {
+      sub: decoded.sub,
+      person_id: userRow.person_id || decoded.person_id,
+      org_id: userRow.org_id || decoded.org_id,
+      phone: userRow.phone || decoded.phone,
+      email: userRow.email || decoded.email,
+      full_name: userRow.full_name || decoded.full_name,
+      roles: freshRoles,
+    };
+
+    const accessToken = jwt.sign(newPayload, JWT_SECRET, { expiresIn: '15m' });
+    res.json({ accessToken });
+  } catch (err) {
+    if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') {
       return res.status(403).json({
         code: 'INVALID_REFRESH_TOKEN',
         message: 'Refresh token không hợp lệ hoặc đã hết hạn.',
       });
     }
-
-    const newPayload = {
-      sub: decoded.sub,
-      person_id: decoded.person_id,
-      org_id: decoded.org_id,
-      phone: decoded.phone,
-      email: decoded.email,
-      full_name: decoded.full_name,
-      roles: decoded.roles,
-    };
-
-    const accessToken = jwt.sign(newPayload, JWT_SECRET, { expiresIn: '15m' });
-    res.json({ accessToken });
-  });
+    console.error('[Refresh Token Error]:', err);
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Lỗi máy chủ khi làm mới token.' });
+  }
 });
 
 /**
