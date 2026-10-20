@@ -1,4 +1,4 @@
-import { pool } from './src/db/client.js';
+import { adminPool as pool } from './src/db/client.js';
 
 async function setup() {
   const orgRes = await pool.query('SELECT id FROM organization LIMIT 1');

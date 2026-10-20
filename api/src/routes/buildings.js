@@ -200,11 +200,25 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     try {
       await client.query('BEGIN');
 
+      const newBuildingId = (await client.query('SELECT gen_random_uuid() as id')).rows[0].id;
+
+      // Tự động gán quyền quản lý tòa nhà mới cho Manager tạo tòa này trước để RLS cho phép RETURNING
+      const roleRes = await client.query("SELECT id FROM role WHERE code = 'MANAGER' AND org_id = $1", [orgId]);
+      if (roleRes.rows.length > 0) {
+        await client.query(
+          `INSERT INTO user_role (user_id, role_id, building_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (user_id, role_id, building_id) DO NOTHING`,
+          [req.user.sub, roleRes.rows[0].id, newBuildingId]
+        );
+      }
+
       const result = await client.query(
-        `INSERT INTO building (org_id, owner_id, name, code, address, timezone, lease_terms, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
+        `INSERT INTO building (id, org_id, owner_id, name, code, address, timezone, lease_terms, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE')
          RETURNING *`,
         [
+          newBuildingId,
           orgId,
           owner_id || null,
           name.trim(),
@@ -219,17 +233,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       );
 
       const newBuilding = result.rows[0];
-
-      // Tự động gán quyền quản lý tòa nhà mới cho Manager tạo tòa này
-      const roleRes = await client.query("SELECT id FROM role WHERE code = 'MANAGER' AND org_id = $1", [orgId]);
-      if (roleRes.rows.length > 0) {
-        await client.query(
-          `INSERT INTO user_role (user_id, role_id, building_id)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (user_id, role_id, building_id) DO NOTHING`,
-          [req.user.sub, roleRes.rows[0].id, newBuilding.id]
-        );
-      }
 
       // Ghi audit log
       await client.query(
@@ -476,7 +479,7 @@ router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
   try {
     const { id, floor_id } = req.params;
     const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const access = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'delete');
+    const access = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
     if (!access.allowed) {
       return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
     }

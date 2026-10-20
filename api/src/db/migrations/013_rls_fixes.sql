@@ -379,6 +379,10 @@ USING (
 CREATE POLICY rls_user_role_insert ON user_role FOR INSERT
 WITH CHECK (
   is_org_admin()
+  OR (
+    is_manager()
+    AND user_id = get_current_user_id()
+  )
 );
 
 CREATE POLICY rls_user_role_update ON user_role FOR UPDATE
