@@ -62,6 +62,7 @@ router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT
       `SELECT c.*, 
         a.code as apartment_code, 
         b.name as building_name, 
+        p.id as person_id,
         p.full_name as tenant_name, 
         p.phone as tenant_phone,
         p.email as tenant_email
@@ -93,7 +94,7 @@ router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT
         return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' });
       }
     } else if (isResident && !isOwner && !isManager) {
-      if (row.tenant_phone !== req.user.phone && row.tenant_email !== req.user.email) {
+      if (row.person_id !== req.user.person_id) {
         return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn chỉ có quyền xem hợp đồng của chính mình.' });
       }
     }

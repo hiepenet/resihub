@@ -47,9 +47,9 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
     const result = await pool.query(
       `UPDATE notification
        SET read_at = NOW()
-       WHERE id = $1 AND read_at IS NULL
+       WHERE id = $1 AND org_id = $2 AND (user_id = $3 OR user_id IS NULL) AND read_at IS NULL
        RETURNING *`,
-      [id]
+      [id, req.user.org_id, req.user.sub]
     );
 
     res.json({ message: 'Đã đánh dấu đã đọc.', data: result.rows[0] || null });

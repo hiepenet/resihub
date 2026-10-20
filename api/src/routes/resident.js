@@ -134,16 +134,33 @@ router.get('/overview', authenticateToken, async (req, res) => {
     );
 
     // 6. Thông tin liên hệ BQL tòa nhà
-    const managerContactRes = await pool.query(
-      `SELECT p.full_name, p.phone, p.email, b.name as building_name
-       FROM user_role ur
-       JOIN role r ON r.id = ur.role_id
-       JOIN app_user au ON au.id = ur.user_id
-       JOIN person p ON p.id = au.person_id
-       LEFT JOIN building b ON b.id = ur.building_id
-       WHERE r.code = 'MANAGER'
-       LIMIT 1`
-    );
+    const targetBuildingId = contract?.building_id || reservation?.building_id || null;
+    let managerContactRes;
+    if (targetBuildingId) {
+      managerContactRes = await pool.query(
+        `SELECT p.full_name, p.phone, p.email, b.name as building_name
+         FROM user_role ur
+         JOIN role r ON r.id = ur.role_id
+         JOIN app_user au ON au.id = ur.user_id
+         JOIN person p ON p.id = au.person_id
+         JOIN building b ON b.id = ur.building_id
+         WHERE r.code = 'MANAGER' AND ur.building_id = $1
+         LIMIT 1`,
+        [targetBuildingId]
+      );
+    }
+    if (!managerContactRes || managerContactRes.rows.length === 0) {
+      managerContactRes = await pool.query(
+        `SELECT p.full_name, p.phone, p.email, b.name as building_name
+         FROM user_role ur
+         JOIN role r ON r.id = ur.role_id
+         JOIN app_user au ON au.id = ur.user_id
+         JOIN person p ON p.id = au.person_id
+         LEFT JOIN building b ON b.id = ur.building_id
+         WHERE r.code = 'MANAGER'
+         LIMIT 1`
+      );
+    }
     const managerContact = managerContactRes.rows[0] || {
       full_name: 'Ban Quản Lý ResiHub',
       phone: '0901234567',

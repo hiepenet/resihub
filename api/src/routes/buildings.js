@@ -474,7 +474,13 @@ router.post('/:id/floors', authenticateToken, requireRole(['MANAGER']), async (r
  */
 router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
   try {
-    const { floor_id } = req.params;
+    const { id, floor_id } = req.params;
+    const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const access = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'delete');
+    if (!access.allowed) {
+      return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
+    }
+
     const aptCountRes = await pool.query('SELECT COUNT(*) FROM apartment WHERE floor_id = $1', [floor_id]);
     const count = parseInt(aptCountRes.rows[0]?.count || 0, 10);
     if (count > 0) {
