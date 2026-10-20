@@ -31,6 +31,8 @@ async function runRlsTests() {
   }
 
   const client = await pool.connect();
+  let cleanupData = null;
+
   try {
     // 0. Setup môi trường kiểm thử RLS
     console.log('--- [BƯỚC 1] THIẾT LẬP DỮ LIỆU CÁCH LY KIỂM THỬ RLS ---');
@@ -43,6 +45,8 @@ async function runRlsTests() {
     const phoneA = `0981${suffix}`;
     const phoneB = `0982${suffix}`;
     const phoneMgr = `0983${suffix}`;
+    const phoneSys = `0984${suffix}`;
+    const phoneMgrUnassigned = `0985${suffix}`;
 
     // Tòa nhà A và Tòa nhà B
     const bldARes = await client.query(
@@ -164,7 +168,51 @@ async function runRlsTests() {
       [userMgrId, roleMgrRes.rows[0].id, bldAId]
     );
 
-    console.log('  Setup hoàn tất: Cư dân A (A101), Cư dân B (B201), Quản lý Tòa Alpha.\n');
+    // Người dùng SYS_ADMIN độc lập (không có vai trò OWNER)
+    const personSysRes = await client.query(
+      `INSERT INTO person (org_id, full_name, phone, email)
+       VALUES ($1, 'Quản Trị Viên SYS_ADMIN', $2, 'sysadmin_${suffix}@resihub.vn') RETURNING id`,
+      [orgId, phoneSys]
+    );
+    const userSysRes = await client.query(
+      `INSERT INTO app_user (person_id, auth_uid, status)
+       VALUES ($1, 'auth-sysadmin-${suffix}', 'ACTIVE') RETURNING id`,
+      [personSysRes.rows[0].id]
+    );
+    const userSysId = userSysRes.rows[0].id;
+    const roleSysRes = await client.query("SELECT id FROM role WHERE code = 'SYS_ADMIN' LIMIT 1");
+    await client.query(
+      `INSERT INTO user_role (user_id, role_id) VALUES ($1, $2)`,
+      [userSysId, roleSysRes.rows[0].id]
+    );
+
+    // Người dùng MANAGER chưa được gán tòa nào (Default Deny check)
+    const personMgrUnassignedRes = await client.query(
+      `INSERT INTO person (org_id, full_name, phone, email)
+       VALUES ($1, 'Quản Lý Chưa Gán Tòa', $2, 'mgr_unassigned_${suffix}@resihub.vn') RETURNING id`,
+      [orgId, phoneMgrUnassigned]
+    );
+    const userMgrUnassignedRes = await client.query(
+      `INSERT INTO app_user (person_id, auth_uid, status)
+       VALUES ($1, 'auth-mgr-unassigned-${suffix}', 'ACTIVE') RETURNING id`,
+      [personMgrUnassignedRes.rows[0].id]
+    );
+    const userMgrUnassignedId = userMgrUnassignedRes.rows[0].id;
+    await client.query(
+      `INSERT INTO user_role (user_id, role_id, building_id) VALUES ($1, $2, NULL)`,
+      [userMgrUnassignedId, roleMgrRes.rows[0].id]
+    );
+
+    cleanupData = {
+      contractIds: [contractAId, contractBId],
+      apartmentIds: [aptAId, aptBId],
+      buildingIds: [bldAId, bldBId],
+      userIds: [userAId, userBId, userMgrId, userSysId, userMgrUnassignedId],
+      tenantIds: [tenantAId, tenantBId],
+      personIds: [personAId, personBId, personMgrRes.rows[0].id, personSysRes.rows[0].id, personMgrUnassignedRes.rows[0].id],
+    };
+
+    console.log('  Setup hoàn tất: Cư dân A (A101), Cư dân B (B201), Quản lý Alpha, SYS_ADMIN, Quản lý chưa gán tòa.\n');
 
     // =========================================================================
     // TEST 1: CƯ DÂN TRUY VẤN HỢP ĐỒNG (TEST NFR-008 BẮT BUỘC)
@@ -178,10 +226,10 @@ async function runRlsTests() {
     const resAContracts = await client.query('SELECT id, rent_amount FROM contract');
     assert(
       resAContracts.rows.length === 1 && resAContracts.rows[0].id === contractAId,
-      `Cư dân A chỉ nhìn thấy đúng 1 hợp đồng của chính mình (${contractAId})`
+      `Cư dân A chỉ nhìn thấy đúng 1 hợp đồng của chính mình (${resAContracts.rows[0]?.id})`
     );
 
-    // 1.2 Cư dân A query trực tiếp ID hợp đồng của Cư dân B (Zero data leak)
+    // 1.2 Cư dân A query đích danh Hợp đồng B -> Trả về 0 dòng
     const resAQueryContractB = await client.query('SELECT * FROM contract WHERE id = $1', [contractBId]);
     assert(
       resAQueryContractB.rows.length === 0,
@@ -253,42 +301,81 @@ async function runRlsTests() {
     await client.query('ROLLBACK');
 
     // =========================================================================
-    // TEST 4: QUYỀN CHỦ ĐẦU TƯ / SYS_ADMIN (TOÀN TỔ CHỨC)
+    // TEST 4: QUYỀN CHỦ ĐẦU TƯ (FULL ORG VISIBILITY)
     // =========================================================================
-    console.log('\n--- [TEST 4] QUYỀN CHỦ ĐẦU TƯ / SYS_ADMIN (FULL ORG VISIBILITY) ---');
-    const adminUserRes = await client.query(
+    console.log('\n--- [TEST 4] QUYỀN CHỦ ĐẦU TƯ / OWNER (FULL ORG VISIBILITY) ---');
+    const ownerUserRes = await client.query(
       `SELECT u.id FROM app_user u
        JOIN user_role ur ON ur.user_id = u.id
        JOIN role r ON r.id = ur.role_id
-       WHERE r.code IN ('SYS_ADMIN', 'OWNER') LIMIT 1`
+       WHERE r.code = 'OWNER' LIMIT 1`
     );
-    const adminUserId = adminUserRes.rows[0].id;
+    const ownerUserId = ownerUserRes.rows[0].id;
 
     await client.query('BEGIN');
     await client.query('SET ROLE resihub_app');
-    await client.query(`SET LOCAL app.current_user_id = '${adminUserId}'`);
+    await client.query(`SET LOCAL app.current_user_id = '${ownerUserId}'`);
 
-    const adminBuildings = await client.query('SELECT id, code FROM building');
-    const adminSeesAlpha = adminBuildings.rows.some((b) => b.id === bldAId);
-    const adminSeesBeta = adminBuildings.rows.some((b) => b.id === bldBId);
+    const ownerBuildings = await client.query('SELECT id, code FROM building');
+    const ownerSeesAlpha = ownerBuildings.rows.some((b) => b.id === bldAId);
+    const ownerSeesBeta = ownerBuildings.rows.some((b) => b.id === bldBId);
     assert(
-      adminSeesAlpha && adminSeesBeta,
-      'Chủ đầu tư / SYS_ADMIN nhìn thấy toàn bộ tòa nhà trong tổ chức'
+      ownerSeesAlpha && ownerSeesBeta,
+      'Chủ đầu tư (OWNER) nhìn thấy toàn bộ tòa nhà trong tổ chức'
     );
-    // Dọn dẹp dữ liệu kiểm thử
-    await client.query('DELETE FROM contract WHERE id IN ($1, $2)', [contractAId, contractBId]);
-    await client.query('DELETE FROM apartment WHERE id IN ($1, $2)', [aptAId, aptBId]);
-    await client.query('DELETE FROM floor WHERE building_id IN ($1, $2)', [bldAId, bldBId]);
-    await client.query('DELETE FROM building WHERE id IN ($1, $2)', [bldAId, bldBId]);
-    await client.query('DELETE FROM user_role WHERE user_id IN ($1, $2, $3)', [userAId, userBId, userMgrId]);
-    await client.query('DELETE FROM app_user WHERE id IN ($1, $2, $3)', [userAId, userBId, userMgrId]);
-    await client.query('DELETE FROM tenant WHERE id IN ($1, $2)', [tenantAId, tenantBId]);
-    await client.query('DELETE FROM person WHERE id IN ($1, $2, $3)', [personAId, personBId, personMgrRes.rows[0].id]);
+    await client.query('ROLLBACK');
+
+    // =========================================================================
+    // TEST 5: VAI TRÒ SYS_ADMIN RIÊNG BIỆT & DEFAULT-DENY CHO MANAGER CHƯA GÁN TÒA
+    // =========================================================================
+    console.log('\n--- [TEST 5] SYS_ADMIN ĐỘC LẬP & DEFAULT-DENY CHO MANAGER CHƯA GÁN TÒA ---');
+
+    // 5.1 User có DUY NHẤT vai trò SYS_ADMIN nhìn thấy toàn bộ tòa nhà trong tổ chức
+    await client.query('BEGIN');
+    await client.query('SET ROLE resihub_app');
+    await client.query(`SET LOCAL app.current_user_id = '${userSysId}'`);
+
+    const sysBuildings = await client.query('SELECT id, code FROM building');
+    const sysSeesAlpha = sysBuildings.rows.some((b) => b.id === bldAId);
+    const sysSeesBeta = sysBuildings.rows.some((b) => b.id === bldBId);
+    assert(
+      sysSeesAlpha && sysSeesBeta,
+      'SYS_ADMIN độc lập (không có vai trò OWNER) nhìn thấy toàn bộ tòa nhà trong tổ chức'
+    );
+    await client.query('ROLLBACK');
+
+    // 5.2 Quản lý chưa được gán tòa nào (building_id IS NULL) -> Không thấy tòa nào (Default-Deny)
+    await client.query('BEGIN');
+    await client.query('SET ROLE resihub_app');
+    await client.query(`SET LOCAL app.current_user_id = '${userMgrUnassignedId}'`);
+
+    const unassignedBuildings = await client.query('SELECT id, code FROM building');
+    assert(
+      unassignedBuildings.rows.length === 0,
+      'MANAGER chưa được gán tòa nào → Không thấy tòa nhà nào (Default-Deny chuẩn xác)'
+    );
+    await client.query('ROLLBACK');
 
   } catch (err) {
     console.error('Lỗi ngoại lệ trong quá trình test RLS:', err);
     failed++;
   } finally {
+    // Dọn dẹp dữ liệu kiểm thử an toàn ngoài transaction bằng superuser
+    if (cleanupData) {
+      try {
+        await client.query('RESET ROLE');
+        await client.query('DELETE FROM contract WHERE id = ANY($1)', [cleanupData.contractIds]);
+        await client.query('DELETE FROM apartment WHERE id = ANY($1)', [cleanupData.apartmentIds]);
+        await client.query('DELETE FROM floor WHERE building_id = ANY($1)', [cleanupData.buildingIds]);
+        await client.query('DELETE FROM building WHERE id = ANY($1)', [cleanupData.buildingIds]);
+        await client.query('DELETE FROM user_role WHERE user_id = ANY($1)', [cleanupData.userIds]);
+        await client.query('DELETE FROM app_user WHERE id = ANY($1)', [cleanupData.userIds]);
+        await client.query('DELETE FROM tenant WHERE id = ANY($1)', [cleanupData.tenantIds]);
+        await client.query('DELETE FROM person WHERE id = ANY($1)', [cleanupData.personIds]);
+      } catch (cleanErr) {
+        console.error('Lỗi dọn dẹp dữ liệu test:', cleanErr);
+      }
+    }
     client.release();
     await pool.end();
   }
