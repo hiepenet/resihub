@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { pool } from '../db/client.js';
 import { otpRequestLimiter } from '../middleware/rateLimiter.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { JWT_SECRET, JWT_REFRESH_SECRET } from '../config/env.js';
 
 const router = express.Router();
 
@@ -12,9 +13,6 @@ const otpStore = new Map();
 
 // In-memory phone rate limit tracker: { phone: [timestamps] }
 const phoneRequestTracker = new Map();
-
-const JWT_SECRET = process.env.JWT_SECRET || 'resihub_dev_jwt_secret_key_very_secure_12345';
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'resihub_dev_jwt_refresh_secret_key_very_secure_67890';
 
 // Helper to sign JWT (15m Access Token, 7d Refresh Token)
 function generateTokens(payload) {

@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { JWT_SECRET } from '../config/env.js';
 
 export function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -11,9 +12,7 @@ export function authenticateToken(req, res, next) {
     });
   }
 
-  const secret = process.env.JWT_SECRET || 'resihub_dev_jwt_secret_key_very_secure_12345';
-
-  jwt.verify(token, secret, (err, decoded) => {
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
       if (err.name === 'TokenExpiredError') {
         return res.status(401).json({
