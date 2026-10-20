@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -74,7 +74,7 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
     });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -124,7 +124,7 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
     console.error('[Deposit Transaction Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận giao dịch cọc.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

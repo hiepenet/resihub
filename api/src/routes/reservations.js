@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -73,7 +73,7 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
     });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -144,7 +144,7 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
     console.error('[Create Reservation Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi đặt cọc giữ chỗ.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 
@@ -154,7 +154,7 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
  */
 router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -191,7 +191,7 @@ router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER']
     console.error('[Convert Reservation Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi chuyển đổi cọc giữ chỗ.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 
@@ -201,7 +201,7 @@ router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER']
  */
 router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -244,7 +244,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
     console.error('[Forfeit Reservation Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận hủy giữ chỗ.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 
@@ -254,7 +254,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
  */
 router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -297,7 +297,7 @@ router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER'])
     console.error('[Refund Reservation Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi hoàn tiền giữ chỗ.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -104,7 +104,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại là bắt buộc.' });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -145,7 +145,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     console.error('[Create Tenant Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hồ sơ cư dân.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -197,7 +197,7 @@ router.post('/rental-application', authenticateToken, async (req, res) => {
     return res.status(400).json({ code: 'INVALID_INPUT', message: 'Vui lòng nhập họ và tên.' });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -253,7 +253,7 @@ router.post('/rental-application', authenticateToken, async (req, res) => {
     console.error('Lỗi nộp hồ sơ thuê nhà:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi nộp hồ sơ thuê nhà.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

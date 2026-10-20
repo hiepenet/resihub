@@ -1,7 +1,8 @@
+import 'dotenv/config';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { pool } from '../db/client.js';
+import { adminPool as pool } from '../db/client.js';
 import { otpRequestLimiter } from '../middleware/rateLimiter.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { JWT_SECRET, JWT_REFRESH_SECRET } from '../config/env.js';

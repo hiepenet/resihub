@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -153,7 +153,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -234,7 +234,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     console.error('[Create Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hợp đồng.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 
@@ -247,7 +247,7 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
   const { id } = req.params;
   const { reason, note } = req.body;
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
@@ -292,7 +292,7 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
     console.error('[Terminate Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi chấm dứt hợp đồng.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

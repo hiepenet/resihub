@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -196,7 +196,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       });
     }
 
-    const client = await pool.connect();
+    const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
 
@@ -248,7 +248,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       await client.query('ROLLBACK');
       throw dbErr;
     } finally {
-      client.release();
+      await release();
     }
   } catch (err) {
     if (err.code === '23505') {
@@ -296,7 +296,7 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
     return res.status(400).json({ code: 'INVALID_STATUS', message: 'Trạng thái chỉ có thể là ACTIVE hoặc INACTIVE.' });
   }
 
-  const client = await pool.connect();
+  const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
     const before = check.building;
@@ -338,7 +338,7 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
     console.error('[Update Status Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật trạng thái tòa nhà.' });
   } finally {
-    client.release();
+    await release();
   }
 });
 

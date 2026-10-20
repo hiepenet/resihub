@@ -1,5 +1,7 @@
+import 'dotenv/config';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET } from '../config/env.js';
+import { appPool, userScope } from '../db/client.js';
 
 export function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -12,7 +14,7 @@ export function authenticateToken(req, res, next) {
     });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+  jwt.verify(token, JWT_SECRET, async (err, decoded) => {
     if (err) {
       if (err.name === 'TokenExpiredError') {
         return res.status(401).json({
@@ -27,6 +29,43 @@ export function authenticateToken(req, res, next) {
     }
 
     req.user = decoded;
-    next();
+
+    let client;
+    try {
+      client = await appPool.connect();
+      await client.query(`SELECT set_config('app.current_user_id', $1, false)`, [req.user.sub]);
+      req.dbClient = client;
+
+      let released = false;
+      const cleanup = async () => {
+        if (released) return;
+        released = true;
+        try {
+          await client.query('ROLLBACK');
+        } catch {}
+        try {
+          await client.query('RESET app.current_user_id');
+        } catch {}
+        try {
+          client.release();
+        } catch {}
+      };
+
+      res.once('finish', cleanup);
+      res.once('close', cleanup);
+
+      userScope.run({ client }, () => next());
+    } catch (dbErr) {
+      console.error('[Auth Middleware DB Error]:', dbErr);
+      if (client) {
+        try {
+          client.release();
+        } catch {}
+      }
+      return res.status(500).json({
+        code: 'DB_CONNECTION_ERROR',
+        message: 'Không thể kết nối cơ sở dữ liệu.',
+      });
+    }
   });
 }

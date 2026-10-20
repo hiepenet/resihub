@@ -1,4 +1,4 @@
-import { pool } from './client.js';
+import { adminPool as pool } from './client.js';
 
 async function seedData() {
   const client = await pool.connect();

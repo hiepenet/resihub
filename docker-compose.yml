@@ -27,6 +27,7 @@ services:
       PORT: 5000
       NODE_ENV: ${NODE_ENV:-development}
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-resihub}
+      APP_DATABASE_URL: postgres://resihub_app:resihub_app_secret@postgres:5432/${POSTGRES_DB:-resihub}
       JWT_SECRET: ${JWT_SECRET:-resihub_dev_jwt_secret_key_very_secure_12345}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-resihub_dev_jwt_refresh_secret_key_very_secure_67890}
       CORS_ORIGIN: "http://localhost:3000"
