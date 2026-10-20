@@ -9,10 +9,13 @@ const router = express.Router();
  * GET /api/v1/reservations
  * Lấy danh sách đặt cọc giữ chỗ (M04 / FR-067 / NV-06)
  */
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const { building_id, status } = req.query;
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
 
     let sql = `
       SELECT r.*, 
@@ -27,6 +30,13 @@ router.get('/', authenticateToken, async (req, res) => {
       WHERE r.org_id = $1
     `;
     const params = [orgId];
+
+    if (isManager && !isOwner) {
+      params.push(req.user.sub);
+      sql += ` AND r.building_id IN (
+        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
+      )`;
+    }
 
     if (building_id) {
       params.push(building_id);

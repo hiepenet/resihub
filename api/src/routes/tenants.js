@@ -9,12 +9,12 @@ const router = express.Router();
  * GET /api/v1/tenants/check-dup
  * Kiểm tra trùng SĐT hoặc CCCD (FR-021)
  */
-router.get('/check-dup', authenticateToken, async (req, res) => {
+router.get('/check-dup', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { phone, id_number } = req.query;
   const orgId = req.user.org_id;
 
   try {
-    let sql = `SELECT * FROM person WHERE org_id = $1 AND (`;
+    let sql = `SELECT id, full_name, phone FROM person WHERE org_id = $1 AND (`;
     const params = [orgId];
     const conditions = [];
 
@@ -51,14 +51,39 @@ router.get('/check-dup', authenticateToken, async (req, res) => {
 router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const result = await pool.query(
-      `SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number
-       FROM tenant t
-       JOIN person p ON p.id = t.person_id
-       WHERE t.org_id = $1
-       ORDER BY t.created_at DESC`,
-      [orgId]
-    );
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
+
+    let sql = `
+      SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number
+      FROM tenant t
+      JOIN person p ON p.id = t.person_id
+      WHERE t.org_id = $1
+    `;
+    const params = [orgId];
+
+    if (isManager && !isOwner) {
+      params.push(req.user.sub);
+      sql += ` AND (
+        t.id IN (
+          SELECT c.primary_tenant_id FROM contract c
+          WHERE c.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
+        )
+        OR t.id IN (
+          SELECT co.tenant_id FROM contract_occupant co
+          JOIN contract c ON c.id = co.contract_id
+          WHERE c.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
+        )
+        OR NOT EXISTS (
+          SELECT 1 FROM contract c WHERE c.primary_tenant_id = t.id
+        )
+      )`;
+    }
+
+    sql += ` ORDER BY t.created_at DESC`;
+
+    const result = await pool.query(sql, params);
 
     res.json({ data: result.rows });
   } catch (err) {
