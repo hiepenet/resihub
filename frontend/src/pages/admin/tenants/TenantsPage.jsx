@@ -283,6 +283,8 @@ export default function TenantsPage() {
                 </div>
               )}
 
+              {editingTenant && <IdImagesSection tenantId={editingTenant.id} />}
+
               <div className="grid grid-cols-2 gap-3">
                 <FormField label="Số CCCD / Hộ chiếu">
                   <Input
@@ -325,6 +327,68 @@ export default function TenantsPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// B7: ảnh CCCD (mặt trước/sau) trong modal sửa hồ sơ — xem qua /attachments/:id/view có audit READ
+function IdImagesSection({ tenantId }) {
+  const [images, setImages] = useState([]);
+
+  const load = () => {
+    api.get(`/api/v1/tenants/${tenantId}/id-images`)
+      .then((res) => setImages(res.data?.data || []))
+      .catch(() => {});
+  };
+  useEffect(load, [tenantId]);
+
+  const upload = (side) => (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Ảnh vượt quá 5MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        await api.post(`/api/v1/tenants/${tenantId}/id-images`, { image_base64: reader.result, side });
+        load();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi lưu ảnh.');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="pt-2 border-t border-slate-100">
+      <p className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">Ảnh CCCD (PII — xem có kiểm soát)</p>
+      <div className="grid grid-cols-2 gap-3">
+        {['front', 'back'].map((side) => {
+          const img = images.find((im) => im.side === side);
+          return (
+            <div key={side} className="text-center">
+              <div className="aspect-[3/2] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center overflow-hidden mb-1">
+                {img ? (
+                  <img
+                    src={`/api/v1/attachments/${img.attachment_id}/view`}
+                    alt={`CCCD ${side === 'front' ? 'mặt trước' : 'mặt sau'}`}
+                    className="w-full h-full object-cover cursor-zoom-in"
+                    onClick={() => window.open(`/api/v1/attachments/${img.attachment_id}/view`, '_blank')}
+                  />
+                ) : (
+                  <span className="text-xs text-slate-400">{side === 'front' ? 'Mặt trước' : 'Mặt sau'}</span>
+                )}
+              </div>
+              <label className="text-xs text-primary-600 font-medium cursor-pointer hover:underline">
+                {img ? 'Thay ảnh' : 'Tải ảnh lên'}
+                <input type="file" accept="image/jpeg,image/png" className="hidden" onChange={upload(side)} />
+              </label>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

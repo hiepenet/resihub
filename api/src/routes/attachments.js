@@ -31,12 +31,10 @@ router.get('/:id/view', authenticateToken, async (req, res) => {
         return res.status(403).json({ code: 'FORBIDDEN_ATTACHMENT', message: 'Bạn không có quyền xem tệp đính kèm này.' });
       }
     } else if (att.owner_entity === 'person') {
+      // PII (CCCD): chỉ người trong cùng tổ chức của person
       const ok = await pool.query(
-        `SELECT 1
-         FROM person p
-         JOIN user_role ur ON ur.org_id = p.org_id
-         WHERE p.id = $1 AND ur.user_id = $2`,
-        [att.owner_id, req.user.sub]
+        `SELECT 1 FROM person p WHERE p.id = $1 AND p.org_id = $2`,
+        [att.owner_id, req.user.org_id]
       );
       if (ok.rows.length === 0) {
         return res.status(403).json({ code: 'FORBIDDEN_ATTACHMENT', message: 'Bạn không có quyền xem tệp đính kèm này.' });

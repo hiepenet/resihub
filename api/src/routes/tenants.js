@@ -2,6 +2,7 @@ import express from 'express';
 import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { saveBase64Image } from '../services/imageUpload.js';
 
 const router = express.Router();
 
@@ -264,6 +265,97 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi cập nhật cư dân.' });
   } finally {
     await release();
+  }
+});
+
+/**
+ * POST /api/v1/tenants/:id/id-images — upload ảnh CCCD (B7, L1)
+ * body: { image_base64, side: 'front'|'back' } — lưu disk + attachment, KHÔNG serve tĩnh,
+ * xem ảnh chỉ qua GET /api/v1/attachments/:id/view (auth + audit READ).
+ */
+router.post('/:id/id-images', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { image_base64, side } = req.body;
+
+  if (!['front', 'back'].includes(side)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: "Cạnh ảnh phải là 'front' hoặc 'back'." });
+  }
+
+  try {
+    const tenantRes = await pool.query(
+      `SELECT t.*, p.id AS person_id, p.id_images AS id_images FROM tenant t JOIN person p ON p.id = t.person_id
+       WHERE t.id = $1 AND t.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (tenantRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy cư dân.' });
+    }
+    const personId = tenantRes.rows[0].person_id;
+
+    const saved = await saveBase64Image({
+      imageBase64: image_base64,
+      folder: 'person',
+      entityId: personId,
+      entity: 'person',
+      ownerId: personId,
+      req,
+      query: (sql, params) => pool.query(sql, params),
+    });
+    if (saved.error) {
+      return res.status(400).json(saved.error);
+    }
+
+    // Đánh dấu cạnh ảnh trong person.id_images: [{attachmentId, side}] dạng text mảng JSON
+    const marker = JSON.stringify({ attachmentId: saved.attachment.id, side });
+    await pool.query(
+      `UPDATE person SET id_images = array_append(COALESCE(id_images, '{}'), $1) WHERE id = $2`,
+      [marker, personId]
+    );
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'UPLOAD', 'attachment', $2, $3)`,
+      [req.user.sub, saved.attachment.id, JSON.stringify({ side, owner: 'person', owner_id: personId })]
+    );
+
+    res.status(201).json({ message: 'Đã lưu ảnh CCCD.', data: { attachment_id: saved.attachment.id, side } });
+  } catch (err) {
+    console.error('[Upload Id Image Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi lưu ảnh CCCD.' });
+  }
+});
+
+/**
+ * GET /api/v1/tenants/:id/id-images — danh sách ảnh (trả attachment_id để UI render qua /attachments/:id/view)
+ */
+router.get('/:id/id-images', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const tenantRes = await pool.query(
+      `SELECT t.*, p.id AS person_id, p.id_images AS id_images FROM tenant t JOIN person p ON p.id = t.person_id
+       WHERE t.id = $1 AND t.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (tenantRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy cư dân.' });
+    }
+    const images = await pool.query(
+      `SELECT id AS attachment_id, storage_path, mime FROM attachment
+       WHERE owner_entity = 'person' AND owner_id = $1 ORDER BY created_at ASC`,
+      [tenantRes.rows[0].person_id]
+    );
+    // Lấy side từ marker trong person.id_images
+    const markers = (tenantRes.rows[0].id_images || [])
+      .map((m) => { try { return JSON.parse(m); } catch { return null; } })
+      .filter(Boolean);
+    const data = images.rows.map((img) => ({
+      attachment_id: img.attachment_id,
+      side: markers.find((m) => m.attachmentId === img.attachment_id)?.side || 'unknown',
+    }));
+    res.json({ data });
+  } catch (err) {
+    console.error('[List Id Images Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tải ảnh CCCD.' });
   }
 });
 
