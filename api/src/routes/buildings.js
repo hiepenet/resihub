@@ -277,7 +277,13 @@ router.get('/:id', authenticateToken, async (req, res) => {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
 
-  res.json({ data: check.building });
+  // Kèm phân khu (B1) để UI tạo căn hộ chọn khu
+  const zones = await pool.query(
+    'SELECT id, code, name, status FROM zone WHERE building_id = $1 ORDER BY code ASC',
+    [id]
+  );
+
+  res.json({ data: { ...check.building, zones: zones.rows } });
 });
 
 /**
@@ -500,6 +506,111 @@ router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Lỗi kiểm tra xóa tầng:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi kiểm tra xóa tầng.' });
+  }
+});
+
+// ============================================================================
+// KHU / BLOCK (B1, FR-007) — cây Tòa · Khu · Tầng · Căn hộ
+// ============================================================================
+
+/**
+ * GET /api/v1/buildings/:id/zones
+ */
+router.get('/:id/zones', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'read');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT z.*, (SELECT COUNT(*) FROM apartment a WHERE a.zone_id = z.id) AS apartment_count
+       FROM zone z WHERE z.building_id = $1 ORDER BY z.code ASC`,
+      [id]
+    );
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[Get Zones Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách khu.' });
+  }
+});
+
+/**
+ * POST /api/v1/buildings/:id/zones — MANAGER khởi tạo khu (NV-03, FR-007)
+ */
+router.post('/:id/zones', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { code, name } = req.body;
+  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'create');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+  if (!code || !String(code).trim()) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Mã khu (code) là bắt buộc.' });
+  }
+  try {
+    const bRes = await pool.query('SELECT org_id FROM building WHERE id = $1', [id]);
+    if (bRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+    }
+    const result = await pool.query(
+      `INSERT INTO zone (org_id, building_id, code, name)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [bRes.rows[0].org_id, id, String(code).trim().toUpperCase(), name || null]
+    );
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE', 'zone', $2, $3)`,
+      [req.user.sub, result.rows[0].id, JSON.stringify(result.rows[0])]
+    );
+    res.status(201).json({ message: 'Tạo khu thành công.', data: result.rows[0] });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({
+        code: 'ZONE_EXISTS',
+        message: `Khu ${String(code).trim().toUpperCase()} đã tồn tại trong tòa này.`,
+      });
+    }
+    console.error('[Create Zone Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tạo khu.' });
+  }
+});
+
+/**
+ * PATCH /api/v1/buildings/:id/zones/:zone_id — đổi tên / bật tắt khu
+ */
+router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id, zone_id } = req.params;
+  const { name, status } = req.body;
+  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+  if (status && !['ACTIVE', 'INACTIVE'].includes(status)) {
+    return res.status(400).json({ code: 'INVALID_ZONE_STATUS', message: 'Trạng thái khu chỉ nhận ACTIVE hoặc INACTIVE.' });
+  }
+  try {
+    const before = await pool.query('SELECT * FROM zone WHERE id = $1 AND building_id = $2', [zone_id, id]);
+    if (before.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy khu trong tòa này.' });
+    }
+    const result = await pool.query(
+      `UPDATE zone SET name = COALESCE($1, name), status = COALESCE($2, status), updated_at = NOW()
+       WHERE id = $3 RETURNING *`,
+      [name ?? null, status ?? null, zone_id]
+    );
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'UPDATE', 'zone', $2, $3, $4)`,
+      [req.user.sub, zone_id, JSON.stringify(before.rows[0]), JSON.stringify(result.rows[0])]
+    );
+    res.json({ message: 'Cập nhật khu thành công.', data: result.rows[0] });
+  } catch (err) {
+    console.error('[Update Zone Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật khu.' });
   }
 });
 

@@ -71,7 +71,7 @@ router.get('/', authenticateToken, async (req, res) => {
  * Quyền: Chỉ MANAGER có quyền tạo căn hộ trên tòa mình quản lý (CRU). OWNER có quyền R (bị chặn).
  */
 router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
-  const { building_id, floor_id, code, area_m2, type, bedrooms, base_rent, amenities, note } = req.body;
+  const { building_id, floor_id, zone_id, code, area_m2, type, bedrooms, base_rent, amenities, note } = req.body;
 
   if (!building_id || !code) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Tòa nhà và mã phòng là bắt buộc.' });
@@ -108,12 +108,27 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       }
     }
 
+    // Guard khu phải thuộc cùng tòa (B1)
+    if (zone_id) {
+      const zoneCheck = await pool.query(
+        `SELECT 1 FROM zone WHERE id = $1 AND building_id = $2`,
+        [zone_id, building_id]
+      );
+      if (zoneCheck.rows.length === 0) {
+        return res.status(400).json({
+          code: 'ZONE_MISMATCH',
+          message: 'Khu không thuộc tòa nhà này.',
+        });
+      }
+    }
+
     const result = await pool.query(
-      `INSERT INTO apartment (building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'AVAILABLE', $8, $9)
+      `INSERT INTO apartment (building_id, zone_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9, $10)
        RETURNING *`,
       [
         building_id,
+        zone_id || null,
         floor_id || null,
         code.trim().toUpperCase(),
         area_m2 || 0,
@@ -148,7 +163,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
  */
 router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { status, base_rent, area_m2, amenities, note } = req.body;
+  const { status, base_rent, area_m2, amenities, note, zone_id } = req.body;
 
   try {
     // Kiểm tra căn hộ có thuộc tòa nhà do Manager này quản lý không
@@ -210,6 +225,17 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       });
     }
 
+    // Guard khu phải thuộc cùng tòa của căn (B1)
+    if (zone_id) {
+      const zoneCheck = await pool.query(
+        `SELECT 1 FROM zone WHERE id = $1 AND building_id = $2`,
+        [zone_id, before.building_id]
+      );
+      if (zoneCheck.rows.length === 0) {
+        return res.status(400).json({ code: 'ZONE_MISMATCH', message: 'Khu không thuộc tòa nhà này.' });
+      }
+    }
+
     const result = await pool.query(
       `UPDATE apartment
        SET status = COALESCE($1, status),
@@ -217,8 +243,9 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
            area_m2 = COALESCE($3, area_m2),
            amenities = COALESCE($4, amenities),
            note = COALESCE($5, note),
+           zone_id = COALESCE($6, zone_id),
            updated_at = NOW()
-       WHERE id = $6
+       WHERE id = $7
        RETURNING *`,
       [
         status || null,
@@ -226,6 +253,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         area_m2 !== undefined ? area_m2 : null,
         amenities ? JSON.stringify(amenities) : null,
         note !== undefined ? note : null,
+        zone_id || null,
         id,
       ]
     );

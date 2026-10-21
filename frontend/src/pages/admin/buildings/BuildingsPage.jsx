@@ -140,6 +140,43 @@ export default function BuildingsPage() {
     }
   };
 
+  // B1: phân khu Khu/Block
+  const [zones, setZones] = useState([]);
+  const [isZoneModalOpen, setIsZoneModalOpen] = useState(false);
+  const [newZone, setNewZone] = useState({ code: '', name: '' });
+
+  const loadZones = async (buildingId) => {
+    if (!buildingId) return;
+    try {
+      const res = await api.get(`/api/v1/buildings/${buildingId}/zones`);
+      setZones(res.data?.data || []);
+    } catch (err) {
+      console.error('Error loading zones:', err);
+    }
+  };
+
+  const handleCreateZone = async (e) => {
+    e.preventDefault();
+    try {
+      await api.post(`/api/v1/buildings/${selectedBuilding.id}/zones`, newZone);
+      setIsZoneModalOpen(false);
+      setNewZone({ code: '', name: '' });
+      loadZones(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi tạo khu.');
+    }
+  };
+
+  const handleToggleZoneStatus = async (z) => {
+    const target = z.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    try {
+      await api.patch(`/api/v1/buildings/${selectedBuilding.id}/zones/${z.id}`, { status: target });
+      loadZones(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi đổi trạng thái khu.');
+    }
+  };
+
   useEffect(() => {
     loadBuildings();
   }, []);
@@ -147,6 +184,7 @@ export default function BuildingsPage() {
   useEffect(() => {
     if (selectedBuilding) {
       loadFloorMap(selectedBuilding.id);
+      loadZones(selectedBuilding.id);
     }
   }, [selectedBuilding]);
 
@@ -466,6 +504,16 @@ export default function BuildingsPage() {
               <Button
                 variant="secondary"
                 size="md"
+                onClick={() => setIsZoneModalOpen(true)}
+                leftIcon={Layers}
+                disabled={!selectedBuilding}
+              >
+                Thêm khu
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="md"
                 onClick={() => setIsFloorModalOpen(true)}
                 leftIcon={Layers}
                 disabled={!selectedBuilding}
@@ -608,6 +656,32 @@ export default function BuildingsPage() {
             </div>
           </div>
 
+          {/* B1: dải phân khu Khu/Block */}
+          {zones.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Khu/Block:</span>
+              {zones.map((z) => (
+                <span
+                  key={z.id}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                    z.status === 'ACTIVE' ? 'bg-primary-50 text-primary-800 border-primary-200' : 'bg-slate-100 text-slate-500 border-slate-200 opacity-60'
+                  }`}
+                  title={`${z.apartment_count || 0} căn hộ${z.status === 'INACTIVE' ? ' — Đã ngưng sử dụng' : ''}`}
+                >
+                  {z.code}{z.name ? ` — ${z.name}` : ''} ({z.apartment_count || 0})
+                  {canManageUnits && (
+                    <button
+                      className="ml-1 text-[10px] underline hover:no-underline"
+                      onClick={() => handleToggleZoneStatus(z)}
+                    >
+                      {z.status === 'ACTIVE' ? 'Tắt' : 'Bật'}
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+
           {/* Sơ đồ tầng theo thiết kế PRD FR-010 */}
           <div className="space-y-4">
             {floorMap.length === 0 ? (
@@ -719,6 +793,14 @@ export default function BuildingsPage() {
                   <div className="flex justify-between py-2 border-b border-slate-50">
                     <span className="text-slate-500">Loại phòng</span>
                     <span className="font-medium">{selectedApartment.type || '1PN'}</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-50">
+                    <span className="text-slate-500">Khu / Block</span>
+                    <span className="font-medium">
+                      {zones.find((z) => z.id === selectedApartment.zone_id)
+                        ? `${zones.find((z) => z.id === selectedApartment.zone_id).code}`
+                        : '—'}
+                    </span>
                   </div>
                   <div className="flex justify-between py-2 border-b border-slate-50">
                     <span className="text-slate-500">Số phòng ngủ</span>
@@ -936,6 +1018,50 @@ export default function BuildingsPage() {
         </div>
       )}
 
+      {/* Modal Thêm Khu/Block (B1, FR-007) */}
+      {isZoneModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100">
+            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+              <h3 className="text-base font-bold text-slate-900">
+                Thêm khu vào {selectedBuilding?.name}
+              </h3>
+              <button onClick={() => setIsZoneModalOpen(false)}>
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateZone} className="space-y-4">
+              <FormField label="Mã khu" required hint="Ví dụ: A, B, TOWER-1 (duy nhất trong tòa)">
+                <Input
+                  placeholder="A"
+                  value={newZone.code}
+                  onChange={(e) => setNewZone({ ...newZone, code: e.target.value.toUpperCase() })}
+                  autoFocus
+                />
+              </FormField>
+
+              <FormField label="Tên hiển thị" hint="Ví dụ: Khu A —Tower chính">
+                <Input
+                  placeholder="Khu A"
+                  value={newZone.name}
+                  onChange={(e) => setNewZone({ ...newZone, name: e.target.value })}
+                />
+              </FormField>
+
+              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <Button variant="secondary" onClick={() => setIsZoneModalOpen(false)}>
+                  Hủy
+                </Button>
+                <Button type="submit" variant="primary">
+                  Thêm khu
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Modal Thêm Tầng (NV-04) */}
       {isFloorModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
@@ -1003,6 +1129,21 @@ export default function BuildingsPage() {
                   {floorMap.map((f) => (
                     <option key={f.id} value={f.id}>
                       {f.name || `Tầng ${f.level}`}
+                    </option>
+                  ))}
+                </select>
+              </FormField>
+
+              <FormField label="Khu / Block (tuỳ chọn)" hint="Phân khu lớn trong tòa, ví dụ Block A">
+                <select
+                  value={newApartment.zone_id || ''}
+                  onChange={(e) => setNewApartment({ ...newApartment, zone_id: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                >
+                  <option value="">— Không phân khu —</option>
+                  {zones.filter((z) => z.status === 'ACTIVE').map((z) => (
+                    <option key={z.id} value={z.id}>
+                      {z.code}{z.name ? ` — ${z.name}` : ''}
                     </option>
                   ))}
                 </select>
