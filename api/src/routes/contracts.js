@@ -158,11 +158,15 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     await client.query('BEGIN');
 
     // Rule C1 & NV-08: Chống chồng lấn kỳ hạn trên cùng căn hộ
+    // Half-open [start, end) — HĐ kết thúc tại ngày D cho phép HĐ mới bắt đầu D (PRD 13.3)
     const overlapCheck = await client.query(
-      `SELECT id, start_date, end_date FROM contract
-       WHERE apartment_id = $1 
-         AND status IN ('ACTIVE', 'PENDING')
-         AND (start_date <= $3 AND end_date >= $2)`,
+      `SELECT c.id, c.start_date, c.end_date, t.id AS tenant_id, p.full_name
+       FROM contract c
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN person p ON p.id = t.person_id
+       WHERE c.apartment_id = $1
+         AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+         AND (c.start_date < $3 AND c.end_date > $2)`,
       [apartment_id, start_date, end_date]
     );
 
@@ -170,7 +174,13 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       await client.query('ROLLBACK');
       return res.status(409).json({
         code: 'OVERLAP_CONTRACT',
-        message: 'Căn hộ đã có hợp đồng hiệu lực hoặc chờ ký trong khoảng thời gian đã chọn.',
+        message: 'Căn hộ đã có hợp đồng trong khoảng thời gian đã chọn.',
+        conflicts: overlapCheck.rows.map((c) => ({
+          contract_id: c.id,
+          start_date: c.start_date,
+          end_date: c.end_date,
+          tenant: c.full_name,
+        })),
       });
     }
 
