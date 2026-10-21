@@ -255,6 +255,188 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 });
 
 /**
+ * GET /api/v1/contracts/:id/occupants — thành viên cùng ở theo hợp đồng (B6)
+ */
+router.get('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    const result = await client.query(
+      `SELECT t.id AS tenant_id, p.full_name, p.phone, p.email, p.id_number, co.relationship
+       FROM contract_occupant co
+       JOIN tenant t ON t.id = co.tenant_id
+       JOIN person p ON p.id = t.person_id
+       WHERE co.contract_id = $1
+       ORDER BY co.created_at ASC`,
+      [id]
+    );
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[List Occupants Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải thành viên cùng ở.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/occupants — thêm thành viên cùng ở (B6): tái dùng person theo SĐT,
+ * tạo tenant type='occupant' nếu chưa có, rồi gắn vào contract_occupant.
+ */
+router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { full_name, phone, relationship, email, dob, id_number } = req.body;
+
+  if (!full_name || !phone) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại là bắt buộc.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    // Guard tòa (mẫu checkMgr)
+    const contractRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (contractRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const contract = contractRes.rows[0];
+    const okRes = await client.query(
+      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+      [req.user.sub, contract.building_id]
+    );
+    if (okRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
+    }
+
+    // Tái dùng person trùng SĐT trong org, không thì tạo mới
+    let personRes = await client.query(
+      'SELECT * FROM person WHERE org_id = $1 AND phone = $2',
+      [req.user.org_id, phone]
+    );
+    let personId;
+    if (personRes.rows.length === 0) {
+      personId = (await client.query(
+        `INSERT INTO person (org_id, full_name, phone, email, dob, id_number)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [req.user.org_id, full_name, phone, email || null, dob || null, id_number || null]
+      )).rows[0].id;
+    } else {
+      personId = personRes.rows[0].id;
+      // Bổ sung thông tin còn thiếu vào person có sẵn
+      await client.query(
+        `UPDATE person SET
+           full_name = COALESCE($1, full_name),
+           email = COALESCE($2, email),
+           dob = COALESCE($3, dob),
+           id_number = COALESCE($4, id_number)
+         WHERE id = $5`,
+        [full_name || null, email || null, dob || null, id_number || null, personId]
+      );
+    }
+
+    // Tìm tenant occupant của person, chưa có thì tạo
+    let tenantRes = await client.query(
+      `SELECT * FROM tenant WHERE person_id = $1 AND org_id = $2 AND type = 'occupant' LIMIT 1`,
+      [personId, req.user.org_id]
+    );
+    let tenantId;
+    if (tenantRes.rows.length === 0) {
+      tenantId = (await client.query(
+        `INSERT INTO tenant (person_id, org_id, type, status)
+         VALUES ($1, $2, 'occupant', 'APPROVED') RETURNING id`,
+        [personId, req.user.org_id]
+      )).rows[0].id;
+    } else {
+      tenantId = tenantRes.rows[0].id;
+    }
+
+    // Trùng thành viên trong cùng hợp đồng?
+    const dup = await client.query(
+      'SELECT 1 FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2',
+      [id, tenantId]
+    );
+    if (dup.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'OCCUPANT_EXISTS', message: 'Người này đã là thành viên của hợp đồng.' });
+    }
+
+    await client.query(
+      'INSERT INTO contract_occupant (contract_id, tenant_id, relationship) VALUES ($1, $2, $3)',
+      [id, tenantId, relationship || 'family']
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE', 'contract_occupant', $2, $3)`,
+      [req.user.sub, id, JSON.stringify({ contract_id: id, tenant_id: tenantId, relationship })]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ message: 'Đã thêm thành viên cùng ở.', data: { contract_id: id, tenant_id: tenantId, relationship: relationship || 'family' } });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Add Occupant Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi thêm thành viên.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * DELETE /api/v1/contracts/:id/occupants/:tenant_id — gỡ khỏi hợp đồng,
+ * KHÔNG xóa tenant/person (NFR-016: không xóa cứng hồ sơ).
+ */
+router.delete('/:id/occupants/:tenant_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id, tenant_id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const contractRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (contractRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const okRes = await client.query(
+      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+      [req.user.sub, contractRes.rows[0].building_id]
+    );
+    if (okRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
+    }
+
+    const linkRes = await client.query(
+      'SELECT 1 FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2',
+      [id, tenant_id]
+    );
+    if (linkRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Người này không thuộc hợp đồng.' });
+    }
+
+    await client.query('DELETE FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2', [id, tenant_id]);
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'DELETE', 'contract_occupant', $2, $3)`,
+      [req.user.sub, id, JSON.stringify({ contract_id: id, tenant_id })]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Đã gỡ thành viên khỏi hợp đồng. Hồ sơ cư dân được giữ nguyên.' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Remove Occupant Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi gỡ thành viên.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
  * PATCH /api/v1/contracts/:id — sửa hợp đồng nháp (A3, PRD 490: MANAGER C/R/U khi DRAFT,
  * sau ACTIVE chỉ sửa qua phụ lục)
  */

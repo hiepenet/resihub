@@ -354,6 +354,7 @@ export default function ContractsPage() {
 // Hành động theo trạng thái hợp đồng (A3: DRAFT → bản ký → ACTIVE; PENDING_APPROVAL → OWNER duyệt)
 function ContractActions({ row, currentRole, onChanged }) {
   const fileRef = React.useRef(null);
+  const [isOccupantsOpen, setIsOccupantsOpen] = useState(false);
 
   const handleActivate = async () => {
     if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
@@ -409,6 +410,7 @@ function ContractActions({ row, currentRole, onChanged }) {
   if (row.status === 'DRAFT') {
     return (
       <div className="flex flex-col gap-1.5 min-w-[150px]">
+        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
         <button
           className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
           onClick={handleActivate}
@@ -436,33 +438,135 @@ function ContractActions({ row, currentRole, onChanged }) {
 
   if (row.status === 'PENDING_APPROVAL' && currentRole === 'OWNER') {
     return (
-      <button
-        className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
-        onClick={handleApprove}
-      >
-        Duyệt
-      </button>
+      <div className="flex flex-col gap-1.5">
+        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        <button
+          className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
+          onClick={handleApprove}
+        >
+          Duyệt
+        </button>
+      </div>
     );
   }
 
   if (row.status === 'ACTIVE') {
     return (
+      <div className="flex flex-col gap-1.5">
+        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        <button
+          className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+          onClick={async () => {
+            if (!window.confirm('Chấm dứt hợp đồng này sớm? Căn hộ sẽ chuyển sang bảo trì chờ bàn giao.')) return;
+            try {
+              await api.post(`/api/v1/contracts/${row.id}/terminate`, { note: 'Chấm dứt từ danh sách hợp đồng' });
+              onChanged();
+            } catch (err) {
+              alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
+            }
+          }}
+        >
+          Chấm dứt
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+      <span className="text-xs text-slate-400">—</span>
+      {isOccupantsOpen && (
+        <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />
+      )}
+    </div>
+  );
+
+  function OccupantsButton({ onClick }) {
+    return (
       <button
-        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-        onClick={async () => {
-          if (!window.confirm('Chấm dứt hợp đồng này sớm? Căn hộ sẽ chuyển sang bảo trì chờ bàn giao.')) return;
-          try {
-            await api.post(`/api/v1/contracts/${row.id}/terminate`, { note: 'Chấm dứt từ danh sách hợp đồng' });
-            onChanged();
-          } catch (err) {
-            alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
-          }
-        }}
+        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
+        onClick={onClick}
       >
-        Chấm dứt
+        Thành viên
       </button>
     );
   }
 
-  return <span className="text-xs text-slate-400">—</span>;
+  function OccupantsModal({ contractId, onClose }) {
+    const [list, setList] = useState([]);
+    const [form, setForm] = useState({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
+
+    const load = () => {
+      api.get(`/api/v1/contracts/${contractId}/occupants`)
+        .then((res) => setList(res.data?.data || []))
+        .catch(() => {});
+    };
+    useEffect(load, [contractId]);
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
+        <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+            <h3 className="text-base font-bold text-slate-900">Thành viên cùng ở</h3>
+            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
+          </div>
+
+          <div className="space-y-2 mb-4">
+            {list.length === 0 && (
+              <p className="text-xs text-slate-400 text-center py-2">Chưa có thành viên cùng ở nào.</p>
+            )}
+            {list.map((m) => (
+              <div key={m.tenant_id} className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/50">
+                <div>
+                  <span className="text-sm font-medium text-slate-900">{m.full_name}</span>
+                  <span className="text-xs text-slate-400 block">{m.phone} · {m.relationship || '—'}</span>
+                </div>
+                <button
+                  className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                  onClick={async () => {
+                    if (!window.confirm(`Gỡ ${m.full_name} khỏi hợp đồng? Hồ sơ cư dân sẽ được giữ nguyên.`)) return;
+                    try {
+                      await api.delete(`/api/v1/contracts/${contractId}/occupants/${m.tenant_id}`);
+                      load();
+                    } catch (err) {
+                      alert(err.response?.data?.message || 'Lỗi khi gỡ thành viên.');
+                    }
+                  }}
+                >
+                  Gỡ
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <form
+            className="space-y-3 pt-3 border-t border-slate-100"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                await api.post(`/api/v1/contracts/${contractId}/occupants`, form);
+                setForm({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
+                load();
+              } catch (err) {
+                alert(err.response?.data?.message || 'Lỗi khi thêm thành viên.');
+              }
+            }}
+          >
+            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm thành viên</p>
+            <div className="grid grid-cols-2 gap-3">
+              <input required placeholder="Họ tên *" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+              <input required placeholder="SĐT *" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+              <input required placeholder="Quan hệ * (vd: vợ, con)" value={form.relationship} onChange={(e) => setForm({ ...form, relationship: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+              <input placeholder="Số CCCD" value={form.id_number} onChange={(e) => setForm({ ...form, id_number: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+              <input placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="col-span-2 w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            </div>
+            <div className="flex justify-end">
+              <Button type="submit" variant="primary" size="sm">Thêm</Button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
 }
