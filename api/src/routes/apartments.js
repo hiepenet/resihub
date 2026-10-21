@@ -150,7 +150,21 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     res.status(201).json({ message: 'Tạo căn hộ thành công.', data: result.rows[0] });
   } catch (err) {
     if (err.code === '23505') {
-      return res.status(409).json({ code: 'DUPLICATE_CODE', message: `Mã căn "${code}" đã tồn tại trong tòa nhà này.` });
+      // C2: gợi ý mã kế tiếp — hậu tố số của mã lớn nhất trong tòa +1
+      let suggestion = '';
+      try {
+        const last = await pool.query(
+          `SELECT code FROM apartment WHERE building_id = $1 ORDER BY code DESC LIMIT 1`,
+          [building_id]
+        );
+        if (last.rows.length > 0) {
+          const m = last.rows[0].code.match(/^(.*?)(\d+)$/);
+          if (m) suggestion = ` Gợi ý mã kế tiếp: ${m[1]}${parseInt(m[2], 10) + 1}.`;
+        }
+      } catch {
+        // gợi ý là phụ, bỏ qua lỗi
+      }
+      return res.status(409).json({ code: 'DUPLICATE_CODE', message: `Mã căn "${code}" đã tồn tại trong tòa nhà này.${suggestion}` });
     }
     console.error('[Create Apartment Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo căn hộ.' });
