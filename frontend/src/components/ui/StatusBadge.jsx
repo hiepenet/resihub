@@ -81,6 +81,11 @@ const STATUS_CONFIG = {
     className: 'bg-red-50 text-red-700 border-red-200 ring-red-500/10',
     dot: 'bg-red-500',
   },
+  SETTLEMENT_DRAFT: {
+    label: 'Nháp tất toán',
+    className: 'bg-slate-50 text-slate-600 border-slate-200 ring-slate-400/10',
+    dot: 'bg-slate-400',
+  },
 };
 
 export default function StatusBadge({ status, customLabel, size = 'md', className = '' }) {

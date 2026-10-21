@@ -54,3 +54,32 @@ export function validateDeduction(input) {
 
   return { ok: true };
 }
+
+/**
+ * Compute refund and shortfall according to AC-017
+ * refund = max(0, deposit − debt − Σitems)
+ * shortfall = max(0, debt + Σitems − deposit)
+ */
+export function computeRefund({ depositAmount, outstandingDebt, items }) {
+  const dep = BigInt(depositAmount ?? 0);
+  const debt = BigInt(outstandingDebt ?? 0);
+  const sumItems = (items || []).reduce((acc, item) => acc + BigInt(item.amount ?? 0), 0n);
+
+  const totalDeductions = debt + sumItems;
+  const refund = dep > totalDeductions ? dep - totalDeductions : 0n;
+  const shortfall = totalDeductions > dep ? totalDeductions - dep : 0n;
+
+  return { refund, shortfall };
+}
+
+/**
+ * Split deposit opening into held amount and remaining collect
+ * openHeld = holdAmount ?? 0n
+ * remainingCollect = max(0n, depositAmount - openHeld)
+ */
+export function splitDepositOpening({ depositAmount, holdAmount }) {
+  const dep = BigInt(depositAmount ?? 0);
+  const openHeld = holdAmount !== null && holdAmount !== undefined ? BigInt(holdAmount) : 0n;
+  const remainingCollect = dep > openHeld ? dep - openHeld : 0n;
+  return { openHeld, remainingCollect };
+}
