@@ -70,7 +70,7 @@ router.get('/', authenticateToken, async (req, res) => {
  * Quyền: Chỉ MANAGER có quyền tạo căn hộ trên tòa mình quản lý (CRU). OWNER có quyền R (bị chặn).
  */
 router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
-  const { building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note } = req.body;
+  const { building_id, floor_id, code, area_m2, type, bedrooms, base_rent, amenities, note } = req.body;
 
   if (!building_id || !code) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Tòa nhà và mã phòng là bắt buộc.' });
@@ -93,9 +93,23 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       });
     }
 
+    // Guard tầng phải thuộc cùng tòa (B4)
+    if (floor_id) {
+      const floorCheck = await pool.query(
+        `SELECT 1 FROM floor WHERE id = $1 AND building_id = $2`,
+        [floor_id, building_id]
+      );
+      if (floorCheck.rows.length === 0) {
+        return res.status(400).json({
+          code: 'FLOOR_MISMATCH',
+          message: 'Tầng không thuộc tòa nhà này.',
+        });
+      }
+    }
+
     const result = await pool.query(
       `INSERT INTO apartment (building_id, floor_id, code, area_m2, type, bedrooms, base_rent, status, amenities, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'AVAILABLE', $8, $9)
        RETURNING *`,
       [
         building_id,
@@ -105,7 +119,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         type || '1PN',
         bedrooms || 1,
         base_rent || 0,
-        status || 'AVAILABLE',
         JSON.stringify(amenities || {}),
         note || '',
       ]
