@@ -2,6 +2,7 @@ import express from 'express';
 import { pool } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { isTransitionAllowed, APARTMENT_TRANSITIONS } from '../services/apartmentStatus.js';
 
 const router = express.Router();
 
@@ -166,6 +167,48 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     }
 
     const before = aptRes.rows[0];
+
+    // Guard: OCCUPIED/RESERVED chỉ được cập nhật tự động qua luồng Hợp đồng / Giữ chỗ (A2/FR-008)
+    if (status && ['OCCUPIED', 'RESERVED'].includes(status)) {
+      return res.status(409).json({
+        code: 'DIRECT_STATUS_CHANGE_PROHIBITED',
+        message: 'Không thể tự ý chuyển sang trạng thái Đang thuê hoặc Đã đặt cọc. Trạng thái này được cập nhật tự động qua Hợp đồng và Giữ chỗ.',
+      });
+    }
+
+    // Guard máy trạng thái (A2): chỉ AVAILABLE <-> MAINTENANCE <-> INACTIVE được đổi qua PATCH
+    if (status && !isTransitionAllowed(before.status, status)) {
+      return res.status(409).json({
+        code: 'INVALID_STATUS_TRANSITION',
+        message: `Không thể chuyển căn hộ từ ${before.status} sang ${status}. Các chuyển đổi hợp lệ từ ${before.status}: ${(APARTMENT_TRANSITIONS[before.status] || []).join(', ') || 'không có (phải qua luồng hợp đồng)'}.`,
+      });
+    }
+
+    // Guard: căn có hợp đồng ACTIVE không được đổi trạng thái, sửa diện tích phải xác nhận (A9)
+    const activeContract = await pool.query(
+      `SELECT 1 FROM contract WHERE apartment_id = $1 AND status = 'ACTIVE'`,
+      [id]
+    );
+    const hasActiveContract = activeContract.rows.length > 0;
+
+    if (status && hasActiveContract) {
+      return res.status(409).json({
+        code: 'INVALID_STATUS_TRANSITION',
+        message: 'Căn đang có hợp đồng hiệu lực, phải chấm dứt hợp đồng trước.',
+      });
+    }
+
+    if (
+      area_m2 !== undefined &&
+      hasActiveContract &&
+      Number(area_m2) !== Number(before.area_m2) &&
+      req.body.confirm_recalculate_fees !== true
+    ) {
+      return res.status(409).json({
+        code: 'AREA_CHANGE_REQUIRES_CONFIRM',
+        message: 'Đang có hợp đồng ACTIVE trên căn này. Sửa diện tích ảnh hưởng phí dịch vụ — gửi kèm confirm_recalculate_fees: true để xác nhận tính lại.',
+      });
+    }
 
     const result = await pool.query(
       `UPDATE apartment
