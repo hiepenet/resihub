@@ -294,4 +294,174 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/v1/resident/contract-requests (FR-019)
+ * Danh sách đề nghị gia hạn / chấm dứt của cư dân
+ */
+router.get('/contract-requests', authenticateToken, async (req, res) => {
+  try {
+    const personId = req.user.person_id;
+    const userId = req.user.sub;
+
+    const query = `
+      SELECT cr.id, cr.type, cr.desired_date, cr.note, cr.status, cr.created_at, cr.updated_at,
+             c.id as contract_id,
+             a.code as apartment_code,
+             b.name as building_name
+      FROM contract_request cr
+      JOIN contract c ON c.id = cr.contract_id
+      JOIN apartment a ON a.id = c.apartment_id
+      JOIN building b ON b.id = cr.building_id
+      WHERE cr.created_by = $1
+         OR c.primary_tenant_id IN (SELECT id FROM tenant WHERE person_id = $2)
+      ORDER BY cr.created_at DESC
+    `;
+    const result = await pool.query(query, [userId, personId]);
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('Lỗi lấy danh sách đề nghị:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi lấy danh sách đề nghị hợp đồng.' });
+  }
+});
+
+/**
+ * POST /api/v1/resident/contract-requests (FR-019, AC-006.1)
+ * Cư dân gửi đề nghị gia hạn hoặc chấm dứt hợp đồng
+ */
+router.post('/contract-requests', authenticateToken, async (req, res) => {
+  const { type, desired_date, note } = req.body;
+  if (!['RENEWAL', 'TERMINATION'].includes(type)) {
+    return res.status(400).json({ code: 'INVALID_TYPE', message: 'Loại đề nghị phải là RENEWAL hoặc TERMINATION.' });
+  }
+
+  try {
+    const personId = req.user.person_id;
+    const userId = req.user.sub;
+
+    // Tìm hợp đồng ACTIVE của cư dân
+    const contractRes = await pool.query(
+      `SELECT c.id, c.building_id, c.org_id, c.end_date, a.code as apartment_code
+       FROM contract c
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN apartment a ON a.id = c.apartment_id
+       WHERE t.person_id = $1 AND c.status = 'ACTIVE'
+       ORDER BY c.created_at DESC
+       LIMIT 1`,
+      [personId]
+    );
+
+    if (contractRes.rows.length === 0) {
+      return res.status(404).json({ code: 'CONTRACT_NOT_FOUND', message: 'Bạn không có hợp đồng thuê nào đang hiệu lực để gửi đề nghị.' });
+    }
+
+    const contract = contractRes.rows[0];
+
+    if (type === 'TERMINATION') {
+      if (!desired_date) {
+        return res.status(422).json({ code: 'INVALID_DATE', message: 'Vui lòng chọn ngày mong muốn chấm dứt hợp đồng.' });
+      }
+      const desired = new Date(desired_date);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (desired < today) {
+        return res.status(422).json({ code: 'INVALID_DATE', message: 'Ngày mong muốn chấm dứt phải từ hôm nay trở đi.' });
+      }
+    }
+
+    const insertRes = await pool.query(
+      `INSERT INTO contract_request (org_id, contract_id, building_id, type, desired_date, note, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'SUBMITTED', $7)
+       RETURNING *`,
+      [contract.org_id, contract.id, contract.building_id, type, desired_date || null, note?.trim() || null, userId]
+    );
+
+    // Ghi audit log
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE', 'contract_request', $2, $3)`,
+      [userId, insertRes.rows[0].id, JSON.stringify({ type, desired_date, note, contract_id: contract.id })]
+    );
+
+    const noticeNotice = type === 'TERMINATION'
+      ? 'Theo quy định (AC-006.1), đề nghị chấm dứt cần báo trước tối thiểu 30 ngày để BQL sắp xếp kiểm tra bàn giao phòng.'
+      : 'BQL sẽ liên hệ để thống nhất điều khoản gia hạn và lập phụ lục hợp đồng.';
+
+    res.status(201).json({
+      message: 'Gửi đề nghị thành công. ' + noticeNotice,
+      data: insertRes.rows[0],
+      notice_period_info: noticeNotice,
+    });
+  } catch (err) {
+    console.error('Lỗi gửi đề nghị hợp đồng:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi gửi đề nghị hợp đồng.' });
+  }
+});
+
+/**
+ * GET /api/v1/resident/deposit-transactions (D9, AC-024.1)
+ * Sổ cọc & Bảng kê giao dịch của cư dân
+ */
+router.get('/deposit-transactions', authenticateToken, async (req, res) => {
+  try {
+    const personId = req.user.person_id;
+
+    const contractRes = await pool.query(
+      `SELECT c.id as contract_id, c.status as contract_status, c.deposit_amount, c.start_date, c.end_date,
+              d.id as deposit_id, d.amount_held, d.status as deposit_status, d.settlement,
+              a.code as apartment_code, b.name as building_name
+       FROM contract c
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = c.building_id
+       LEFT JOIN deposit d ON d.contract_id = c.id
+       WHERE t.person_id = $1
+       ORDER BY (CASE WHEN c.status = 'ACTIVE' THEN 0 ELSE 1 END), c.created_at DESC
+       LIMIT 1`,
+      [personId]
+    );
+
+    if (contractRes.rows.length === 0) {
+      return res.json({ data: { contract: null, deposit: null, transactions: [] } });
+    }
+
+    const contractInfo = contractRes.rows[0];
+    let transactions = [];
+
+    if (contractInfo.deposit_id) {
+      const txRes = await pool.query(
+        `SELECT id, type, amount, category, method, note, status, created_at
+         FROM deposit_transaction
+         WHERE deposit_id = $1 AND status = 'APPROVED'
+         ORDER BY created_at ASC`,
+        [contractInfo.deposit_id]
+      );
+      transactions = txRes.rows;
+    }
+
+    res.json({
+      data: {
+        contract: {
+          id: contractInfo.contract_id,
+          status: contractInfo.contract_status,
+          deposit_amount: contractInfo.deposit_amount,
+          start_date: contractInfo.start_date,
+          end_date: contractInfo.end_date,
+          apartment_code: contractInfo.apartment_code,
+          building_name: contractInfo.building_name,
+        },
+        deposit: contractInfo.deposit_id ? {
+          id: contractInfo.deposit_id,
+          amount_held: contractInfo.amount_held,
+          status: contractInfo.deposit_status,
+          settlement: contractInfo.settlement,
+        } : null,
+        transactions,
+      },
+    });
+  } catch (err) {
+    console.error('Lỗi lấy sổ cọc cư dân:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi lấy thông tin sổ cọc.' });
+  }
+});
+
 export default router;

@@ -58,6 +58,266 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
 });
 
 /**
+ * GET /api/v1/contracts/requests (FR-019)
+ * Danh sách đề nghị gia hạn/chấm dứt từ cư dân dành cho BQL/Chủ nhà
+ */
+router.get('/requests', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  try {
+    const orgId = req.user.org_id;
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    const isManager = userRoles.includes('MANAGER');
+    const { building_id, status } = req.query;
+
+    let sql = `
+      SELECT cr.id, cr.org_id, cr.contract_id, cr.building_id, cr.type, cr.desired_date, cr.note, cr.status, cr.created_by, cr.created_at, cr.updated_at,
+             c.status as contract_status, c.start_date, c.end_date, c.rent_amount,
+             a.code as apartment_code,
+             b.name as building_name,
+             p.full_name as resident_name,
+             p.phone as resident_phone
+      FROM contract_request cr
+      JOIN contract c ON c.id = cr.contract_id
+      JOIN apartment a ON a.id = c.apartment_id
+      JOIN building b ON b.id = cr.building_id
+      JOIN tenant t ON t.id = c.primary_tenant_id
+      JOIN person p ON p.id = t.person_id
+      WHERE cr.org_id = $1
+    `;
+    const params = [orgId];
+
+    if (isManager && !isOwner) {
+      params.push(req.user.sub);
+      sql += ` AND cr.building_id IN (
+        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
+      )`;
+    }
+
+    if (building_id) {
+      params.push(building_id);
+      sql += ` AND cr.building_id = $${params.length}`;
+    }
+
+    if (status) {
+      params.push(status);
+      sql += ` AND cr.status = $${params.length}`;
+    }
+
+    sql += ` ORDER BY cr.created_at DESC`;
+    const result = await pool.query(sql, params);
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[Contract Requests Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách đề nghị hợp đồng.' });
+  }
+});
+
+/**
+ * POST /api/v1/contracts/requests/:id/approve (OWNER)
+ * Phê duyệt đề nghị gia hạn/chấm dứt từ cư dân
+ */
+router.post('/requests/:id/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+
+  try {
+    await client.query('BEGIN');
+
+    const reqRes = await client.query(
+      `SELECT cr.*, c.apartment_id, a.code as apartment_code, b.name as building_name, c.primary_tenant_id
+       FROM contract_request cr
+       JOIN contract c ON c.id = cr.contract_id
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = cr.building_id
+       WHERE cr.id = $1
+       FOR UPDATE OF cr`,
+      [id]
+    );
+
+    if (reqRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+    }
+
+    const requestItem = reqRes.rows[0];
+
+    if (requestItem.status !== 'SUBMITTED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_PROCESSED', message: 'Đề nghị này đã được xử lý trước đó.' });
+    }
+
+    const updatedRes = await client.query(
+      `UPDATE contract_request
+       SET status = 'APPROVED', updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'APPROVE', 'contract_request', $2, $3, $4)`,
+      [
+        req.user.sub,
+        id,
+        JSON.stringify({ status: requestItem.status }),
+        JSON.stringify({ status: 'APPROVED' }),
+      ]
+    );
+
+    let targetUserId = requestItem.created_by;
+    if (!targetUserId) {
+      const uRes = await client.query(
+        `SELECT u.id as user_id
+         FROM app_user u
+         JOIN person p ON p.id = u.person_id
+         JOIN tenant t ON t.person_id = p.id
+         WHERE t.id = $1 LIMIT 1`,
+        [requestItem.primary_tenant_id]
+      );
+      if (uRes.rows.length > 0) targetUserId = uRes.rows[0].user_id;
+    }
+
+    if (targetUserId) {
+      const isTerm = requestItem.type === 'TERMINATION';
+      const title = isTerm ? 'Phê duyệt đề nghị chấm dứt hợp đồng' : 'Phê duyệt đề nghị gia hạn hợp đồng';
+      const content = isTerm
+        ? `Ban Quản Lý đã phê duyệt đề nghị chấm dứt hợp đồng thuê căn hộ ${requestItem.apartment_code}. Vui lòng liên hệ BQL để thống nhất lịch bàn giao phòng và hoàn tất thủ tục tất toán.`
+        : `Ban Quản Lý đã phê duyệt đề nghị gia hạn hợp đồng thuê căn hộ ${requestItem.apartment_code}. BQL sẽ sớm gửi phụ lục gia hạn hợp đồng đến bạn.`;
+
+      await client.query(
+        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+         VALUES ($1, $2, $3, $4, 'CONTRACT_REQUEST_APPROVED', $5)`,
+        [
+          requestItem.org_id,
+          targetUserId,
+          title,
+          content,
+          JSON.stringify({ request_id: id, contract_id: requestItem.contract_id, link: '/resident' }),
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Đã phê duyệt đề nghị của cư dân thành công.',
+      data: updatedRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Approve Contract Request Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phê duyệt đề nghị.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/requests/:id/reject (OWNER)
+ * Từ chối đề nghị gia hạn/chấm dứt từ cư dân
+ */
+router.post('/requests/:id/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const { client, release } = await getUserClient(req);
+
+  try {
+    await client.query('BEGIN');
+
+    const reqRes = await client.query(
+      `SELECT cr.*, c.apartment_id, a.code as apartment_code, b.name as building_name, c.primary_tenant_id
+       FROM contract_request cr
+       JOIN contract c ON c.id = cr.contract_id
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = cr.building_id
+       WHERE cr.id = $1
+       FOR UPDATE OF cr`,
+      [id]
+    );
+
+    if (reqRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+    }
+
+    const requestItem = reqRes.rows[0];
+
+    if (requestItem.status !== 'SUBMITTED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_PROCESSED', message: 'Đề nghị này đã được xử lý trước đó.' });
+    }
+
+    const updatedNote = reason
+      ? (requestItem.note ? `${requestItem.note}\n[Lý do từ chối]: ${reason.trim()}` : `[Lý do từ chối]: ${reason.trim()}`)
+      : requestItem.note;
+
+    const updatedRes = await client.query(
+      `UPDATE contract_request
+       SET status = 'REJECTED', note = $2, updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id, updatedNote]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'REJECT', 'contract_request', $2, $3, $4)`,
+      [
+        req.user.sub,
+        id,
+        JSON.stringify({ status: requestItem.status }),
+        JSON.stringify({ status: 'REJECTED', reason }),
+      ]
+    );
+
+    let targetUserId = requestItem.created_by;
+    if (!targetUserId) {
+      const uRes = await client.query(
+        `SELECT u.id as user_id
+         FROM app_user u
+         JOIN person p ON p.id = u.person_id
+         JOIN tenant t ON t.person_id = p.id
+         WHERE t.id = $1 LIMIT 1`,
+        [requestItem.primary_tenant_id]
+      );
+      if (uRes.rows.length > 0) targetUserId = uRes.rows[0].user_id;
+    }
+
+    if (targetUserId) {
+      const isTerm = requestItem.type === 'TERMINATION';
+      const title = `Từ chối đề nghị ${isTerm ? 'chấm dứt' : 'gia hạn'} hợp đồng`;
+      const content = `Đề nghị ${isTerm ? 'chấm dứt' : 'gia hạn'} hợp đồng thuê căn hộ ${requestItem.apartment_code} của bạn đã bị từ chối.${reason ? ' Lý do: ' + reason.trim() : ''}`;
+
+      await client.query(
+        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+         VALUES ($1, $2, $3, $4, 'CONTRACT_REQUEST_REJECTED', $5)`,
+        [
+          requestItem.org_id,
+          targetUserId,
+          title,
+          content,
+          JSON.stringify({ request_id: id, contract_id: requestItem.contract_id, reason, link: '/resident' }),
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Đã từ chối đề nghị của cư dân.',
+      data: updatedRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Reject Contract Request Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối đề nghị.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
  * GET /api/v1/contracts/:id
  */
 router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
@@ -1596,6 +1856,446 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối phụ lục hợp đồng.' });
   } finally {
     await release();
+  }
+});
+
+/**
+ * GET /api/v1/contracts/:id/template (FR-020, C10)
+ * Xuất mẫu hợp đồng thuê A4 chuẩn pháp lý (HTML printable)
+ */
+router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const contractRes = await pool.query(
+      `SELECT c.*,
+              a.code as apartment_code, a.area_m2, a.bedrooms,
+              b.id as building_id, b.name as building_name, b.address as building_address,
+              o.name as org_name,
+              p.full_name as tenant_name, p.phone as tenant_phone, p.email as tenant_email,
+              p.id_number as tenant_id_number, p.dob as tenant_dob
+       FROM contract c
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = c.building_id
+       JOIN organization o ON o.id = b.org_id
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN person p ON p.id = t.person_id
+       WHERE c.id = $1`,
+      [id]
+    );
+
+    if (contractRes.rows.length === 0) {
+      return res.status(404).send('<h1>404 Không tìm thấy hợp đồng</h1>');
+    }
+
+    const c = contractRes.rows[0];
+
+    // Kiểm tra quyền theo tòa nếu là MANAGER
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    if (userRoles.includes('MANAGER') && !userRoles.includes('OWNER')) {
+      const checkMgr = await pool.query(
+        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+        [req.user.sub, c.building_id]
+      );
+      if (checkMgr.rows.length === 0) {
+        return res.status(403).send('<h1>403 Bạn không có quyền truy cập tòa nhà này</h1>');
+      }
+    }
+
+    // Lấy thành viên cùng ở
+    const occRes = await pool.query(
+      `SELECT co.relationship, p.full_name, p.phone, p.id_number
+       FROM contract_occupant co
+       JOIN person p ON p.id = co.person_id
+       WHERE co.contract_id = $1
+       ORDER BY co.created_at ASC`,
+      [id]
+    );
+    const occupants = occRes.rows;
+
+    // Lấy bảng giá dịch vụ
+    const spRes = await pool.query(
+      `SELECT code, custom_price, effective_from
+       FROM contract_service_price
+       WHERE contract_id = $1
+       ORDER BY code ASC`,
+      [id]
+    );
+    const servicePrices = spRes.rows;
+
+    const fmtDate = (d) => {
+      if (!d) return '—';
+      const dt = new Date(d);
+      return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
+    };
+
+    const fmtMoney = (m) => {
+      if (m == null) return '0 ₫';
+      return Number(m).toLocaleString('vi-VN') + ' ₫';
+    };
+
+    const isDraft = c.status !== 'ACTIVE';
+    const watermarkHtml = isDraft
+      ? `<div class="watermark">DỰ THẢO - CHƯA KÍCH HOẠT</div>`
+      : '';
+
+    const contractCode = `HĐ-${c.id.slice(0, 8).toUpperCase()}`;
+
+    const serviceCodeLabels = {
+      ELEC: { name: 'Điện sinh hoạt', unit: 'kWh' },
+      WATER: { name: 'Nước sinh hoạt', unit: 'm³' },
+      INTERNET: { name: 'Internet / Wifi', unit: 'tháng' },
+      CLEANING: { name: 'Vệ sinh & Rác thải', unit: 'tháng' },
+      PARKING_MOTO: { name: 'Gửi xe máy', unit: 'xe/tháng' },
+      PARKING_CAR: { name: 'Gửi xe ô tô', unit: 'xe/tháng' },
+      MANAGEMENT: { name: 'Phí quản lý tòa nhà', unit: 'tháng' },
+    };
+
+    const serviceRowsHtml = servicePrices.length > 0
+      ? servicePrices.map((sp, idx) => {
+          const meta = serviceCodeLabels[sp.code] || { name: sp.code, unit: 'tháng' };
+          return `
+            <tr>
+              <td style="text-align:center;">${idx + 1}</td>
+              <td><strong>${meta.name}</strong> (${sp.code})</td>
+              <td style="text-align:center;">${meta.unit}</td>
+              <td style="text-align:right; font-weight:600;">${fmtMoney(sp.custom_price)}</td>
+              <td style="text-align:center;">${fmtDate(sp.effective_from)}</td>
+            </tr>
+          `;
+        }).join('')
+      : `
+        <tr><td colspan="5" style="text-align:center; color:#666; font-style:italic;">Theo biểu phí tiêu chuẩn của tòa nhà.</td></tr>
+      `;
+
+    const occupantsHtml = occupants.length > 0
+      ? `
+        <p><strong>Người cùng lưu trú:</strong></p>
+        <table class="bordered-table">
+          <thead>
+            <tr>
+              <th style="width:40px;">STT</th>
+              <th>Họ và tên</th>
+              <th>Quan hệ</th>
+              <th>Số điện thoại</th>
+              <th>Số CCCD/Hộ chiếu</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${occupants.map((occ, i) => `
+              <tr>
+                <td style="text-align:center;">${i + 1}</td>
+                <td><strong>${occ.full_name}</strong></td>
+                <td>${occ.relationship || 'Khác'}</td>
+                <td>${occ.phone || '—'}</td>
+                <td>${occ.id_number || '—'}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `
+      : '';
+
+    const html = `<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Hợp đồng thuê căn hộ - ${c.apartment_code}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 20mm 15mm 20mm 15mm;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: 'Times New Roman', Times, serif, 'Segoe UI', Arial, sans-serif;
+      font-size: 13pt;
+      line-height: 1.5;
+      color: #111;
+      margin: 0;
+      padding: 0;
+      background-color: #f1f5f9;
+    }
+    .page-container {
+      max-width: 210mm;
+      min-height: 297mm;
+      margin: 20px auto;
+      background: #fff;
+      padding: 20mm 20mm;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      position: relative;
+    }
+    .header-section {
+      text-align: center;
+      margin-bottom: 25px;
+    }
+    .header-national {
+      font-size: 12pt;
+      font-weight: bold;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .header-motto {
+      font-size: 13pt;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+    .divider {
+      width: 160px;
+      margin: 0 auto 20px auto;
+      border-top: 1.5px solid #111;
+    }
+    .contract-title {
+      font-size: 18pt;
+      font-weight: bold;
+      text-transform: uppercase;
+      margin: 15px 0 5px 0;
+    }
+    .contract-code {
+      font-size: 11pt;
+      font-style: italic;
+      color: #444;
+      margin-bottom: 20px;
+    }
+    h3 {
+      font-size: 13pt;
+      text-transform: uppercase;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 4px;
+      margin-top: 18px;
+      margin-bottom: 8px;
+    }
+    p {
+      margin: 6px 0;
+      text-align: justify;
+    }
+    .field-row {
+      display: flex;
+      margin: 4px 0;
+    }
+    .field-label {
+      width: 170px;
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .field-value {
+      flex: 1;
+    }
+    .bordered-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 12pt;
+    }
+    .bordered-table th, .bordered-table td {
+      border: 1px solid #444;
+      padding: 6px 10px;
+    }
+    .bordered-table th {
+      background-color: #f8fafc;
+      font-weight: bold;
+      text-align: left;
+    }
+    .signature-grid {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 40px;
+      page-break-inside: avoid;
+    }
+    .signature-box {
+      width: 45%;
+      text-align: center;
+    }
+    .signature-space {
+      height: 90px;
+    }
+    .watermark {
+      position: fixed;
+      top: 40%;
+      left: 15%;
+      right: 15%;
+      text-align: center;
+      transform: rotate(-30deg);
+      font-size: 42pt;
+      font-weight: 900;
+      color: rgba(220, 38, 38, 0.12);
+      border: 5px dashed rgba(220, 38, 38, 0.22);
+      padding: 20px 30px;
+      border-radius: 12px;
+      pointer-events: none;
+      z-index: 1000;
+      letter-spacing: 2px;
+    }
+    .toolbar {
+      position: sticky;
+      top: 0;
+      background: #0f172a;
+      color: #fff;
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      z-index: 9999;
+    }
+    .btn-print {
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      padding: 8px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-print:hover {
+      background: #4338ca;
+    }
+    @media print {
+      body {
+        background: transparent;
+      }
+      .toolbar {
+        display: none !important;
+      }
+      .page-container {
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div style="font-weight:600; font-size:14px;">
+      Mẫu hợp đồng thuê căn hộ: <strong>${c.apartment_code}</strong> — ${c.building_name} (${contractCode})
+    </div>
+    <button class="btn-print" onclick="window.print()">
+      🖨️ In hợp đồng (Ctrl + P)
+    </button>
+  </div>
+
+  <div class="page-container">
+    ${watermarkHtml}
+
+    <div class="header-section">
+      <div class="header-national">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>
+      <div class="header-motto">Độc lập – Tự do – Hạnh phúc</div>
+      <div class="divider"></div>
+      <div class="contract-title">HỢP ĐỒNG THUÊ CĂN HỘ</div>
+      <div class="contract-code">Số: ${contractCode} / ${c.building_name}</div>
+    </div>
+
+    <p><em>Hôm nay, ngày ${new Date().getDate()} tháng ${new Date().getMonth() + 1} năm ${new Date().getFullYear()}, tại ${c.building_name}, chúng tôi gồm có:</em></p>
+
+    <h3>BÊN CHO THUÊ (BÊN A)</h3>
+    <div class="field-row">
+      <div class="field-label">Đơn vị quản lý:</div>
+      <div class="field-value"><strong>${c.org_name || 'Ban Quản Lý Tòa Nhà'}</strong></div>
+    </div>
+    <div class="field-row">
+      <div class="field-label">Tòa nhà:</div>
+      <div class="field-value">${c.building_name}</div>
+    </div>
+    <div class="field-row">
+      <div class="field-label">Địa chỉ:</div>
+      <div class="field-value">${c.building_address}</div>
+    </div>
+
+    <h3>BÊN THUÊ (BÊN B)</h3>
+    <div class="field-row">
+      <div class="field-label">Họ và tên:</div>
+      <div class="field-value"><strong>${c.tenant_name}</strong></div>
+    </div>
+    <div class="field-row">
+      <div class="field-label">Số CCCD / Hộ chiếu:</div>
+      <div class="field-value">${c.tenant_id_number || '—'}</div>
+    </div>
+    <div class="field-row">
+      <div class="field-label">Số điện thoại:</div>
+      <div class="field-value">${c.tenant_phone}</div>
+    </div>
+    <div class="field-row">
+      <div class="field-label">Email:</div>
+      <div class="field-value">${c.tenant_email || '—'}</div>
+    </div>
+
+    ${occupantsHtml}
+
+    <h3>ĐIỀU 1: ĐỐI TƯỢNG HỢP ĐỒNG VÀ MỤC ĐÍCH THUÊ</h3>
+    <p>1.1. Bên A đồng ý cho Bên B thuê căn hộ số <strong>${c.apartment_code}</strong>, thuộc tòa nhà <strong>${c.building_name}</strong>, địa chỉ: ${c.building_address}.</p>
+    <p>1.2. Diện tích sàn căn hộ: <strong>${c.area_m2 || '—'} m²</strong>, số phòng ngủ: <strong>${c.bedrooms || 1}</strong>.</p>
+    <p>1.3. Mục đích thuê: Dùng để ở sinh hoạt hợp pháp, không sử dụng vào mục đích kinh doanh trái phép hoặc làm nơi chứa hàng nguy hiểm.</p>
+
+    <h3>ĐIỀU 2: THỜI HẠN THUÊ</h3>
+    <p>2.1. Thời hạn thuê bắt đầu từ ngày <strong>${fmtDate(c.start_date)}</strong> đến hết ngày <strong>${fmtDate(c.end_date)}</strong>.</p>
+    <p>2.2. Trước khi hết hạn hợp đồng tối thiểu 30 ngày (theo AC-006.1), Bên B có quyền gửi đề nghị gia hạn hoặc chấm dứt hợp đồng qua Cổng cư dân để hai bên tiến hành ký phụ lục hoặc lập thủ tục tất toán.</p>
+
+    <h3>ĐIỀU 3: GIÁ THUÊ VÀ PHƯƠNG THỨC THANH TOÁN</h3>
+    <p>3.1. Giá thuê căn hộ: <strong>${fmtMoney(c.rent_amount)} / tháng</strong> (Bằng chữ: theo quy định thực tế).</p>
+    <p>3.2. Chu kỳ thanh toán: <strong>${c.billing_cycle === 'quarterly' ? '3 tháng / lần' : 'Hàng tháng'}</strong>.</p>
+    <p>3.3. Ngày phát hành hóa đơn định kỳ: Ngày <strong>${c.billing_day || 1}</strong> hàng tháng. Thời hạn thanh toán: Trong vòng <strong>${c.payment_due_days || 5}</strong> ngày kể từ ngày thông báo.</p>
+
+    <h3>ĐIỀU 4: TIỀN ĐẶT CỌC BẢO ĐẢM VÀ QUY TẮC HOÀN TRẢ</h3>
+    <p>4.1. Tiền đặt cọc bảo đảm thực hiện hợp đồng: <strong>${fmtMoney(c.deposit_amount)}</strong>.</p>
+    <p>4.2. Số tiền cọc này được Bên A bảo lưu an toàn trong suốt thời gian hiệu lực của hợp đồng và không tính lãi.</p>
+    <p>4.3. <strong>Quy tắc tất toán hoàn cọc:</strong> Khi hợp đồng kết thúc hoặc chấm dứt hợp lệ, Bên A lập hồ sơ tất toán trong vòng 3-5 ngày làm việc. Số tiền hoàn trả thực tế được tính theo công thức:</p>
+    <p style="text-align:center; font-weight:bold; background:#f8fafc; padding:8px; border:1px solid #cbd5e1; border-radius:6px;">
+      Tiền hoàn trả = Tiền cọc bảo đảm − Tổng khấu trừ hư hại vật chất − Công nợ dịch vụ tồn đọng
+    </p>
+
+    <h3>ĐIỀU 5: BIỂU PHÍ DỊCH VỤ VÀ TIỆN ÍCH</h3>
+    <p>Các chi phí phát sinh hàng tháng theo chỉ số tiêu thụ hoặc mức cố định quy định dưới đây:</p>
+    <table class="bordered-table">
+      <thead>
+        <tr>
+          <th style="width:40px; text-align:center;">STT</th>
+          <th>Dịch vụ</th>
+          <th style="width:100px; text-align:center;">Đơn vị</th>
+          <th style="width:140px; text-align:right;">Đơn giá áp dụng</th>
+          <th style="width:120px; text-align:center;">Hiệu lực từ</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${serviceRowsHtml}
+      </tbody>
+    </table>
+
+    <h3>ĐIỀU 6: ĐIỀU KHOẢN THI HÀNH VÀ CAM KẾT CHUNG</h3>
+    <p>6.1. Hai bên cam kết thực hiện đúng và đầy đủ các điều khoản đã thỏa thuận trong hợp đồng.</p>
+    <p>6.2. Hợp đồng được lập thành 02 (hai) bản có giá trị pháp lý như nhau, mỗi bên giữ 01 bản để thực hiện.</p>
+
+    <div class="signature-grid">
+      <div class="signature-box">
+        <strong>ĐẠI DIỆN BÊN A</strong><br>
+        <em>(Ký, ghi rõ họ tên và đóng dấu)</em>
+        <div class="signature-space"></div>
+        <p><strong>${c.org_name || 'Ban Quản Lý'}</strong></p>
+      </div>
+
+      <div class="signature-box">
+        <strong>ĐẠI DIỆN BÊN B</strong><br>
+        <em>(Ký và ghi rõ họ tên)</em>
+        <div class="signature-space"></div>
+        <p><strong>${c.tenant_name}</strong></p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[Contract Template Error]:', err);
+    res.status(500).send('<h1>500 Lỗi máy chủ khi tạo mẫu in hợp đồng</h1>');
   }
 });
 

@@ -26,6 +26,7 @@ import {
   Droplets,
   HelpCircle,
   ChevronRight,
+  Plus,
 } from 'lucide-react';
 import api from '../../services/api';
 import { useAuthStore } from '../../stores/authStore';
@@ -42,6 +43,19 @@ export default function ResidentPortalPage() {
   const [showServiceModal, setShowServiceModal] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
   const [selectedAptForContact, setSelectedAptForContact] = useState(null);
+  const [showContractRequestModal, setShowContractRequestModal] = useState(false);
+  const [showDepositLedgerModal, setShowDepositLedgerModal] = useState(false);
+
+  // Contract requests & deposit ledger
+  const [contractRequests, setContractRequests] = useState([]);
+  const [depositLedger, setDepositLedger] = useState(null);
+  const [contractRequestForm, setContractRequestForm] = useState({
+    type: 'RENEWAL',
+    desired_date: '',
+    note: '',
+  });
+  const [isSubmittingContractReq, setIsSubmittingContractReq] = useState(false);
+  const [contractReqSuccessMessage, setContractReqSuccessMessage] = useState('');
 
   // Form states
   const [applicationForm, setApplicationForm] = useState({
@@ -85,8 +99,28 @@ export default function ResidentPortalPage() {
     }
   };
 
+  const fetchContractRequests = async () => {
+    try {
+      const res = await api.get('/api/v1/resident/contract-requests');
+      setContractRequests(res.data?.data || []);
+    } catch (err) {
+      console.error('Lỗi tải danh sách đề nghị hợp đồng:', err);
+    }
+  };
+
+  const fetchDepositLedger = async () => {
+    try {
+      const res = await api.get('/api/v1/resident/deposit-transactions');
+      setDepositLedger(res.data?.data || null);
+    } catch (err) {
+      console.error('Lỗi tải sổ cọc cư dân:', err);
+    }
+  };
+
   useEffect(() => {
     fetchOverview();
+    fetchContractRequests();
+    fetchDepositLedger();
   }, []);
 
   const formatVND = (amount) => {
@@ -143,6 +177,27 @@ export default function ResidentPortalPage() {
       alert(err.response?.data?.message || 'Lỗi gửi yêu cầu hỗ trợ.');
     } finally {
       setIsSubmittingService(false);
+    }
+  };
+
+  // Submit Contract Request (FR-019, AC-006.1)
+  const handleSubmitContractRequest = async (e) => {
+    e.preventDefault();
+    setIsSubmittingContractReq(true);
+    setContractReqSuccessMessage('');
+    try {
+      const res = await api.post('/api/v1/resident/contract-requests', contractRequestForm);
+      setContractReqSuccessMessage(res.data?.message || 'Đã gửi đề nghị thành công!');
+      setTimeout(() => {
+        setShowContractRequestModal(false);
+        setContractRequestForm({ type: 'RENEWAL', desired_date: '', note: '' });
+        setContractReqSuccessMessage('');
+        fetchContractRequests();
+      }, 2000);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi gửi đề nghị.');
+    } finally {
+      setIsSubmittingContractReq(false);
     }
   };
 
@@ -208,8 +263,16 @@ export default function ResidentPortalPage() {
                 </p>
               </div>
 
-              {/* Quick Contact Button */}
-              <div className="flex items-center gap-3">
+              {/* Quick Contact & Action Buttons */}
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                <button
+                  id="btn-resident-contract-request"
+                  onClick={() => setShowContractRequestModal(true)}
+                  className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm text-white text-xs font-semibold transition-all border border-white/20 flex items-center space-x-2"
+                >
+                  <FileText className="w-4 h-4 text-amber-300" />
+                  <span>Đề nghị HĐ (Gia hạn / Trả phòng)</span>
+                </button>
                 <button
                   id="btn-resident-call-bql"
                   onClick={() => setShowContactModal(true)}
@@ -240,14 +303,27 @@ export default function ResidentPortalPage() {
               </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
-              <span className="text-xs font-semibold text-slate-500">Tiền cọc an toàn đang giữ</span>
+            <div
+              className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between cursor-pointer hover:border-indigo-300 transition-all hover:shadow-md"
+              onClick={() => setShowDepositLedgerModal(true)}
+              title="Nhấn để xem Sổ cọc & Bảng kê thanh lý"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-500">Tiền cọc an toàn đang giữ</span>
+                <span className="text-[11px] font-semibold text-indigo-600 flex items-center gap-0.5">
+                  Sổ cọc <ChevronRight className="w-3 h-3" />
+                </span>
+              </div>
               <div className="mt-2">
                 <span className="text-2xl font-bold text-indigo-600">
-                  {formatVND(contract.deposit_held_amount || contract.deposit_amount)}
+                  {formatVND(
+                    depositLedger?.deposit?.amount_held != null
+                      ? depositLedger.deposit.amount_held
+                      : (contract.deposit_held_amount || contract.deposit_amount)
+                  )}
                 </span>
                 <span className="text-xs text-emerald-600 font-medium block mt-0.5">
-                  ✓ Trạng thái: {contract.deposit_status || 'HELD'} (Đang bảo lưu)
+                  ✓ Trạng thái: {depositLedger?.deposit?.status || contract.deposit_status || 'HELD'}
                 </span>
               </div>
             </div>
@@ -274,6 +350,103 @@ export default function ResidentPortalPage() {
               </div>
             </div>
           </div>
+
+          {/* Banner Bảng kê tất toán cọc nếu có */}
+          {depositLedger?.deposit?.settlement && (
+            <div
+              className="bg-indigo-50/90 border border-indigo-200 p-4 rounded-2xl flex items-center justify-between cursor-pointer hover:bg-indigo-100/70 transition-colors shadow-sm"
+              onClick={() => setShowDepositLedgerModal(true)}
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-base shadow-sm">
+                  📋
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-indigo-950">
+                    Hồ sơ tất toán tiền cọc đang được xử lý
+                  </h4>
+                  <p className="text-xs text-indigo-700 mt-0.5">
+                    Số tiền dự kiến hoàn trả:{' '}
+                    <strong className="text-emerald-700 font-bold">
+                      {formatVND(depositLedger.deposit.settlement.refund)}
+                    </strong>
+                    {depositLedger.deposit.settlement.shortfall > 0 && (
+                      <span className="ml-2 text-rose-600">
+                        (Cần nộp bù sau trả phòng: {formatVND(depositLedger.deposit.settlement.shortfall)})
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+              <button className="px-3 py-1.5 text-xs font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-xl shadow-sm hover:bg-slate-50">
+                Xem bảng kê chi tiết ➔
+              </button>
+            </div>
+          )}
+
+          {/* Lịch sử đề nghị hợp đồng của cư dân */}
+          {contractRequests.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                  <FileText className="w-5 h-5 text-indigo-600" />
+                  <span>Đề nghị hợp đồng của tôi</span>
+                </h2>
+                <button
+                  onClick={() => setShowContractRequestModal(true)}
+                  className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Gửi đề nghị mới
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-semibold">
+                    <tr>
+                      <th className="py-2.5 px-3">Loại đề nghị</th>
+                      <th className="py-2.5 px-3">Ngày mong muốn</th>
+                      <th className="py-2.5 px-3">Ghi chú</th>
+                      <th className="py-2.5 px-3">Trạng thái</th>
+                      <th className="py-2.5 px-3">Ngày gửi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {contractRequests.map((req) => (
+                      <tr key={req.id} className="hover:bg-slate-50/50">
+                        <td className="py-2.5 px-3 font-semibold">
+                          {req.type === 'TERMINATION' ? (
+                            <span className="text-rose-600">Chấm dứt & Trả phòng</span>
+                          ) : (
+                            <span className="text-indigo-600">Gia hạn hợp đồng</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-mono font-medium">{formatDate(req.desired_date)}</td>
+                        <td className="py-2.5 px-3 text-slate-600 max-w-xs whitespace-pre-line">{req.note || '—'}</td>
+                        <td className="py-2.5 px-3">
+                          {req.status === 'SUBMITTED' && (
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                              Chờ BQL duyệt
+                            </span>
+                          )}
+                          {req.status === 'APPROVED' && (
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              ✓ Đã phê duyệt
+                            </span>
+                          )}
+                          {req.status === 'REJECTED' && (
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                              ✕ Từ chối
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-400">{formatDate(req.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* B9: Thẻ Hồ sơ của tôi (thông tin cư dân lưu trong hệ thống) */}
           <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm">
@@ -938,6 +1111,323 @@ export default function ResidentPortalPage() {
                   <span>Gọi ngay: {manager_contact?.phone || '0901.234.567'}</span>
                 </a>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 4: ĐỀ NGHỊ HỢP ĐỒNG (GIA HẠN / TRẢ PHÒNG) (FR-019, AC-006.1)       */}
+      {/* ========================================================================= */}
+      {showContractRequestModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 animate-scaleUp">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center space-x-2">
+                <FileText className="w-5 h-5 text-indigo-600" />
+                <h3 className="text-base font-bold text-slate-900">Gửi đề nghị Hợp đồng</h3>
+              </div>
+              <button
+                onClick={() => setShowContractRequestModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {contractReqSuccessMessage ? (
+              <div className="py-8 text-center space-y-3">
+                <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <p className="text-sm font-bold text-slate-800">{contractReqSuccessMessage}</p>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitContractRequest} className="py-4 space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-2">Loại đề nghị:</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label
+                      className={`p-3 rounded-xl border flex items-center space-x-2.5 cursor-pointer text-xs font-semibold transition-all ${
+                        contractRequestForm.type === 'RENEWAL'
+                          ? 'border-indigo-600 bg-indigo-50/60 text-indigo-900 ring-2 ring-indigo-500/20'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="req_type"
+                        value="RENEWAL"
+                        checked={contractRequestForm.type === 'RENEWAL'}
+                        onChange={(e) => setContractRequestForm({ ...contractRequestForm, type: e.target.value })}
+                        className="text-indigo-600"
+                      />
+                      <span>Gia hạn hợp đồng</span>
+                    </label>
+
+                    <label
+                      className={`p-3 rounded-xl border flex items-center space-x-2.5 cursor-pointer text-xs font-semibold transition-all ${
+                        contractRequestForm.type === 'TERMINATION'
+                          ? 'border-rose-600 bg-rose-50/60 text-rose-900 ring-2 ring-rose-500/20'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="req_type"
+                        value="TERMINATION"
+                        checked={contractRequestForm.type === 'TERMINATION'}
+                        onChange={(e) => setContractRequestForm({ ...contractRequestForm, type: e.target.value })}
+                        className="text-rose-600"
+                      />
+                      <span>Chấm dứt & Trả phòng</span>
+                    </label>
+                  </div>
+                </div>
+
+                {contractRequestForm.type === 'TERMINATION' && (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 space-y-1">
+                    <p className="font-semibold flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                      Quy định báo trước (AC-006.1):
+                    </p>
+                    <p>
+                      Đề nghị chấm dứt cần báo trước tối thiểu <strong>30 ngày</strong> để BQL sắp xếp lịch kiểm tra hiện trạng bàn giao phòng và hoàn tất thủ tục tất toán tiền cọc trong 3-5 ngày làm việc.
+                    </p>
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    {contractRequestForm.type === 'TERMINATION'
+                      ? 'Ngày mong muốn trả phòng bàn giao *'
+                      : 'Ngày kết thúc mới mong muốn'}
+                  </label>
+                  <input
+                    type="date"
+                    required={contractRequestForm.type === 'TERMINATION'}
+                    min={new Date().toISOString().split('T')[0]}
+                    value={contractRequestForm.desired_date}
+                    onChange={(e) => setContractRequestForm({ ...contractRequestForm, desired_date: e.target.value })}
+                    className="w-full px-3.5 py-2.5 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Ghi chú gửi Ban Quản Lý:</label>
+                  <textarea
+                    rows={3}
+                    value={contractRequestForm.note}
+                    onChange={(e) => setContractRequestForm({ ...contractRequestForm, note: e.target.value })}
+                    placeholder={
+                      contractRequestForm.type === 'TERMINATION'
+                        ? 'Lý do trả phòng, thời gian thuận tiện để kỹ thuật viên kiểm tra căn hộ...'
+                        : 'Thời hạn mong muốn gia hạn (ví dụ: 6 tháng, 12 tháng), đề xuất điều chỉnh...'
+                    }
+                    className="w-full px-3.5 py-2.5 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div className="pt-2 flex items-center justify-end space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowContractRequestModal(false)}
+                    className="px-3.5 py-2 text-xs text-slate-600 hover:bg-slate-100 rounded-xl"
+                  >
+                    Hủy
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSubmittingContractReq}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-md disabled:opacity-50"
+                  >
+                    {isSubmittingContractReq ? 'Đang gửi...' : 'Gửi đề nghị'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 5: SỔ CỌC & BẢNG KÊ THANH LÝ (D9, AC-024.1)                         */}
+      {/* ========================================================================= */}
+      {showDepositLedgerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto animate-scaleUp">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center space-x-2">
+                <CreditCard className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Sổ theo dõi Tiền cọc & Bảng kê thanh lý</h3>
+                  <p className="text-xs text-slate-400">
+                    Căn hộ {data?.contract?.apartment_code} — {data?.contract?.building_name}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowDepositLedgerModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="py-4 space-y-6">
+              {/* Thẻ tổng quan sổ cọc */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                  <span className="text-[11px] font-semibold text-slate-500 block">Tiền cọc theo hợp đồng</span>
+                  <span className="text-base font-bold text-slate-900 mt-0.5 block">
+                    {formatVND(data?.contract?.deposit_amount)}
+                  </span>
+                </div>
+                <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-100">
+                  <span className="text-[11px] font-semibold text-indigo-700 block">Số dư cọc an toàn đang giữ</span>
+                  <span className="text-base font-bold text-indigo-700 mt-0.5 block">
+                    {formatVND(depositLedger?.deposit?.amount_held ?? data?.contract?.deposit_amount)}
+                  </span>
+                </div>
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                  <span className="text-[11px] font-semibold text-slate-500 block">Trạng thái sổ cọc</span>
+                  <span className="text-xs font-bold text-emerald-600 mt-1 block">
+                    {depositLedger?.deposit?.status || 'HELD'} (Đang bảo lưu)
+                  </span>
+                </div>
+              </div>
+
+              {/* Bảng kê tất toán nếu có */}
+              {depositLedger?.deposit?.settlement && (
+                <div className="p-4 rounded-2xl bg-amber-50/50 border border-amber-200/80 space-y-3">
+                  <h4 className="text-xs font-bold text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>📋 Bảng kê quyết toán hoàn trả tiền cọc (AC-017)</span>
+                  </h4>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                    <div className="p-2.5 rounded-xl bg-white border border-amber-100">
+                      <span className="text-[11px] text-slate-500 block">Cọc ban đầu</span>
+                      <span className="font-bold text-slate-800">{formatVND(depositLedger.deposit.settlement.deposit)}</span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-white border border-amber-100">
+                      <span className="text-[11px] text-slate-500 block">Khấu trừ hư hại</span>
+                      <span className="font-bold text-rose-600">-{formatVND(depositLedger.deposit.settlement.sumItems)}</span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-white border border-amber-100">
+                      <span className="text-[11px] text-slate-500 block">Cấn trừ công nợ</span>
+                      <span className="font-bold text-amber-600">-{formatVND(depositLedger.deposit.settlement.outstandingDebt)}</span>
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                      <span className="text-[11px] text-emerald-700 font-semibold block">Thực nhận hoàn</span>
+                      <span className="font-bold text-emerald-700 text-sm">{formatVND(depositLedger.deposit.settlement.refund)}</span>
+                    </div>
+                  </div>
+
+                  {depositLedger.deposit.settlement.shortfall > 0 && (
+                    <p className="text-xs text-rose-600 font-semibold">
+                      ⚠️ Khoản cần nộp bù sau trả phòng: {formatVND(depositLedger.deposit.settlement.shortfall)}
+                    </p>
+                  )}
+
+                  {/* Chi tiết từng khoản trừ hư hại */}
+                  {Array.isArray(depositLedger.deposit.settlement.items) && depositLedger.deposit.settlement.items.length > 0 && (
+                    <div className="pt-2">
+                      <span className="text-[11px] font-bold text-slate-700 block mb-1.5">
+                        Chi tiết các khoản khấu trừ hư hại vật chất:
+                      </span>
+                      <div className="border border-amber-200/60 rounded-xl overflow-hidden bg-white">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-amber-100/40 text-amber-950 font-semibold">
+                            <tr>
+                              <th className="py-2 px-3">Danh mục</th>
+                              <th className="py-2 px-3">Mô tả</th>
+                              <th className="py-2 px-3 text-right">Số tiền</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-amber-100">
+                            {depositLedger.deposit.settlement.items.map((item, idx) => (
+                              <tr key={idx}>
+                                <td className="py-2 px-3 font-medium text-slate-700">{item.category}</td>
+                                <td className="py-2 px-3 text-slate-600">{item.description}</td>
+                                <td className="py-2 px-3 text-right font-bold text-rose-600">{formatVND(item.amount)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Lịch sử giao dịch sổ cọc */}
+              <div>
+                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-2">
+                  Lịch sử giao dịch sổ cọc
+                </h4>
+                {(!depositLedger?.transactions || depositLedger.transactions.length === 0) ? (
+                  <p className="text-xs text-slate-400 italic py-3 text-center border border-dashed border-slate-200 rounded-xl">
+                    Chưa có giao dịch phát sinh nào trong sổ cọc.
+                  </p>
+                ) : (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                        <tr>
+                          <th className="py-2.5 px-3">Thời gian</th>
+                          <th className="py-2.5 px-3">Loại giao dịch</th>
+                          <th className="py-2.5 px-3">Danh mục</th>
+                          <th className="py-2.5 px-3 text-right">Số tiền</th>
+                          <th className="py-2.5 px-3">Phương thức</th>
+                          <th className="py-2.5 px-3">Ghi chú</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {depositLedger.transactions.map((tx) => (
+                          <tr key={tx.id} className="hover:bg-slate-50/50">
+                            <td className="py-2.5 px-3 text-slate-500 font-mono">{formatDate(tx.created_at)}</td>
+                            <td className="py-2.5 px-3">
+                              {tx.type === 'COLLECT' && (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                                  + Thu cọc
+                                </span>
+                              )}
+                              {tx.type === 'DEDUCT' && (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800">
+                                  - Khấu trừ
+                                </span>
+                              )}
+                              {tx.type === 'REFUND' && (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800">
+                                  Hoàn trả
+                                </span>
+                              )}
+                              {tx.type === 'TRANSFER' && (
+                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800">
+                                  Chuyển cọc
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-600">{tx.category || '—'}</td>
+                            <td className="py-2.5 px-3 text-right font-bold text-slate-900">{formatVND(tx.amount)}</td>
+                            <td className="py-2.5 px-3 text-slate-500">{tx.method || 'Chuyển khoản'}</td>
+                            <td className="py-2.5 px-3 text-slate-500 max-w-xs truncate">{tx.note || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => setShowDepositLedgerModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl"
+              >
+                Đóng
+              </button>
             </div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, Plus, Calendar, Home, User, DollarSign, X } from 'lucide-react';
+import { FileText, Plus, Calendar, Home, User, DollarSign, X, Printer, Bell, Check, AlertCircle } from 'lucide-react';
 import Button from '../../../components/ui/Button';
 import Input from '../../../components/ui/Input';
 import FormField from '../../../components/ui/FormField';
@@ -21,6 +21,11 @@ export default function ContractsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formError, setFormError] = useState('');
+
+  // Tabs: 'contracts' | 'requests'
+  const [activeTab, setActiveTab] = useState('contracts');
+  const [requests, setRequests] = useState([]);
+  const [isRequestsLoading, setIsRequestsLoading] = useState(false);
 
   // Phân quyền Hợp đồng: MANAGER (CRU+A - được tạo), OWNER (R + Duyệt PENDING_APPROVAL), RESIDENT (chặn)
   const canCreateContract = currentRole === 'MANAGER';
@@ -49,6 +54,41 @@ export default function ContractsPage() {
     );
   }
 
+  const loadRequests = async () => {
+    setIsRequestsLoading(true);
+    try {
+      const res = await api.get('/api/v1/contracts/requests');
+      setRequests(res.data?.data || []);
+    } catch (err) {
+      console.error('Error loading contract requests:', err);
+    } finally {
+      setIsRequestsLoading(false);
+    }
+  };
+
+  const handleApproveRequest = async (requestId) => {
+    if (!window.confirm('Xác nhận phê duyệt đề nghị này của cư dân?')) return;
+    try {
+      await api.post(`/api/v1/contracts/requests/${requestId}/approve`);
+      alert('Đã phê duyệt đề nghị của cư dân thành công.');
+      loadRequests();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi phê duyệt đề nghị.');
+    }
+  };
+
+  const handleRejectRequest = async (requestId) => {
+    const reason = window.prompt('Nhập lý do từ chối đề nghị của cư dân:');
+    if (reason === null) return;
+    try {
+      await api.post(`/api/v1/contracts/requests/${requestId}/reject`, { reason });
+      alert('Đã từ chối đề nghị của cư dân.');
+      loadRequests();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi từ chối đề nghị.');
+    }
+  };
+
   const loadInitialData = async () => {
     setIsLoading(true);
     try {
@@ -70,6 +110,7 @@ export default function ContractsPage() {
         setFormData((prev) => ({ ...prev, building_id: target }));
         loadApartments(target);
       }
+      loadRequests();
     } catch (err) {
       console.error('Error loading contracts:', err);
     } finally {
@@ -201,6 +242,107 @@ export default function ContractsPage() {
     }] : []),
   ];
 
+  const requestColumns = [
+    {
+      title: 'Căn hộ & Tòa nhà',
+      key: 'apartment_code',
+      sortable: true,
+      render: (val, row) => (
+        <div>
+          <span className="font-bold text-slate-900 block">{val}</span>
+          <span className="text-xs text-slate-500">{row.building_name}</span>
+        </div>
+      ),
+    },
+    {
+      title: 'Khách thuê / Cư dân',
+      key: 'resident_name',
+      render: (val, row) => (
+        <div>
+          <span className="font-semibold text-slate-800 block">{val}</span>
+          <span className="text-xs text-slate-500 font-mono">{row.resident_phone || '—'}</span>
+        </div>
+      ),
+    },
+    {
+      title: 'Loại đề nghị',
+      key: 'type',
+      render: (val) =>
+        val === 'TERMINATION' ? (
+          <span className="px-2 py-1 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">
+            Chấm dứt & Trả phòng
+          </span>
+        ) : (
+          <span className="px-2 py-1 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+            Gia hạn hợp đồng
+          </span>
+        ),
+    },
+    {
+      title: 'Ngày mong muốn',
+      key: 'desired_date',
+      render: (val) => (
+        <span className="text-xs font-mono font-medium text-slate-700">
+          {val ? new Date(val).toLocaleDateString('vi-VN') : '—'}
+        </span>
+      ),
+    },
+    {
+      title: 'Ghi chú',
+      key: 'note',
+      render: (val) => (
+        <span className="text-xs text-slate-600 max-w-xs block truncate" title={val}>
+          {val || '—'}
+        </span>
+      ),
+    },
+    {
+      title: 'Trạng thái',
+      key: 'status',
+      render: (val) => {
+        if (val === 'SUBMITTED') {
+          return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">Chờ duyệt</span>;
+        }
+        if (val === 'APPROVED') {
+          return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">✓ Đã duyệt</span>;
+        }
+        return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">✕ Từ chối</span>;
+      },
+    },
+    {
+      title: 'Thao tác',
+      key: 'actions',
+      render: (val, row) => (
+        <div className="flex items-center gap-1.5">
+          {row.status === 'SUBMITTED' ? (
+            currentRole === 'OWNER' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleApproveRequest(row.id)}
+                  className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold shadow-sm"
+                >
+                  Duyệt
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRejectRequest(row.id)}
+                  className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-semibold"
+                >
+                  Từ chối
+                </button>
+              </>
+            ) : (
+              <span className="text-xs text-slate-400 italic">Chờ Chủ nhà duyệt</span>
+            )
+          ) : (
+            <span className="text-xs text-slate-400 italic">Đã xử lý</span>
+          )}
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -225,15 +367,69 @@ export default function ContractsPage() {
         )}
       </div>
 
+      {/* Tab Switcher */}
+      <div className="flex border-b border-slate-200 gap-6">
+        <button
+          type="button"
+          onClick={() => setActiveTab('contracts')}
+          className={`pb-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2 ${
+            activeTab === 'contracts'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          <span>Danh sách Hợp đồng</span>
+          <span className="px-1.5 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600 font-medium">
+            {contracts.length}
+          </span>
+        </button>
 
-      <DataTable
-        columns={columns}
-        data={contracts}
-        isLoading={isLoading}
-        searchKeys={['apartment_code', 'tenant_name', 'building_name', 'tenant_phone']}
-        emptyTitle="Chưa có hợp đồng nào"
-        emptyDescription="Nhấn 'Lập hợp đồng mới' để tạo hợp đồng cho căn hộ có sẵn."
-      />
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('requests');
+            loadRequests();
+          }}
+          className={`pb-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2 ${
+            activeTab === 'requests'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <Bell className="w-4 h-4" />
+          <span>Đề nghị từ cư dân</span>
+          {requests.filter((r) => r.status === 'SUBMITTED').length > 0 ? (
+            <span className="px-2 py-0.5 text-xs rounded-full bg-amber-500 text-white font-bold animate-pulse">
+              {requests.filter((r) => r.status === 'SUBMITTED').length} mới
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600 font-medium">
+              {requests.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeTab === 'contracts' ? (
+        <DataTable
+          columns={columns}
+          data={contracts}
+          isLoading={isLoading}
+          searchKeys={['apartment_code', 'tenant_name', 'building_name', 'tenant_phone']}
+          emptyTitle="Chưa có hợp đồng nào"
+          emptyDescription="Nhấn 'Lập hợp đồng mới' để tạo hợp đồng cho căn hộ có sẵn."
+        />
+      ) : (
+        <DataTable
+          columns={requestColumns}
+          data={requests}
+          isLoading={isRequestsLoading}
+          searchKeys={['apartment_code', 'resident_name', 'building_name', 'resident_phone']}
+          emptyTitle="Chưa có đề nghị nào từ cư dân"
+          emptyDescription="Cư dân có thể gửi đề nghị gia hạn hoặc chấm dứt hợp đồng từ Cổng cư dân."
+        />
+      )}
 
       {/* Modal Lập Hợp Đồng */}
       {isModalOpen && (
@@ -421,6 +617,17 @@ function ContractActions({ row, currentRole, onChanged }) {
     reader.readAsDataURL(file);
   };
 
+  const handlePrintTemplate = async () => {
+    try {
+      const res = await api.get(`/api/v1/contracts/${row.id}/template`, { responseType: 'text' });
+      const blob = new Blob([res.data], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi tải mẫu hợp đồng in.');
+    }
+  };
+
   const renderNavButtons = () => (
     <>
       <div className="flex flex-wrap gap-1">
@@ -429,6 +636,7 @@ function ContractActions({ row, currentRole, onChanged }) {
         {['ACTIVE', 'RENEWAL_PENDING'].includes(row.status) && (
           <AmendmentsButton onClick={() => setIsAmendmentsOpen(true)} />
         )}
+        <PrintButton onClick={handlePrintTemplate} />
       </div>
       {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
       {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
@@ -589,6 +797,20 @@ function ContractActions({ row, currentRole, onChanged }) {
         onClick={onClick}
       >
         Dịch vụ
+      </button>
+    );
+  }
+
+  function PrintButton({ onClick }) {
+    return (
+      <button
+        type="button"
+        className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium flex items-center gap-1 shadow-sm"
+        onClick={onClick}
+        title="In mẫu hợp đồng A4"
+      >
+        <Printer className="w-3.5 h-3.5" />
+        <span>In mẫu</span>
       </button>
     );
   }
