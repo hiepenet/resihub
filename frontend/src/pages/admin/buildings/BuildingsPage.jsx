@@ -14,6 +14,7 @@ import {
   Power,
   RotateCcw,
   Trash2,
+  Pencil,
   BookmarkCheck,
   Calendar,
 } from 'lucide-react';
@@ -76,6 +77,7 @@ export default function BuildingsPage() {
     account_name: '',
     account_type: 'personal',
     lease_notes: '',
+    owner_id: '',
   });
   const [codeCheckStatus, setCodeCheckStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'invalid'
   const [codeMessage, setCodeMessage] = useState('');
@@ -83,6 +85,34 @@ export default function BuildingsPage() {
 
   // Add Floor State
   const [newFloor, setNewFloor] = useState({ level: 1, name: '' });
+
+  // B3: sửa tòa + chọn chủ sở hữu
+  const [editingBuilding, setEditingBuilding] = useState(null);
+  const [owners, setOwners] = useState([]);
+
+  useEffect(() => {
+    api.get('/api/v1/buildings/owners')
+      .then((res) => setOwners(res.data?.data || []))
+      .catch(() => {});
+  }, []);
+
+  const openEditBuilding = async (row) => {
+    const res = await api.get(`/api/v1/buildings/${row.id}`).catch(() => null);
+    const b = res?.data?.data || row;
+    setEditingBuilding(b);
+    setNewBuilding({
+      name: b.name || '',
+      code: b.code || '',
+      address: b.address || '',
+      bank: b.lease_terms?.payment_account?.bank || '',
+      account_no: b.lease_terms?.payment_account?.account_no || '',
+      account_name: b.lease_terms?.payment_account?.account_name || '',
+      account_type: b.lease_terms?.payment_account?.type || 'personal',
+      lease_notes: b.lease_terms?.notes || '',
+      owner_id: b.owner_id || '',
+    });
+    setIsBuildingModalOpen(true);
+  };
 
   // Add Apartment State
   const [newApartment, setNewApartment] = useState({
@@ -227,34 +257,46 @@ export default function BuildingsPage() {
       return;
     }
 
-    if (!newBuilding.code.trim()) {
+    if (!editingBuilding && !newBuilding.code.trim()) {
       setBuildingFormError('Mã tòa nhà không được để trống.');
       return;
     }
 
-    if (codeCheckStatus === 'taken' || codeCheckStatus === 'invalid') {
+    if (!editingBuilding && (codeCheckStatus === 'taken' || codeCheckStatus === 'invalid')) {
       setBuildingFormError('Mã tòa không hợp lệ hoặc đã bị trùng.');
       return;
     }
 
     try {
-      const payload = {
-        name: newBuilding.name.trim(),
-        code: newBuilding.code.trim().toUpperCase(),
-        address: newBuilding.address.trim(),
-        payment_account: {
-          bank: newBuilding.bank,
-          account_no: newBuilding.account_no,
-          account_name: newBuilding.account_name,
-          type: newBuilding.account_type,
-        },
-        lease_terms: {
-          notes: newBuilding.lease_notes,
-        },
+      const payment_account = {
+        bank: newBuilding.bank,
+        account_no: newBuilding.account_no,
+        account_name: newBuilding.account_name,
+        type: newBuilding.account_type,
       };
+      const lease_terms = { notes: newBuilding.lease_notes, payment_account };
 
-      const res = await api.post('/api/v1/buildings', payload);
+      if (editingBuilding) {
+        // B3: sửa tòa — mã KHÔNG được sửa
+        await api.patch(`/api/v1/buildings/${editingBuilding.id}`, {
+          name: newBuilding.name.trim(),
+          address: newBuilding.address.trim(),
+          owner_id: newBuilding.owner_id === '' ? null : (newBuilding.owner_id || undefined),
+          payment_account,
+          lease_terms: { notes: newBuilding.lease_notes },
+        });
+      } else {
+        await api.post('/api/v1/buildings', {
+          name: newBuilding.name.trim(),
+          code: newBuilding.code.trim().toUpperCase(),
+          address: newBuilding.address.trim(),
+          owner_id: newBuilding.owner_id || undefined,
+          payment_account,
+          lease_terms,
+        });
+      }
       setIsBuildingModalOpen(false);
+      setEditingBuilding(null);
       setNewBuilding({
         name: '',
         code: '',
@@ -264,12 +306,12 @@ export default function BuildingsPage() {
         account_name: '',
         account_type: 'personal',
         lease_notes: '',
+        owner_id: '',
       });
       setCodeCheckStatus(null);
       await loadBuildings();
-      setSelectedBuilding(res.data.data);
     } catch (err) {
-      setBuildingFormError(err.response?.data?.message || 'Lỗi khi tạo tòa nhà mới.');
+      setBuildingFormError(err.response?.data?.message || 'Lỗi khi lưu tòa nhà.');
     }
   };
 
@@ -452,7 +494,14 @@ export default function BuildingsPage() {
       title: 'Thao tác',
       key: 'actions',
       render: (_, row) => canChangeBuildingStatus ? (
-        <button
+        <div className="flex gap-1.5">
+          <button
+            onClick={() => openEditBuilding(row)}
+            className="text-xs font-semibold px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
+          >
+            Sửa
+          </button>
+          <button
           onClick={() => setConfirmStatusModal({
             isOpen: true,
             building: row,
@@ -466,6 +515,7 @@ export default function BuildingsPage() {
         >
           {row.status === 'ACTIVE' ? 'Tạm dừng' : 'Kích hoạt lại'}
         </button>
+        </div>
       ) : (
         <span className="text-xs text-slate-400 italic">Chỉ xem</span>
       ),
@@ -700,6 +750,29 @@ export default function BuildingsPage() {
                       <span className="text-xs text-slate-400">
                         {floor.apartments?.length || 0} căn hộ
                       </span>
+                      {canManageUnits && (
+                        <button
+                          onClick={async () => {
+                            const name = window.prompt('Tên hiển thị tầng mới:', floor.name || `Tầng ${floor.level}`);
+                            if (name === null) return;
+                            const levelStr = window.prompt('Số tầng (level): <0 hầm, 0 trệt, >0 tầng', String(floor.level));
+                            if (levelStr === null) return;
+                            try {
+                              await api.patch(`/api/v1/buildings/${selectedBuilding.id}/floors/${floor.id}`, {
+                                name,
+                                level: parseInt(levelStr, 10),
+                              });
+                              await loadFloorMap(selectedBuilding.id);
+                            } catch (err) {
+                              alert(err.response?.data?.message || 'Lỗi khi sửa tầng.');
+                            }
+                          }}
+                          className="text-slate-400 hover:text-primary-600 p-1 rounded transition-colors"
+                          title="Sửa tầng"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       {isSysAdmin && (!floor.apartments || floor.apartments.length === 0) && (
                         <button
                           onClick={() => handleDeleteFloor(floor.id)}
@@ -911,8 +984,10 @@ export default function BuildingsPage() {
           <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
               <div>
-                <h3 className="text-base font-bold text-slate-900">Thêm Tòa nhà mới (NV-03)</h3>
-                <p className="text-xs text-slate-500">Actor: SYS_ADMIN · Module: M03</p>
+                <h3 className="text-base font-bold text-slate-900">
+                  {editingBuilding ? `Sửa Tòa nhà (NV-03)` : 'Thêm Tòa nhà mới (NV-03)'}
+                </h3>
+                <p className="text-xs text-slate-500">Module: M03{editingBuilding ? ` · Code ${editingBuilding.code} (không đổi được)` : ''}</p>
               </div>
               <button onClick={() => setIsBuildingModalOpen(false)}>
                 <X className="w-5 h-5 text-slate-400" />
@@ -942,19 +1017,34 @@ export default function BuildingsPage() {
 
               <FormField
                 label="Mã tòa (Code)"
-                required
-                hint={codeMessage || 'Chỉ chứa chữ hoa (A-Z), số (0-9) và dấu gạch ngang (-). VD: TN-A'}
+                required={!editingBuilding}
+                hint={editingBuilding ? 'Mã tòa không được phép sửa sau khi tạo.' : (codeMessage || 'Chỉ chứa chữ hoa (A-Z), số (0-9) và dấu gạch ngang (-). VD: TN-A')}
               >
                 <Input
                   placeholder="VD: TN-A"
                   value={newBuilding.code}
                   onChange={(e) => {
+                    if (editingBuilding) return;
                     setNewBuilding({ ...newBuilding, code: e.target.value.toUpperCase() });
                     setCodeCheckStatus(null);
                   }}
-                  onBlur={handleCodeBlur}
-                  className="font-mono uppercase font-bold"
+                  onBlur={editingBuilding ? undefined : handleCodeBlur}
+                  disabled={!!editingBuilding}
+                  className="font-mono uppercase font-bold disabled:bg-slate-100 disabled:text-slate-500"
                 />
+              </FormField>
+
+              <FormField label="Chủ sở hữu (tuỳ chọn)" hint="Danh sách owner thuộc tổ chức">
+                <select
+                  value={newBuilding.owner_id || ''}
+                  onChange={(e) => setNewBuilding({ ...newBuilding, owner_id: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                >
+                  <option value="">— Không gán —</option>
+                  {owners.map((o) => (
+                    <option key={o.id} value={o.id}>{o.full_name}</option>
+                  ))}
+                </select>
               </FormField>
 
               <FormField label="Địa chỉ">
@@ -1006,11 +1096,11 @@ export default function BuildingsPage() {
               </FormField>
 
               <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsBuildingModalOpen(false)}>
+                <Button variant="secondary" onClick={() => { setIsBuildingModalOpen(false); setEditingBuilding(null); }}>
                   Hủy
                 </Button>
                 <Button type="submit" variant="primary">
-                  Tạo tòa nhà
+                  {editingBuilding ? 'Lưu thay đổi' : 'Tạo tòa nhà'}
                 </Button>
               </div>
             </form>

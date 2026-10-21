@@ -96,6 +96,20 @@ export default function ContractsPage() {
     loadInitialData();
   }, []);
 
+  // B3: đồng bộ với Building Switcher trên TopBar
+  useEffect(() => {
+    const applySelectedBuilding = (val) => {
+      if (val && val !== 'ALL') {
+        setFormData((prev) => ({ ...prev, building_id: val }));
+        loadApartments(val);
+      }
+    };
+    const onBuildingChanged = (e) => applySelectedBuilding(e.detail);
+    applySelectedBuilding(localStorage.getItem('resihub_selected_building_id'));
+    window.addEventListener('buildingChanged', onBuildingChanged);
+    return () => window.removeEventListener('buildingChanged', onBuildingChanged);
+  }, []);
+
   const handleBuildingChange = (bId) => {
     setFormData((prev) => ({ ...prev, building_id: bId }));
     loadApartments(bId);

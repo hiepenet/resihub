@@ -268,6 +268,23 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 /**
  * GET /api/v1/buildings/:id
  */
+/**
+ * GET /api/v1/buildings/owners — danh sách chủ sở hữu để chọn khi tạo/sửa tòa (B3)
+ * Đặt TRƯỚC router.get('/:id') để không bị nuốt bởi pattern /:id
+ */
+router.get('/owners', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, full_name FROM owner WHERE org_id = $1 ORDER BY full_name ASC',
+      [req.user.org_id]
+    );
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[List Owners Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách chủ sở hữu.' });
+  }
+});
+
 router.get('/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
@@ -348,6 +365,147 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật trạng thái tòa nhà.' });
   } finally {
     await release();
+  }
+});
+
+/**
+ * PATCH /api/v1/buildings/:id — sửa thông tin tòa (B3): name, address, owner_id,
+ * timezone, lease_terms, payment_account. Mã tòa (code) KHÔNG cho sửa.
+ */
+router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { name, address, owner_id, timezone, lease_terms, payment_account } = req.body;
+  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+
+  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+
+  if (name !== undefined && (!name || name.trim().length < 2 || name.trim().length > 100)) {
+    return res.status(422).json({ code: 'VALIDATION_ERROR', message: 'Tên tòa nhà phải từ 2 đến 100 ký tự.' });
+  }
+
+  try {
+    let ownerOk = true;
+    if (owner_id !== undefined) {
+      // null = gỡ owner, còn lại phải thuộc org
+      ownerOk = owner_id === null ||
+        (await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, req.user.org_id])).rows.length > 0;
+      if (!ownerOk) {
+        return res.status(400).json({ code: 'INVALID_OWNER', message: 'Chủ sở hữu không tồn tại trong tổ chức.' });
+      }
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+      const beforeRes = await client.query('SELECT * FROM building WHERE id = $1', [id]);
+      if (beforeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+      }
+      const before = beforeRes.rows[0];
+
+      // lease_terms JSONB merge — payment_account nằm trong lease_terms
+      const oldTerms = before.lease_terms || {};
+      const nextTerms = lease_terms === undefined && payment_account === undefined
+        ? undefined
+        : {
+            ...oldTerms,
+            ...(lease_terms || {}),
+            ...(payment_account !== undefined ? { payment_account } : {}),
+          };
+
+      const updated = await client.query(
+        `UPDATE building
+         SET name = COALESCE($1, name),
+             address = COALESCE($2, address),
+             owner_id = CASE WHEN $3 THEN $4 ELSE owner_id END,
+             timezone = COALESCE($5, timezone),
+             lease_terms = COALESCE($6, lease_terms)
+         WHERE id = $7
+         RETURNING id, org_id, owner_id, name, code, address, timezone, lease_terms, status, created_at`,
+        [
+          name?.trim() || null,
+          address?.trim() || null,
+          owner_id !== undefined, owner_id ?? null, // hasOwnerKey, ownerValue
+          timezone || null,
+          nextTerms ? JSON.stringify(nextTerms) : null,
+          id,
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'UPDATE', 'building', $2, $3, $4)`,
+        [req.user.sub, id, JSON.stringify(before), JSON.stringify(updated.rows[0])]
+      );
+
+      await client.query('COMMIT');
+      res.json({ message: 'Cập nhật tòa nhà thành công.', data: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      await release();
+    }
+  } catch (err) {
+    console.error('[Update Building Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi cập nhật tòa nhà.' });
+  }
+});
+
+/**
+ * PATCH /api/v1/buildings/:id/floors/:floor_id — sửa tầng (B3): level, name.
+ */
+router.patch('/:id/floors/:floor_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id, floor_id } = req.params;
+  const { level, name } = req.body;
+  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+
+  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+
+  let lvl;
+  if (level !== undefined) {
+    lvl = parseInt(level, 10);
+    if (isNaN(lvl)) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Số tầng phải là số nguyên (INTEGER).' });
+    }
+    const dup = await pool.query(
+      'SELECT id FROM floor WHERE building_id = $1 AND level = $2 AND id <> $3',
+      [id, lvl, floor_id]
+    );
+    if (dup.rows.length > 0) {
+      return res.status(409).json({ code: 'FLOOR_EXISTS', message: `Tầng ${lvl} đã tồn tại trong tòa nhà này.` });
+    }
+  }
+
+  try {
+    const before = await pool.query('SELECT * FROM floor WHERE id = $1 AND building_id = $2', [floor_id, id]);
+    if (before.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tầng trong tòa này.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE floor SET level = COALESCE($1, level), name = COALESCE($2, name)
+       WHERE id = $3 RETURNING *`,
+      [lvl ?? null, name?.trim() || null, floor_id]
+    );
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'UPDATE', 'floor', $2, $3, $4)`,
+      [req.user.sub, floor_id, JSON.stringify(before.rows[0]), JSON.stringify(result.rows[0])]
+    );
+
+    res.json({ message: 'Cập nhật tầng thành công.', data: result.rows[0] });
+  } catch (err) {
+    console.error('[Update Floor Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật tầng.' });
   }
 });
 
