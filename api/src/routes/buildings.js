@@ -340,6 +340,19 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
           message: `Không thể tạm dừng hoạt động tòa nhà này vì đang có ${activeCount} hợp đồng đang có hiệu lực. Vui lòng thanh lý hết hợp đồng trước.`,
         });
       }
+
+      // C7: còn giữ chỗ (reservation HELD) thì cũng không cho tạm dừng
+      const heldRes = await client.query(
+        `SELECT COUNT(*) FROM reservation WHERE building_id = $1 AND status = 'HELD'`,
+        [id]
+      );
+      const heldCount = parseInt(heldRes.rows[0].count, 10);
+      if (heldCount > 0) {
+        return res.status(400).json({
+          code: 'RESERVED_APARTMENTS_EXIST',
+          message: `Không thể tạm dừng hoạt động tòa nhà này vì đang có ${heldCount} căn đang được giữ chỗ.`,
+        });
+      }
     }
 
     const updateRes = await client.query(
