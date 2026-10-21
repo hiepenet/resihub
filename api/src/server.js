@@ -15,6 +15,7 @@ import depositsRoute from './routes/deposits.js';
 import reservationsRoute from './routes/reservations.js';
 import notificationsRoute from './routes/notifications.js';
 import residentRoute from './routes/resident.js';
+import { startDailyJobs } from './jobs/daily.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
 dotenv.config();
@@ -69,11 +70,12 @@ app.use((err, req, res, next) => {
 });
 
 // Start Server
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`===============================================`);
   console.log(`🚀 ResiHub API running on http://localhost:${PORT}`);
   console.log(`🩺 Health check: http://localhost:${PORT}/api/health`);
   console.log(`===============================================`);
+  startDailyJobs();
 });
 
 export default app;

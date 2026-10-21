@@ -225,9 +225,12 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
       [id]
     );
 
-    // Mở lại phòng về AVAILABLE
+    // Mở lại phòng về AVAILABLE — chỉ khi căn không còn giữ chỗ HELD khác / hợp đồng ghim
     await client.query(
-      `UPDATE apartment SET status = 'AVAILABLE', updated_at = NOW() WHERE id = $1`,
+      `UPDATE apartment a SET status = 'AVAILABLE', updated_at = NOW()
+       WHERE a.id = $1 AND a.status = 'RESERVED'
+         AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD')
+         AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE','RENEWAL_PENDING'))`,
       [currentRes.apartment_id]
     );
 
@@ -278,9 +281,12 @@ router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER'])
       [id]
     );
 
-    // Mở lại phòng về AVAILABLE
+    // Mở lại phòng về AVAILABLE — chỉ khi căn không còn giữ chỗ HELD khác / hợp đồng ghim
     await client.query(
-      `UPDATE apartment SET status = 'AVAILABLE', updated_at = NOW() WHERE id = $1`,
+      `UPDATE apartment a SET status = 'AVAILABLE', updated_at = NOW()
+       WHERE a.id = $1 AND a.status = 'RESERVED'
+         AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD')
+         AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE','RENEWAL_PENDING'))`,
       [currentRes.apartment_id]
     );
 
