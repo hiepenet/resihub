@@ -331,13 +331,32 @@ export default function TenantsPage() {
   );
 }
 
-// B7: ảnh CCCD (mặt trước/sau) trong modal sửa hồ sơ — xem qua /attachments/:id/view có audit READ
+// B7: ảnh CCCD (mặt trước/sau) trong modal sửa hồ sơ — fetch blob gắn Bearer rồi objectURL
+// (ERR-2: <img src> trần không mang Authorization, API yêu cầu Bearer)
 function IdImagesSection({ tenantId }) {
   const [images, setImages] = useState([]);
+  const [urls, setUrls] = useState({});
 
   const load = () => {
     api.get(`/api/v1/tenants/${tenantId}/id-images`)
-      .then((res) => setImages(res.data?.data || []))
+      .then(async (res) => {
+        const list = res.data?.data || [];
+        setImages(list);
+        const next = {};
+        for (const im of list) {
+          if (!urls[im.attachment_id]) {
+            try {
+              const blobRes = await api.get(`/api/v1/attachments/${im.attachment_id}/view`, { responseType: 'blob' });
+              next[im.attachment_id] = URL.createObjectURL(blobRes.data);
+            } catch {
+              next[im.attachment_id] = null;
+            }
+          } else {
+            next[im.attachment_id] = urls[im.attachment_id];
+          }
+        }
+        setUrls(next);
+      })
       .catch(() => {});
   };
   useEffect(load, [tenantId]);
@@ -366,16 +385,16 @@ function IdImagesSection({ tenantId }) {
       <p className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">Ảnh CCCD (PII — xem có kiểm soát)</p>
       <div className="grid grid-cols-2 gap-3">
         {['front', 'back'].map((side) => {
-          const img = images.find((im) => im.side === side);
+          const img = [...images].filter((im) => im.side === side).pop(); // ảnh mới nhất của side (upload lại thay ảnh cũ)
           return (
             <div key={side} className="text-center">
               <div className="aspect-[3/2] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center overflow-hidden mb-1">
                 {img ? (
                   <img
-                    src={`/api/v1/attachments/${img.attachment_id}/view`}
+                    src={urls[img.attachment_id] || ''}
                     alt={`CCCD ${side === 'front' ? 'mặt trước' : 'mặt sau'}`}
                     className="w-full h-full object-cover cursor-zoom-in"
-                    onClick={() => window.open(`/api/v1/attachments/${img.attachment_id}/view`, '_blank')}
+                    onClick={() => urls[img.attachment_id] && window.open(urls[img.attachment_id], '_blank')}
                   />
                 ) : (
                   <span className="text-xs text-slate-400">{side === 'front' ? 'Mặt trước' : 'Mặt sau'}</span>

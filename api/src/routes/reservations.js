@@ -22,11 +22,13 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req
         a.code as apartment_code, 
         a.area_m2 as apartment_area,
         b.name as building_name,
-        u.email as created_by_email
+        u.id IS NOT NULL as has_creator,
+        p_u.email as created_by_email
       FROM reservation r
       JOIN apartment a ON a.id = r.apartment_id
       JOIN building b ON b.id = r.building_id
       LEFT JOIN app_user u ON u.id = r.created_by
+      LEFT JOIN person p_u ON p_u.id = u.person_id
       WHERE r.org_id = $1
     `;
     const params = [orgId];
