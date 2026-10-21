@@ -255,4 +255,70 @@ router.delete('/:id', authenticateToken, async (req, res) => {
   });
 });
 
+/**
+ * PATCH /api/v1/apartments/:id/handover
+ * Bàn giao & nghiệm thu phòng (B8 / PRD 7.5): căn MAINTENANCE (sau chấm dứt hợp đồng) về AVAILABLE.
+ * Guard: chỉ từ MAINTENANCE, không còn hợp đồng ACTIVE. Cọc còn giữ → cảnh báo, không chặn.
+ */
+router.patch('/:id/handover', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const aptRes = await pool.query(
+      `SELECT a.* FROM apartment a
+       JOIN user_role ur ON ur.building_id = a.building_id
+       WHERE a.id = $1 AND ur.user_id = $2`,
+      [id, req.user.sub]
+    );
+    if (aptRes.rows.length === 0) {
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý căn hộ này.' });
+    }
+
+    const before = aptRes.rows[0];
+    if (before.status !== 'MAINTENANCE') {
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Chỉ căn hộ đang bảo trì (MAINTENANCE) mới cần bàn giao. Căn hiện ở trạng thái ${before.status}.`,
+      });
+    }
+
+    const activeContract = await pool.query(
+      `SELECT 1 FROM contract WHERE apartment_id = $1 AND status = 'ACTIVE'`,
+      [id]
+    );
+    if (activeContract.rows.length > 0) {
+      return res.status(409).json({
+        code: 'ACTIVE_CONTRACT_EXISTS',
+        message: 'Căn đang có hợp đồng hiệu lực, phải chấm dứt hợp đồng trước khi bàn giao.',
+      });
+    }
+
+    const warnings = [];
+    const heldDeposit = await pool.query(
+      `SELECT 1 FROM deposit WHERE contract_id IN (
+         SELECT id FROM contract WHERE apartment_id = $1
+       ) AND status = 'HELD' LIMIT 1`,
+      [id]
+    );
+    if (heldDeposit.rows.length > 0) {
+      warnings.push('Còn cọc đang giữ chưa tất toán. Hãy hoàn tất tất toán theo FR-024.');
+    }
+
+    const result = await pool.query(
+      `UPDATE apartment SET status = 'AVAILABLE', updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'HANDOVER', 'apartment', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(before), JSON.stringify(result.rows[0])]
+    );
+
+    res.json({ message: 'Bàn giao và nghiệm thu phòng thành công. Căn hộ sẵn sàng kinh doanh.', data: result.rows[0], warnings });
+  } catch (err) {
+    console.error('[Handover Apartment Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi bàn giao căn hộ.' });
+  }
+});
+
 export default router;

@@ -350,6 +350,33 @@ export default function BuildingsPage() {
     }
   };
 
+  // Bàn giao & nghiệm thu sau chấm dứt hợp đồng (B8 / PRD 7.5)
+  const handleHandover = async () => {
+    if (!window.confirm('Xác nhận bàn giao & nghiệm thu phòng? Căn hộ sẽ về trạng thái sẵn sàng kinh doanh (AVAILABLE).')) return;
+    try {
+      const res = await api.patch(`/api/v1/apartments/${selectedApartment.id}/handover`);
+      if (res.data?.warnings?.length) {
+        alert(res.data.warnings.join('\n'));
+      }
+      setSelectedApartment(null);
+      loadFloorMap(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi bàn giao căn hộ.');
+    }
+  };
+
+  // B2: đổi trạng thái MAINTENANCE <-> INACTIVE <-> AVAILABLE trực tiếp từ panel
+  const handleSetApartmentStatus = async (targetStatus, confirmText) => {
+    if (!window.confirm(confirmText)) return;
+    try {
+      await api.patch(`/api/v1/apartments/${selectedApartment.id}`, { status: targetStatus });
+      setSelectedApartment(null);
+      loadFloorMap(selectedBuilding.id);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi đổi trạng thái căn hộ.');
+    }
+  };
+
   // State Machine Toggle: ACTIVE <-> INACTIVE
   const handleToggleStatus = async () => {
     const { building, targetStatus } = confirmStatusModal;
@@ -748,6 +775,39 @@ export default function BuildingsPage() {
                       </Button>
                     </div>
                   </div>
+                )}
+
+                {selectedApartment.status === 'MAINTENANCE' && (
+                  <div className="space-y-2 w-full">
+                    <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+                      <p className="font-semibold">Căn hộ đang bảo trì</p>
+                      <p className="text-[11px] mt-0.5">Sau chấm dứt hợp đồng, cần bàn giao & nghiệm thu trước khi kinh doanh lại.</p>
+                    </div>
+                    <Button
+                      variant="primary"
+                      className="w-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5"
+                      onClick={handleHandover}
+                    >
+                      <span>Xác nhận bàn giao & nghiệm thu phòng</span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="w-full text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
+                      onClick={() => handleSetApartmentStatus('INACTIVE', 'Chuyển căn hộ sang Không kinh doanh (INACTIVE)?')}
+                    >
+                      Chuyển sang Không kinh doanh
+                    </Button>
+                  </div>
+                )}
+
+                {selectedApartment.status === 'INACTIVE' && (
+                  <Button
+                    variant="primary"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
+                    onClick={() => handleSetApartmentStatus('AVAILABLE', 'Kinh doanh lại căn hộ này (AVAILABLE)?')}
+                  >
+                    <span>Kinh doanh lại</span>
+                  </Button>
                 )}
 
                 <Button
