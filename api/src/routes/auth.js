@@ -56,27 +56,26 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     });
   }
 
-  // Kiểm tra số lần request trên SĐT trong 1 giờ qua (Trong dev cho phép thoải mái để test)
+  // Kiểm tra số lần request trên SĐT trong 1 giờ qua (Rate-limit: 3 lần/giờ/SĐT theo AC-001)
   const now = Date.now();
-  const isDev = process.env.NODE_ENV !== 'production';
   const oneHourAgo = now - 60 * 60 * 1000;
   const history = phoneRequestTracker.get(cleanPhone) || [];
   const recentHistory = history.filter((ts) => ts > oneHourAgo);
-  const maxReqPerHour = isDev ? 1000 : 3;
+  const maxReqPerHour = 3; // Giới hạn nghiêm ngặt 3 lần / giờ / SĐT
 
   if (recentHistory.length >= maxReqPerHour) {
     return res.status(429).json({
       code: 'RATE_LIMIT_EXCEEDED',
-      message: 'Bạn đã yêu cầu gửi OTP quá nhiều lần trong 1 giờ. Vui lòng đợi thêm hoặc liên hệ quản trị viên.',
+      message: 'Bạn đã yêu cầu gửi OTP quá 3 lần trong 1 giờ. Vui lòng đợi thêm hoặc liên hệ quản trị viên.',
     });
   }
 
   recentHistory.push(now);
   phoneRequestTracker.set(cleanPhone, recentHistory);
 
-  // Kiểm tra xem SĐT có đang bị lock do nhập sai quá 5 lần không (Dev bỏ qua lock)
+  // Kiểm tra xem SĐT có đang bị lock do nhập sai quá 5 lần không (AC-001.2: Khóa 15 phút)
   const existingRecord = otpStore.get(cleanPhone);
-  if (!isDev && existingRecord && existingRecord.lockedUntil && existingRecord.lockedUntil > now) {
+  if (existingRecord && existingRecord.lockedUntil && existingRecord.lockedUntil > now) {
     const minutesLeft = Math.ceil((existingRecord.lockedUntil - now) / 60000);
     return res.status(429).json({
       code: 'ACCOUNT_LOCKED',

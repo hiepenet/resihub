@@ -28,7 +28,7 @@ export default function LoginPage() {
 
   // NV-01: OTP State
   const [step, setStep] = useState(1); // 1: Phone, 2: OTP
-  const [phone, setPhone] = useState('0977930202');
+  const [phone, setPhone] = useState('0901234567');
   const [otp, setOtp] = useState('');
   const [devOtpHint, setDevOtpHint] = useState('');
   const [countdown, setCountdown] = useState(300); // 5 mins
@@ -275,7 +275,7 @@ export default function LoginPage() {
 
                 <div className="pt-2 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                  <span>Tự động kích hoạt tài khoản Cư dân cho mọi số 10 chữ số</span>
+                  <span>Bảo mật chống lạm dụng · Rate-limit 3 req/giờ/SĐT · Tự động kích hoạt Cư dân</span>
                 </div>
               </form>
             )}
