@@ -3,6 +3,7 @@ import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
+import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 
 const router = express.Router();
 
@@ -125,22 +126,10 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     note,
   } = req.body;
 
-  if (!apartment_id || !building_id || !primary_tenant_id || !start_date || !end_date || !rent_amount) {
+  if (!apartment_id || !primary_tenant_id || !start_date || !end_date || !rent_amount) {
     return res.status(422).json({
       code: 'VALIDATION_ERROR',
-      message: 'Thiếu thông tin bắt buộc: Căn hộ, Tòa nhà, Khách thuê, Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
-    });
-  }
-
-  // Kiểm tra quyền quản lý tòa nhà của Manager
-  const checkMgr = await pool.query(
-    'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-    [req.user.sub, building_id]
-  );
-  if (checkMgr.rows.length === 0) {
-    return res.status(403).json({
-      code: 'ACCESS_DENIED',
-      message: 'Bạn không có quyền quản lý tòa nhà này để lập hợp đồng.',
+      message: 'Thiếu thông tin bắt buộc: Căn hộ, Khách thuê, Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
     });
   }
 
@@ -159,14 +148,40 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     await client.query('BEGIN');
 
     // Guard căn hộ: chỉ AVAILABLE hoặc RESERVED được lập hợp đồng (A3, PRD FR-014)
+    // C5: derive building_id từ căn hộ để chống tạo hợp đồng chéo tòa
     const aptCheck = await client.query(
-      `SELECT status FROM apartment WHERE id = $1`,
+      `SELECT status, building_id, base_rent FROM apartment WHERE id = $1`,
       [apartment_id]
     );
     if (aptCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
     }
+
+    const effectiveBuildingId = aptCheck.rows[0].building_id;
+
+    // Chặn nếu body gửi building_id lệch với tòa của căn
+    if (building_id && building_id !== effectiveBuildingId) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'BUILDING_MISMATCH',
+        message: 'Tòa nhà được chọn không khớp với tòa nhà của căn hộ.',
+      });
+    }
+
+    // Kiểm tra quyền quản lý tòa nhà của Manager
+    const checkMgr = await client.query(
+      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+      [req.user.sub, effectiveBuildingId]
+    );
+    if (checkMgr.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không có quyền quản lý tòa nhà này để lập hợp đồng.',
+      });
+    }
+
     if (!['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -219,7 +234,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
        RETURNING *`,
       [
         apartment_id,
-        building_id,
+        effectiveBuildingId,
         primary_tenant_id,
         start_date,
         end_date,
@@ -247,6 +262,10 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     res.status(201).json({ message: 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.', data: contract });
   } catch (err) {
     await client.query('ROLLBACK');
+    const mapped = mapPgError(err);
+    if (mapped) {
+      return res.status(mapped.status).json({ code: mapped.code, message: mapped.message });
+    }
     console.error('[Create Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hợp đồng.' });
   } finally {
@@ -457,6 +476,20 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
     }
     const cur = curRes.rows[0];
+
+    // C6: Guard quyền quản lý tòa nhà của Manager
+    const checkMgr = await client.query(
+      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+      [req.user.sub, cur.building_id]
+    );
+    if (checkMgr.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không có quyền quản lý tòa nhà của hợp đồng này.',
+      });
+    }
+
     if (cur.status !== 'DRAFT') {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -477,11 +510,21 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
     // Đổi dates hoặc căn → chạy lại guard căn + chồng lấn
     if (apartment_id !== undefined || start_date !== undefined || end_date !== undefined) {
-      const aptCheck = await client.query(`SELECT status FROM apartment WHERE id = $1`, [nextApartment]);
+      const aptCheck = await client.query(`SELECT status, building_id FROM apartment WHERE id = $1`, [nextApartment]);
       if (aptCheck.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
       }
+
+      // Guard đổi căn hộ chéo tòa (Lưu ý 4):
+      if (aptCheck.rows[0].building_id !== cur.building_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'CANNOT_CHANGE_BUILDING',
+          message: 'Không thể chuyển căn hộ sang tòa nhà khác trên cùng hợp đồng nháp.',
+        });
+      }
+
       if (!['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -539,6 +582,10 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     res.json({ message: 'Cập nhật hợp đồng nháp thành công.', data: updated.rows[0] });
   } catch (err) {
     await client.query('ROLLBACK');
+    const mapped = mapPgError(err);
+    if (mapped) {
+      return res.status(mapped.status).json({ code: mapped.code, message: mapped.message });
+    }
     console.error('[Update Draft Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi cập nhật hợp đồng.' });
   } finally {
@@ -637,8 +684,7 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
 
   // 3. Giá lệch khung → PENDING_APPROVAL, chờ chủ đầu tư duyệt
   // Lượt /approve đã là quyết định duyệt — bỏ qua check giá (skipPriceCheck).
-  // ponytail: ngưỡng 10% hard-code theo PRD 486, mục 23 chờ chủ đầu tư chốt — tách config khi có.
-  if (!skipPriceCheck && Number(contract.rent_amount) < Number(apt.base_rent) * 0.9) {
+  if (!skipPriceCheck && isDiscountedPrice(contract.rent_amount, apt.base_rent)) {
     const pendingRes = await client.query(
       `UPDATE contract SET status = 'PENDING_APPROVAL', updated_at = NOW() WHERE id = $1 RETURNING *`,
       [contract.id]
@@ -699,7 +745,7 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
 // Guard điều kiện chung trước khi gọi completeActivation
 async function assertActivatable(client, contractId) {
   const cRes = await client.query(
-    `SELECT c.*, t.id AS tenant_id, p.id AS person_id, p.id_number
+    `SELECT c.*, t.id AS tenant_id, t.status AS tenant_status, p.id AS person_id, p.id_number
      FROM contract c
      JOIN tenant t ON t.id = c.primary_tenant_id
      JOIN person p ON p.id = t.person_id
@@ -744,6 +790,14 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
       return res.status(409).json({
         code: 'MISSING_IDENTITY_PAPER',
         message: 'Thiếu thông tin CCCD/hộ chiếu của khách thuê chính. Cập nhật hồ sơ khách thuê trước khi kích hoạt.',
+      });
+    }
+    // C3 / PRD 484: cư dân đại diện đã có hồ sơ APPROVED
+    if (contract.tenant_status !== 'APPROVED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'TENANT_NOT_APPROVED',
+        message: 'Khách thuê chính chưa được phê duyệt hồ sơ (yêu cầu trạng thái APPROVED). Vui lòng cập nhật và duyệt hồ sơ trước khi kích hoạt.',
       });
     }
     const result = await completeActivation(client, contract, res, req);

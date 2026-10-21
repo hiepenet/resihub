@@ -33,7 +33,7 @@ export default function ContractsPage() {
     start_date: new Date().toISOString().split('T')[0],
     end_date: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // +6 months
     rent_amount: 8000000,
-    deposit_amount: 16000000, // 2 months deposit standard
+    deposit_amount: 8000000, // 1 month deposit standard (PRD v2.0)
     billing_day: 1,
     billing_cycle: 'monthly',
     note: '',
@@ -64,8 +64,11 @@ export default function ContractsPage() {
       setTenants(tRes.data?.data || []);
 
       if (bList.length > 0) {
-        setFormData((prev) => ({ ...prev, building_id: bList[0].id }));
-        loadApartments(bList[0].id);
+        // ERR-4: bám Building Switcher — localStorage set trước khi fetch xong thì dùng nó, bList[0] chỉ là fallback
+        const saved = localStorage.getItem('resihub_selected_building_id');
+        const target = saved && saved !== 'ALL' && bList.some((b) => b.id === saved) ? saved : bList[0].id;
+        setFormData((prev) => ({ ...prev, building_id: target }));
+        loadApartments(target);
       }
     } catch (err) {
       console.error('Error loading contracts:', err);
@@ -84,7 +87,7 @@ export default function ContractsPage() {
           ...prev,
           apartment_id: apts[0].id,
           rent_amount: apts[0].base_rent || 8000000,
-          deposit_amount: (apts[0].base_rent || 8000000) * 2,
+          deposit_amount: (apts[0].base_rent || 8000000) * 1,
         }));
       }
     } catch (err) {
@@ -121,7 +124,7 @@ export default function ContractsPage() {
       ...prev,
       apartment_id: aptId,
       rent_amount: apt?.base_rent || prev.rent_amount,
-      deposit_amount: apt ? apt.base_rent * 2 : prev.deposit_amount,
+      deposit_amount: apt ? apt.base_rent * 1 : prev.deposit_amount,
     }));
   };
 
@@ -318,7 +321,7 @@ export default function ContractsPage() {
                   />
                 </FormField>
 
-                <FormField label="Tiền đặt cọc (VND)" required hint="Tự động mở sổ cọc HELD">
+                <FormField label="Tiền đặt cọc (VND)" required hint="Quy tắc: 1 tháng tiền thuê. Sau ký, thu bù chênh lệch qua Sổ cọc">
                   <Input
                     type="number"
                     value={formData.deposit_amount}
@@ -362,7 +365,10 @@ function ContractActions({ row, currentRole, onChanged }) {
       await api.post(`/api/v1/contracts/${row.id}/activate`);
       onChanged();
     } catch (err) {
+      // PRICE_NEEDS_APPROVAL: 409 hợp lệ — DB đã chuyển PENDING_APPROVAL, phải refresh row;
+      // các 409 khác không đổi state, refresh vô hại
       alert(err.response?.data?.message || 'Lỗi khi kích hoạt hợp đồng.');
+      if (err.response?.status === 409) onChanged();
     }
   };
 
@@ -411,6 +417,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     return (
       <div className="flex flex-col gap-1.5 min-w-[150px]">
         <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
         <button
           className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
           onClick={handleActivate}
@@ -440,6 +447,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     return (
       <div className="flex flex-col gap-1.5">
         <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
         <button
           className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
           onClick={handleApprove}
@@ -454,6 +462,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     return (
       <div className="flex flex-col gap-1.5">
         <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
         <button
           className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
           onClick={async () => {
