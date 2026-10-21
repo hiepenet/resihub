@@ -6,6 +6,7 @@ import { saveBase64Image } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
 import { splitDepositOpening } from '../services/depositSettlement.js';
+import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 
 const router = express.Router();
 
@@ -1296,6 +1297,303 @@ router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['O
     await client.query('ROLLBACK');
     console.error('[Delete Service Price Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi xóa đơn giá dịch vụ.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * GET /api/v1/contracts/:id/amendments (FR-016, C7)
+ */
+router.get('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    const versionsRes = await client.query(
+      `SELECT cv.*, 
+              u.email as approved_by_email,
+              p.full_name as approved_by_name
+       FROM contract_version cv
+       LEFT JOIN app_user u ON u.id = cv.approved_by
+       LEFT JOIN person p ON p.id = u.person_id
+       WHERE cv.contract_id = $1
+       ORDER BY cv.version_no DESC`,
+      [id]
+    );
+    res.json({ data: versionsRes.rows });
+  } catch (err) {
+    console.error('[Get Amendments Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách phụ lục hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/amendments (FR-016, FR-015, C7)
+ * Đề xuất phụ lục hợp đồng (MANAGER/OWNER) — Lưu ý 1: Không áp dụng diff trước khi duyệt
+ */
+router.post('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { changes, reason, effective_from } = req.body;
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do lập phụ lục hợp đồng.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const cRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
+    if (cRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+
+    const cur = cRes.rows[0];
+
+    // Chỉ áp dụng cho hợp đồng ACTIVE hoặc RENEWAL_PENDING (nếu đang chờ gia hạn)
+    if (!['ACTIVE', 'RENEWAL_PENDING'].includes(cur.status)) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'CONTRACT_NOT_ACTIVE',
+        message: cur.status === 'DRAFT'
+          ? 'Hợp đồng bản nháp (DRAFT) có thể chỉnh sửa trực tiếp bằng cập nhật, không cần lập phụ lục.'
+          : `Hợp đồng đang ở trạng thái ${cur.status}, chỉ hợp đồng hiệu lực (ACTIVE) mới được lập phụ lục.`
+      });
+    }
+
+    // Build diff
+    const diffRes = buildDiff(cur, changes);
+    if (!diffRes.ok) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ code: diffRes.code, message: diffRes.message });
+    }
+
+    // Re-check overlap nếu có thay đổi end_date mới (loại trừ chính hợp đồng này)
+    if (changes.end_date) {
+      const sDate = cur.start_date.toISOString ? cur.start_date.toISOString().split('T')[0] : String(cur.start_date);
+      const newEndDate = changes.end_date;
+
+      if (newEndDate <= sDate) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          code: 'INVALID_END_DATE',
+          message: 'Ngày kết thúc mới phải sau ngày bắt đầu hợp đồng.'
+        });
+      }
+
+      const overlapRes = await client.query(
+        `SELECT id, start_date, end_date FROM contract
+         WHERE apartment_id = $1 AND id <> $2
+           AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+           AND (start_date < $4 AND end_date > $3)`,
+        [cur.apartment_id, id, sDate, newEndDate]
+      );
+      if (overlapRes.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'OVERLAP_CONTRACT',
+          message: 'Thời hạn gia hạn mới bị trùng lấn với hợp đồng khác của căn hộ.',
+          conflicts: overlapRes.rows
+        });
+      }
+    }
+
+    // Lấy số phiên bản tiếp theo
+    const vRes = await client.query(
+      `SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no FROM contract_version WHERE contract_id = $1`,
+      [id]
+    );
+    const nextVer = vRes.rows[0].next_no;
+
+    const effDate = effective_from || new Date().toISOString().split('T')[0];
+
+    const diffPayload = {
+      ...diffRes.diff,
+      status: 'PENDING',
+      created_by: req.user.sub,
+    };
+
+    const insRes = await client.query(
+      `INSERT INTO contract_version (contract_id, version_no, diff, effective_from, reason, approved_by)
+       VALUES ($1, $2, $3, $4, $5, NULL)
+       RETURNING *`,
+      [id, nextVer, JSON.stringify(diffPayload), effDate, reason.trim()]
+    );
+
+    // Nếu gia hạn (thay đổi end_date), cập nhật trạng thái hợp đồng thành RENEWAL_PENDING
+    if (changes.end_date) {
+      await client.query(
+        `UPDATE contract SET status = 'RENEWAL_PENDING', updated_at = NOW() WHERE id = $1`,
+        [id]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE_AMENDMENT', 'contract_version', $2, $3)`,
+      [req.user.sub, insRes.rows[0].id, JSON.stringify(insRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: 'Đã lập đề xuất phụ lục hợp đồng, chờ Chủ đầu tư (OWNER) phê duyệt.',
+      data: insRes.rows[0]
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Create Amendment Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tạo phụ lục hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/amendments/:versionId/approve (FR-016, C7)
+ * OWNER phê duyệt và áp dụng phụ lục vào hợp đồng
+ */
+router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id, versionId } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const vRes = await client.query(
+      `SELECT * FROM contract_version WHERE id = $1 AND contract_id = $2 FOR UPDATE`,
+      [versionId, id]
+    );
+
+    if (vRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy phụ lục hợp đồng.' });
+    }
+
+    const version = vRes.rows[0];
+    if (version.approved_by) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_APPROVED', message: 'Phụ lục này đã được phê duyệt trước đó.' });
+    }
+
+    const diff = version.diff || {};
+    if (diff.status === 'REJECTED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_REJECTED', message: 'Phụ lục này đã bị từ chối trước đó.' });
+    }
+
+    // Áp dụng các thay đổi từ diff vào bảng contract (Lưu ý 1)
+    const updateClauses = [];
+    const updateParams = [id];
+
+    for (const field of ['end_date', 'rent_amount', 'deposit_amount', 'note']) {
+      if (diff[field] && diff[field].new !== undefined) {
+        updateParams.push(diff[field].new);
+        updateClauses.push(`${field} = $${updateParams.length}`);
+      }
+    }
+
+    // Đưa trạng thái hợp đồng về ACTIVE (nếu đang RENEWAL_PENDING hoặc giữ ACTIVE)
+    updateClauses.push(`status = 'ACTIVE'`);
+    updateClauses.push(`updated_at = NOW()`);
+
+    await client.query(
+      `UPDATE contract SET ${updateClauses.join(', ')} WHERE id = $1`,
+      updateParams
+    );
+
+    // Cập nhật approved_by trong contract_version
+    const updatedDiff = { ...diff, status: 'APPROVED', approved_at: new Date().toISOString() };
+    const upRes = await client.query(
+      `UPDATE contract_version
+       SET approved_by = $1, diff = $2
+       WHERE id = $3
+       RETURNING *`,
+      [req.user.sub, JSON.stringify(updatedDiff), versionId]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'APPROVE_AMENDMENT', 'contract_version', $2, $3)`,
+      [req.user.sub, versionId, JSON.stringify(upRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Phê duyệt và áp dụng phụ lục hợp đồng thành công.', data: upRes.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Approve Amendment Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phê duyệt phụ lục hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/amendments/:versionId/reject (FR-016, C7)
+ * OWNER từ chối phụ lục hợp đồng
+ */
+router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id, versionId } = req.params;
+  const { reason } = req.body;
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do từ chối phụ lục.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const vRes = await client.query(
+      `SELECT * FROM contract_version WHERE id = $1 AND contract_id = $2 FOR UPDATE`,
+      [versionId, id]
+    );
+
+    if (vRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy phụ lục hợp đồng.' });
+    }
+
+    const version = vRes.rows[0];
+    if (version.approved_by) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_APPROVED', message: 'Phụ lục này đã được phê duyệt, không thể từ chối.' });
+    }
+
+    const diff = version.diff || {};
+    const updatedDiff = {
+      ...diff,
+      status: 'REJECTED',
+      rejected_by: req.user.sub,
+      rejected_at: new Date().toISOString(),
+      rejection_reason: reason.trim(),
+    };
+
+    await client.query(
+      `UPDATE contract_version SET diff = $1 WHERE id = $2`,
+      [JSON.stringify(updatedDiff), versionId]
+    );
+
+    // Nếu contract đang ở RENEWAL_PENDING, đưa về ACTIVE
+    await client.query(
+      `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 AND status = 'RENEWAL_PENDING'`,
+      [id]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, note, after)
+       VALUES ($1, 'REJECT_AMENDMENT', 'contract_version', $2, $3, $4)`,
+      [req.user.sub, versionId, reason.trim(), JSON.stringify(updatedDiff)]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Đã từ chối đề xuất phụ lục hợp đồng.' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Reject Amendment Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối phụ lục hợp đồng.' });
   } finally {
     await release();
   }

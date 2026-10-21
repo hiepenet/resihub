@@ -359,6 +359,7 @@ function ContractActions({ row, currentRole, onChanged }) {
   const fileRef = React.useRef(null);
   const [isOccupantsOpen, setIsOccupantsOpen] = useState(false);
   const [isServicesOpen, setIsServicesOpen] = useState(false);
+  const [isAmendmentsOpen, setIsAmendmentsOpen] = useState(false);
 
   const handleActivate = async () => {
     if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
@@ -422,12 +423,16 @@ function ContractActions({ row, currentRole, onChanged }) {
 
   const renderNavButtons = () => (
     <>
-      <div className="flex gap-1">
+      <div className="flex flex-wrap gap-1">
         <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
         <ServicesButton onClick={() => setIsServicesOpen(true)} />
+        {['ACTIVE', 'RENEWAL_PENDING'].includes(row.status) && (
+          <AmendmentsButton onClick={() => setIsAmendmentsOpen(true)} />
+        )}
       </div>
       {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
       {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
+      {isAmendmentsOpen && <AmendmentsModal contract={row} currentRole={currentRole} onClose={() => { setIsAmendmentsOpen(false); onChanged(); }} />}
     </>
   );
 
@@ -714,6 +719,270 @@ function ContractActions({ row, currentRole, onChanged }) {
               </Button>
             </div>
           </form>
+        </div>
+      </div>
+    );
+  }
+
+  function AmendmentsButton({ onClick }) {
+    return (
+      <button
+        className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium"
+        onClick={onClick}
+      >
+        Phụ lục
+      </button>
+    );
+  }
+
+  function AmendmentsModal({ contract, currentRole, onClose }) {
+    const [versions, setVersions] = useState([]);
+    const [type, setType] = useState('RENEWAL'); // RENEWAL | RENT | DEPOSIT | NOTE
+    const [form, setForm] = useState({
+      end_date: contract.end_date ? new Date(new Date(contract.end_date).getTime() + 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] : '',
+      rent_amount: contract.rent_amount || '',
+      deposit_amount: contract.deposit_amount || '',
+      note: '',
+      reason: '',
+      effective_from: new Date().toISOString().split('T')[0],
+    });
+
+    const loadVersions = () => {
+      api.get(`/api/v1/contracts/${contract.id}/amendments`)
+        .then((res) => setVersions(res.data?.data || []))
+        .catch((err) => console.error(err));
+    };
+
+    useEffect(loadVersions, [contract.id]);
+
+    const handleCreate = async (e) => {
+      e.preventDefault();
+      if (!form.reason.trim()) {
+        alert('Vui lòng nhập lý do lập phụ lục.');
+        return;
+      }
+
+      const changes = {};
+      if (type === 'RENEWAL') changes.end_date = form.end_date;
+      if (type === 'RENT') changes.rent_amount = Number(form.rent_amount);
+      if (type === 'DEPOSIT') changes.deposit_amount = Number(form.deposit_amount);
+      if (type === 'NOTE') changes.note = form.note;
+
+      try {
+        await api.post(`/api/v1/contracts/${contract.id}/amendments`, {
+          changes,
+          reason: form.reason.trim(),
+          effective_from: form.effective_from,
+        });
+        alert('Đã gửi đề xuất phụ lục hợp đồng, chờ OWNER phê duyệt.');
+        setForm((prev) => ({ ...prev, reason: '' }));
+        loadVersions();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi đề xuất phụ lục.');
+      }
+    };
+
+    const handleApprove = async (versionId) => {
+      if (!window.confirm('Phê duyệt và áp dụng phụ lục này vào hợp đồng?')) return;
+      try {
+        await api.post(`/api/v1/contracts/${contract.id}/amendments/${versionId}/approve`);
+        alert('Phê duyệt phụ lục thành công.');
+        loadVersions();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi phê duyệt phụ lục.');
+      }
+    };
+
+    const handleReject = async (versionId) => {
+      const reason = window.prompt('Lý do từ chối phụ lục:');
+      if (reason === null) return;
+      if (!reason.trim()) {
+        alert('Vui lòng nhập lý do từ chối.');
+        return;
+      }
+      try {
+        await api.post(`/api/v1/contracts/${contract.id}/amendments/${versionId}/reject`, { reason: reason.trim() });
+        alert('Đã từ chối phụ lục.');
+        loadVersions();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi từ chối phụ lục.');
+      }
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
+        <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">Phụ lục Hợp đồng (FR-016 / FR-015)</h3>
+              <p className="text-xs text-slate-500">Căn {contract.apartment_code} · Khách {contract.tenant_name}</p>
+            </div>
+            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
+          </div>
+
+          {/* Lịch sử phiên bản phụ lục */}
+          <div className="space-y-3 mb-6">
+            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lịch sử phụ lục hợp đồng</p>
+            {versions.length === 0 && (
+              <p className="text-xs text-slate-400 text-center py-3 border border-dashed rounded-lg">
+                Chưa có phụ lục hợp đồng nào.
+              </p>
+            )}
+            {versions.map((v) => {
+              const diff = v.diff || {};
+              const isPending = !v.approved_by && diff.status !== 'REJECTED';
+              const isApproved = !!v.approved_by || diff.status === 'APPROVED';
+              const isRejected = diff.status === 'REJECTED';
+
+              return (
+                <div key={v.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-900">Phụ lục #{v.version_no} · {v.reason}</span>
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                      isApproved ? 'bg-emerald-100 text-emerald-800' :
+                      isRejected ? 'bg-rose-100 text-rose-800' :
+                      'bg-amber-100 text-amber-800'
+                    }`}>
+                      {isApproved ? 'Đã duyệt' : isRejected ? 'Từ chối' : 'Chờ duyệt'}
+                    </span>
+                  </div>
+
+                  <div className="text-xs text-slate-600 space-y-1">
+                    {diff.end_date && (
+                      <p>Gia hạn thời hạn: <strong>{diff.end_date.old} → {diff.end_date.new}</strong></p>
+                    )}
+                    {diff.rent_amount && (
+                      <p>Điều chỉnh giá thuê: <strong>{Number(diff.rent_amount.old).toLocaleString('vi-VN')} ₫ → {Number(diff.rent_amount.new).toLocaleString('vi-VN')} ₫</strong></p>
+                    )}
+                    {diff.deposit_amount && (
+                      <p>Điều chỉnh tiền cọc: <strong>{Number(diff.deposit_amount.old).toLocaleString('vi-VN')} ₫ → {Number(diff.deposit_amount.new).toLocaleString('vi-VN')} ₫</strong></p>
+                    )}
+                    {diff.note && (
+                      <p>Cập nhật điều khoản: <em>{diff.note.new}</em></p>
+                    )}
+                    <p className="text-[11px] text-slate-400">
+                      Hiệu lực: {new Date(v.effective_from).toLocaleDateString('vi-VN')}
+                      {v.approved_by_name && ` · Người duyệt: ${v.approved_by_name}`}
+                      {diff.rejection_reason && ` · Lý do từ chối: ${diff.rejection_reason}`}
+                    </p>
+                  </div>
+
+                  {isPending && currentRole === 'OWNER' && (
+                    <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                      <Button size="sm" variant="outline" onClick={() => handleReject(v.id)} className="text-rose-600 border-rose-200 hover:bg-rose-50 text-xs">
+                        Từ chối
+                      </Button>
+                      <Button size="sm" variant="primary" onClick={() => handleApprove(v.id)} className="bg-emerald-600 hover:bg-emerald-700 text-xs">
+                        Duyệt phụ lục
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Form lập đề xuất phụ lục mới */}
+          {['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) && (
+            <form onSubmit={handleCreate} className="space-y-3 pt-3 border-t border-slate-100">
+              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Đề xuất phụ lục mới (MANAGER/OWNER)</p>
+
+              <div>
+                <label className="text-xs text-slate-600 font-medium block mb-1">Nội dung thay đổi</label>
+                <select
+                  value={type}
+                  onChange={(e) => setType(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 py-1.5 px-3 text-xs bg-white"
+                >
+                  <option value="RENEWAL">Gia hạn thời hạn hợp đồng (end_date)</option>
+                  <option value="RENT">Điều chỉnh giá thuê (rent_amount)</option>
+                  <option value="DEPOSIT">Điều chỉnh tiền cọc (deposit_amount)</option>
+                  <option value="NOTE">Bổ sung điều khoản ghi chú (note)</option>
+                </select>
+              </div>
+
+              {type === 'RENEWAL' && (
+                <div>
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Ngày kết thúc mới (Gia hạn) *</label>
+                  <Input
+                    type="date"
+                    required
+                    value={form.end_date}
+                    onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                  />
+                  <span className="text-[11px] text-slate-400">Hạn hiện tại: {contract.end_date}</span>
+                </div>
+              )}
+
+              {type === 'RENT' && (
+                <div>
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Giá thuê mới / tháng (VND) *</label>
+                  <Input
+                    type="number"
+                    required
+                    min="0"
+                    value={form.rent_amount}
+                    onChange={(e) => setForm({ ...form, rent_amount: e.target.value })}
+                  />
+                  <span className="text-[11px] text-slate-400">Giá hiện tại: {Number(contract.rent_amount).toLocaleString('vi-VN')} ₫</span>
+                </div>
+              )}
+
+              {type === 'DEPOSIT' && (
+                <div>
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Tiền cọc mới (VND) *</label>
+                  <Input
+                    type="number"
+                    required
+                    min="0"
+                    value={form.deposit_amount}
+                    onChange={(e) => setForm({ ...form, deposit_amount: e.target.value })}
+                  />
+                  <span className="text-[11px] text-slate-400">Cọc hiện tại: {Number(contract.deposit_amount).toLocaleString('vi-VN')} ₫</span>
+                </div>
+              )}
+
+              {type === 'NOTE' && (
+                <div>
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Nội dung điều khoản mới *</label>
+                  <Input
+                    required
+                    value={form.note}
+                    placeholder="vd: Cho phép nuôi thú cưng nhỏ, thêm 1 chỗ gửi xe..."
+                    onChange={(e) => setForm({ ...form, note: e.target.value })}
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Lý do lập phụ lục *</label>
+                  <Input
+                    required
+                    placeholder="vd: Khách thỏa thuận thuê thêm 6 tháng, gia hạn hợp đồng..."
+                    value={form.reason}
+                    onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <label className="text-xs text-slate-600 font-medium block mb-1">Ngày hiệu lực *</label>
+                  <Input
+                    type="date"
+                    required
+                    value={form.effective_from}
+                    onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <Button type="submit" variant="primary" size="sm">
+                  Gửi đề xuất phụ lục
+                </Button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     );
