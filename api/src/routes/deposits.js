@@ -56,21 +56,39 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
 
 /**
  * POST /api/v1/deposits/:id/transactions
- * Thêm giao dịch cọc (collect, deduct, refund, transfer)
+ * Thêm giao dịch cọc (chỉ cho phép collect hoặc transfer)
+ * deduct/refund chỉ được thực hiện qua luồng /settlement có phê duyệt (FR-024)
  */
 router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { type, amount, description, category } = req.body;
+  const { type, amount, description, method } = req.body;
 
-  if (!type || !amount) {
-    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Loại giao dịch và số tiền là bắt buộc.' });
+  if (type === 'deduct' || type === 'refund') {
+    return res.status(409).json({
+      code: 'MUST_USE_SETTLEMENT',
+      message: 'Khấu trừ/hoàn cọc chỉ thực hiện qua hồ sơ tất toán có phê duyệt (FR-024).'
+    });
   }
 
-  // PRD Rule: Tiền cọc TUYỆT ĐỐI KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ (Mục 5.3 / FR-068)
-  if (type === 'deduct' && (category === 'rent' || (description && /tiền thuê|nợ thuê/i.test(description)))) {
+  if (type !== 'collect' && type !== 'transfer') {
     return res.status(400).json({
-      code: 'RENT_OFFSET_PROHIBITED',
-      message: 'Quy tắc an toàn PRD: Tiền cọc TUYỆT ĐỐI KHÔNG ĐƯỢC CẤN TRỪ VÀO TIỀN THUÊ hằng tháng.',
+      code: 'INVALID_TRANSACTION_TYPE',
+      message: 'Loại giao dịch không hợp lệ. Chỉ chấp nhận collect hoặc transfer.'
+    });
+  }
+
+  const numAmount = Number(amount);
+  if (!amount || isNaN(numAmount) || numAmount <= 0) {
+    return res.status(400).json({
+      code: 'INVALID_AMOUNT',
+      message: 'Số tiền giao dịch phải lớn hơn 0.'
+    });
+  }
+
+  if (type === 'collect' && !method) {
+    return res.status(400).json({
+      code: 'METHOD_REQUIRED',
+      message: 'Phương thức thanh toán là bắt buộc khi thu tiền cọc (vd: BANK_TRANSFER, CASH).'
     });
   }
 
@@ -78,32 +96,33 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
   try {
     await client.query('BEGIN');
 
-    const depositRes = await client.query('SELECT * FROM deposit WHERE id = $1', [id]);
+    const depositRes = await client.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
     if (depositRes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
     }
 
     const currentDeposit = depositRes.rows[0];
-    let newAmount = BigInt(currentDeposit.amount_held);
     const txnAmount = BigInt(amount);
-
-    if (type === 'collect') {
-      newAmount += txnAmount;
-    } else if (type === 'deduct' || type === 'refund') {
-      if (txnAmount > newAmount) {
-        return res.status(400).json({ code: 'INSUFFICIENT_FUNDS', message: 'Số tiền khấu trừ/hoàn trả vượt quá số dư cọc.' });
-      }
-      newAmount -= txnAmount;
-    }
+    const newAmount = BigInt(currentDeposit.amount_held) + txnAmount;
 
     const txnRes = await client.query(
-      `INSERT INTO deposit_transaction (deposit_id, type, amount, description, approved_by, approved_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $5)
+      `INSERT INTO deposit_transaction (
+         deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, 'APPROVED', $6, NOW(), $6)
        RETURNING *`,
-      [id, type, amount, description || '', req.user.sub]
+      [
+        id,
+        type,
+        amount,
+        description || (type === 'collect' ? 'Thu bổ sung cọc' : 'Chuyển đổi cọc giữ chỗ'),
+        method || (type === 'transfer' ? 'TRANSFER' : 'OTHER'),
+        req.user.sub
+      ]
     );
 
-    const newStatus = newAmount === 0n && (type === 'refund' || type === 'deduct') ? 'REFUNDED' : 'HELD';
+    const newStatus = currentDeposit.status === 'DISPUTED' ? 'DISPUTED' : 'HELD';
 
     await client.query(
       `UPDATE deposit SET amount_held = $1, status = $2, updated_at = NOW() WHERE id = $3`,

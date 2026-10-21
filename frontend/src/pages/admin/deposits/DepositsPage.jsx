@@ -32,11 +32,12 @@ export default function DepositsPage() {
   const [selectedDeposit, setSelectedDeposit] = useState(null);
   const [isTxnModalOpen, setIsTxnModalOpen] = useState(false);
 
-  // Transaction form
+  // Transaction form (chỉ còn thu bổ sung cọc; khấu trừ/hoàn trả qua hồ sơ tất toán FR-024)
   const [txnData, setTxnData] = useState({
-    type: 'deduct', // deduct | refund | collect
+    type: 'collect',
+    method: 'BANK_TRANSFER',
     amount: 1000000,
-    description: '',
+    description: 'Thu bổ sung cọc',
   });
   const [formError, setFormError] = useState('');
 
@@ -59,9 +60,10 @@ export default function DepositsPage() {
   const handleOpenTxnModal = (dep) => {
     setSelectedDeposit(dep);
     setTxnData({
-      type: 'deduct',
-      amount: Math.min(1000000, Number(dep.amount_held)),
-      description: '',
+      type: 'collect',
+      method: 'BANK_TRANSFER',
+      amount: 1000000,
+      description: 'Thu bổ sung cọc',
     });
     setFormError('');
     setIsTxnModalOpen(true);
@@ -178,16 +180,29 @@ export default function DepositsPage() {
               <FormField label="Loại giao dịch" required error={formError}>
                 <select
                   value={txnData.type}
-                  onChange={(e) => setTxnData({ ...txnData, type: e.target.value })}
+                  disabled
+                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm bg-slate-50 text-slate-700"
+                >
+                  <option value="collect">Thu bổ sung tiền cọc (Collect)</option>
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  * Khấu trừ và hoàn trả cọc được thực hiện qua Hồ sơ Tất toán có phê duyệt (FR-024).
+                </p>
+              </FormField>
+
+              <FormField label="Phương thức thanh toán" required>
+                <select
+                  value={txnData.method}
+                  onChange={(e) => setTxnData({ ...txnData, method: e.target.value })}
                   className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                 >
-                  <option value="deduct">Khấu trừ hư hại / Nợ tiền phòng (Deduct)</option>
-                  <option value="refund">Hoàn trả tiền cọc cho khách (Refund)</option>
-                  <option value="collect">Thu bổ sung tiền cọc (Collect)</option>
+                  <option value="BANK_TRANSFER">Chuyển khoản (Bank Transfer)</option>
+                  <option value="CASH">Tiền mặt (Cash)</option>
+                  <option value="OTHER">Khác</option>
                 </select>
               </FormField>
 
-              <FormField label="Số tiền giao dịch (VND)" required>
+              <FormField label="Số tiền thu bổ sung (VND)" required>
                 <Input
                   type="number"
                   value={txnData.amount}
@@ -197,7 +212,7 @@ export default function DepositsPage() {
 
               <FormField label="Lý do / Mô tả chi tiết" required>
                 <Input
-                  placeholder="Ví dụ: Khấu trừ tiền sơn lại tường phòng ngủ..."
+                  placeholder="Ví dụ: Khách nộp bổ sung tiền cọc đợt 2..."
                   value={txnData.description}
                   onChange={(e) => setTxnData({ ...txnData, description: e.target.value })}
                 />
