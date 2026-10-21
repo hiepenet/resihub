@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from '../pages/auth/LoginPage';
+import ForgotPasswordPage from '../pages/auth/ForgotPasswordPage';
 import AdminLayout from '../components/layout/AdminLayout';
 import DashboardPage from '../pages/admin/dashboard/DashboardPage';
 import BuildingsPage from '../pages/admin/buildings/BuildingsPage';
@@ -57,6 +58,7 @@ export default function AppRouter() {
     <Routes>
       {/* Public Auth Routes */}
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
 
       {/* Protected Resident Routes */}
       <Route

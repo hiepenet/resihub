@@ -22,13 +22,13 @@ export default {
         },
         status: {
           available: '#10b981',   // xanh lá
-          occupied:  '#6366f1',   // indigo
-          reserved:  '#f59e0b',   // vàng
+          occupied: '#6366f1',   // indigo
+          reserved: '#f59e0b',   // vàng
           maintenance: '#ef4444', // đỏ
-          inactive:  '#94a3b8',   // xám
-          draft:     '#94a3b8',
-          active:    '#10b981',
-          expired:   '#ef4444',
+          inactive: '#94a3b8',   // xám
+          draft: '#94a3b8',
+          active: '#10b981',
+          expired: '#ef4444',
         }
       },
       fontFamily: {

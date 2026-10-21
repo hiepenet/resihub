@@ -107,8 +107,6 @@ export default function DashboardPage() {
       setDeposits(dRes.data?.data || []);
       setReservations(rRes.data?.data || []);
       setTenants(tRes.data?.data || []);
-      setTenants(tRes.data?.data || []);
-      setReservations(rRes.data?.data || []);
     } catch (err) {
       console.error('Error loading dashboard live data:', err);
     } finally {

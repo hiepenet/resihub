@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { FileText, Plus, Calendar, Home, User, DollarSign, X, Printer, Bell, Check, AlertCircle } from 'lucide-react';
 import Button from '../../../components/ui/Button';
 import Input from '../../../components/ui/Input';
@@ -11,6 +12,7 @@ import api from '../../../services/api';
 import { useAuthStore } from '../../../stores/authStore';
 
 export default function ContractsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
   const [contracts, setContracts] = useState([]);
@@ -21,6 +23,7 @@ export default function ContractsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formError, setFormError] = useState('');
+  const [reservationId, setReservationId] = useState(null);
 
   // Tabs: 'contracts' | 'requests'
   const [activeTab, setActiveTab] = useState('contracts');
@@ -154,6 +157,42 @@ export default function ContractsPage() {
     return () => window.removeEventListener('buildingChanged', onBuildingChanged);
   }, []);
 
+  // Đồng bộ query params khi chuyển từ Giữ chỗ (Reservation) sang Ký hợp đồng (FR-067 / NV-06)
+  useEffect(() => {
+    const action = searchParams.get('action');
+    if (action === 'new') {
+      const bId = searchParams.get('building_id');
+      const aId = searchParams.get('apartment_id');
+      const rId = searchParams.get('reservation_id');
+      const hAmount = searchParams.get('hold_amount');
+
+      if (rId) setReservationId(rId);
+
+      if (bId) {
+        setFormData((prev) => ({ ...prev, building_id: bId }));
+        loadApartments(bId);
+      }
+      if (aId) {
+        setFormData((prev) => ({ ...prev, apartment_id: aId }));
+      }
+      if (hAmount) {
+        setFormData((prev) => ({ ...prev, deposit_amount: Number(hAmount) }));
+      }
+      setIsModalOpen(true);
+    }
+  }, [searchParams]);
+
+  // Tự động chọn người thuê nếu SĐT từ giữ chỗ khớp với hồ sơ cư dân có sẵn
+  useEffect(() => {
+    const phone = searchParams.get('phone');
+    if (phone && tenants.length > 0) {
+      const matched = tenants.find((t) => t.phone === phone);
+      if (matched) {
+        setFormData((prev) => ({ ...prev, primary_tenant_id: matched.id }));
+      }
+    }
+  }, [tenants, searchParams]);
+
   const handleBuildingChange = (bId) => {
     setFormData((prev) => ({ ...prev, building_id: bId }));
     loadApartments(bId);
@@ -180,6 +219,17 @@ export default function ContractsPage() {
 
     try {
       await api.post('/api/v1/contracts', formData);
+
+      // Nếu tạo hợp đồng từ giữ chỗ: Tự động chuyển đổi giữ chỗ sang CONVERTED (NV-06)
+      if (reservationId) {
+        try {
+          await api.patch(`/api/v1/reservations/${reservationId}/convert`);
+        } catch (rErr) {
+          console.warn('Could not auto-convert reservation:', rErr);
+        }
+        setReservationId(null);
+      }
+      setSearchParams({});
       setIsModalOpen(false);
       loadInitialData();
     } catch (err) {

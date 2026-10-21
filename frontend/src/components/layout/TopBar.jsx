@@ -15,9 +15,13 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
+import { useAuthStore } from '../../stores/authStore';
+import ProfileModal from '../common/ProfileModal';
 
 export default function TopBar({ onMenuClick }) {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   // Building Switcher State
   const [buildings, setBuildings] = useState([]);
@@ -355,6 +359,24 @@ export default function TopBar({ onMenuClick }) {
             </div>
           )}
         </div>
+
+        {/* User Profile & Password */}
+        <button
+          id="btn-admin-profile"
+          onClick={() => setIsProfileOpen(true)}
+          className="flex items-center gap-2 p-1 pl-2 rounded-xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all text-left"
+          title="Xem hồ sơ & đổi mật khẩu"
+        >
+          <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white font-bold flex items-center justify-center text-xs shadow-sm">
+            {user?.full_name ? user.full_name.charAt(0).toUpperCase() : 'U'}
+          </div>
+          <div className="hidden md:block pr-1">
+            <p className="text-xs font-bold text-slate-800 leading-none">{user?.full_name || 'Quản lý'}</p>
+            <p className="text-[10px] text-slate-400 font-mono mt-0.5">{user?.phone || ''}</p>
+          </div>
+        </button>
+
+        <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
       </div>
     </header>
   );

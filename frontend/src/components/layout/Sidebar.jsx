@@ -1,11 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { Building, Shield, ChevronDown, LogOut } from 'lucide-react';
 import { NAV_ITEMS } from '../../constants/navigation';
 import { useAuthStore } from '../../stores/authStore';
+import ProfileModal from '../common/ProfileModal';
 
 export default function Sidebar({ isOpen, onClose }) {
   const { user, getCurrentRole, getCurrentRoleInfo, logout } = useAuthStore();
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   const currentRole = getCurrentRole();
   const currentRoleInfo = getCurrentRoleInfo();
@@ -101,7 +103,11 @@ export default function Sidebar({ isOpen, onClose }) {
         {/* User Footer & Logout */}
         <div className="p-3 border-t border-slate-800 bg-slate-950/40">
           <div className="flex items-center justify-between px-2 py-1.5">
-            <div className="flex items-center gap-2.5 overflow-hidden">
+            <div
+              onClick={() => setIsProfileOpen(true)}
+              className="flex items-center gap-2.5 overflow-hidden cursor-pointer hover:opacity-80 transition-opacity"
+              title="Xem hồ sơ & đổi mật khẩu"
+            >
               <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-300 text-xs font-bold border border-slate-700 flex-shrink-0">
                 {user?.full_name ? user.full_name.charAt(0) : 'U'}
               </div>
@@ -124,6 +130,8 @@ export default function Sidebar({ isOpen, onClose }) {
             </button>
           </div>
         </div>
+
+        <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
       </aside>
     </>
   );

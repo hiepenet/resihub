@@ -1307,23 +1307,31 @@ export default function ResidentPortalPage() {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                     <div className="p-2.5 rounded-xl bg-white border border-amber-100">
                       <span className="text-[11px] text-slate-500 block">Cọc ban đầu</span>
-                      <span className="font-bold text-slate-800">{formatVND(depositLedger.deposit.settlement.deposit)}</span>
+                      <span className="font-bold text-slate-800">
+                        {formatVND(depositLedger.deposit.amount_held ?? depositLedger.deposit.original_amount ?? depositLedger.deposit.settlement.deposit ?? 0)}
+                      </span>
                     </div>
                     <div className="p-2.5 rounded-xl bg-white border border-amber-100">
                       <span className="text-[11px] text-slate-500 block">Khấu trừ hư hại</span>
-                      <span className="font-bold text-rose-600">-{formatVND(depositLedger.deposit.settlement.sumItems)}</span>
+                      <span className="font-bold text-rose-600">
+                        -{formatVND(depositLedger.deposit.settlement.items?.reduce((sum, item) => sum + Number(item.amount || 0), 0) || 0)}
+                      </span>
                     </div>
                     <div className="p-2.5 rounded-xl bg-white border border-amber-100">
                       <span className="text-[11px] text-slate-500 block">Cấn trừ công nợ</span>
-                      <span className="font-bold text-amber-600">-{formatVND(depositLedger.deposit.settlement.outstandingDebt)}</span>
+                      <span className="font-bold text-amber-600">
+                        -{formatVND(depositLedger.deposit.settlement.outstanding_debt ?? depositLedger.deposit.settlement.outstandingDebt ?? 0)}
+                      </span>
                     </div>
                     <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200">
                       <span className="text-[11px] text-emerald-700 font-semibold block">Thực nhận hoàn</span>
-                      <span className="font-bold text-emerald-700 text-sm">{formatVND(depositLedger.deposit.settlement.refund)}</span>
+                      <span className="font-bold text-emerald-700 text-sm">
+                        {formatVND(depositLedger.deposit.settlement.refund_amount ?? depositLedger.deposit.settlement.refund ?? 0)}
+                      </span>
                     </div>
                   </div>
 
-                  {depositLedger.deposit.settlement.shortfall > 0 && (
+                  {Number(depositLedger.deposit.settlement.shortfall || 0) > 0 && (
                     <p className="text-xs text-rose-600 font-semibold">
                       ⚠️ Khoản cần nộp bù sau trả phòng: {formatVND(depositLedger.deposit.settlement.shortfall)}
                     </p>

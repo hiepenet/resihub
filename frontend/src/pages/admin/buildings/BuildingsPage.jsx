@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Building2,
   Plus,
@@ -17,6 +18,7 @@ import {
   Pencil,
   BookmarkCheck,
   Calendar,
+  FileText,
 } from 'lucide-react';
 import Button from '../../../components/ui/Button';
 import Input from '../../../components/ui/Input';
@@ -40,6 +42,7 @@ const AMENITY_LABELS = {
 };
 
 export default function BuildingsPage() {
+  const navigate = useNavigate();
   const { user, getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
@@ -428,6 +431,28 @@ export default function BuildingsPage() {
       loadFloorMap(selectedBuilding.id);
     } catch (err) {
       alert(err.response?.data?.message || 'Lỗi hoàn tiền giữ chỗ.');
+    }
+  };
+
+  const handleConvertReservationToContract = async (apartment) => {
+    try {
+      const resList = await api.get('/api/v1/reservations?status=HELD');
+      const found = resList.data?.data?.find((r) => r.apartment_id === apartment.id);
+      const params = new URLSearchParams({
+        action: 'new',
+        building_id: apartment.building_id,
+        apartment_id: apartment.id,
+      });
+      if (found) {
+        params.set('reservation_id', found.id);
+        if (found.hold_amount) params.set('hold_amount', found.hold_amount);
+        if (found.prospect_name) params.set('prospect_name', found.prospect_name);
+        if (found.phone) params.set('phone', found.phone);
+      }
+      navigate(`/admin/contracts?${params.toString()}`);
+    } catch (err) {
+      console.error('Error navigating to contract from reservation:', err);
+      navigate(`/admin/contracts?action=new&building_id=${apartment.building_id}&apartment_id=${apartment.id}`);
     }
   };
 
@@ -910,6 +935,14 @@ export default function BuildingsPage() {
                       </p>
                       <p className="text-[11px] mt-0.5">Khách đã đặt cọc giữ chỗ. Xử lý khi khách ký HĐ hoặc hủy:</p>
                     </div>
+                    <Button
+                      variant="primary"
+                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-1.5 shadow-sm"
+                      onClick={() => handleConvertReservationToContract(selectedApartment)}
+                    >
+                      <FileText className="w-4 h-4" />
+                      <span>Ký hợp đồng từ giữ chỗ này (NV-06)</span>
+                    </Button>
                     <div className="flex gap-2">
                       <Button
                         variant="outline"

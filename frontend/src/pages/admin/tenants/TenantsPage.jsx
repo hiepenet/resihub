@@ -123,6 +123,49 @@ export default function TenantsPage() {
     }
   };
 
+  // Merge Modal State (FR-021)
+  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+  const [mergeSource, setMergeSource] = useState(null);
+  const [mergeTargetId, setMergeTargetId] = useState('');
+  const [mergeReason, setMergeReason] = useState('');
+  const [mergeError, setMergeError] = useState('');
+  const [isMerging, setIsMerging] = useState(false);
+
+  const handleOpenMergeModal = (row) => {
+    setMergeSource(row);
+    // Chọn mặc định target khác source
+    const other = tenants.find((t) => t.id !== row.id && t.status !== 'MERGED');
+    setMergeTargetId(other ? other.id : '');
+    setMergeReason('Gộp hồ sơ trùng lặp thông tin CCCD/SĐT');
+    setMergeError('');
+    setIsMergeModalOpen(true);
+  };
+
+  const handleExecuteMerge = async (e) => {
+    e.preventDefault();
+    if (!mergeSource || !mergeTargetId) {
+      setMergeError('Vui lòng chọn hồ sơ đích để gộp.');
+      return;
+    }
+    setIsMerging(true);
+    setMergeError('');
+    try {
+      const res = await api.post('/api/v1/tenants/merge', {
+        source_tenant_id: mergeSource.id,
+        target_tenant_id: mergeTargetId,
+        reason: mergeReason,
+      });
+      alert(res.data?.message || 'Đã gộp hồ sơ thành công.');
+      setIsMergeModalOpen(false);
+      setMergeSource(null);
+      loadTenants();
+    } catch (err) {
+      setMergeError(err.response?.data?.message || 'Lỗi khi gộp hồ sơ cư dân.');
+    } finally {
+      setIsMerging(false);
+    }
+  };
+
   const openEditTenant = (row) => {
     setEditingTenant(row);
     setFormData({
@@ -199,6 +242,15 @@ export default function TenantsPage() {
           >
             Sửa
           </button>
+          {row.status !== 'MERGED' && (
+            <button
+              className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium"
+              onClick={() => handleOpenMergeModal(row)}
+              title="Gộp hồ sơ trùng lặp (FR-021)"
+            >
+              Gộp
+            </button>
+          )}
         </div>
       ),
     }] : []),
@@ -321,6 +373,69 @@ export default function TenantsPage() {
                 </Button>
                 <Button type="submit" variant="primary">
                   Lưu hồ sơ cư dân
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Gộp Hồ Sơ Cư Dân Trùng Lặp (FR-021) */}
+      {isMergeModalOpen && mergeSource && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100">
+            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+              <h3 className="text-base font-bold text-slate-900">Gộp hồ sơ cư dân trùng lặp (FR-021)</h3>
+              <button onClick={() => setIsMergeModalOpen(false)}>
+                <X className="w-5 h-5 text-slate-400" />
+              </button>
+            </div>
+
+            {mergeError && (
+              <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700">
+                {mergeError}
+              </div>
+            )}
+
+            <form onSubmit={handleExecuteMerge} className="space-y-4">
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-1">
+                <p className="font-bold">⚠️ Hồ sơ cần gộp (sẽ bị vô hiệu hóa):</p>
+                <p>• Họ tên: <strong>{mergeSource.full_name}</strong></p>
+                <p>• SĐT: {mergeSource.phone} · CCCD: {mergeSource.id_number || 'Chưa có'}</p>
+                <p className="text-[11px] text-amber-700 pt-1">Toàn bộ hợp đồng, thành viên và yêu cầu của người này sẽ được chuyển sang hồ sơ đích được chọn bên dưới.</p>
+              </div>
+
+              <FormField label="Chọn hồ sơ chính (Hồ sơ đích giữ lại)" required>
+                <select
+                  value={mergeTargetId}
+                  onChange={(e) => setMergeTargetId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                >
+                  <option value="">-- Chọn hồ sơ đích --</option>
+                  {tenants
+                    .filter((t) => t.id !== mergeSource.id && t.status !== 'MERGED')
+                    .map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.full_name} ({t.phone} - CCCD: {t.id_number || '---'})
+                      </option>
+                    ))}
+                </select>
+              </FormField>
+
+              <FormField label="Lý do gộp hồ sơ" required>
+                <Input
+                  value={mergeReason}
+                  onChange={(e) => setMergeReason(e.target.value)}
+                  placeholder="Ví dụ: Cùng một khách hàng đổi số điện thoại mới"
+                />
+              </FormField>
+
+              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <Button variant="secondary" onClick={() => setIsMergeModalOpen(false)}>
+                  Hủy
+                </Button>
+                <Button type="submit" variant="primary" isLoading={isMerging}>
+                  Xác nhận gộp hồ sơ
                 </Button>
               </div>
             </form>

@@ -1,11 +1,14 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
 import { Building2, LogOut, PhoneCall, Bell, Shield, User, Home, Sparkles } from 'lucide-react';
+import NotificationBell from '../common/NotificationBell';
+import ProfileModal from '../common/ProfileModal';
 import { useAuthStore } from '../../stores/authStore';
 
 export default function ResidentLayout() {
   const navigate = useNavigate();
   const { user, logout } = useAuthStore();
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   const handleLogout = () => {
     logout();
@@ -40,8 +43,8 @@ export default function ResidentLayout() {
             </div>
           </div>
 
-          {/* Right actions: Support hotline, Profile & Logout */}
-          <div className="flex items-center space-x-3 sm:space-x-4">
+          {/* Right actions: Support hotline, Notifications, Profile & Logout */}
+          <div className="flex items-center space-x-2 sm:space-x-3">
             {/* Hotline chip */}
             <a
               href="tel:0901234567"
@@ -52,8 +55,15 @@ export default function ResidentLayout() {
               <span>Hotline BQL: 0901.234.567</span>
             </a>
 
+            {/* Chuông thông báo cư dân */}
+            <NotificationBell />
+
             {/* User Info chip */}
-            <div className="flex items-center space-x-2.5 pl-2 sm:border-l sm:border-slate-200">
+            <div
+              onClick={() => setIsProfileOpen(true)}
+              className="flex items-center space-x-2.5 pl-2 sm:border-l sm:border-slate-200 cursor-pointer hover:opacity-80 transition-opacity"
+              title="Xem hồ sơ & đổi mật khẩu"
+            >
               <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-sm border border-indigo-200">
                 {displayName.charAt(0).toUpperCase()}
               </div>
@@ -76,6 +86,8 @@ export default function ResidentLayout() {
             >
               <LogOut className="w-4 h-4" />
             </button>
+
+            <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
           </div>
         </div>
       </header>

@@ -75,6 +75,29 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
     });
   }
 
+  // Bắt buộc hold_until và kiểm tra ngày hợp lệ (FR-067)
+  if (!hold_until) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Thời hạn giữ chỗ (hold_until) là bắt buộc.',
+    });
+  }
+  const holdUntilDate = new Date(hold_until);
+  const nowDate = new Date();
+  if (isNaN(holdUntilDate.getTime()) || holdUntilDate <= nowDate) {
+    return res.status(400).json({
+      code: 'INVALID_HOLD_DATE',
+      message: 'Thời hạn giữ chỗ phải là một ngày hợp lệ trong tương lai.',
+    });
+  }
+  const maxHoldDate = new Date(nowDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+  if (holdUntilDate > maxHoldDate) {
+    return res.status(400).json({
+      code: 'HOLD_DURATION_EXCEEDED',
+      message: 'Thời hạn giữ chỗ tối đa không quá 30 ngày theo quy định.',
+    });
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -94,6 +117,24 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
     }
 
     const apt = aptRes.rows[0];
+
+    // Building access guard cho Manager
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    if (!isOwner) {
+      const accessCheck = await client.query(
+        `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+        [req.user.sub, apt.building_id]
+      );
+      if (accessCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền quản lý tòa nhà chứa căn hộ này.',
+        });
+      }
+    }
+
     if (apt.status !== 'AVAILABLE') {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -115,7 +156,7 @@ router.post('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (re
         prospect_name.trim(),
         phone.trim(),
         hold_amount || 0,
-        hold_until || null,
+        hold_until,
         note || '',
         req.user.sub,
       ]
@@ -167,6 +208,24 @@ router.patch('/:id/convert', authenticateToken, requireRole(['OWNER', 'MANAGER']
     }
 
     const currentRes = resCheck.rows[0];
+
+    // Building access guard cho Manager
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    if (!isOwner) {
+      const accessCheck = await client.query(
+        `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+        [req.user.sub, currentRes.building_id]
+      );
+      if (accessCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
+    }
+
     if (currentRes.status !== 'HELD') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -214,6 +273,24 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
     }
 
     const currentRes = resCheck.rows[0];
+
+    // Building access guard cho Manager
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    if (!isOwner) {
+      const accessCheck = await client.query(
+        `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+        [req.user.sub, currentRes.building_id]
+      );
+      if (accessCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
+    }
+
     if (currentRes.status !== 'HELD') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -239,7 +316,16 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'FORFEIT', 'reservation', $2, $3, $4)`,
-      [req.user.sub, id, JSON.stringify(currentRes), JSON.stringify(updated.rows[0])]
+      [
+        req.user.sub,
+        id,
+        JSON.stringify(currentRes),
+        JSON.stringify({
+          reservation: updated.rows[0],
+          forfeited_amount: currentRes.hold_amount,
+          note: 'Khách hủy giữ chỗ, mất tiền cọc giữ chỗ',
+        }),
+      ]
     );
 
     await client.query('COMMIT');
@@ -255,7 +341,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['OWNER', 'MANAGER']
 
 /**
  * PATCH /api/v1/reservations/:id/refund
- * Khách hủy và được hoàn lại cọc giữ chỗ (NV-06)
+ * Khách hủy và được hoàn lại cọc giữ chỗ (NV-06 / Phê duyệt 4 mắt)
  */
 router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
@@ -270,6 +356,33 @@ router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER'])
     }
 
     const currentRes = resCheck.rows[0];
+
+    // Building access guard cho Manager
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const isOwner = userRoles.includes('OWNER');
+    if (!isOwner) {
+      const accessCheck = await client.query(
+        `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+        [req.user.sub, currentRes.building_id]
+      );
+      if (accessCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
+    }
+
+    // Quy tắc 4 mắt (Four-eyes / NON-SELF): Người duyệt hoàn tiền cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (trừ khi là OWNER)
+    if (!isOwner && currentRes.created_by && currentRes.created_by === req.user.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        code: 'FOUR_EYES_VIOLATION',
+        message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ.',
+      });
+    }
+
     if (currentRes.status !== 'HELD') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -295,7 +408,17 @@ router.patch('/:id/refund', authenticateToken, requireRole(['OWNER', 'MANAGER'])
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'REFUND', 'reservation', $2, $3, $4)`,
-      [req.user.sub, id, JSON.stringify(currentRes), JSON.stringify(updated.rows[0])]
+      [
+        req.user.sub,
+        id,
+        JSON.stringify(currentRes),
+        JSON.stringify({
+          reservation: updated.rows[0],
+          refunded_amount: currentRes.hold_amount,
+          approved_by: req.user.sub,
+          note: 'Hoàn trả tiền đặt cọc giữ chỗ cho khách',
+        }),
+      ]
     );
 
     await client.query('COMMIT');

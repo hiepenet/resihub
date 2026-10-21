@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import {
   Building2,
   Phone,
@@ -381,6 +381,15 @@ export default function LoginPage() {
                 </button>
               </div>
             </FormField>
+
+            <div className="flex items-center justify-end -mt-1">
+              <Link
+                to="/forgot-password"
+                className="text-xs font-semibold text-primary-600 hover:text-primary-700 transition-colors"
+              >
+                Quên mật khẩu?
+              </Link>
+            </div>
 
             <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-500 space-y-2">
               <div className="flex items-center justify-between font-semibold text-slate-700">

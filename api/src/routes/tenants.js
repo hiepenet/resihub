@@ -76,10 +76,14 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req
           JOIN contract c ON c.id = co.contract_id
           WHERE c.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
         )
-        OR NOT EXISTS (
-          SELECT 1 FROM contract c WHERE c.primary_tenant_id = t.id
+        OR t.id IN (
+          SELECT t2.id FROM tenant t2
+          JOIN person p2 ON p2.id = t2.person_id
+          JOIN reservation r ON r.phone = p2.phone
+          WHERE r.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
         )
       )`;
+
     }
 
     sql += ` ORDER BY t.created_at DESC`;
@@ -109,7 +113,24 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   try {
     await client.query('BEGIN');
 
-    // 1. Tạo hoặc lấy person
+    // 1. Kiểm tra trùng số CCCD/CMND trước khi tạo (FR-021 check)
+    if (id_number && id_number.trim()) {
+      const cleanId = id_number.trim();
+      const dupIdRes = await client.query(
+        `SELECT id, full_name, phone FROM person WHERE org_id = $1 AND id_number = $2`,
+        [orgId, cleanId]
+      );
+      if (dupIdRes.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'DUPLICATE_ID_NUMBER',
+          message: `Số CCCD/CMND ${cleanId} đã tồn tại trong hệ thống (Hồ sơ: ${dupIdRes.rows[0].full_name} - SĐT: ${dupIdRes.rows[0].phone}). Vui lòng kiểm tra lại hoặc sử dụng tính năng gộp hồ sơ.`,
+          existing_person: dupIdRes.rows[0],
+        });
+      }
+    }
+
+    // 2. Tạo hoặc lấy person
     let personRes = await client.query('SELECT * FROM person WHERE org_id = $1 AND phone = $2', [orgId, phone]);
     let personId;
     if (personRes.rows.length === 0) {
@@ -124,7 +145,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       personId = personRes.rows[0].id;
     }
 
-    // 2. Tạo tenant — thiếu CCCD/hộ chiếu thì PENDING, đủ giấy tờ mới APPROVED (A6, FR-021)
+    // 3. Tạo tenant — thiếu CCCD/hộ chiếu thì PENDING, đủ giấy tờ mới APPROVED (A6, FR-021)
     const tenantStatus = id_number ? 'APPROVED' : 'PENDING';
     const tenantRes = await client.query(
       `INSERT INTO tenant (person_id, org_id, type, status)
@@ -150,7 +171,139 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Create Tenant Error]:', err);
+    if (err.code === '23505') {
+      return res.status(409).json({
+        code: 'DUPLICATE_DATA',
+        message: 'Dữ liệu bị trùng lặp (Số CCCD hoặc SĐT đã tồn tại trong hệ thống).',
+      });
+    }
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hồ sơ cư dân.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/tenants/merge
+ * Gộp 2 hồ sơ cư dân bị trùng lặp (FR-021 / P0)
+ * Actor: OWNER, MANAGER
+ * Body: { source_tenant_id, target_tenant_id, reason }
+ */
+router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { source_tenant_id, target_tenant_id, reason } = req.body;
+  const orgId = req.user.org_id;
+
+  if (!source_tenant_id || !target_tenant_id) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Vui lòng cung cấp cả hồ sơ cần gộp (source) và hồ sơ đích (target).',
+    });
+  }
+
+  if (source_tenant_id === target_tenant_id) {
+    return res.status(400).json({
+      code: 'INVALID_MERGE',
+      message: 'Hồ sơ cần gộp và hồ sơ đích không được trùng nhau.',
+    });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    // 1. Kiểm tra tồn tại 2 hồ sơ tenant
+    const sourceRes = await client.query(
+      `SELECT t.*, p.full_name, p.phone, p.id_number, p.id as person_id 
+       FROM tenant t JOIN person p ON p.id = t.person_id 
+       WHERE t.id = $1 AND t.org_id = $2`,
+      [source_tenant_id, orgId]
+    );
+    const targetRes = await client.query(
+      `SELECT t.*, p.full_name, p.phone, p.id_number, p.id as person_id 
+       FROM tenant t JOIN person p ON p.id = t.person_id 
+       WHERE t.id = $1 AND t.org_id = $2`,
+      [target_tenant_id, orgId]
+    );
+
+    if (sourceRes.rows.length === 0 || targetRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        code: 'NOT_FOUND',
+        message: 'Không tìm thấy hồ sơ cư dân cần gộp hoặc hồ sơ đích.',
+      });
+    }
+
+    const sourceTenant = sourceRes.rows[0];
+    const targetTenant = targetRes.rows[0];
+
+    // 2. Chuyển đổi các hợp đồng mà source làm primary_tenant sang target
+    await client.query(
+      `UPDATE contract SET primary_tenant_id = $1, updated_at = NOW() WHERE primary_tenant_id = $2`,
+      [target_tenant_id, source_tenant_id]
+    );
+
+    // 3. Chuyển đổi occupants từ source sang target (tránh trùng khóa unique)
+    await client.query(
+      `UPDATE contract_occupant SET tenant_id = $1 WHERE tenant_id = $2
+       AND NOT EXISTS (
+         SELECT 1 FROM contract_occupant co2 WHERE co2.contract_id = contract_occupant.contract_id AND co2.tenant_id = $1
+       )`,
+      [target_tenant_id, source_tenant_id]
+    );
+    await client.query(`DELETE FROM contract_occupant WHERE tenant_id = $1`, [source_tenant_id]);
+
+    // 4. Chuyển đổi contract_request từ source sang target
+    await client.query(
+      `UPDATE contract_request SET tenant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
+      [target_tenant_id, source_tenant_id]
+    );
+
+    // 5. Nếu target thiếu CCCD mà source có -> Cập nhật CCCD từ source sang target person
+    if (!targetTenant.id_number && sourceTenant.id_number) {
+      await client.query(
+        `UPDATE person SET id_number = $1, updated_at = NOW() WHERE id = $2`,
+        [sourceTenant.id_number, targetTenant.person_id]
+      );
+      await client.query(
+        `UPDATE tenant SET status = 'APPROVED', updated_at = NOW() WHERE id = $1`,
+        [target_tenant_id]
+      );
+    }
+
+    // 6. Đổi trạng thái source_tenant thành MERGED và đổi tên person để tránh nhầm lẫn
+    await client.query(
+      `UPDATE tenant SET status = 'MERGED', updated_at = NOW() WHERE id = $1`,
+      [source_tenant_id]
+    );
+    await client.query(
+      `UPDATE person SET full_name = '[ĐÃ GỘP] ' || full_name, updated_at = NOW() WHERE id = $1`,
+      [sourceTenant.person_id]
+    );
+
+    // 7. Ghi audit_log chi tiết (FR-021)
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'MERGE_TENANT', 'tenant', $2, $3, $4)`,
+      [
+        req.user.sub,
+        target_tenant_id,
+        JSON.stringify({ source: sourceTenant }),
+        JSON.stringify({ target: targetTenant, reason: reason || 'Gộp hồ sơ trùng lặp' }),
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      message: `Đã gộp thành công hồ sơ của ${sourceTenant.full_name} vào hồ sơ ${targetTenant.full_name}.`,
+      data: {
+        merged_tenant_id: target_tenant_id,
+        source_tenant_id: source_tenant_id,
+      },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Merge Tenant Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi gộp hồ sơ cư dân.' });
   } finally {
     await release();
   }

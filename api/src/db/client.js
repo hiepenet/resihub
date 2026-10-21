@@ -7,15 +7,20 @@ dotenv.config();
 const { Pool } = pg;
 
 // 1. ADMIN POOL (Superuser - Dành cho migrations, seed, auth lookups)
-const adminConnectionConfig = process.env.DATABASE_URL
-  ? { connectionString: process.env.DATABASE_URL }
-  : {
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5433', 10),
-      database: process.env.POSTGRES_DB || 'resihub',
-      user: process.env.POSTGRES_USER || 'postgres',
-      password: process.env.POSTGRES_PASSWORD || 'postgres',
-    };
+const adminConnectionConfig = {
+  ...(process.env.DATABASE_URL
+    ? { connectionString: process.env.DATABASE_URL }
+    : {
+        host: process.env.DB_HOST || 'localhost',
+        port: parseInt(process.env.DB_PORT || '5433', 10),
+        database: process.env.POSTGRES_DB || 'resihub',
+        user: process.env.POSTGRES_USER || 'postgres',
+        password: process.env.POSTGRES_PASSWORD || 'postgres',
+      }),
+  max: 30, // Tăng pool size chống starvation khi nhiều request đồng thời
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+};
 
 export const adminPool = new Pool(adminConnectionConfig);
 adminPool.on('error', (err) => {
@@ -25,7 +30,12 @@ adminPool.on('error', (err) => {
 // 2. APP POOL (resihub_app - RLS-bound role)
 let appConnectionConfig;
 if (process.env.APP_DATABASE_URL) {
-  appConnectionConfig = { connectionString: process.env.APP_DATABASE_URL };
+  appConnectionConfig = {
+    connectionString: process.env.APP_DATABASE_URL,
+    max: 30, // Tăng pool size cho appPool
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  };
 } else {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('FATAL: APP_DATABASE_URL must be defined in production environment.');
@@ -38,6 +48,8 @@ export const appPool = new Pool(appConnectionConfig);
 appPool.on('error', (err) => {
   console.error('[App Database Pool Error]: Unexpected error on idle client', err);
 });
+
+
 
 // 3. ASYNC LOCAL STORAGE (Scope cho từng HTTP request)
 export const userScope = new AsyncLocalStorage();
