@@ -282,9 +282,9 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
       [note ? `${currentContract.note || ''} [Lý do chấm dứt: ${reason || ''} - ${note}]` : null, id]
     );
 
-    // 2. Chuyển căn hộ về AVAILABLE để sẵn sàng bàn giao / khai thác
+    // 2. Căn hộ chuyển MAINTENANCE (A1): chờ bàn giao/nghiệm thu mới về AVAILABLE, không khai thác ngay
     await client.query(
-      `UPDATE apartment SET status = 'AVAILABLE', updated_at = NOW() WHERE id = $1`,
+      `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
       [currentContract.apartment_id]
     );
 
@@ -296,7 +296,7 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
     );
 
     await client.query('COMMIT');
-    res.json({ message: 'Chấm dứt hợp đồng thành công. Căn hộ đã mở lại trạng thái sẵn sàng.', data: updatedRes.rows[0] });
+    res.json({ message: 'Chấm dứt hợp đồng thành công. Căn hộ chuyển sang trạng thái bảo trì, chờ bàn giao và tất toán cọc.', data: updatedRes.rows[0] });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Terminate Contract Error]:', err);
