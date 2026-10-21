@@ -13,19 +13,6 @@ import { useAuthStore } from '../../../stores/authStore';
 export default function ContractsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
-
-  // Phân quyền Hợp đồng: MANAGER (CRU+A - được tạo), OWNER (R - chỉ xem), RESIDENT (chặn truy cập)
-  const canCreateContract = currentRole === 'MANAGER';
-
-  if (currentRole === 'RESIDENT') {
-    return (
-      <AccessDenied
-        currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
-      />
-    );
-  }
-
   const [contracts, setContracts] = useState([]);
 
   const [buildings, setBuildings] = useState([]);
@@ -33,6 +20,10 @@ export default function ContractsPage() {
   const [tenants, setTenants] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  // Phân quyền Hợp đồng: MANAGER (CRU+A - được tạo), OWNER (R + Duyệt PENDING_APPROVAL), RESIDENT (chặn)
+  const canCreateContract = currentRole === 'MANAGER';
 
   // Form
   const [formData, setFormData] = useState({
@@ -47,7 +38,16 @@ export default function ContractsPage() {
     billing_cycle: 'monthly',
     note: '',
   });
-  const [formError, setFormError] = useState('');
+
+  // Phân quyền truy cập trang: chặn RESIDENT
+  if (currentRole === 'RESIDENT') {
+    return (
+      <AccessDenied
+        currentRole={currentRole}
+        allowedRoles={['OWNER', 'MANAGER']}
+      />
+    );
+  }
 
   const loadInitialData = async () => {
     setIsLoading(true);
@@ -177,6 +177,11 @@ export default function ContractsPage() {
       key: 'status',
       render: (val) => <StatusBadge status={val} />,
     },
+    ...(canCreateContract || currentRole === 'OWNER' ? [{
+      title: 'Thao tác',
+      key: 'actions',
+      render: (val, row) => <ContractActions row={row} currentRole={currentRole} onChanged={loadInitialData} />,
+    }] : []),
   ];
 
   return (
@@ -330,4 +335,120 @@ export default function ContractsPage() {
       )}
     </div>
   );
+}
+
+// Hành động theo trạng thái hợp đồng (A3: DRAFT → bản ký → ACTIVE; PENDING_APPROVAL → OWNER duyệt)
+function ContractActions({ row, currentRole, onChanged }) {
+  const fileRef = React.useRef(null);
+
+  const handleActivate = async () => {
+    if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
+    try {
+      await api.post(`/api/v1/contracts/${row.id}/activate`);
+      onChanged();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi kích hoạt hợp đồng.');
+    }
+  };
+
+  const handleCancel = async () => {
+    const reason = window.prompt('Lý do hủy hợp đồng nháp:');
+    if (reason === null) return;
+    try {
+      await api.post(`/api/v1/contracts/${row.id}/cancel`, { reason });
+      onChanged();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi hủy hợp đồng.');
+    }
+  };
+
+  const handleApprove = async () => {
+    if (!window.confirm('Phê duyệt và kích hoạt hợp đồng (giá lệch khung đã được xem xét)?')) return;
+    try {
+      await api.post(`/api/v1/contracts/${row.id}/approve`);
+      onChanged();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi phê duyệt hợp đồng.');
+    }
+  };
+
+  const handleScanFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Ảnh vượt quá 5MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        await api.post(`/api/v1/contracts/${row.id}/scan`, { image_base64: reader.result });
+        alert('Đã đính kèm bản scan hợp đồng.');
+        onChanged();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi đính kèm bản scan.');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  if (row.status === 'DRAFT') {
+    return (
+      <div className="flex flex-col gap-1.5 min-w-[150px]">
+        <button
+          className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
+          onClick={handleActivate}
+        >
+          Kích hoạt
+        </button>
+        <div className="flex gap-1.5">
+          <button
+            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
+            onClick={() => fileRef.current?.click()}
+          >
+            Đính bản ký
+          </button>
+          <button
+            className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
+            onClick={handleCancel}
+          >
+            Hủy
+          </button>
+        </div>
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png" className="hidden" onChange={handleScanFile} />
+      </div>
+    );
+  }
+
+  if (row.status === 'PENDING_APPROVAL' && currentRole === 'OWNER') {
+    return (
+      <button
+        className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
+        onClick={handleApprove}
+      >
+        Duyệt
+      </button>
+    );
+  }
+
+  if (row.status === 'ACTIVE') {
+    return (
+      <button
+        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+        onClick={async () => {
+          if (!window.confirm('Chấm dứt hợp đồng này sớm? Căn hộ sẽ chuyển sang bảo trì chờ bàn giao.')) return;
+          try {
+            await api.post(`/api/v1/contracts/${row.id}/terminate`, { note: 'Chấm dứt từ danh sách hợp đồng' });
+            onChanged();
+          } catch (err) {
+            alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
+          }
+        }}
+      >
+        Chấm dứt
+      </button>
+    );
+  }
+
+  return <span className="text-xs text-slate-400">—</span>;
 }

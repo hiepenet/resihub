@@ -2,6 +2,7 @@ import express from 'express';
 import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { saveBase64Image } from '../services/imageUpload.js';
 
 const router = express.Router();
 
@@ -418,6 +419,298 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi chấm dứt hợp đồng.' });
   } finally {
     await release();
+  }
+});
+
+/**
+ * Helper hoàn tất kích hoạt (dùng chung /activate và /approve) — A3 phần 2, A5.
+ * Điều kiện chặn ACTIVE (PRD 486, AC-009.2): căn AVAILABLE/RESERVED, không chồng lấn,
+ * đủ giấy tờ (CCCD) bên thuê chính. Giá lệch ≥10% so giá niêm yết → PENDING_APPROVAL.
+ */
+async function completeActivation(client, contract, res, req, { skipPriceCheck = false } = {}) {
+  // 1. Căn phải còn AVAILABLE/RESERVED (ai đó có thể đã ký căn này trước)
+  const aptRes = await client.query(
+    `SELECT a.status, a.base_rent, b.id AS building_id
+     FROM apartment a JOIN building b ON b.id = a.building_id
+     WHERE a.id = $1`,
+    [contract.apartment_id]
+  );
+  const apt = aptRes.rows[0];
+  if (['AVAILABLE', 'RESERVED'].indexOf(apt.status) === -1) {
+    return { error: { status: 409, code: 'INVALID_APARTMENT_STATUS', message: `Căn hộ đang ở trạng thái ${apt.status}, không thể kích hoạt hợp đồng.` } };
+  }
+
+  // 2. Chồng lấn kỳ hạn (re-check tại thời điểm ACTIVE; DB constraint ghim các HĐ hiệu lực)
+  const overlapRes = await client.query(
+    `SELECT c.id, c.start_date, c.end_date
+     FROM contract c
+     WHERE c.apartment_id = $1 AND c.id <> $2
+       AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+       AND (c.start_date < $4 AND c.end_date > $3)`,
+    [contract.apartment_id, contract.id, contract.start_date, contract.end_date]
+  );
+  if (overlapRes.rows.length > 0) {
+    return { error: { status: 409, code: 'OVERLAP_CONTRACT', message: 'Căn hộ đã có hợp đồng trong khoảng thời gian này.', conflicts: overlapRes.rows } };
+  }
+
+  // 3. Giá lệch khung → PENDING_APPROVAL, chờ chủ đầu tư duyệt
+  // Lượt /approve đã là quyết định duyệt — bỏ qua check giá (skipPriceCheck).
+  // ponytail: ngưỡng 10% hard-code theo PRD 486, mục 23 chờ chủ đầu tư chốt — tách config khi có.
+  if (!skipPriceCheck && Number(contract.rent_amount) < Number(apt.base_rent) * 0.9) {
+    const pendingRes = await client.query(
+      `UPDATE contract SET status = 'PENDING_APPROVAL', updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [contract.id]
+    );
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'SUBMIT_APPROVAL', 'contract', $2, $3, $4)`,
+      [req.user.sub, contract.id, JSON.stringify(contract), JSON.stringify(pendingRes.rows[0])]
+    );
+    // KHÔNG rollback ở caller — giữ PENDING_APPROVAL đã ghi (nhánh này phải COMMIT)
+    return { needsApproval: pendingRes.rows[0] };
+  }
+
+  // 4. ACTIVE + chuyển cọc giữ chỗ thành cọc hợp đồng (FR-067)
+  const activeRes = await client.query(
+    `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 RETURNING *`,
+    [contract.id]
+  );
+
+  const rsvRes = await client.query(
+    `SELECT id, hold_amount FROM reservation
+     WHERE apartment_id = $1 AND status = 'HELD'
+     ORDER BY created_at DESC LIMIT 1`,
+    [contract.apartment_id]
+  );
+
+  const opensDeposit = contract.deposit_amount > 0 || rsvRes.rows.length > 0;
+  if (opensDeposit) {
+    const existing = await client.query(`SELECT 1 FROM deposit WHERE contract_id = $1`, [contract.id]);
+    if (existing.rows.length === 0) {
+      await client.query(
+        `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+         VALUES ($1, $2, $3, 'HELD')`,
+        [contract.id, rsvRes.rows[0]?.id ?? null, contract.deposit_amount > 0 ? contract.deposit_amount : rsvRes.rows[0].hold_amount]
+      );
+    }
+    if (rsvRes.rows.length > 0) {
+      await client.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [rsvRes.rows[0].id]);
+    }
+  }
+
+  // 5. Căn hộ: ACTIVE ngay hôm nay → OCCUPIED; start_date tương lai → RESERVED, job hằng ngày sẽ flip
+  await client.query(
+    `UPDATE apartment SET status = CASE WHEN $2::date <= CURRENT_DATE THEN 'OCCUPIED' ELSE 'RESERVED' END,
+     updated_at = NOW() WHERE id = $1`,
+    [contract.apartment_id, contract.start_date]
+  );
+
+  await client.query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+     VALUES ($1, 'ACTIVATE', 'contract', $2, $3, $4)`,
+    [req.user.sub, contract.id, JSON.stringify(contract), JSON.stringify(activeRes.rows[0])]
+  );
+
+  return { contract: activeRes.rows[0] };
+}
+
+// Guard điều kiện chung trước khi gọi completeActivation
+async function assertActivatable(client, contractId) {
+  const cRes = await client.query(
+    `SELECT c.*, t.id AS tenant_id, p.id AS person_id, p.id_number
+     FROM contract c
+     JOIN tenant t ON t.id = c.primary_tenant_id
+     JOIN person p ON p.id = t.person_id
+     WHERE c.id = $1`,
+    [contractId]
+  );
+  return cRes.rows[0];
+}
+
+router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+    const contract = await assertActivatable(client, id);
+    if (!contract) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    if (contract.status !== 'DRAFT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng đang ở trạng thái ${contract.status}. Chỉ DRAFT mới được kích hoạt; PENDING_APPROVAL chờ chủ đầu tư duyệt.`,
+      });
+    }
+    // AC-009.2: chưa có bản scan hợp đồng đã ký → chặn và nêu điều kiện thiếu
+    const scanRes = await client.query(
+      `SELECT 1 FROM attachment WHERE owner_entity = 'contract' AND owner_id = $1`,
+      [id]
+    );
+    if (scanRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'MISSING_SIGNED_SCAN',
+        message: 'Chưa đính kèm bản scan hợp đồng đã ký. Tải bản ký, scan rồi dùng "Đính kèm bản ký" trước khi kích hoạt.',
+      });
+    }
+    // PRD 486: thiếu giấy tờ tùy thân → cho lưu DRAFT nhưng chặn ACTIVE
+    if (!contract.id_number) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'MISSING_IDENTITY_PAPER',
+        message: 'Thiếu thông tin CCCD/hộ chiếu của khách thuê chính. Cập nhật hồ sơ khách thuê trước khi kích hoạt.',
+      });
+    }
+    const result = await completeActivation(client, contract, res, req);
+    if (result.needsApproval) {
+      await client.query('COMMIT');
+      return res.status(409).json({
+        code: 'PRICE_NEEDS_APPROVAL',
+        message: 'Giá thuê thấp hơn 10% so với giá niêm yết, hợp đồng chuyển sang chờ chủ đầu tư phê duyệt (PENDING_APPROVAL).',
+        data: result.needsApproval,
+      });
+    }
+    if (result.error) {
+      await client.query('ROLLBACK');
+      return res.status(result.error.status).json({
+        code: result.error.code,
+        message: result.error.message,
+        conflicts: result.error.conflicts,
+      });
+    }
+    await client.query('COMMIT');
+    res.json({ message: 'Kích hoạt hợp đồng thành công.', data: result.contract });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Activate Contract Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi kích hoạt hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+router.post('/:id/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+    const contract = await assertActivatable(client, id);
+    if (!contract) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    if (contract.status !== 'PENDING_APPROVAL') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng đang ở trạng thái ${contract.status}, chỉ hợp đồng chờ phê duyệt (PENDING_APPROVAL) mới được duyệt.`,
+      });
+    }
+    const result = await completeActivation(client, contract, res, req, { skipPriceCheck: true });
+    if (result.needsApproval) {
+      await client.query('COMMIT');
+      return res.status(409).json({
+        code: 'PRICE_NEEDS_APPROVAL',
+        message: 'Giá vẫn thấp hơn khung cho phép, hợp đồng giữ trạng thái chờ phê duyệt.',
+        data: result.needsApproval,
+      });
+    }
+    if (result.error) {
+      await client.query('ROLLBACK');
+      return res.status(result.error.status).json({ code: result.error.code, message: result.error.message, conflicts: result.error.conflicts });
+    }
+    await client.query('COMMIT');
+    res.json({ message: 'Đã phê duyệt và kích hoạt hợp đồng thành công.', data: result.contract });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Approve Contract Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi phê duyệt hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+    const curRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (curRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const cur = curRes.rows[0];
+    if (!['DRAFT', 'PENDING_APPROVAL'].includes(cur.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng ở trạng thái ${cur.status} không thể hủy nháp. Chỉ DRAFT hoặc PENDING_APPROVAL được hủy.`,
+      });
+    }
+    const updated = await client.query(
+      `UPDATE contract SET status = 'CANCELLED', note = COALESCE($1, note), updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [reason ? `${cur.note || ''} [Lý do hủy: ${reason}]`.trim() : null, id]
+    );
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'CANCEL', 'contract', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(cur), JSON.stringify(updated.rows[0])]
+    );
+    await client.query('COMMIT');
+    res.json({ message: 'Hủy hợp đồng nháp thành công.', data: updated.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Cancel Contract Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi hủy hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/scan — đính kèm bản scan hợp đồng đã ký (FR-020, AC-009.2)
+ */
+router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { image_base64 } = req.body;
+  try {
+    const contractRes = await pool.query('SELECT id, building_id FROM contract WHERE id = $1', [id]);
+    if (contractRes.rows.length === 0 || contractRes.rows[0].building_id === null) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const ok = await pool.query(
+      `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
+      [req.user.sub, contractRes.rows[0].building_id]
+    );
+    if (ok.rows.length === 0) {
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
+    }
+    const saved = await saveBase64Image({
+      imageBase64: image_base64,
+      folder: 'contract',
+      entityId: id,
+      entity: 'contract',
+      ownerId: id,
+      req,
+      query: (sql, params) => pool.query(sql, params),
+    });
+    if (saved.error) {
+      return res.status(400).json(saved.error);
+    }
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'UPLOAD', 'attachment', $2, $3)`,
+      [req.user.sub, saved.attachment.id, JSON.stringify(saved.attachment)]
+    );
+    res.status(201).json({ message: 'Đã đính kèm bản scan hợp đồng.', data: saved.attachment });
+  } catch (err) {
+    console.error('[Upload Contract Scan Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi đính kèm bản scan.' });
   }
 });
 

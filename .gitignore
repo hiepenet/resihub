@@ -35,3 +35,6 @@ Thumbs.db
 
 # Postgres data (if mounted locally)
 pgdata/
+
+# Uploaded files (bản ký HĐ, ảnh CCCD — PII)
+api/uploads/
