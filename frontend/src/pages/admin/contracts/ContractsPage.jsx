@@ -76,7 +76,7 @@ export default function ContractsPage() {
 
   const loadApartments = async (buildingId) => {
     try {
-      const res = await api.get(`/api/v1/apartments?building_id=${buildingId}&status=AVAILABLE`);
+      const res = await api.get(`/api/v1/apartments?building_id=${buildingId}&status=AVAILABLE,RESERVED`);
       const apts = res.data?.data || [];
       setApartments(apts);
       if (apts.length > 0) {
@@ -248,7 +248,9 @@ export default function ContractsPage() {
                       <option value="">Không có căn trống</option>
                     ) : (
                       apartments.map((a) => (
-                        <option key={a.id} value={a.id}>Căn {a.code} ({a.area_m2}m²)</option>
+                        <option key={a.id} value={a.id}>
+                          Căn {a.code} ({a.area_m2}m²){a.status === 'RESERVED' ? ' — Đã cọc giữ chỗ' : ''}
+                        </option>
                       ))
                     )}
                   </select>

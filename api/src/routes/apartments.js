@@ -53,7 +53,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     if (status) {
       params.push(status);
-      sql += ` AND a.status = $${params.length}`;
+      sql += ` AND a.status = ANY(string_to_array($${params.length}, ','))`;
     }
 
     sql += ` ORDER BY a.code ASC`;

@@ -157,6 +157,23 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   try {
     await client.query('BEGIN');
 
+    // Guard căn hộ: chỉ AVAILABLE hoặc RESERVED được lập hợp đồng (A3, PRD FR-014)
+    const aptCheck = await client.query(
+      `SELECT status FROM apartment WHERE id = $1`,
+      [apartment_id]
+    );
+    if (aptCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
+    if (!['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_APARTMENT_STATUS',
+        message: `Căn hộ đang ở trạng thái ${aptCheck.rows[0].status}, chỉ căn AVAILABLE hoặc RESERVED mới ký được hợp đồng.`,
+      });
+    }
+
     // Rule C1 & NV-08: Chống chồng lấn kỳ hạn trên cùng căn hộ
     // Half-open [start, end) — HĐ kết thúc tại ngày D cho phép HĐ mới bắt đầu D (PRD 13.3)
     const overlapCheck = await client.query(
@@ -192,12 +209,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       finalDeposit = Number(rent_amount) * Number(deposit_months);
     }
 
-    // 1. Tạo bản ghi contract
+    // 1. Tạo bản ghi contract — luôn DRAFT trước (A3, PRD 485: lưu DRAFT → tải bản ký → ACTIVE)
     const contractRes = await client.query(
       `INSERT INTO contract (
-        apartment_id, building_id, primary_tenant_id, start_date, end_date, 
+        apartment_id, building_id, primary_tenant_id, start_date, end_date,
         rent_amount, billing_day, deposit_amount, status, created_by, note
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, $10)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9, $10)
        RETURNING *`,
       [
         apartment_id,
@@ -215,22 +232,10 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     const contract = contractRes.rows[0];
 
-    // 2. Cập nhật trạng thái căn hộ -> OCCUPIED
-    await client.query(
-      `UPDATE apartment SET status = 'OCCUPIED', updated_at = NOW() WHERE id = $1`,
-      [apartment_id]
-    );
+    // Căn hộ và cọc giữ chỗ KHÔNG đổi ở bước DRAFT: căn AVAILABLE/RESERVED giữ nguyên,
+    // cọc giữ chỗ vẫn HELD — chỉ kích hoạt khi ACTIVE (Task 8, PRD 485 bước 6).
 
-    // 3. Nếu có finalDeposit > 0, tự động mở sổ cọc HELD (NV-11)
-    if (finalDeposit > 0) {
-      await client.query(
-        `INSERT INTO deposit (contract_id, amount_held, status)
-         VALUES ($1, $2, 'HELD')`,
-        [contract.id, finalDeposit]
-      );
-    }
-
-    // 4. Ghi audit log
+    // 2. Ghi audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'CREATE', 'contract', $2, $3)`,
@@ -238,11 +243,121 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     );
 
     await client.query('COMMIT');
-    res.status(201).json({ message: 'Tạo hợp đồng thành công.', data: contract });
+    res.status(201).json({ message: 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.', data: contract });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Create Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * PATCH /api/v1/contracts/:id — sửa hợp đồng nháp (A3, PRD 490: MANAGER C/R/U khi DRAFT,
+ * sau ACTIVE chỉ sửa qua phụ lục)
+ */
+router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const {
+    start_date, end_date, rent_amount, billing_cycle, billing_day,
+    deposit_amount, deposit_months, apartment_id, primary_tenant_id, note,
+  } = req.body;
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const curRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (curRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const cur = curRes.rows[0];
+    if (cur.status !== 'DRAFT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'CONTRACT_NOT_EDITABLE',
+        message: `Hợp đồng ở trạng thái ${cur.status} không được sửa trực tiếp. Sau ACTIVE yêu cầu thay đổi qua phụ lục hợp đồng.`,
+      });
+    }
+
+    const nextApartment = apartment_id ?? cur.apartment_id;
+    const nextStart = start_date ?? cur.start_date;
+    const nextEnd = end_date ?? cur.end_date;
+    const s = new Date(nextStart);
+    const e = new Date(nextEnd);
+    if (e <= s) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ code: 'INVALID_DATE_RANGE', message: 'Ngày kết thúc hợp đồng phải sau ngày bắt đầu hợp đồng.' });
+    }
+
+    // Đổi dates hoặc căn → chạy lại guard căn + chồng lấn
+    if (apartment_id !== undefined || start_date !== undefined || end_date !== undefined) {
+      const aptCheck = await client.query(`SELECT status FROM apartment WHERE id = $1`, [nextApartment]);
+      if (aptCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+      }
+      if (!['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_APARTMENT_STATUS',
+          message: `Căn hộ đang ở trạng thái ${aptCheck.rows[0].status}, chỉ căn AVAILABLE hoặc RESERVED mới gán được cho nháp hợp đồng.`,
+        });
+      }
+      const overlap = await client.query(
+        `SELECT 1 FROM contract
+         WHERE apartment_id = $1 AND id <> $2
+           AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+           AND (start_date < $4 AND end_date > $3)`,
+        [nextApartment, id, nextStart, nextEnd]
+      );
+      if (overlap.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'OVERLAP_CONTRACT', message: 'Căn hộ đã có hợp đồng trong khoảng thời gian đã chọn.' });
+      }
+    }
+
+    // Tính lại tiền cọc nếu đổi deposit
+    let nextDeposit = cur.deposit_amount;
+    if (deposit_amount !== undefined && deposit_amount !== null) {
+      nextDeposit = Number(deposit_amount);
+    } else if (deposit_months) {
+      nextDeposit = Number(rent_amount ?? cur.rent_amount) * Number(deposit_months);
+    }
+
+    const updated = await client.query(
+      `UPDATE contract
+       SET start_date = $1, end_date = $2,
+           rent_amount = COALESCE($3, rent_amount),
+           billing_cycle = COALESCE($4, billing_cycle),
+           billing_day = COALESCE($5, billing_day),
+           deposit_amount = $6,
+           apartment_id = $7,
+           primary_tenant_id = COALESCE($8, primary_tenant_id),
+           note = COALESCE($9, note),
+           updated_at = NOW()
+       WHERE id = $10 RETURNING *`,
+      [
+        nextStart, nextEnd,
+        rent_amount ?? null, billing_cycle ?? null, billing_day ?? null,
+        nextDeposit, nextApartment, primary_tenant_id ?? null, note ?? null, id,
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'UPDATE', 'contract', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(cur), JSON.stringify(updated.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Cập nhật hợp đồng nháp thành công.', data: updated.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Update Draft Contract Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi cập nhật hợp đồng.' });
   } finally {
     await release();
   }
