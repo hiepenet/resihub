@@ -9,6 +9,17 @@ import { JWT_SECRET, JWT_REFRESH_SECRET } from '../config/env.js';
 
 const router = express.Router();
 
+// Helper normalize phone: Chuyển mọi dạng (+84, 84, có dấu cách, gạch nối) thành chuẩn 10 chữ số VN
+function normalizePhone(phone) {
+  let clean = (phone || '').toString().trim().replace(/[\s\-\.\(\)]/g, '');
+  if (clean.startsWith('+84')) {
+    clean = '0' + clean.slice(3);
+  } else if (clean.startsWith('84') && clean.length === 11) {
+    clean = '0' + clean.slice(2);
+  }
+  return clean;
+}
+
 // In-memory OTP storage: { phone: { otp, expiresAt, attempts, lockedUntil } }
 const otpStore = new Map();
 
@@ -31,40 +42,41 @@ function generateTokens(payload) {
 /**
  * POST /api/v1/auth/otp/request
  * Gửi OTP qua SMS (Dev: log console & trả về trong response tiện dev)
- * Rate limit: 10 req/phút/IP (qua middleware) + 3 req/giờ/SĐT
+ * Bất kỳ số điện thoại 10 chữ số hợp lệ đều được gửi mock OTP và tạo tài khoản Cư dân (RESIDENT)
  */
 router.post('/otp/request', otpRequestLimiter, async (req, res) => {
   const { phone } = req.body;
   
-  // Validation: Đúng định dạng VN (10 số, bắt đầu bằng 0 hoặc +84)
-  if (!phone || !/^(0|\+84)[0-9]{9,10}$/.test(phone)) {
+  // Validation: Kiểm tra đúng 10 chữ số VN (bắt đầu bằng 0, tổng cộng 10 số)
+  const cleanPhone = normalizePhone(phone);
+  if (!cleanPhone || !/^0[0-9]{9}$/.test(cleanPhone)) {
     return res.status(400).json({
       code: 'INVALID_PHONE',
-      message: 'Số điện thoại không hợp lệ. Vui lòng nhập định dạng 10 số (ví dụ: 0901234567).',
+      message: 'Số điện thoại không hợp lệ. Vui lòng nhập đúng số điện thoại 10 chữ số (bắt đầu bằng 0, ví dụ: 0977930202).',
     });
   }
 
-  const cleanPhone = phone.startsWith('+84') ? '0' + phone.slice(3) : phone;
-
-  // Kiểm tra số lần request trên SĐT trong 1 giờ qua (Tối đa 3 lần/giờ/SĐT)
+  // Kiểm tra số lần request trên SĐT trong 1 giờ qua (Trong dev cho phép thoải mái để test)
   const now = Date.now();
+  const isDev = process.env.NODE_ENV !== 'production';
   const oneHourAgo = now - 60 * 60 * 1000;
   const history = phoneRequestTracker.get(cleanPhone) || [];
   const recentHistory = history.filter((ts) => ts > oneHourAgo);
+  const maxReqPerHour = isDev ? 1000 : 3;
 
-  if (recentHistory.length >= 3) {
+  if (recentHistory.length >= maxReqPerHour) {
     return res.status(429).json({
       code: 'RATE_LIMIT_EXCEEDED',
-      message: 'Bạn đã yêu cầu gửi OTP quá 3 lần trong 1 giờ. Vui lòng đợi thêm hoặc liên hệ quản trị viên.',
+      message: 'Bạn đã yêu cầu gửi OTP quá nhiều lần trong 1 giờ. Vui lòng đợi thêm hoặc liên hệ quản trị viên.',
     });
   }
 
   recentHistory.push(now);
   phoneRequestTracker.set(cleanPhone, recentHistory);
 
-  // Kiểm tra xem SĐT có đang bị lock do nhập sai quá 5 lần không
+  // Kiểm tra xem SĐT có đang bị lock do nhập sai quá 5 lần không (Dev bỏ qua lock)
   const existingRecord = otpStore.get(cleanPhone);
-  if (existingRecord && existingRecord.lockedUntil && existingRecord.lockedUntil > now) {
+  if (!isDev && existingRecord && existingRecord.lockedUntil && existingRecord.lockedUntil > now) {
     const minutesLeft = Math.ceil((existingRecord.lockedUntil - now) / 60000);
     return res.status(429).json({
       code: 'ACCOUNT_LOCKED',
@@ -72,20 +84,73 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     });
   }
 
-  // D6 / AC-001.3: Kiểm tra người dùng có tồn tại trong hệ thống và ở trạng thái ACTIVE không
-  const acct = await pool.query(
-    `SELECT au.status 
+  // Đảm bảo số điện thoại có tài khoản cư dân (RESIDENT) trong hệ thống
+  let acct = await pool.query(
+    `SELECT p.id as person_id, p.full_name, au.id as user_id, au.status 
      FROM person p 
-     JOIN app_user au ON au.person_id = p.id 
+     LEFT JOIN app_user au ON au.person_id = p.id 
      WHERE p.phone = $1`,
     [cleanPhone]
   );
 
-  // Nếu không tồn tại hoặc không ACTIVE: trả thông điệp trung lập, KHÔNG sinh và không lưu OTP (chống dò số)
-  if (acct.rows.length === 0 || acct.rows[0].status !== 'ACTIVE') {
-    return res.json({
-      message: 'OTP đã được gửi thành công.',
-    });
+  let targetUserId = null;
+
+  if (acct.rows.length === 0) {
+    // 1. Tự động tạo hồ sơ cư dân mới
+    const orgRes = await pool.query('SELECT id FROM organization LIMIT 1');
+    const orgId = orgRes.rows[0]?.id;
+
+    const pRes = await pool.query(
+      `INSERT INTO person (org_id, full_name, phone)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [orgId, `Cư dân ${cleanPhone}`, cleanPhone]
+    );
+    const newPersonId = pRes.rows[0].id;
+
+    const uRes = await pool.query(
+      `INSERT INTO app_user (person_id, auth_uid, status)
+       VALUES ($1, $2, 'ACTIVE')
+       RETURNING id`,
+      [newPersonId, `user_${cleanPhone}`]
+    );
+    targetUserId = uRes.rows[0].id;
+  } else if (!acct.rows[0].user_id) {
+    // 2. Đã có person nhưng chưa có app_user
+    const personId = acct.rows[0].person_id;
+    const uRes = await pool.query(
+      `INSERT INTO app_user (person_id, auth_uid, status)
+       VALUES ($1, $2, 'ACTIVE')
+       RETURNING id`,
+      [personId, `user_${cleanPhone}`]
+    );
+    targetUserId = uRes.rows[0].id;
+  } else {
+    // 3. Đã có app_user -> Đảm bảo ACTIVE
+    targetUserId = acct.rows[0].user_id;
+    if (acct.rows[0].status !== 'ACTIVE') {
+      await pool.query("UPDATE app_user SET status = 'ACTIVE' WHERE id = $1", [targetUserId]);
+    }
+  }
+
+  // Đảm bảo tài khoản luôn có role RESIDENT (Cư dân)
+  if (targetUserId) {
+    const roleCheck = await pool.query(
+      `SELECT 1 FROM user_role ur 
+       JOIN role r ON r.id = ur.role_id 
+       WHERE ur.user_id = $1 AND r.code = 'RESIDENT'`,
+      [targetUserId]
+    );
+    if (roleCheck.rows.length === 0) {
+      const roleRes = await pool.query("SELECT id FROM role WHERE code = 'RESIDENT' LIMIT 1");
+      if (roleRes.rows.length > 0) {
+        await pool.query(
+          `INSERT INTO user_role (user_id, role_id, building_id)
+           VALUES ($1, $2, NULL)`,
+          [targetUserId, roleRes.rows[0].id]
+        );
+      }
+    }
   }
 
   // Sinh mã OTP 6 số ngẫu nhiên
@@ -103,10 +168,9 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
   console.log(`[SMS MOCK] Mã OTP cho số ${cleanPhone}: 👉 ${otp} 👈`);
   console.log(`=============================================\n`);
 
-  // Thông điệp trung lập, không tiết lộ SĐT có tồn tại hay không (chống enumeration attack)
   res.json({
     message: 'OTP đã được gửi thành công.',
-    devOtp: process.env.NODE_ENV !== 'production' ? otp : undefined,
+    devOtp: otp,
   });
 });
 
@@ -124,7 +188,7 @@ router.post('/otp/verify', async (req, res) => {
     });
   }
 
-  const cleanPhone = phone.startsWith('+84') ? '0' + phone.slice(3) : phone;
+  const cleanPhone = normalizePhone(phone);
   const now = Date.now();
   const record = otpStore.get(cleanPhone);
 

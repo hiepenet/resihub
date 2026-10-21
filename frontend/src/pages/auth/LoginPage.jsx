@@ -28,7 +28,7 @@ export default function LoginPage() {
 
   // NV-01: OTP State
   const [step, setStep] = useState(1); // 1: Phone, 2: OTP
-  const [phone, setPhone] = useState('0901234567');
+  const [phone, setPhone] = useState('0977930202');
   const [otp, setOtp] = useState('');
   const [devOtpHint, setDevOtpHint] = useState('');
   const [countdown, setCountdown] = useState(300); // 5 mins
@@ -42,6 +42,17 @@ export default function LoginPage() {
   // Shared Form State
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Chuẩn hóa số điện thoại 10 chữ số
+  const cleanPhoneNumber = (input) => {
+    let cleaned = (input || '').toString().trim().replace(/[\s\-\.\(\)]/g, '');
+    if (cleaned.startsWith('+84')) {
+      cleaned = '0' + cleaned.slice(3);
+    } else if (cleaned.startsWith('84') && cleaned.length === 11) {
+      cleaned = '0' + cleaned.slice(2);
+    }
+    return cleaned;
+  };
 
   // Countdown timer for OTP expiry (5 mins)
   useEffect(() => {
@@ -78,18 +89,20 @@ export default function LoginPage() {
     e?.preventDefault();
     setError('');
 
-    if (!phone || phone.trim().length < 10) {
-      setError('Vui lòng nhập số điện thoại hợp lệ (định dạng 10 số VN).');
+    const normalized = cleanPhoneNumber(phone);
+    if (!normalized || !/^0[0-9]{9}$/.test(normalized)) {
+      setError('Vui lòng nhập đúng số điện thoại 10 chữ số (bắt đầu bằng 0, ví dụ: 0977930202).');
       return;
     }
 
     setIsLoading(true);
     try {
-      const res = await api.post('/api/v1/auth/otp/request', { phone });
+      const res = await api.post('/api/v1/auth/otp/request', { phone: normalized });
       if (res.data?.devOtp) {
         setDevOtpHint(res.data.devOtp);
         setOtp(res.data.devOtp); // Auto-fill test code in dev
       }
+      setPhone(normalized);
       setStep(2);
       setCountdown(300);
       setResendCooldown(60);
@@ -107,6 +120,7 @@ export default function LoginPage() {
     e?.preventDefault();
     setError('');
 
+    const normalized = cleanPhoneNumber(phone);
     if (!otp || otp.length !== 6) {
       setError('Vui lòng nhập đủ 6 chữ số OTP.');
       return;
@@ -114,7 +128,7 @@ export default function LoginPage() {
 
     setIsLoading(true);
     try {
-      const res = await api.post('/api/v1/auth/otp/verify', { phone, otp });
+      const res = await api.post('/api/v1/auth/otp/verify', { phone: normalized, otp });
       const { accessToken, refreshToken, user } = res.data;
 
       setAuthData(accessToken, refreshToken, user);
@@ -238,11 +252,11 @@ export default function LoginPage() {
                 <FormField
                   label="Số điện thoại nhận OTP"
                   required
-                  hint="Nhập SĐT đã đăng ký hoặc số test (vd: 0901234567)"
+                  hint="Nhập bất kỳ SĐT 10 chữ số (vd: 0977930202) để nhận mock OTP và vào tài khoản Cư dân"
                 >
                   <Input
                     type="tel"
-                    placeholder="090 123 4567"
+                    placeholder="0977930202"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     leftIcon={Phone}
@@ -261,7 +275,7 @@ export default function LoginPage() {
 
                 <div className="pt-2 text-center text-xs text-slate-400 flex items-center justify-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                  <span>Bảo mật chống enumeration · Rate-limit 3 req/giờ</span>
+                  <span>Tự động kích hoạt tài khoản Cư dân cho mọi số 10 chữ số</span>
                 </div>
               </form>
             )}
@@ -275,9 +289,9 @@ export default function LoginPage() {
                 </div>
 
                 {devOtpHint && (
-                  <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-center justify-between">
-                    <span>Mã OTP giả lập (Dev): <strong>{devOtpHint}</strong></span>
-                    <span className="text-[10px] bg-amber-200 px-2 py-0.5 rounded font-mono font-bold">MOCK SMS</span>
+                  <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between">
+                    <span>Mã OTP giả lập (Dev): <strong className="font-mono text-sm text-emerald-700">{devOtpHint}</strong></span>
+                    <span className="text-[10px] bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded font-mono font-bold">TỰ ĐỘNG ĐIỀN</span>
                   </div>
                 )}
 

@@ -13,7 +13,7 @@ export const generalLimiter = rateLimit({
 
 export const otpRequestLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 10, // 10 req/minute per IP
+  max: process.env.NODE_ENV === 'production' ? 10 : 500, // Thả lỏng cho dev test
   message: {
     code: 'RATE_LIMIT_EXCEEDED',
     message: 'Bạn đã yêu cầu gửi OTP quá nhanh. Vui lòng thử lại sau 1 phút.',
