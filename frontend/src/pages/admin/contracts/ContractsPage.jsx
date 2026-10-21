@@ -362,7 +362,10 @@ function ContractActions({ row, currentRole, onChanged }) {
   const handleActivate = async () => {
     if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
     try {
-      await api.post(`/api/v1/contracts/${row.id}/activate`);
+      const res = await api.post(`/api/v1/contracts/${row.id}/activate`);
+      if (res.data?.remaining_collect > 0) {
+        alert(res.data.message || `Kích hoạt thành công. Cần thu bổ sung ${res.data.remaining_collect.toLocaleString('vi-VN')} ₫ vào Sổ cọc.`);
+      }
       onChanged();
     } catch (err) {
       // PRICE_NEEDS_APPROVAL: 409 hợp lệ — DB đã chuyển PENDING_APPROVAL, phải refresh row;
@@ -386,7 +389,10 @@ function ContractActions({ row, currentRole, onChanged }) {
   const handleApprove = async () => {
     if (!window.confirm('Phê duyệt và kích hoạt hợp đồng (giá lệch khung đã được xem xét)?')) return;
     try {
-      await api.post(`/api/v1/contracts/${row.id}/approve`);
+      const res = await api.post(`/api/v1/contracts/${row.id}/approve`);
+      if (res.data?.remaining_collect > 0) {
+        alert(res.data.message || `Phê duyệt thành công. Cần thu bổ sung ${res.data.remaining_collect.toLocaleString('vi-VN')} ₫ vào Sổ cọc.`);
+      }
       onChanged();
     } catch (err) {
       alert(err.response?.data?.message || 'Lỗi khi phê duyệt hợp đồng.');

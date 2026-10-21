@@ -5,6 +5,7 @@ import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
+import { splitDepositOpening } from '../services/depositSettlement.js';
 
 const router = express.Router();
 
@@ -915,14 +916,36 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
   );
 
   const opensDeposit = contract.deposit_amount > 0 || rsvRes.rows.length > 0;
+  let remainingCollect = 0n;
+
   if (opensDeposit) {
-    const existing = await client.query(`SELECT 1 FROM deposit WHERE contract_id = $1`, [contract.id]);
+    const existing = await client.query(`SELECT id FROM deposit WHERE contract_id = $1`, [contract.id]);
     if (existing.rows.length === 0) {
-      await client.query(
+      const holdAmount = rsvRes.rows.length > 0 ? rsvRes.rows[0].hold_amount : null;
+      const split = splitDepositOpening({
+        depositAmount: contract.deposit_amount,
+        holdAmount,
+      });
+      remainingCollect = split.remainingCollect;
+
+      const depRes = await client.query(
         `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-         VALUES ($1, $2, $3, 'HELD')`,
-        [contract.id, rsvRes.rows[0]?.id ?? null, contract.deposit_amount > 0 ? contract.deposit_amount : rsvRes.rows[0].hold_amount]
+         VALUES ($1, $2, $3, 'HELD')
+         RETURNING id`,
+        [contract.id, rsvRes.rows[0]?.id ?? null, split.openHeld.toString()]
       );
+
+      const newDepositId = depRes.rows[0].id;
+
+      if (split.openHeld > 0n && rsvRes.rows.length > 0) {
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'transfer', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
+          [newDepositId, split.openHeld.toString(), req.user.sub]
+        );
+      }
     }
     if (rsvRes.rows.length > 0) {
       await client.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [rsvRes.rows[0].id]);
@@ -942,7 +965,7 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
     [req.user.sub, contract.id, JSON.stringify(contract), JSON.stringify(activeRes.rows[0])]
   );
 
-  return { contract: activeRes.rows[0] };
+  return { contract: activeRes.rows[0], remaining_collect: Number(remainingCollect) };
 }
 
 // Guard điều kiện chung trước khi gọi completeActivation
@@ -1021,7 +1044,10 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
       });
     }
     await client.query('COMMIT');
-    res.json({ message: 'Kích hoạt hợp đồng thành công.', data: result.contract });
+    const msg = result.remaining_collect > 0
+      ? `Kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.`
+      : 'Kích hoạt hợp đồng thành công.';
+    res.json({ message: msg, data: result.contract, remaining_collect: result.remaining_collect });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Activate Contract Error]:', err);
@@ -1062,7 +1088,10 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER']), async (re
       return res.status(result.error.status).json({ code: result.error.code, message: result.error.message, conflicts: result.error.conflicts });
     }
     await client.query('COMMIT');
-    res.json({ message: 'Đã phê duyệt và kích hoạt hợp đồng thành công.', data: result.contract });
+    const approveMsg = result.remaining_collect > 0
+      ? `Đã phê duyệt và kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.`
+      : 'Đã phê duyệt và kích hoạt hợp đồng thành công.';
+    res.json({ message: approveMsg, data: result.contract, remaining_collect: result.remaining_collect });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Approve Contract Error]:', err);
