@@ -626,6 +626,13 @@ router.post('/:id/floors', authenticateToken, requireRole(['MANAGER']), async (r
       [id, lvl, floorName]
     );
 
+    // C3: audit khi tạo tầng (đồng bộ pattern audit của zone/căn)
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE', 'floor', $2, $3)`,
+      [req.user.sub, result.rows[0].id, JSON.stringify(result.rows[0])]
+    );
+
     res.status(201).json({ message: 'Tạo tầng thành công.', data: result.rows[0] });
   } catch (err) {
     console.error('[Create Floor Error]:', err);
