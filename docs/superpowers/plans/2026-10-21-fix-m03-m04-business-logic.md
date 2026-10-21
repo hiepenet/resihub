@@ -354,34 +354,17 @@ git commit -m "fix(db,api,ui): FR-021 chan trung CCCD + chan tenant primary trun
 **Interfaces:**
 - Produces:
   - `POST /api/v1/buildings/:id/zones` `{code, name?}` → 201
-  - `PATCH /api/v1/buildings/:id/zones/:zone_id` `{name?, status?}` (status ∈ ACTIVE/INACTIVE)
-  - GET `/buildings/:id` trả thêm `zones: [{id, code, name, status}]`
+  - `PATCH /api/v1/buildings/:id/zones/:zone_id` `{name?}` (đổi tên khu)
+  - GET `/buildings/:id` trả thêm `zones: [{id, code, name}]`
   - POST /apartments nhận `zone_id` (guard ZONE_MISMATCH — Task 2 đã chèn sẵn)
-- Lỗi: `ZONE_EXISTS` (409, trùng code trong tòa), `INVALID_ZONE_STATUS` (400).
+- Lỗi: `ZONE_EXISTS` (409, trùng code trong tòa).
 
-- [ ] **Step 1: Migration** `016_zone.sql`:
-
-```sql
--- B1 / FR-007: phân khu (Khu/Block) trong tòa nhà
-CREATE TABLE IF NOT EXISTS zone (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id      UUID NOT NULL REFERENCES organization(id),
-  building_id UUID NOT NULL REFERENCES building(id),
-  code        TEXT NOT NULL,
-  name        TEXT,
-  status      TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (building_id, code)
-);
-ALTER TABLE apartment ADD COLUMN IF NOT EXISTS zone_id UUID REFERENCES zone(id);
--- RLS: sao chép trọn bộ policy của bảng floor (migration 010/013), đổi tên rls_floor_* -> rls_zone_*
-```
-
-- [ ] **Step 2: Routes zone** trong `buildings.js` — (a) POST: MANAGER qua `checkBuildingAccess(..., 'update')`, validate code không rỗng, catch unique violation → 409 `ZONE_EXISTS`; audit `'CREATE'`; (b) PATCH: guard zone thuộc building; `status` whitelist; audit before/after; (c) bổ sung `zones` vào GET detail + GET list (query song song như floors).
+- [ ] **Step 1: Migration** `016_zone.sql` (kèm `017_remove_zone_status.sql`):
+  Tạo bảng `zone` định danh khối nhà/khu (`id, org_id, building_id, code, name`), không có cột status.
+- [ ] **Step 2: Routes zone** trong `buildings.js` — (a) POST: MANAGER qua `checkBuildingAccess(..., 'update')`, validate code không rỗng, catch unique violation → 409 `ZONE_EXISTS`; audit `'CREATE'`; (b) PATCH: guard zone thuộc building; đổi tên `name`; audit before/after; (c) bổ sung `zones` vào GET detail + GET list (query song song như floors).
 - [ ] **Step 3: apartments.js** — POST/PATCH nhận `zone_id` (guard đã chèn ở Task 2; PATCH validate tương tự nếu truyền `zone_id`).
-- [ ] **Step 4: UI BuildingsPage** — (a) section "Khu/Block" trong trang tòa: bảng zone (code, tên, trạng thái) + nút "Thêm khu" (modal code+tên) + nút bật/tắt ACTIVE; (b) modal tạo căn hộ: select "Khu" (load từ GET /buildings/:id); (c) panel chi tiết căn hiển thị dòng "Khu: <code>" khi có.
-- [ ] **Step 5: Verify** — tạo zone "Khu A" code `A` → 201; tạo trùng code `A` cùng tòa → 409 ZONE_EXISTS; tạo căn gắn zone → panel hiện "Khu: A"; PATCH zone INACTIVE → vẫn hiển thị nhưng mờ; curl tạo căn với zone_id của tòa khác → 400 ZONE_MISMATCH.
+- [ ] **Step 4: UI BuildingsPage** — (a) section "Khu/Block" trong trang tòa: hiển thị danh sách chip Khu/Block (`code`, `name`, đếm số căn) + nút "Thêm khu" (modal code+tên); (b) modal tạo căn hộ: select "Khu / Block" (load từ GET /buildings/:id); (c) panel chi tiết căn hiển thị dòng "Khu: <code>" khi có.
+- [ ] **Step 5: Verify** — tạo zone "Khu A" code `A` → 201; tạo trùng code `A` cùng tòa → 409 ZONE_EXISTS; tạo căn gắn zone → panel hiện "Khu: A"; curl tạo căn với zone_id của tòa khác → 400 ZONE_MISMATCH.
 - [ ] **Step 6: Commit**
 
 ```bash

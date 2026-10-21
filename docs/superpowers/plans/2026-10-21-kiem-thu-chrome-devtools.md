@@ -45,7 +45,7 @@
 
 - [ ] **Step 1:** Với manager, chọn tòa `TN-TEST-7674` → mở modal "Thêm khu": code `A` đã tồn tại → kỳ vọng: thông báo `Khu A đã tồn tại trong tòa này.` (409 ZONE_EXISTS), modal không đóng oке khi lỗi.
 - [ ] **Step 2:** Tạo khu `QA-C` (tên "Khu QA") → kỳ vọng: pill mới hiện dải "Khu/Block" với đếm (0), audit_log có CREATE zone (kiểm bằng UI ảnh hoặc psql đối chứng: 1 dòng).
-- [ ] **Step 3:** Bấm Tắt/Bật trên pill khu → status pill mờ đi/rực lại (INACTIVE/ACTIVE).
+- [ ] **Step 3:** Kiểm tra danh sách chip Khu/Block hiển thị đồng nhất, thanh lịch (không có nút Tắt/Bật), đếm đúng số lượng căn hộ gán vào khu.
 - [ ] **Step 4:** Thêm tầng mới (level 5, "Tầng 5") → tầng xuất hiện trên sơ đồ; psql đối chứng audit_log có dòng CREATE 'floor' (C3).
 - [ ] **Step 5:** Bấm icon bút chì sửa tầng — đổi tên "Tầng QA-5" → tên cập nhật ngay.
 - [ ] **Step 6:** Sửa một căn hộ panel: xem khối "Tiện ích đi kèm" — kỳ vọng chỉ hiện giá trị truthy từ amenities JSONB, không còn 4 chip cứng (C1). Căn không có tiện ích → hiện dòng nhạt "Không có tiện ích nào được ghi nhận."
@@ -56,7 +56,7 @@
 - [ ] **Step 2:** Tạo căn hợp lệ `QA-101` gắn khu `QA-C` → căn xanh AVAILABLE, panel hiện Khu/Block = QA-C.
 - [ ] **Step 3:** Trên căn đang OCCUPIED (TN-TEST-7674-101): thử sửa trực tiếp status → kỳ vọng: bean `DIRECT_STATUS_CHANGE_PROHIBITED` (A2), căn giữ OCCUPIED.
 - [ ] **Step 4:** Sửa `area_m2` của căn có HĐ ACTIVE → kỳ vọng: dialog xác nhận (A9), hủy → không đổi; xác nhận → đổi.
-- [ ] **Step 5:** Tạo căn với zone của tòa khác (UI select chỉ liệt kê khu ACTIVE của tòa đang chọn — nếu vẫn nhét được zone khác tòa vào request thì kỳ vọng 400 ZONE_MISMATCH và lỗi hiển thị trên form).
+- [ ] **Step 5:** Tạo căn với zone của tòa khác (UI select liệt kê đầy đủ các Khu/Block của tòa đang chọn — nếu vẫn nhét được zone khác tòa vào request thì kỳ vọng 400 ZONE_MISMATCH và lỗi hiển thị trên form).
 
 ### Task 4: Cư dân — Duyệt/sửa + CCCD (A6, A7, A8, B7)
 

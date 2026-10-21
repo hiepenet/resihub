@@ -296,7 +296,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
   // Kèm phân khu (B1) để UI tạo căn hộ chọn khu
   const zones = await pool.query(
-    'SELECT id, code, name, status FROM zone WHERE building_id = $1 ORDER BY code ASC',
+    'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
     [id]
   );
 
@@ -757,18 +757,15 @@ router.post('/:id/zones', authenticateToken, requireRole(['MANAGER']), async (re
 });
 
 /**
- * PATCH /api/v1/buildings/:id/zones/:zone_id — đổi tên / bật tắt khu
+ * PATCH /api/v1/buildings/:id/zones/:zone_id — đổi tên khu
  */
 router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id, zone_id } = req.params;
-  const { name, status } = req.body;
+  const { name } = req.body;
   const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
   const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
-  }
-  if (status && !['ACTIVE', 'INACTIVE'].includes(status)) {
-    return res.status(400).json({ code: 'INVALID_ZONE_STATUS', message: 'Trạng thái khu chỉ nhận ACTIVE hoặc INACTIVE.' });
   }
   try {
     const before = await pool.query('SELECT * FROM zone WHERE id = $1 AND building_id = $2', [zone_id, id]);
@@ -776,9 +773,9 @@ router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['MANAGER']),
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy khu trong tòa này.' });
     }
     const result = await pool.query(
-      `UPDATE zone SET name = COALESCE($1, name), status = COALESCE($2, status), updated_at = NOW()
-       WHERE id = $3 RETURNING *`,
-      [name ?? null, status ?? null, zone_id]
+      `UPDATE zone SET name = COALESCE($1, name), updated_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [name ?? null, zone_id]
     );
     await pool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)

@@ -207,15 +207,6 @@ export default function BuildingsPage() {
     }
   };
 
-  const handleToggleZoneStatus = async (z) => {
-    const target = z.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
-    try {
-      await api.patch(`/api/v1/buildings/${selectedBuilding.id}/zones/${z.id}`, { status: target });
-      loadZones(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi đổi trạng thái khu.');
-    }
-  };
 
   useEffect(() => {
     loadBuildings();
@@ -723,20 +714,10 @@ export default function BuildingsPage() {
               {zones.map((z) => (
                 <span
                   key={z.id}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
-                    z.status === 'ACTIVE' ? 'bg-primary-50 text-primary-800 border-primary-200' : 'bg-slate-100 text-slate-500 border-slate-200 opacity-60'
-                  }`}
-                  title={`${z.apartment_count || 0} căn hộ${z.status === 'INACTIVE' ? ' — Đã ngưng sử dụng' : ''}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-primary-50 text-primary-800 border-primary-200"
+                  title={`${z.apartment_count || 0} căn hộ`}
                 >
                   {z.code}{z.name ? ` — ${z.name}` : ''} ({z.apartment_count || 0})
-                  {canManageUnits && (
-                    <button
-                      className="ml-1 text-[10px] underline hover:no-underline"
-                      onClick={() => handleToggleZoneStatus(z)}
-                    >
-                      {z.status === 'ACTIVE' ? 'Tắt' : 'Bật'}
-                    </button>
-                  )}
                 </span>
               ))}
             </div>
@@ -1247,7 +1228,7 @@ export default function BuildingsPage() {
                   className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                 >
                   <option value="">— Không phân khu —</option>
-                  {zones.filter((z) => z.status === 'ACTIVE').map((z) => (
+                  {zones.map((z) => (
                     <option key={z.id} value={z.id}>
                       {z.code}{z.name ? ` — ${z.name}` : ''}
                     </option>
