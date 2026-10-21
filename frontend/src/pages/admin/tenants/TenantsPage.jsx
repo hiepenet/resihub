@@ -38,6 +38,7 @@ export default function TenantsPage() {
     id_number: '',
     type: 'primary',
   });
+  const [editingTenant, setEditingTenant] = useState(null); // A8: sửa hồ sơ tái dùng modal
   const [formError, setFormError] = useState('');
   const [duplicateWarning, setDuplicateWarning] = useState(null);
 
@@ -90,14 +91,49 @@ export default function TenantsPage() {
     }
 
     try {
-      await api.post('/api/v1/tenants', formData);
+      if (editingTenant) {
+        // A8: sửa hồ sơ — PATCH, giữ trạng thái
+        await api.patch(`/api/v1/tenants/${editingTenant.id}`, {
+          full_name: formData.full_name,
+          phone: formData.phone,
+          email: formData.email,
+          id_number: formData.id_number,
+        });
+      } else {
+        await api.post('/api/v1/tenants', formData);
+      }
       setIsModalOpen(false);
+      setEditingTenant(null);
       setFormData({ full_name: '', phone: '', email: '', id_number: '', type: 'primary' });
       setDuplicateWarning(null);
       loadTenants();
     } catch (err) {
-      setFormError(err.response?.data?.message || 'Lỗi khi tạo hồ sơ cư dân.');
+      setFormError(err.response?.data?.message || 'Lỗi khi lưu hồ sơ cư dân.');
     }
+  };
+
+  // A6: duyệt / từ chối hồ sơ PENDING
+  const handleApproveTenant = async (row, action) => {
+    if (action === 'approve' && !row.id_number && !window.confirm('Hồ sơ chưa có CCCD — hệ thống sẽ chặn duyệt. Tiếp tục?')) return;
+    try {
+      await api.patch(`/api/v1/tenants/${row.id}`, { action });
+      loadTenants();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Lỗi khi duyệt hồ sơ.');
+    }
+  };
+
+  const openEditTenant = (row) => {
+    setEditingTenant(row);
+    setFormData({
+      full_name: row.full_name || '',
+      phone: row.phone || '',
+      email: row.email || '',
+      id_number: row.id_number || '',
+      type: row.type || 'primary',
+    });
+    setDuplicateWarning(null);
+    setIsModalOpen(true);
   };
 
   const columns = [
@@ -136,6 +172,36 @@ export default function TenantsPage() {
       key: 'status',
       render: (val) => <StatusBadge status={val} />,
     },
+    ...(canCreateTenant ? [{
+      title: 'Thao tác',
+      key: 'actions',
+      render: (val, row) => (
+        <div className="flex gap-1.5">
+          {row.status === 'PENDING' && (
+            <>
+              <button
+                className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
+                onClick={() => handleApproveTenant(row, 'approve')}
+              >
+                Duyệt
+              </button>
+              <button
+                className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
+                onClick={() => handleApproveTenant(row, 'reject')}
+              >
+                Từ chối
+              </button>
+            </>
+          )}
+          <button
+            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
+            onClick={() => openEditTenant(row)}
+          >
+            Sửa
+          </button>
+        </div>
+      ),
+    }] : []),
   ];
 
   return (
@@ -154,7 +220,12 @@ export default function TenantsPage() {
           <Button
             variant="primary"
             size="md"
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => {
+              setEditingTenant(null);
+              setFormData({ full_name: '', phone: '', email: '', id_number: '', type: 'primary' });
+              setDuplicateWarning(null);
+              setIsModalOpen(true);
+            }}
             leftIcon={Plus}
           >
             Thêm cư dân mới
@@ -177,7 +248,7 @@ export default function TenantsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100">
             <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">Tạo hồ sơ Cư dân</h3>
+              <h3 className="text-base font-bold text-slate-900">{editingTenant ? 'Cập nhật hồ sơ cư dân' : 'Tạo hồ sơ Cư dân'}</h3>
               <button onClick={() => setIsModalOpen(false)}>
                 <X className="w-5 h-5 text-slate-400" />
               </button>
