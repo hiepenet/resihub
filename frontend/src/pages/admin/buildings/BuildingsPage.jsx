@@ -29,6 +29,16 @@ import AccessDenied from '../../../components/common/AccessDenied';
 import api from '../../../services/api';
 import { useAuthStore } from '../../../stores/authStore';
 
+// C1: nhãn hiển thị tiện ích (amenities là JSONB {"wifi":true,...}; key lạ hiển thị nguyên bản)
+const AMENITY_LABELS = {
+  wifi: 'Wifi',
+  air_conditioner: 'Điều hòa',
+  water_heater: 'Nóng lạnh',
+  smart_lock: 'Khóa từ',
+  parking: 'Chỗ đỗ xe',
+  balcony: 'Ban công',
+};
+
 export default function BuildingsPage() {
   const { user, getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
@@ -883,10 +893,16 @@ export default function BuildingsPage() {
                   <div className="pt-2">
                     <span className="text-slate-500 block mb-2 font-medium">Tiện ích đi kèm</span>
                     <div className="flex flex-wrap gap-1.5">
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">Wifi</span>
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">Điều hòa</span>
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">Nóng lạnh</span>
-                      <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">Khóa từ</span>
+                      {Object.entries(selectedApartment.amenities || {})
+                        .filter(([, v]) => v)
+                        .map(([key]) => (
+                          <span key={key} className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">
+                            {AMENITY_LABELS[key] || key}
+                          </span>
+                        ))}
+                      {Object.values(selectedApartment.amenities || {}).filter(Boolean).length === 0 && (
+                        <span className="text-xs text-slate-400 italic">Không có tiện ích nào được ghi nhận.</span>
+                      )}
                     </div>
                   </div>
                 </div>
