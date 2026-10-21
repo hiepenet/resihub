@@ -4,6 +4,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
+import { refundDeadline } from '../services/deadlines.js';
 
 const router = express.Router();
 
@@ -595,12 +596,13 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
 /**
  * POST /api/v1/contracts/:id/terminate
- * Chấm dứt hợp đồng thuê (NV-10)
+ * Đề xuất chấm dứt hợp đồng thuê (FR-017, C8, D4)
  * Quyền: OWNER (R), MANAGER (CRU)
+ * Hợp đồng chuyển sang TERMINATION_PENDING, căn hộ vẫn OCCUPIED, chờ OWNER phê duyệt
  */
 router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { reason, note } = req.body;
+  const { terminated_date, reason, note } = req.body;
 
   const { client, release } = await getUserClient(req);
   try {
@@ -613,39 +615,240 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
     }
 
     const currentContract = contractCheck.rows[0];
+
+    // Guard quyền theo tòa nếu là Manager
+    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    if (userRoles.includes('MANAGER') && !userRoles.includes('OWNER')) {
+      const checkMgr = await client.query(
+        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
+        [req.user.sub, currentContract.building_id]
+      );
+      if (checkMgr.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý tòa nhà của hợp đồng này.' });
+      }
+    }
+
     if (currentContract.status !== 'ACTIVE') {
       await client.query('ROLLBACK');
       return res.status(400).json({
         code: 'INVALID_STATUS',
-        message: `Hợp đồng đang ở trạng thái ${currentContract.status}, chỉ hợp đồng ACTIVE mới có thể chấm dứt.`,
+        message: `Hợp đồng đang ở trạng thái ${currentContract.status}, chỉ hợp đồng ACTIVE mới có thể đề xuất chấm dứt.`,
       });
     }
 
-    // 1. Cập nhật contract sang TERMINATED
+    const termDate = terminated_date || new Date().toISOString().split('T')[0];
+    const sDate = currentContract.start_date.toISOString ? currentContract.start_date.toISOString().split('T')[0] : String(currentContract.start_date);
+    const eDate = currentContract.end_date.toISOString ? currentContract.end_date.toISOString().split('T')[0] : String(currentContract.end_date);
+
+    if (termDate < sDate || termDate > eDate) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_TERMINATION_DATE',
+        message: 'Ngày chấm dứt phải nằm trong kỳ hạn của hợp đồng.',
+      });
+    }
+
+    const reasonSuffix = reason ? `[Đề xuất chấm dứt: ${reason}${note ? ' - ' + note : ''}]` : (note ? `[Đề xuất chấm dứt: ${note}]` : '');
+    const newNote = reasonSuffix ? `${currentContract.note || ''} ${reasonSuffix}`.trim() : currentContract.note;
+
+    // 1. Chuyển hợp đồng sang TERMINATION_PENDING, ghi mốc ngày terminated_at
     const updatedRes = await client.query(
-      `UPDATE contract SET status = 'TERMINATED', note = COALESCE($1, note), updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [note ? `${currentContract.note || ''} [Lý do chấm dứt: ${reason || ''} - ${note}]` : null, id]
+      `UPDATE contract
+       SET status = 'TERMINATION_PENDING', terminated_at = $1, note = $2, updated_at = NOW()
+       WHERE id = $3 RETURNING *`,
+      [termDate, newNote, id]
     );
 
-    // 2. Căn hộ chuyển MAINTENANCE (A1): chờ bàn giao/nghiệm thu mới về AVAILABLE, không khai thác ngay
+    // Căn hộ giữ nguyên trạng thái OCCUPIED cho tới khi OWNER duyệt chính thức
+
+    // 2. Ghi audit log
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'TERMINATE_REQUEST', 'contract', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(currentContract), JSON.stringify(updatedRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      message: 'Đã gửi đề xuất chấm dứt hợp đồng. Đang chờ Chủ đầu tư (OWNER) phê duyệt.',
+      data: updatedRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Terminate Request Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi đề xuất chấm dứt hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/terminate/approve
+ * Phê duyệt chấm dứt hợp đồng thuê (FR-017, C8, D4)
+ * Quyền: Chỉ OWNER có quyền duyệt
+ * Ràng buộc Four-eyes: Người đề xuất không được tự duyệt
+ */
+router.post('/:id/terminate/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+
+  try {
+    await client.query('BEGIN');
+
+    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (contractCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+
+    const currentContract = contractCheck.rows[0];
+    if (currentContract.status !== 'TERMINATION_PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng đang ở trạng thái ${currentContract.status}. Chỉ hợp đồng TERMINATION_PENDING mới có thể duyệt chấm dứt.`,
+      });
+    }
+
+    // Four-eyes: kiểm tra người đề xuất trong audit_log (Lỗi 1 Fix)
+    const lastReq = await client.query(
+      `SELECT actor_id FROM audit_log
+       WHERE action = 'TERMINATE_REQUEST' AND entity = 'contract' AND entity_id = $1
+       ORDER BY at DESC LIMIT 1`,
+      [id]
+    );
+    if (lastReq.rows.length > 0 && lastReq.rows[0].actor_id === req.user.sub) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({
+        code: 'SELF_APPROVAL',
+        message: 'Người đề xuất chấm dứt hợp đồng không được tự phê duyệt (Nguyên tắc Four-eyes).',
+      });
+    }
+
+    // 1. Chuyển hợp đồng sang TERMINATED
+    const updatedRes = await client.query(
+      `UPDATE contract SET status = 'TERMINATED', updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    // 2. Căn hộ chuyển sang MAINTENANCE chờ nghiệm thu bàn giao
     await client.query(
       `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
       [currentContract.apartment_id]
     );
 
-    // 3. Ghi audit log
+    // 3. Gán hạn hoàn cọc (refund_due_date = ngày chấm dứt + 5 ngày theo FR-068) trên sổ cọc
+    const termAt = currentContract.terminated_at
+      ? (currentContract.terminated_at.toISOString ? currentContract.terminated_at.toISOString().split('T')[0] : String(currentContract.terminated_at))
+      : new Date().toISOString().split('T')[0];
+    const { dueAt } = refundDeadline(termAt);
+
+    await client.query(
+      `UPDATE deposit SET refund_due_date = $1, updated_at = NOW()
+       WHERE contract_id = $2 AND status = 'HELD'`,
+      [dueAt, id]
+    );
+
+    // 4. Ghi audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES ($1, 'TERMINATE', 'contract', $2, $3, $4)`,
+       VALUES ($1, 'TERMINATE_APPROVE', 'contract', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(currentContract), JSON.stringify(updatedRes.rows[0])]
+    );
+
+    // 5. Gửi thông báo cho Cư dân
+    const tenantUserRes = await client.query(
+      `SELECT u.id AS user_id FROM app_user u
+       JOIN person p ON p.id = u.person_id
+       JOIN tenant t ON t.person_id = p.id
+       WHERE t.id = $1`,
+      [currentContract.primary_tenant_id]
+    );
+    if (tenantUserRes.rows.length > 0) {
+      await client.query(
+        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+         VALUES ((SELECT org_id FROM building WHERE id = $1), $2, $3, $4, 'CONTRACT_TERMINATED', $5)`,
+        [
+          currentContract.building_id,
+          tenantUserRes.rows[0].user_id,
+          'Hợp đồng thuê đã được phê duyệt chấm dứt',
+          `Hợp đồng thuê căn hộ của bạn đã được phê duyệt chấm dứt (ngày kết thúc: ${termAt}). BQL sẽ tiến hành kiểm tra căn hộ và hoàn tất thủ tục tất toán cọc trong 3-5 ngày.`,
+          JSON.stringify({ contract_id: id, link: '/resident' }),
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({
+      message: 'Phê duyệt chấm dứt hợp đồng thành công. Căn hộ chuyển sang bảo trì và hạn hoàn cọc đã được thiết lập.',
+      data: updatedRes.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Approve Terminate Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phê duyệt chấm dứt hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/terminate/reject
+ * Từ chối đề xuất chấm dứt hợp đồng (quay lại ACTIVE)
+ * Quyền: Chỉ OWNER
+ */
+router.post('/:id/terminate/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Lý do từ chối là bắt buộc.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    if (contractCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+
+    const currentContract = contractCheck.rows[0];
+    if (currentContract.status !== 'TERMINATION_PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng đang ở trạng thái ${currentContract.status}. Chỉ hợp đồng TERMINATION_PENDING mới có thể từ chối.`,
+      });
+    }
+
+    const rejectNote = `[Từ chối chấm dứt: ${reason.trim()}]`;
+    const updatedRes = await client.query(
+      `UPDATE contract
+       SET status = 'ACTIVE', terminated_at = NULL,
+           note = COALESCE(note || ' ', '') || $1, updated_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [rejectNote, id]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'TERMINATE_REJECT', 'contract', $2, $3, $4)`,
       [req.user.sub, id, JSON.stringify(currentContract), JSON.stringify(updatedRes.rows[0])]
     );
 
     await client.query('COMMIT');
-    res.json({ message: 'Chấm dứt hợp đồng thành công. Căn hộ chuyển sang trạng thái bảo trì, chờ bàn giao và tất toán cọc.', data: updatedRes.rows[0] });
+    res.json({
+      message: 'Đã từ chối đề xuất chấm dứt hợp đồng. Hợp đồng trở lại trạng thái ACTIVE.',
+      data: updatedRes.rows[0],
+    });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('[Terminate Contract Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi chấm dứt hợp đồng.' });
+    console.error('[Reject Terminate Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối đề xuất chấm dứt hợp đồng.' });
   } finally {
     await release();
   }

@@ -59,6 +59,11 @@ const STATUS_CONFIG = {
     className: 'bg-slate-100 text-slate-600 border-slate-200 ring-slate-400/10',
     dot: 'bg-slate-400',
   },
+  TERMINATION_PENDING: {
+    label: 'Chờ duyệt thanh lý',
+    className: 'bg-amber-50 text-amber-700 border-amber-200 ring-amber-400/10',
+    dot: 'bg-amber-500',
+  },
 
   // Cọc
   HELD: {

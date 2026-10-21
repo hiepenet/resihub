@@ -458,17 +458,82 @@ function ContractActions({ row, currentRole, onChanged }) {
     );
   }
 
+  if (row.status === 'TERMINATION_PENDING') {
+    if (currentRole === 'OWNER') {
+      return (
+        <div className="flex flex-col gap-1.5">
+          <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+          {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+          <button
+            className="px-2 py-1 text-xs rounded-lg bg-rose-600 text-white hover:bg-rose-700 font-medium"
+            onClick={async () => {
+              if (!window.confirm('Xác nhận duyệt chấm dứt hợp đồng? Căn hộ sẽ chuyển sang bảo trì.')) return;
+              try {
+                await api.post(`/api/v1/contracts/${row.id}/terminate/approve`);
+                onChanged();
+              } catch (err) {
+                alert(err.response?.data?.message || 'Lỗi khi duyệt chấm dứt.');
+              }
+            }}
+          >
+            Duyệt chấm dứt
+          </button>
+          <button
+            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
+            onClick={async () => {
+              const reason = window.prompt('Lý do từ chối yêu cầu chấm dứt:');
+              if (reason === null) return;
+              if (!reason.trim()) {
+                alert('Vui lòng nhập lý do từ chối');
+                return;
+              }
+              try {
+                await api.post(`/api/v1/contracts/${row.id}/terminate/reject`, { reason: reason.trim() });
+                onChanged();
+              } catch (err) {
+                alert(err.response?.data?.message || 'Lỗi khi từ chối chấm dứt.');
+              }
+            }}
+          >
+            Từ chối
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-1.5">
+        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+        <span className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium text-center">
+          Chờ OWNER duyệt chấm dứt
+        </span>
+      </div>
+    );
+  }
+
   if (row.status === 'ACTIVE') {
     return (
       <div className="flex flex-col gap-1.5">
         <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
         {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
         <button
-          className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+          className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium"
           onClick={async () => {
-            if (!window.confirm('Chấm dứt hợp đồng này sớm? Căn hộ sẽ chuyển sang bảo trì chờ bàn giao.')) return;
+            const todayStr = new Date().toISOString().split('T')[0];
+            const termDate = window.prompt(`Ngày chấm dứt hợp đồng (YYYY-MM-DD):`, todayStr);
+            if (!termDate) return;
+            const reason = window.prompt('Lý do chấm dứt hợp đồng:');
+            if (reason === null) return;
+            if (!reason.trim()) {
+              alert('Vui lòng nhập lý do chấm dứt');
+              return;
+            }
             try {
-              await api.post(`/api/v1/contracts/${row.id}/terminate`, { note: 'Chấm dứt từ danh sách hợp đồng' });
+              await api.post(`/api/v1/contracts/${row.id}/terminate`, {
+                terminated_date: termDate.trim(),
+                reason: reason.trim(),
+                note: `Chấm dứt sớm: ${reason.trim()}`,
+              });
               onChanged();
             } catch (err) {
               alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
