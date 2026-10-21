@@ -275,6 +275,35 @@ export default function ResidentPortalPage() {
             </div>
           </div>
 
+          {/* B9: Thẻ Hồ sơ của tôi (thông tin cư dân lưu trong hệ thống) */}
+          <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm">
+            <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2 mb-4">
+              <ShieldCheck className="w-5 h-5 text-indigo-600" />
+              <span>Hồ sơ của tôi</span>
+            </h2>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                <span className="text-xs text-slate-500 block">Họ và tên</span>
+                <span className="text-sm font-bold text-slate-800">{data.user?.full_name || residentName}</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                <span className="text-xs text-slate-500 block">Số điện thoại</span>
+                <span className="text-sm font-bold text-slate-800">{data.user?.phone || '—'}</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                <span className="text-xs text-slate-500 block">Email</span>
+                <span className="text-sm font-bold text-slate-800">{data.user?.email || '—'}</span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-100">
+                <span className="text-xs text-slate-500 block">CCCD / Hộ chiếu</span>
+                <span className="text-sm font-bold text-slate-800 font-mono">{data.user?.id_number || '—'}</span>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-3">
+              Thông tin sai lệch? Liên hệ Ban Quản Lý để được cập nhật hồ sơ.
+            </p>
+          </div>
+
           {/* Chi tiết căn hộ & Tiện ích */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200/80 p-6 shadow-sm space-y-4">
