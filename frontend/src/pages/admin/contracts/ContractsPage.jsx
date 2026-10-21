@@ -358,6 +358,7 @@ export default function ContractsPage() {
 function ContractActions({ row, currentRole, onChanged }) {
   const fileRef = React.useRef(null);
   const [isOccupantsOpen, setIsOccupantsOpen] = useState(false);
+  const [isServicesOpen, setIsServicesOpen] = useState(false);
 
   const handleActivate = async () => {
     if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
@@ -419,11 +420,21 @@ function ContractActions({ row, currentRole, onChanged }) {
     reader.readAsDataURL(file);
   };
 
+  const renderNavButtons = () => (
+    <>
+      <div className="flex gap-1">
+        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+        <ServicesButton onClick={() => setIsServicesOpen(true)} />
+      </div>
+      {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+      {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
+    </>
+  );
+
   if (row.status === 'DRAFT') {
     return (
       <div className="flex flex-col gap-1.5 min-w-[150px]">
-        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+        {renderNavButtons()}
         <button
           className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
           onClick={handleActivate}
@@ -452,8 +463,7 @@ function ContractActions({ row, currentRole, onChanged }) {
   if (row.status === 'PENDING_APPROVAL' && currentRole === 'OWNER') {
     return (
       <div className="flex flex-col gap-1.5">
-        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+        {renderNavButtons()}
         <button
           className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
           onClick={handleApprove}
@@ -468,8 +478,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     if (currentRole === 'OWNER') {
       return (
         <div className="flex flex-col gap-1.5">
-          <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-          {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+          {renderNavButtons()}
           <button
             className="px-2 py-1 text-xs rounded-lg bg-rose-600 text-white hover:bg-rose-700 font-medium"
             onClick={async () => {
@@ -508,8 +517,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     }
     return (
       <div className="flex flex-col gap-1.5">
-        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+        {renderNavButtons()}
         <span className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium text-center">
           Chờ OWNER duyệt chấm dứt
         </span>
@@ -520,8 +528,7 @@ function ContractActions({ row, currentRole, onChanged }) {
   if (row.status === 'ACTIVE') {
     return (
       <div className="flex flex-col gap-1.5">
-        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-        {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+        {renderNavButtons()}
         <button
           className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium"
           onClick={async () => {
@@ -554,11 +561,8 @@ function ContractActions({ row, currentRole, onChanged }) {
 
   return (
     <div className="flex flex-col gap-1.5">
-      <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
+      {renderNavButtons()}
       <span className="text-xs text-slate-400">—</span>
-      {isOccupantsOpen && (
-        <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />
-      )}
     </div>
   );
 
@@ -570,6 +574,148 @@ function ContractActions({ row, currentRole, onChanged }) {
       >
         Thành viên
       </button>
+    );
+  }
+
+  function ServicesButton({ onClick }) {
+    return (
+      <button
+        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
+        onClick={onClick}
+      >
+        Dịch vụ
+      </button>
+    );
+  }
+
+  function ServicePricesModal({ contractId, startDate, onClose }) {
+    const [prices, setPrices] = useState([]);
+    const [form, setForm] = useState({
+      service_code: 'INTERNET',
+      unit_price: 100000,
+      effective_from: startDate ? new Date(startDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]
+    });
+
+    const SERVICE_LABELS = {
+      INTERNET: 'Mạng Internet',
+      MOTORBIKE_PARKING: 'Gửi xe máy (xăng)',
+      ELECTRICBIKE_PARKING: 'Gửi xe máy điện',
+      TRASH: 'Vệ sinh rác',
+      COMMON_SERVICE: 'Phí dịch vụ chung'
+    };
+
+    const loadPrices = () => {
+      api.get(`/api/v1/contracts/${contractId}/service-prices`)
+        .then((res) => setPrices(res.data?.data || []))
+        .catch((err) => console.error(err));
+    };
+
+    useEffect(loadPrices, [contractId]);
+
+    const handleAdd = async (e) => {
+      e.preventDefault();
+      try {
+        await api.post(`/api/v1/contracts/${contractId}/service-prices`, form);
+        loadPrices();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi lưu đơn giá dịch vụ.');
+      }
+    };
+
+    const handleDelete = async (priceId) => {
+      if (!window.confirm('Xóa đơn giá dịch vụ này? Hệ thống sẽ dùng giá tòa/mặc định.')) return;
+      try {
+        await api.delete(`/api/v1/contracts/${contractId}/service-prices/${priceId}`);
+        loadPrices();
+      } catch (err) {
+        alert(err.response?.data?.message || 'Lỗi khi xóa đơn giá.');
+      }
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
+        <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">Đơn giá Dịch vụ theo Hợp đồng (FR-065)</h3>
+              <p className="text-xs text-slate-500">Ưu tiên áp dụng: Giá hợp đồng → Giá tòa → Giá mặc định</p>
+            </div>
+            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
+          </div>
+
+          <div className="space-y-2 mb-4">
+            {prices.length === 0 && (
+              <p className="text-xs text-slate-400 text-center py-3 border border-dashed rounded-lg">
+                Chưa có đơn giá riêng cho hợp đồng này (sử dụng biểu phí chuẩn của tòa nhà).
+              </p>
+            )}
+            {prices.map((p) => (
+              <div key={p.id} className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/50">
+                <div>
+                  <span className="text-sm font-semibold text-slate-900">
+                    {SERVICE_LABELS[p.service_code] || p.service_code}
+                  </span>
+                  <span className="text-xs text-slate-400 block">
+                    Áp dụng từ: {new Date(p.effective_from).toLocaleDateString('vi-VN')}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Money amount={p.unit_price} className="font-bold text-indigo-600 text-sm" />
+                  <button
+                    className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                    onClick={() => handleDelete(p.id)}
+                  >
+                    Xóa
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <form onSubmit={handleAdd} className="space-y-3 pt-3 border-t border-slate-100">
+            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm / Cập nhật đơn giá</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2 sm:col-span-1">
+                <label className="text-[11px] text-slate-500 font-medium block mb-1">Mã dịch vụ *</label>
+                <select
+                  value={form.service_code}
+                  onChange={(e) => setForm({ ...form, service_code: e.target.value })}
+                  className="w-full rounded-lg border border-slate-300 py-1.5 px-2.5 text-xs bg-white"
+                >
+                  {Object.entries(SERVICE_LABELS).map(([code, label]) => (
+                    <option key={code} value={code}>{label} ({code})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="col-span-2 sm:col-span-1">
+                <label className="text-[11px] text-slate-500 font-medium block mb-1">Đơn giá riêng (VND) *</label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={form.unit_price}
+                  onChange={(e) => setForm({ ...form, unit_price: e.target.value })}
+                />
+              </div>
+
+              <div className="col-span-2">
+                <label className="text-[11px] text-slate-500 font-medium block mb-1">Ngày hiệu lực *</label>
+                <Input
+                  type="date"
+                  value={form.effective_from}
+                  onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <Button type="submit" variant="primary" size="sm">
+                Lưu đơn giá
+              </Button>
+            </div>
+          </form>
+        </div>
+      </div>
     );
   }
 

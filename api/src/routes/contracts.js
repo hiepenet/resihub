@@ -1182,4 +1182,123 @@ router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req
   }
 });
 
+export const SERVICE_CODES = ['INTERNET', 'MOTORBIKE_PARKING', 'ELECTRICBIKE_PARKING', 'TRASH', 'COMMON_SERVICE'];
+
+/**
+ * GET /api/v1/contracts/:id/service-prices (FR-065, C1)
+ */
+router.get('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    const pricesRes = await client.query(
+      `SELECT * FROM contract_service_price WHERE contract_id = $1 ORDER BY service_code, effective_from DESC`,
+      [id]
+    );
+    res.json({ data: pricesRes.rows });
+  } catch (err) {
+    console.error('[Get Service Prices Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy đơn giá dịch vụ hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/service-prices (FR-065, C1)
+ */
+router.post('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { service_code, unit_price, effective_from } = req.body;
+
+  if (!service_code || !SERVICE_CODES.includes(service_code)) {
+    return res.status(422).json({
+      code: 'INVALID_SERVICE_CODE',
+      message: `Mã dịch vụ không hợp lệ. Phải thuộc: ${SERVICE_CODES.join(', ')}.`
+    });
+  }
+
+  const priceNum = Number(unit_price);
+  if (unit_price === undefined || unit_price === null || isNaN(priceNum) || priceNum < 0) {
+    return res.status(422).json({
+      code: 'INVALID_UNIT_PRICE',
+      message: 'Đơn giá dịch vụ phải lớn hơn hoặc bằng 0.'
+    });
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const cRes = await client.query('SELECT id, start_date FROM contract WHERE id = $1', [id]);
+    if (cRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+
+    const effFrom = effective_from || (cRes.rows[0].start_date.toISOString ? cRes.rows[0].start_date.toISOString().split('T')[0] : cRes.rows[0].start_date);
+
+    const upsertRes = await client.query(
+      `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (contract_id, service_code, effective_from)
+       DO UPDATE SET unit_price = EXCLUDED.unit_price
+       RETURNING *`,
+      [id, service_code, priceNum, effFrom]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'UPSERT_SERVICE_PRICE', 'contract_service_price', $2, $3)`,
+      [req.user.sub, upsertRes.rows[0].id, JSON.stringify(upsertRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.status(200).json({ message: 'Cập nhật đơn giá dịch vụ thành công.', data: upsertRes.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Upsert Service Price Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật đơn giá dịch vụ.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * DELETE /api/v1/contracts/:id/service-prices/:priceId (FR-065, C1)
+ * # ponytail: chưa chặn theo invoice vì M09 chưa dựng — thêm guard khi M09 có kỳ phát hành < effective_from thay đổi
+ */
+router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+  const { id, priceId } = req.params;
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const delRes = await client.query(
+      `DELETE FROM contract_service_price WHERE id = $1 AND contract_id = $2 RETURNING *`,
+      [priceId, id]
+    );
+
+    if (delRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đơn giá dịch vụ cần xóa.' });
+    }
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE_SERVICE_PRICE', 'contract_service_price', $2, $3)`,
+      [req.user.sub, priceId, JSON.stringify(delRes.rows[0])]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Đã xóa đơn giá dịch vụ theo hợp đồng.', data: delRes.rows[0] });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Delete Service Price Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi xóa đơn giá dịch vụ.' });
+  } finally {
+    await release();
+  }
+});
+
 export default router;
