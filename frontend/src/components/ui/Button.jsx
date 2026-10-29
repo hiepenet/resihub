@@ -1,48 +1,56 @@
 import React from 'react';
 import { Loader2 } from 'lucide-react';
 
-export default function Button({
+const VARIANTS = {
+  primary: 'bg-primary-500 hover:bg-primary-600 text-white shadow-sm focus-visible:ring-primary-500',
+  secondary: 'bg-secondary-600 hover:bg-secondary-700 text-white shadow-sm focus-visible:ring-secondary-500',
+  outline: 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 shadow-sm focus-visible:ring-slate-300',
+  ghost: 'bg-transparent hover:bg-slate-100 text-slate-600 hover:text-slate-900',
+  success: 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm focus-visible:ring-emerald-500',
+  warning: 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm focus-visible:ring-amber-500',
+  danger: 'bg-rose-600 hover:bg-rose-700 text-white shadow-sm focus-visible:ring-rose-500',
+  soft: 'bg-primary-50 hover:bg-primary-100 text-primary-700 border border-primary-100',
+};
+
+const SIZES = {
+  xs: 'h-7 px-2.5 text-xs gap-1 rounded-md',
+  sm: 'h-8 px-3 text-xs gap-1.5 rounded-lg',
+  md: 'h-9 px-4 text-sm gap-2 rounded-lg',
+  lg: 'h-11 px-5 text-sm gap-2 rounded-xl',
+};
+
+export function Button({
   children,
   variant = 'primary',
   size = 'md',
-  isLoading = false,
+  loading = false,
   disabled = false,
-  className = '',
-  leftIcon: LeftIcon,
+  icon: Icon,
   rightIcon: RightIcon,
+  className = '',
   type = 'button',
   ...props
 }) {
-  const baseStyles = 'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed select-none';
-
-  const sizeStyles = {
-    sm: 'text-xs px-2.5 py-1.5 gap-1.5',
-    md: 'text-sm px-4 py-2 gap-2',
-    lg: 'text-base px-5 py-2.5 gap-2.5',
-  };
-
-  const variantStyles = {
-    primary: 'bg-primary-600 hover:bg-primary-700 active:bg-primary-900 text-white shadow-sm hover:shadow focus:ring-primary-500',
-    secondary: 'bg-white hover:bg-slate-50 active:bg-slate-100 text-slate-700 border border-surface-border shadow-sm focus:ring-primary-500',
-    danger: 'bg-red-600 hover:bg-red-700 active:bg-red-800 text-white shadow-sm focus:ring-red-500',
-    outline: 'border border-primary-600 text-primary-600 hover:bg-primary-50 active:bg-primary-100 focus:ring-primary-500',
-    ghost: 'text-slate-600 hover:bg-slate-100 active:bg-slate-200 focus:ring-slate-400',
-  };
-
+  const isDisabled = disabled || loading;
   return (
     <button
       type={type}
-      disabled={disabled || isLoading}
-      className={`${baseStyles} ${sizeStyles[size] || sizeStyles.md} ${variantStyles[variant] || variantStyles.primary} ${className}`}
+      disabled={isDisabled}
+      className={`inline-flex items-center justify-center font-medium whitespace-nowrap shrink-0 transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed select-none ${
+        VARIANTS[variant] || VARIANTS.primary
+      } ${SIZES[size] || SIZES.md} ${className}`}
       {...props}
     >
-      {isLoading ? (
-        <Loader2 className="w-4 h-4 animate-spin text-current" />
-      ) : (
-        LeftIcon && <LeftIcon className="w-4 h-4" />
-      )}
-      <span>{children}</span>
-      {!isLoading && RightIcon && <RightIcon className="w-4 h-4" />}
+      {loading ? (
+        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+      ) : Icon ? (
+        <Icon className="w-4 h-4 shrink-0" />
+      ) : null}
+      {children}
+      {RightIcon && !loading ? <RightIcon className="w-4 h-4 shrink-0" /> : null}
     </button>
   );
 }
+
+export default Button;
+
