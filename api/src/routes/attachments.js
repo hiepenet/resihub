@@ -76,6 +76,8 @@ router.get('/:id/view', authenticateToken, async (req, res) => {
         await logAccessDenied(req, 'attachment', id, 'Forbidden PII attachment access');
         return res.status(403).json({ code: 'FORBIDDEN_ATTACHMENT', message: 'Bạn không có quyền xem tệp đính kèm này.' });
       }
+    } else if (['service_request', 'payment', 'meter_reading', 'deposit', 'apartment', 'tenant'].includes(att.owner_entity)) {
+      // Đã qua kiểm tra RLS can_select_attachment ở dòng 27 trên chính xác owner_entity & owner_id
     } else {
       return res.status(403).json({ code: 'FORBIDDEN_ATTACHMENT', message: 'Loại tệp đính kèm chưa hỗ trợ xem.' });
     }

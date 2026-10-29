@@ -87,6 +87,84 @@ export async function managerBuildingFilter(buildingColumn, userId, orgId, exist
 }
 
 /**
+ * Lấy danh sách building_id được gán cho STAFF / ACCOUNTANT / MANAGER (qua user_role.building_id).
+ */
+export async function getStaffBuildingIds(userId, orgId) {
+  if (!userId || !orgId) return [];
+  const result = await adminPool.query(
+    `SELECT DISTINCT ur.building_id
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     JOIN building b ON b.id = ur.building_id
+     WHERE ur.user_id = $1
+       AND r.code IN ('MANAGER', 'STAFF', 'ACCOUNTANT')
+       AND b.org_id = $2
+       AND ur.building_id IS NOT NULL`,
+    [userId, orgId]
+  );
+  return result.rows.map((r) => r.building_id);
+}
+
+/**
+ * Lấy danh sách building_id mà user (OWNER / MANAGER / STAFF / ACCOUNTANT) được phép truy cập.
+ * Nếu là SYS_ADMIN trả null (nghĩa là toàn bộ org).
+ */
+export async function getAccessibleBuildingIds(req) {
+  const roles = getUserRoleCodes(req);
+  if (roles.includes('SYS_ADMIN')) return null;
+
+  const userId = req.user?.sub;
+  const orgId = req.user?.org_id;
+  const idSet = new Set();
+
+  if (roles.includes('OWNER')) {
+    const ownIds = await getOwnerBuildingIds(userId, orgId);
+    ownIds.forEach((id) => idSet.add(id));
+  }
+  if (roles.some((r) => ['MANAGER', 'STAFF', 'ACCOUNTANT'].includes(r))) {
+    const staffIds = await getStaffBuildingIds(userId, orgId);
+    staffIds.forEach((id) => idSet.add(id));
+  }
+  return Array.from(idSet);
+}
+
+/**
+ * Tạo SQL fragment tự động theo vai trò (SYS_ADMIN / OWNER / MANAGER / STAFF / ACCOUNTANT).
+ */
+export async function scopedBuildingFilter(req, buildingColumn, existingParams) {
+  const ids = await getAccessibleBuildingIds(req);
+  if (ids === null) {
+    return { sql: '', params: existingParams };
+  }
+  if (ids.length === 0) {
+    return { sql: ' AND FALSE', params: existingParams };
+  }
+  existingParams.push(ids);
+  return {
+    sql: ` AND ${buildingColumn} = ANY($${existingParams.length}::uuid[])`,
+    params: existingParams,
+  };
+}
+
+/**
+ * Kiểm tra quyền truy cập buildingId cụ thể, nếu không hợp lệ tự động logAccessDenied (AC-019.1).
+ * Trả về true nếu hợp lệ, false nếu bị từ chối.
+ */
+export async function checkBuildingAccess(req, buildingId, entity = 'building', entityId = null) {
+  if (!buildingId) return true;
+  const ids = await getAccessibleBuildingIds(req);
+  if (ids === null) return true;
+  if (ids.includes(buildingId)) return true;
+  await logAccessDenied(
+    req,
+    entity,
+    entityId || buildingId,
+    `User attempted unauthorized access to building ${buildingId}`
+  );
+  return false;
+}
+
+/**
  * Ghi sự kiện ACCESS_DENIED vào audit_log khi truy cập trái phép theo AC-019.1 & PRD 7.5.
  * Sử dụng adminPool để đảm bảo luôn ghi được ngay cả khi transaction bị ROLLBACK hoặc RLS chặn.
  */

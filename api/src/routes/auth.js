@@ -89,8 +89,9 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     });
   }
 
-  // Đảm bảo số điện thoại có tài khoản cư dân (RESIDENT) trong hệ thống
-  let acct = await pool.query(
+  // AC-001.3: Kiểm tra số điện thoại đã tồn tại trong hệ thống (không tự động tạo tài khoản cho SĐT lạ)
+  const neutralMessage = 'Nếu số điện thoại đã được đăng ký trong hệ thống, mã OTP đã được gửi thành công.';
+  const acct = await pool.query(
     `SELECT p.id as person_id, p.full_name, au.id as user_id, au.status 
      FROM person p 
      LEFT JOIN app_user au ON au.person_id = p.id 
@@ -98,30 +99,17 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     [cleanPhone]
   );
 
-  let targetUserId = null;
+  // SĐT không tồn tại hoặc tài khoản đã bị đình chỉ -> Trả thông điệp trung lập (anti-enumeration)
+  if (acct.rows.length === 0 || acct.rows[0].status === 'SUSPENDED') {
+    return res.json({
+      message: neutralMessage,
+    });
+  }
 
-  if (acct.rows.length === 0) {
-    // 1. Tự động tạo hồ sơ cư dân mới
-    const orgRes = await pool.query('SELECT id FROM organization LIMIT 1');
-    const orgId = orgRes.rows[0]?.id;
+  let targetUserId = acct.rows[0].user_id;
 
-    const pRes = await pool.query(
-      `INSERT INTO person (org_id, full_name, phone)
-       VALUES ($1, $2, $3)
-       RETURNING id`,
-      [orgId, `Cư dân ${cleanPhone}`, cleanPhone]
-    );
-    const newPersonId = pRes.rows[0].id;
-
-    const uRes = await pool.query(
-      `INSERT INTO app_user (person_id, auth_uid, status)
-       VALUES ($1, $2, 'ACTIVE')
-       RETURNING id`,
-      [newPersonId, `user_${cleanPhone}`]
-    );
-    targetUserId = uRes.rows[0].id;
-  } else if (!acct.rows[0].user_id) {
-    // 2. Đã có person nhưng chưa có app_user
+  // Nếu cư dân đã được BQL/Admin tạo hồ sơ person nhưng chưa có bản ghi app_user thì khởi tạo app_user liên kết
+  if (!targetUserId) {
     const personId = acct.rows[0].person_id;
     const uRes = await pool.query(
       `INSERT INTO app_user (person_id, auth_uid, status)
@@ -130,31 +118,15 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
       [personId, `user_${cleanPhone}`]
     );
     targetUserId = uRes.rows[0].id;
-  } else {
-    // 3. Đã có app_user -> Đảm bảo ACTIVE
-    targetUserId = acct.rows[0].user_id;
-    if (acct.rows[0].status !== 'ACTIVE') {
-      await pool.query("UPDATE app_user SET status = 'ACTIVE' WHERE id = $1", [targetUserId]);
-    }
-  }
 
-  // Đảm bảo tài khoản luôn có role RESIDENT (Cư dân)
-  if (targetUserId) {
-    const roleCheck = await pool.query(
-      `SELECT 1 FROM user_role ur 
-       JOIN role r ON r.id = ur.role_id 
-       WHERE ur.user_id = $1 AND r.code = 'RESIDENT'`,
-      [targetUserId]
-    );
-    if (roleCheck.rows.length === 0) {
-      const roleRes = await pool.query("SELECT id FROM role WHERE code = 'RESIDENT' LIMIT 1");
-      if (roleRes.rows.length > 0) {
-        await pool.query(
-          `INSERT INTO user_role (user_id, role_id, building_id)
-           VALUES ($1, $2, NULL)`,
-          [targetUserId, roleRes.rows[0].id]
-        );
-      }
+    const roleRes = await pool.query("SELECT id FROM role WHERE code = 'RESIDENT' LIMIT 1");
+    if (roleRes.rows.length > 0) {
+      await pool.query(
+        `INSERT INTO user_role (user_id, role_id, building_id)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT DO NOTHING`,
+        [targetUserId, roleRes.rows[0].id]
+      );
     }
   }
 
@@ -169,13 +141,15 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     lockedUntil: null,
   });
 
-  console.log(`\n=============================================`);
-  console.log(`[SMS MOCK] Mã OTP cho số ${cleanPhone}: 👉 ${otp} 👈`);
-  console.log(`=============================================\n`);
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`\n=============================================`);
+    console.log(`[SMS MOCK] Mã OTP cho số ${cleanPhone}: 👉 ${otp} 👈`);
+    console.log(`=============================================\n`);
+  }
 
   res.json({
-    message: 'OTP đã được gửi thành công.',
-    devOtp: otp,
+    message: neutralMessage,
+    ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}),
   });
 });
 
@@ -511,15 +485,19 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    // 2. Reload roles mới nhất từ CSDL
+    // 2. Reload roles mới nhất từ CSDL (đầy đủ cấu trúc code, name, building_id)
     const rolesRes = await pool.query(
-      `SELECT r.code 
+      `SELECT r.code, r.name, r.scope, ur.building_id
        FROM user_role ur 
        JOIN role r ON r.id = ur.role_id 
        WHERE ur.user_id = $1`,
       [decoded.sub]
     );
-    const freshRoles = rolesRes.rows.map((r) => r.code);
+    const freshRoles = rolesRes.rows.map((r) => ({
+      code: r.code,
+      name: r.name,
+      building_id: r.building_id,
+    }));
 
     const newPayload = {
       sub: decoded.sub,
@@ -533,7 +511,7 @@ router.post('/refresh', async (req, res) => {
     };
 
     const accessToken = jwt.sign(newPayload, JWT_SECRET, { expiresIn: '15m' });
-    res.json({ accessToken });
+    res.json({ accessToken, user: newPayload });
   } catch (err) {
     if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') {
       return res.status(403).json({
