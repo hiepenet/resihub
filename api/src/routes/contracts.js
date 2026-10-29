@@ -17,6 +17,7 @@ import {
 } from '../services/ownerScope.js';
 import {
   normalizeVnPhone,
+  checkPersonScopeForActor,
   upsertPersonAndTenantInTx,
   ensureResidentAccount,
 } from '../services/residentAccount.js';
@@ -747,10 +748,37 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     // Khởi tạo hồ sơ cư dân mới ngay trong cùng transaction nếu người dùng chọn "+ Tạo mới cư dân"
     let effectiveTenantId = primary_tenant_id;
     let inlineTenantResult = null;
-    if (!effectiveTenantId && hasNewTenant) {
+    if (effectiveTenantId) {
+      if (!UUID_REGEX.test(String(effectiveTenantId))) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+      }
+      const tMeta = await adminPool.query(
+        'SELECT id, person_id, status FROM tenant WHERE id = $1 AND org_id = $2 LIMIT 1',
+        [effectiveTenantId, req.user.org_id]
+      );
+      if (tMeta.rows.length === 0 || ['MERGED', 'REJECTED'].includes(tMeta.rows[0].status)) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Hồ sơ cư dân không tồn tại hoặc không còn hợp lệ.' });
+      }
+      const inScope = await checkPersonScopeForActor(tMeta.rows[0].person_id, {
+        actorId: req.user.sub,
+        orgId: req.user.org_id,
+        roleCodes: getUserRoleCodes(req),
+      });
+      if (!inScope) {
+        await client.query('ROLLBACK');
+        await logAccessDenied(req, 'tenant', effectiveTenantId, 'MANAGER attempted to link out-of-scope tenant to contract');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Hồ sơ cư dân này thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
+        });
+      }
+    } else if (hasNewTenant) {
       inlineTenantResult = await upsertPersonAndTenantInTx(client, {
         orgId: req.user.org_id,
         actorId: req.user.sub,
+        actorRoles: getUserRoleCodes(req),
         fullName: new_tenant.full_name,
         phone: new_tenant.phone,
         email: new_tenant.email,

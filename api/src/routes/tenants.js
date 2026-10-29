@@ -11,19 +11,37 @@ import {
 } from '../services/ownerScope.js';
 import {
   normalizeVnPhone,
+  checkPersonScopeForActor,
   upsertPersonAndTenantInTx,
   ensureResidentAccount,
 } from '../services/residentAccount.js';
+import {
+  checkLookupRateLimit,
+  maskEmail,
+  maskIdNumber,
+  maskName,
+  maskPhone,
+} from '../utils/piiMask.js';
 
 const router = express.Router();
+const checkDupBuckets = new Map();
+const tenantLookupBuckets = new Map();
 
 /**
  * GET /api/v1/tenants/check-dup
- * Kiểm tra trùng SĐT hoặc CCCD (FR-021)
+ * Kiểm tra trùng SĐT hoặc CCCD (FR-021) — có Rate Limit, kiểm tra phạm vi tòa nhà và che PII
  */
 router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { phone, id_number } = req.query;
   const orgId = req.user.org_id;
+
+  const rl = checkLookupRateLimit(checkDupBuckets, String(req.user.sub), 30, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      code: 'TOO_MANY_REQUESTS',
+      message: `Bạn đã kiểm tra quá nhiều lần. Vui lòng thử lại sau ${rl.retryAfterSec} giây.`,
+    });
+  }
 
   try {
     let sql = `
@@ -41,16 +59,19 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
     const conditions = [];
 
     if (phone) {
-      params.push(normalizeVnPhone(phone));
-      conditions.push(`p.phone = $${params.length}`);
+      const cleanPhone = normalizeVnPhone(phone);
+      if (/^0[0-9]{9}$/.test(cleanPhone)) {
+        params.push(cleanPhone);
+        conditions.push(`p.phone = $${params.length}`);
+      }
     }
-    if (id_number && String(id_number).trim()) {
+    if (id_number && String(id_number).trim().length >= 8) {
       params.push(String(id_number).trim());
       conditions.push(`p.id_number = $${params.length}`);
     }
 
     if (conditions.length === 0) {
-      return res.json({ isDuplicate: false, duplicates: [] });
+      return res.json({ isDuplicate: false, inScope: true, duplicates: [] });
     }
 
     sql += conditions.join(' OR ') + ')';
@@ -61,13 +82,170 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
       )`;
     const result = await adminPool.query(sql, params);
 
+    if (result.rows.length === 0) {
+      return res.json({ isDuplicate: false, inScope: true, duplicates: [] });
+    }
+
+    const roleCodes = getUserRoleCodes(req);
+    const inScopeRows = [];
+    for (const row of result.rows) {
+      const allowed = await checkPersonScopeForActor(row.id, {
+        actorId: req.user.sub,
+        orgId,
+        roleCodes,
+      });
+      if (allowed && row.tenant_id) {
+        inScopeRows.push({
+          id: row.id,
+          full_name: row.full_name,
+          masked_name: maskName(row.full_name),
+          phone: maskPhone(row.phone),
+          masked_phone: maskPhone(row.phone),
+          id_number: maskIdNumber(row.id_number),
+          masked_id_number: maskIdNumber(row.id_number),
+          email: maskEmail(row.email),
+          tenant_id: row.tenant_id,
+        });
+      }
+    }
+
+    if (inScopeRows.length === 0) {
+      return res.json({
+        isDuplicate: true,
+        inScope: false,
+        duplicates: [],
+        message: 'Định danh (SĐT/CCCD) này đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý.',
+      });
+    }
+
     res.json({
-      isDuplicate: result.rows.length > 0,
-      duplicates: result.rows,
+      isDuplicate: true,
+      inScope: true,
+      duplicates: inScopeRows,
     });
   } catch (err) {
     console.error('[Check Dup Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi kiểm tra trùng lặp.' });
+  }
+});
+
+/**
+ * GET /api/v1/tenants/lookup?identifier=...
+ * Tra cứu chính xác hồ sơ cư dân theo SĐT 10 số hoặc CCCD/Hộ chiếu (9-12 ký tự) khi lập hợp đồng:
+ * - Không công khai dropdown toàn bộ cư dân.
+ * - Giới hạn phạm vi quản lý của MANAGER + Rate Limit + Che PII (masking).
+ */
+router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+  const raw = String(req.query.identifier || '').trim();
+  if (!raw) {
+    return res.status(400).json({
+      code: 'MISSING_IDENTIFIER',
+      message: 'Vui lòng nhập Số điện thoại (10 số) hoặc Số CCCD/Hộ chiếu của cư dân để tra cứu.',
+    });
+  }
+
+  const rl = checkLookupRateLimit(tenantLookupBuckets, String(req.user.sub), 20, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      code: 'TOO_MANY_REQUESTS',
+      message: `Bạn đã tra cứu quá nhiều lần. Vui lòng thử lại sau ${rl.retryAfterSec} giây.`,
+    });
+  }
+
+  const normPhone = normalizeVnPhone(raw);
+  const isPhone = /^0[0-9]{9}$/.test(normPhone);
+  const cleanId = raw.replace(/\s+/g, '');
+  const isIdNumber = !isPhone && /^[A-Za-z0-9]{9,12}$/.test(cleanId);
+
+  if (!isPhone && !isIdNumber) {
+    return res.status(422).json({
+      code: 'INVALID_IDENTIFIER',
+      message: 'Định dạng không hợp lệ. Vui lòng nhập đúng SĐT 10 chữ số (VD: 0912345678) hoặc Số CCCD/Hộ chiếu (9–12 ký tự).',
+    });
+  }
+
+  try {
+    const orgId = req.user.org_id;
+    const matchCondition = isPhone ? 'p.phone = $2' : 'UPPER(p.id_number) = UPPER($2)';
+    const matchValue = isPhone ? normPhone : cleanId;
+
+    const personRes = await adminPool.query(
+      `SELECT p.id, p.full_name, p.phone, p.id_number,
+              t.id AS tenant_id, t.status AS tenant_status
+       FROM person p
+       LEFT JOIN LATERAL (
+         SELECT t_sub.id, t_sub.status
+         FROM tenant t_sub
+         WHERE t_sub.person_id = p.id
+           AND t_sub.org_id = p.org_id
+           AND t_sub.status NOT IN ('MERGED', 'REJECTED')
+         ORDER BY CASE WHEN t_sub.type = 'primary' THEN 0 ELSE 1 END, t_sub.created_at DESC
+         LIMIT 1
+       ) t ON TRUE
+       WHERE p.org_id = $1
+         AND ${matchCondition}
+         AND NOT (
+           EXISTS (SELECT 1 FROM tenant tm WHERE tm.person_id = p.id AND tm.status = 'MERGED')
+           AND NOT EXISTS (SELECT 1 FROM tenant ta WHERE ta.person_id = p.id AND ta.status <> 'MERGED')
+         )
+       LIMIT 1`,
+      [orgId, matchValue]
+    );
+
+    if (personRes.rows.length === 0) {
+      return res.json({
+        found: false,
+        outOfScopeConflict: false,
+        tenant: null,
+        normalizedPhone: isPhone ? normPhone : null,
+        normalizedIdNumber: isIdNumber ? cleanId : null,
+        message: 'Chưa tìm thấy hồ sơ cư dân khớp với SĐT / CCCD này. Bạn có thể chuyển sang tạo mới hồ sơ cư dân.',
+      });
+    }
+
+    const row = personRes.rows[0];
+    if (!row.tenant_id) {
+      return res.json({
+        found: false,
+        outOfScopeConflict: true,
+        tenant: null,
+        message: 'Định danh này đã gắn với tài khoản hệ thống khác, không thể dùng làm hồ sơ khách thuê.',
+      });
+    }
+
+    const inScope = await checkPersonScopeForActor(row.id, {
+      actorId: req.user.sub,
+      orgId,
+      roleCodes: getUserRoleCodes(req),
+    });
+
+    if (!inScope) {
+      return res.json({
+        found: false,
+        outOfScopeConflict: true,
+        tenant: null,
+        message: 'Hồ sơ mang SĐT / CCCD này thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
+      });
+    }
+
+    return res.json({
+      found: true,
+      outOfScopeConflict: false,
+      tenant: {
+        id: row.tenant_id,
+        person_id: row.id,
+        full_name: row.full_name,
+        masked_name: maskName(row.full_name),
+        masked_phone: maskPhone(row.phone),
+        masked_id_number: maskIdNumber(row.id_number),
+        has_id_number: Boolean(row.id_number),
+        status: row.tenant_status,
+      },
+      message: 'Đã tìm thấy hồ sơ cư dân hợp lệ.',
+    });
+  } catch (err) {
+    console.error('[Tenant Lookup Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tra cứu hồ sơ cư dân.' });
   }
 });
 
@@ -140,6 +318,8 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
       }
       params.push(mgrBuildingIds);
       const idx = params.length;
+      params.push(req.user.sub);
+      const actorIdx = params.length;
       sql += ` AND (
         t.id IN (
           SELECT c.primary_tenant_id FROM contract c
@@ -157,9 +337,19 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
           WHERE r.building_id = ANY($${idx}::uuid[])
         )
         OR (
-          -- Hồ sơ mới tạo chưa có hợp đồng ở bất kỳ tòa nào (để BQL chọn khi lập HĐ mới)
-          NOT EXISTS (SELECT 1 FROM contract c_any WHERE c_any.primary_tenant_id = t.id)
-          AND NOT EXISTS (SELECT 1 FROM contract_occupant co_any WHERE co_any.tenant_id = t.id)
+          -- Hồ sơ cư dân chưa lên hợp đồng: CHỈ hiển thị hồ sơ do chính MANAGER này khởi tạo (không lộ sang tòa khác)
+          (t.created_by = $${actorIdx}::uuid OR p.created_by = $${actorIdx}::uuid)
+          AND NOT EXISTS (
+            SELECT 1 FROM contract c_other
+            WHERE c_other.primary_tenant_id = t.id
+              AND NOT (c_other.building_id = ANY($${idx}::uuid[]))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM contract_occupant co_other
+            JOIN contract c_occ ON c_occ.id = co_other.contract_id
+            WHERE co_other.tenant_id = t.id
+              AND NOT (c_occ.building_id = ANY($${idx}::uuid[]))
+          )
         )
       )`;
     }
@@ -197,6 +387,7 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
     const { personId, cleanPhone, cleanEmail, tenant } = await upsertPersonAndTenantInTx(client, {
       orgId,
       actorId: req.user.sub,
+      actorRoles: getUserRoleCodes(req),
       fullName: full_name,
       phone,
       email,
@@ -321,20 +512,24 @@ router.post('/merge', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
       });
     }
 
-    // Kiểm tra phạm vi tòa nhà cho MANAGER (không được gộp cư dân thuộc tòa nhà ngoài phạm vi)
+    // Kiểm tra phạm vi tòa nhà cho MANAGER (không được gộp cư dân thuộc tòa nhà ngoài phạm vi hoặc do BQL tòa khác khởi tạo)
     if (!isSysAdmin) {
-      const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
-      const linkedBldRes = await client.query(
-        `SELECT DISTINCT building_id FROM contract WHERE primary_tenant_id = ANY($1::uuid[])`,
-        [[source_tenant_id, target_tenant_id]]
-      );
-      const outOfScope = linkedBldRes.rows.some((r) => !mgrBuildingIds.includes(r.building_id));
-      if (outOfScope) {
+      const sourceInScope = await checkPersonScopeForActor(sourceTenant.person_id, {
+        actorId: req.user.sub,
+        orgId,
+        roleCodes: userRoles,
+      });
+      const targetInScope = await checkPersonScopeForActor(targetTenant.person_id, {
+        actorId: req.user.sub,
+        orgId,
+        roleCodes: userRoles,
+      });
+      if (!sourceInScope || !targetInScope) {
         await client.query('ROLLBACK');
         await logAccessDenied(req, 'tenant', source_tenant_id, 'MANAGER attempted to merge tenant outside building scope');
         return res.status(403).json({
           code: 'ACCESS_DENIED',
-          message: 'Hồ sơ cư dân đang gắn với hợp đồng thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
+          message: 'Hồ sơ cư dân thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
         });
       }
     }
