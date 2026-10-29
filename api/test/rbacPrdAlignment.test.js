@@ -113,12 +113,82 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
     assert.strictEqual(dRes.status, 200);
     assert.ok(dRes.body.data.length >= 15, `Expected >=15 deposits for VOP-A, got ${dRes.body.data.length}`);
 
-    // Manager CANNOT create a new building (PRD v0.2: only SYS_ADMIN creates buildings)
-    const postBldg = await apiFetch('/api/v1/buildings', token, {
-      method: 'POST',
-      body: JSON.stringify({ name: 'Tòa Trái Phép', code: 'HACK-01' }),
-    });
-    assert.strictEqual(postBldg.status, 403);
+    // PRD FR-007 / US-008 / 6.2 (CRU) & Bảo mật danh tính OWNER:
+    // - MANAGER KHÔNG được lấy danh sách công khai /api/v1/buildings/owners (403)
+    // - MANAGER tra cứu chính xác bằng Email qua /api/v1/buildings/lookup-owner (masked PII)
+    const ownersPublicRes = await apiFetch('/api/v1/buildings/owners', token);
+    assert.strictEqual(ownersPublicRes.status, 403, 'MANAGER must NOT be allowed to list all org owners publicly');
+
+    const lookupOwnerRes = await apiFetch('/api/v1/buildings/lookup-owner?identifier=owner.vop@resihub.vn', token);
+    assert.strictEqual(lookupOwnerRes.status, 200);
+    assert.strictEqual(lookupOwnerRes.body.found, true);
+    assert.ok(lookupOwnerRes.body.owner?.id, 'Exact owner email lookup must return owner id');
+    assert.ok(lookupOwnerRes.body.owner?.masked_email?.includes('***'), 'Owner email must be masked');
+
+    const { token: adminToken } = await login('admin@resihub.vn', 'Admin@123456');
+    const uniqueCode = `MGR-${Date.now().toString().slice(-6)}`;
+    let createdBuildingId = null;
+
+    try {
+      const postBldg = await apiFetch('/api/v1/buildings', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Tòa Khởi Tạo Bởi Manager',
+          code: uniqueCode,
+          address: '123 Đường Kiểm Thử FR-007',
+          owner_id: lookupOwnerRes.body.owner.id,
+        }),
+      });
+      assert.strictEqual(postBldg.status, 201, `Expected 201 when MANAGER creates building, got ${postBldg.status}: ${JSON.stringify(postBldg.body)}`);
+      createdBuildingId = postBldg.body.data.id;
+      assert.ok(createdBuildingId, 'Created building must return id');
+
+      // Manager immediately sees 2 buildings (VOP-A + newly created building)
+      const bAfter = await apiFetch('/api/v1/buildings', token);
+      assert.strictEqual(bAfter.status, 200);
+      assert.ok(
+        bAfter.body.data.some((b) => b.id === createdBuildingId && b.code === uniqueCode),
+        'Newly created building must be immediately accessible in MANAGER scope'
+      );
+
+      // US-008: Manager can immediately create Zone & Floor inside the newly created building
+      const zRes = await apiFetch(`/api/v1/buildings/${createdBuildingId}/zones`, token, {
+        method: 'POST',
+        body: JSON.stringify({ code: 'KHU-A', name: 'Phân khu A' }),
+      });
+      assert.strictEqual(zRes.status, 201, 'MANAGER must be able to create Zone inside newly created building');
+
+      const fRes = await apiFetch(`/api/v1/buildings/${createdBuildingId}/floors`, token, {
+        method: 'POST',
+        body: JSON.stringify({ level: 1, name: 'Tầng 1' }),
+      });
+      assert.strictEqual(fRes.status, 201, 'MANAGER must be able to create Floor inside newly created building');
+
+      // Manager CANNOT delete building (CRU only, no D)
+      const mgrDelBldg = await apiFetch(`/api/v1/buildings/${createdBuildingId}`, token, {
+        method: 'DELETE',
+      });
+      assert.strictEqual(mgrDelBldg.status, 403, 'MANAGER must be blocked from deleting building (CRU only)');
+
+      // Clean up child zone & floor as SYS_ADMIN, then delete empty building via SYS_ADMIN API (CRUD)
+      await apiFetch(`/api/v1/buildings/${createdBuildingId}/zones/${zRes.body.data.id}`, adminToken, { method: 'DELETE' });
+      await apiFetch(`/api/v1/buildings/${createdBuildingId}/floors/${fRes.body.data.id}`, adminToken, { method: 'DELETE' });
+
+      const adminDelBldg = await apiFetch(`/api/v1/buildings/${createdBuildingId}`, adminToken, {
+        method: 'DELETE',
+      });
+      assert.strictEqual(adminDelBldg.status, 200, 'SYS_ADMIN must be able to delete empty building (CRUD)');
+      createdBuildingId = null;
+
+      // Verify user_role scope cleaned up so manager is back to 1 building (VOP-A)
+      const bRestored = await apiFetch('/api/v1/buildings', token);
+      assert.strictEqual(bRestored.body.data.length, 1);
+    } finally {
+      if (createdBuildingId) {
+        await adminPool.query('DELETE FROM user_role WHERE building_id = $1', [createdBuildingId]);
+        await adminPool.query('DELETE FROM building WHERE id = $1', [createdBuildingId]);
+      }
+    }
   });
 
   await t.test('3. AC-019.1: MANAGER VOP-A accessing VOP-B directly receives 403 and writes ACCESS_DENIED audit_log', async () => {
@@ -224,6 +294,52 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
         [mgrBldgs.rows[0].id]
       );
       assert.strictEqual(mgrCrossContracts.rowCount, 0, 'RLS must hide contracts of all other buildings from MANAGER VOP-A');
+
+      // (b2) Anti-privilege-escalation at RLS layer: MANAGER CANNOT self-assign VOP-B or SYS_ADMIN in user_role directly
+      const vopBRow = await adminPool.query(`SELECT id, org_id FROM building WHERE code = 'VOP-B' LIMIT 1`);
+      const mgrRoleRow = await adminPool.query(`SELECT id FROM role WHERE code = 'MANAGER' LIMIT 1`);
+      const adminRoleRow = await adminPool.query(`SELECT id FROM role WHERE code = 'SYS_ADMIN' LIMIT 1`);
+
+      await assert.rejects(
+        () =>
+          client.query(
+            `INSERT INTO user_role (user_id, role_id, building_id) VALUES ($1, $2, $3)`,
+            [idByEmail['manager.vop.a@resihub.vn'], mgrRoleRow.rows[0].id, vopBRow.rows[0].id]
+          ),
+        /row-level security/i,
+        'RLS must block MANAGER from self-assigning an existing unassigned building (VOP-B)'
+      );
+
+      await assert.rejects(
+        () =>
+          client.query(
+            `INSERT INTO user_role (user_id, role_id, building_id) VALUES ($1, $2, NULL)`,
+            [idByEmail['manager.vop.a@resihub.vn'], adminRoleRow.rows[0].id]
+          ),
+        /row-level security/i,
+        'RLS must block MANAGER from self-escalating to SYS_ADMIN'
+      );
+
+      // (b3) RLS allows MANAGER to INSERT a new building in their org, auto-assigns MANAGER role via trigger, and blocks DELETE
+      const rlsCode = `RLS-${Date.now().toString().slice(-6)}`;
+      let rlsBldgId = null;
+      try {
+        await client.query(
+          `INSERT INTO building (org_id, name, code, address, status) VALUES ($1, 'RLS Mgr Bldg', $2, 'RLS Addr', 'ACTIVE')`,
+          [vopBRow.rows[0].org_id, rlsCode]
+        );
+        const selNew = await client.query(`SELECT id, code FROM building WHERE code = $1`, [rlsCode]);
+        assert.strictEqual(selNew.rowCount, 1, 'MANAGER must immediately SELECT newly created building via trigger-assigned user_role');
+        rlsBldgId = selNew.rows[0].id;
+
+        const delNew = await client.query(`DELETE FROM building WHERE id = $1 RETURNING id`, [rlsBldgId]);
+        assert.strictEqual(delNew.rowCount, 0, 'RLS must block MANAGER from deleting building');
+      } finally {
+        if (rlsBldgId) {
+          await adminPool.query(`DELETE FROM user_role WHERE building_id = $1`, [rlsBldgId]);
+          await adminPool.query(`DELETE FROM building WHERE id = $1`, [rlsBldgId]);
+        }
+      }
 
       // (c) RESIDENT cannot UPDATE their own deposit at RLS layer
       await client.query(`SELECT set_config('app.current_user_id', $1, false)`, [idByEmail['tenant1@resihub.vn']]);

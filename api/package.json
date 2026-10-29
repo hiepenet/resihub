@@ -9,7 +9,7 @@
     "dev": "nodemon -L src/server.js",
     "migrate": "node src/db/migrate.js",
     "seed": "node src/db/seed.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "keywords": ["resihub", "express", "postgres", "property-management"],
   "author": "ResiHub Team",
