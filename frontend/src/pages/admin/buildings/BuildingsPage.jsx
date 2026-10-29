@@ -1,1450 +1,444 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2,
   Plus,
-  LayoutGrid,
-  List,
-  X,
-  Home,
-  CheckCircle2,
-  AlertCircle,
-  Shield,
+  MapPin,
   Layers,
+  DoorOpen,
+  LayoutGrid,
+  Edit3,
   ArrowRight,
-  Power,
-  RotateCcw,
-  Trash2,
-  Pencil,
-  BookmarkCheck,
-  Calendar,
-  FileText,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
-import Button from '../../../components/ui/Button';
-import Input from '../../../components/ui/Input';
-import FormField from '../../../components/ui/FormField';
-import StatusBadge from '../../../components/ui/StatusBadge';
-import Money from '../../../components/ui/Money';
-import DataTable from '../../../components/ui/DataTable';
-import ConfirmDialog from '../../../components/ui/ConfirmDialog';
-import AccessDenied from '../../../components/common/AccessDenied';
-import api from '../../../services/api';
-import { useAuthStore } from '../../../stores/authStore';
+import { PageHeader } from '../../../components/common/PageHeader';
+import { StatsCard } from '../../../components/common/StatsCard';
+import { SearchBar } from '../../../components/common/SearchBar';
+import { EmptyState } from '../../../components/common/EmptyState';
+import { Card } from '../../../components/ui/Card';
+import { Button } from '../../../components/ui/Button';
+import { Badge } from '../../../components/ui/Badge';
+import { Modal } from '../../../components/ui/Modal';
+import { Input } from '../../../components/ui/Input';
+import { Select } from '../../../components/ui/Select';
+import { PageSkeleton } from '../../../components/ui/Skeleton';
+import { buildingsService } from '../../../services/buildings.service';
+import { usePermission } from '../../../hooks/usePermission';
+import { useToast } from '../../../hooks/useToast';
+import { extractErrorMessage } from '../../../utils/validation';
 
-// C1: nhãn hiển thị tiện ích (amenities là JSONB {"wifi":true,...}; key lạ hiển thị nguyên bản)
-const AMENITY_LABELS = {
-  wifi: 'Wifi',
-  air_conditioner: 'Điều hòa',
-  water_heater: 'Nóng lạnh',
-  smart_lock: 'Khóa từ',
-  parking: 'Chỗ đỗ xe',
-  balcony: 'Ban công',
-};
-
-export default function BuildingsPage() {
+export function BuildingsPage() {
   const navigate = useNavigate();
-  const { user, getCurrentRole } = useAuthStore();
-  const currentRole = getCurrentRole();
-
-  // Phân quyền theo PRD v2.0 Mục 6.2:
-  // - SYS_ADMIN: CRUD toàn bộ tòa/khu/tầng/căn hộ
-  // - MANAGER: RU tòa được phân công, CRU khu/tầng/căn hộ thuộc tòa đó
-  // - OWNER: R các tòa thuộc sở hữu (Chỉ xem)
-  // - RESIDENT: chặn truy cập trang quản trị tòa nhà
-  const isSysAdmin = currentRole === 'SYS_ADMIN';
-  const isManager = currentRole === 'MANAGER';
-  const isOwner = currentRole === 'OWNER';
-
-  const canCreateBuilding = isSysAdmin;               // Chỉ SYS_ADMIN tạo mới tòa nhà
-  const canManageUnits = isSysAdmin || isManager;     // SYS_ADMIN CRUD, MANAGER CRU, OWNER R
-  const canChangeBuildingStatus = isSysAdmin || isManager;
-
-  // Nếu người dùng là RESIDENT -> chặn hiển thị trang quản trị tòa nhà chung
-  if (currentRole === 'RESIDENT') {
-    return (
-      <AccessDenied
-        currentRole={currentRole}
-        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
-      />
-    );
-  }
-
+  const toast = useToast();
+  const { canManageBuildings, canEditRealEstate } = usePermission();
 
   const [buildings, setBuildings] = useState([]);
-  const [selectedBuilding, setSelectedBuilding] = useState(null);
-  const [activeTab, setActiveTab] = useState('floormap'); // 'floormap' | 'list'
-  const [floorMap, setFloorMap] = useState([]);
-  const [selectedApartment, setSelectedApartment] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [owners, setOwners] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
 
-  // Modals & Drawers
-  const [isBuildingModalOpen, setIsBuildingModalOpen] = useState(false);
-  const [isApartmentModalOpen, setIsApartmentModalOpen] = useState(false);
-  const [isFloorModalOpen, setIsFloorModalOpen] = useState(false);
-  const [confirmStatusModal, setConfirmStatusModal] = useState({ isOpen: false, building: null, targetStatus: null });
-
-  // NV-03 Form State
-  const [newBuilding, setNewBuilding] = useState({
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [codeCheck, setCodeCheck] = useState(null);
+  const [form, setForm] = useState({
     name: '',
     code: '',
     address: '',
-    bank: '',
-    account_no: '',
-    account_name: '',
-    account_type: 'personal',
-    lease_notes: '',
     owner_id: '',
+    bank_name: '',
+    account_number: '',
+    account_holder: '',
   });
-  const [codeCheckStatus, setCodeCheckStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'invalid'
-  const [codeMessage, setCodeMessage] = useState('');
-  const [buildingFormError, setBuildingFormError] = useState('');
 
-  // Add Floor State
-  const [newFloor, setNewFloor] = useState({ level: 1, name: '' });
-
-  // B3: sửa tòa + chọn chủ sở hữu
-  const [editingBuilding, setEditingBuilding] = useState(null);
-  const [owners, setOwners] = useState([]);
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [bRes, oRes] = await Promise.all([
+        buildingsService.list(),
+        buildingsService.listOwners().catch(() => ({ data: [] })),
+      ]);
+      setBuildings(bRes.data || []);
+      setOwners(oRes.data || []);
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
   useEffect(() => {
-    if (!isSysAdmin) return;
-    api.get('/api/v1/buildings/owners')
-      .then((res) => setOwners(res.data?.data || []))
-      .catch(() => {});
-  }, [isSysAdmin]);
+    loadData();
+  }, [loadData]);
 
-  const openEditBuilding = async (row) => {
-    const res = await api.get(`/api/v1/buildings/${row.id}`).catch(() => null);
-    const b = res?.data?.data || row;
-    setEditingBuilding(b);
-    setNewBuilding({
+  const openCreate = () => {
+    setEditing(null);
+    setCodeCheck(null);
+    setForm({
+      name: '',
+      code: '',
+      address: '',
+      owner_id: owners[0]?.id || '',
+      bank_name: 'Vietcombank',
+      account_number: '',
+      account_holder: '',
+    });
+    setModalOpen(true);
+  };
+
+  const openEdit = (b, e) => {
+    e?.stopPropagation();
+    setEditing(b);
+    setCodeCheck(null);
+    const pa = b.payment_account || {};
+    setForm({
       name: b.name || '',
       code: b.code || '',
       address: b.address || '',
-      bank: b.lease_terms?.payment_account?.bank || '',
-      account_no: b.lease_terms?.payment_account?.account_no || '',
-      account_name: b.lease_terms?.payment_account?.account_name || '',
-      account_type: b.lease_terms?.payment_account?.type || 'personal',
-      lease_notes: b.lease_terms?.notes || '',
       owner_id: b.owner_id || '',
+      bank_name: pa.bank_name || '',
+      account_number: pa.account_number || '',
+      account_holder: pa.account_holder || '',
     });
-    setIsBuildingModalOpen(true);
+    setModalOpen(true);
   };
 
-  // Add Apartment State
-  const [newApartment, setNewApartment] = useState({
-    code: '',
-    floor_id: '',
-    area_m2: 45,
-    type: '1PN',
-    bedrooms: 1,
-    base_rent: 7500000,
-    status: 'AVAILABLE',
-  });
-  const [aptFormError, setAptFormError] = useState('');
-
-  // NV-06 Reservation State
-  const [isReservationModalOpen, setIsReservationModalOpen] = useState(false);
-  const [reservationData, setReservationData] = useState({
-    prospect_name: '',
-    phone: '',
-    hold_amount: 1000000,
-    hold_until: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    note: '',
-  });
-  const [reservationError, setReservationError] = useState('');
-
-  const loadBuildings = async () => {
-    setIsLoading(true);
-    try {
-      const res = await api.get('/api/v1/buildings');
-      const list = res.data?.data || [];
-      setBuildings(list);
-      if (list.length > 0 && !selectedBuilding) {
-        setSelectedBuilding(list[0]);
-      } else if (selectedBuilding) {
-        const updated = list.find((b) => b.id === selectedBuilding.id);
-        if (updated) setSelectedBuilding(updated);
-      }
-    } catch (err) {
-      console.error('Error loading buildings:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const loadFloorMap = async (buildingId) => {
-    if (!buildingId) return;
-    try {
-      const res = await api.get(`/api/v1/buildings/${buildingId}/floor-map`);
-      const map = res.data?.data || [];
-      setFloorMap(map);
-      if (map.length > 0 && !newApartment.floor_id) {
-        setNewApartment((prev) => ({ ...prev, floor_id: map[0].id }));
-      }
-    } catch (err) {
-      console.error('Error loading floor map:', err);
-    }
-  };
-
-  // B1: phân khu Khu/Block
-  const [zones, setZones] = useState([]);
-  const [isZoneModalOpen, setIsZoneModalOpen] = useState(false);
-  const [newZone, setNewZone] = useState({ code: '', name: '' });
-
-  const loadZones = async (buildingId) => {
-    if (!buildingId) return;
-    try {
-      const res = await api.get(`/api/v1/buildings/${buildingId}/zones`);
-      setZones(res.data?.data || []);
-    } catch (err) {
-      console.error('Error loading zones:', err);
-    }
-  };
-
-  const handleCreateZone = async (e) => {
-    e.preventDefault();
-    try {
-      await api.post(`/api/v1/buildings/${selectedBuilding.id}/zones`, newZone);
-      setIsZoneModalOpen(false);
-      setNewZone({ code: '', name: '' });
-      loadZones(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi tạo khu.');
-    }
-  };
-
-
-  useEffect(() => {
-    loadBuildings();
-  }, []);
-
-  useEffect(() => {
-    if (selectedBuilding) {
-      loadFloorMap(selectedBuilding.id);
-      loadZones(selectedBuilding.id);
-    }
-  }, [selectedBuilding]);
-
-  // Real-time Check Mã Tòa (FR-007 / NV-03)
   const handleCodeBlur = async () => {
-    const rawCode = newBuilding.code.trim();
-    if (!rawCode) {
-      setCodeCheckStatus(null);
-      setCodeMessage('');
-      return;
-    }
-
-    if (!/^[A-Z0-9-]+$/.test(rawCode)) {
-      setCodeCheckStatus('invalid');
-      setCodeMessage('Mã chỉ gồm chữ cái, số và dấu gạch ngang (-)');
-      return;
-    }
-
-    setCodeCheckStatus('checking');
+    if (editing || !form.code.trim()) return;
     try {
-      const res = await api.get(`/api/v1/buildings/check-code?code=${rawCode}`);
-      if (res.data.available) {
-        setCodeCheckStatus('available');
-        setCodeMessage('✅ Mã tòa chưa được dùng (Hợp lệ)');
-      } else {
-        setCodeCheckStatus('taken');
-        setCodeMessage('❌ Mã tòa này đã tồn tại trong tổ chức');
-      }
-    } catch (e) {
-      setCodeCheckStatus(null);
+      const res = await buildingsService.checkCode(form.code.trim());
+      setCodeCheck(res);
+    } catch {
+      setCodeCheck(null);
     }
   };
 
-  const handleCreateBuilding = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    setBuildingFormError('');
-
-    if (!newBuilding.name.trim()) {
-      setBuildingFormError('Tên tòa nhà không được để trống (2-100 ký tự).');
-      return;
-    }
-
-    if (!editingBuilding && !newBuilding.code.trim()) {
-      setBuildingFormError('Mã tòa nhà không được để trống.');
-      return;
-    }
-
-    if (!editingBuilding && (codeCheckStatus === 'taken' || codeCheckStatus === 'invalid')) {
-      setBuildingFormError('Mã tòa không hợp lệ hoặc đã bị trùng.');
-      return;
-    }
-
+    setSaving(true);
     try {
-      const payment_account = {
-        bank: newBuilding.bank,
-        account_no: newBuilding.account_no,
-        account_name: newBuilding.account_name,
-        type: newBuilding.account_type,
+      const payload = {
+        name: form.name.trim(),
+        code: form.code.trim().toUpperCase(),
+        address: form.address.trim(),
+        owner_id: form.owner_id || undefined,
+        payment_account: {
+          bank_name: form.bank_name.trim(),
+          account_number: form.account_number.trim(),
+          account_holder: form.account_holder.trim(),
+        },
       };
-      const lease_terms = { notes: newBuilding.lease_notes, payment_account };
 
-      if (editingBuilding) {
-        // B3: sửa tòa — mã KHÔNG được sửa; chỉ SYS_ADMIN mới được gán/đổi owner_id
-        await api.patch(`/api/v1/buildings/${editingBuilding.id}`, {
-          name: newBuilding.name.trim(),
-          address: newBuilding.address.trim(),
-          ...(isSysAdmin ? { owner_id: newBuilding.owner_id === '' ? null : (newBuilding.owner_id || undefined) } : {}),
-          payment_account,
-          lease_terms: { notes: newBuilding.lease_notes },
-        });
+      if (editing) {
+        await buildingsService.update(editing.id, payload);
+        toast.success('Đã cập nhật thông tin tòa nhà.');
       } else {
-        await api.post('/api/v1/buildings', {
-          name: newBuilding.name.trim(),
-          code: newBuilding.code.trim().toUpperCase(),
-          address: newBuilding.address.trim(),
-          owner_id: newBuilding.owner_id || undefined,
-          payment_account,
-          lease_terms,
-        });
+        await buildingsService.create(payload);
+        toast.success('Đã tạo tòa nhà mới thành công.');
       }
-      setIsBuildingModalOpen(false);
-      setEditingBuilding(null);
-      setNewBuilding({
-        name: '',
-        code: '',
-        address: '',
-        bank: '',
-        account_no: '',
-        account_name: '',
-        account_type: 'personal',
-        lease_notes: '',
-        owner_id: '',
-      });
-      setCodeCheckStatus(null);
-      await loadBuildings();
+      setModalOpen(false);
+      loadData();
     } catch (err) {
-      setBuildingFormError(err.response?.data?.message || 'Lỗi khi lưu tòa nhà.');
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleCreateFloor = async (e) => {
-    e.preventDefault();
-    if (!selectedBuilding) return;
+  if (loading && buildings.length === 0) return <PageSkeleton />;
 
-    try {
-      await api.post(`/api/v1/buildings/${selectedBuilding.id}/floors`, newFloor);
-      setIsFloorModalOpen(false);
-      setNewFloor({ level: floorMap.length + 1, name: '' });
-      await loadFloorMap(selectedBuilding.id);
-      loadBuildings();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi tạo tầng.');
-    }
-  };
+  const filtered = buildings.filter((b) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      b.name?.toLowerCase().includes(q) ||
+      b.code?.toLowerCase().includes(q) ||
+      b.address?.toLowerCase().includes(q)
+    );
+  });
 
-  const handleCreateApartment = async (e) => {
-    e.preventDefault();
-    setAptFormError('');
-
-    if (!newApartment.code) {
-      setAptFormError('Vui lòng nhập mã phòng.');
-      return;
-    }
-
-    try {
-      await api.post('/api/v1/apartments', {
-        ...newApartment,
-        building_id: selectedBuilding.id,
-      });
-      setIsApartmentModalOpen(false);
-      setNewApartment({
-        code: '',
-        floor_id: floorMap[0]?.id || '',
-        area_m2: 45,
-        type: '1PN',
-        bedrooms: 1,
-        base_rent: 7500000,
-        status: 'AVAILABLE',
-      });
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      setAptFormError(err.response?.data?.message || 'Lỗi khi tạo căn hộ.');
-    }
-  };
-
-  const handleDeleteFloor = async (floorId) => {
-    if (!window.confirm('Bạn có chắc chắn muốn xóa tầng này? (Chỉ xóa được khi không có căn hộ)')) return;
-    try {
-      await api.delete(`/api/v1/buildings/${selectedBuilding.id}/floors/${floorId}`);
-      await loadFloorMap(selectedBuilding.id);
-      loadBuildings();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi xóa tầng.');
-    }
-  };
-
-  const handleCreateReservation = async (e) => {
-    e.preventDefault();
-    setReservationError('');
-    if (!selectedApartment) return;
-
-    try {
-      await api.post('/api/v1/reservations', {
-        ...reservationData,
-        apartment_id: selectedApartment.id,
-      });
-      setIsReservationModalOpen(false);
-      setReservationData({
-        prospect_name: '',
-        phone: '',
-        hold_amount: 1000000,
-        hold_until: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-        note: '',
-      });
-      setSelectedApartment(null);
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      setReservationError(err.response?.data?.message || 'Lỗi khi đặt giữ chỗ.');
-    }
-  };
-
-  const handleForfeitReservation = async (apartmentId) => {
-    if (!window.confirm('Xác nhận khách hủy giữ chỗ (mất cọc)? Căn hộ sẽ mở lại trạng thái có sẵn.')) return;
-    try {
-      const resList = await api.get(`/api/v1/reservations?status=HELD`);
-      const found = resList.data?.data?.find((r) => r.apartment_id === apartmentId);
-      if (!found) {
-        alert('Không tìm thấy thông tin giữ chỗ đang chờ xử lý của căn này.');
-        return;
-      }
-      await api.patch(`/api/v1/reservations/${found.id}/forfeit`);
-      setSelectedApartment(null);
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi xử lý hủy giữ chỗ.');
-    }
-  };
-
-  const handleRefundReservation = async (apartmentId) => {
-    if (!window.confirm('Xác nhận hoàn tiền giữ chỗ cho khách? Căn hộ sẽ mở lại trạng thái có sẵn.')) return;
-    try {
-      const resList = await api.get(`/api/v1/reservations?status=HELD`);
-      const found = resList.data?.data?.find((r) => r.apartment_id === apartmentId);
-      if (!found) {
-        alert('Không tìm thấy thông tin giữ chỗ đang chờ xử lý của căn này.');
-        return;
-      }
-      await api.patch(`/api/v1/reservations/${found.id}/refund`);
-      setSelectedApartment(null);
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi hoàn tiền giữ chỗ.');
-    }
-  };
-
-  const handleConvertReservationToContract = async (apartment) => {
-    try {
-      const resList = await api.get('/api/v1/reservations?status=HELD');
-      const found = resList.data?.data?.find((r) => r.apartment_id === apartment.id);
-      const params = new URLSearchParams({
-        action: 'new',
-        building_id: apartment.building_id,
-        apartment_id: apartment.id,
-      });
-      if (found) {
-        params.set('reservation_id', found.id);
-        if (found.hold_amount) params.set('hold_amount', found.hold_amount);
-        if (found.prospect_name) params.set('prospect_name', found.prospect_name);
-        if (found.phone) params.set('phone', found.phone);
-      }
-      navigate(`/admin/contracts?${params.toString()}`);
-    } catch (err) {
-      console.error('Error navigating to contract from reservation:', err);
-      navigate(`/admin/contracts?action=new&building_id=${apartment.building_id}&apartment_id=${apartment.id}`);
-    }
-  };
-
-  // Bàn giao & nghiệm thu sau chấm dứt hợp đồng (B8 / PRD 7.5)
-  const handleHandover = async () => {
-    if (!window.confirm('Xác nhận bàn giao & nghiệm thu phòng? Căn hộ sẽ về trạng thái sẵn sàng kinh doanh (AVAILABLE).')) return;
-    try {
-      const res = await api.patch(`/api/v1/apartments/${selectedApartment.id}/handover`);
-      if (res.data?.warnings?.length) {
-        alert(res.data.warnings.join('\n'));
-      }
-      setSelectedApartment(null);
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi bàn giao căn hộ.');
-    }
-  };
-
-  // B2: đổi trạng thái MAINTENANCE <-> INACTIVE <-> AVAILABLE trực tiếp từ panel
-  const handleSetApartmentStatus = async (targetStatus, confirmText) => {
-    if (!window.confirm(confirmText)) return;
-    try {
-      await api.patch(`/api/v1/apartments/${selectedApartment.id}`, { status: targetStatus });
-      setSelectedApartment(null);
-      loadFloorMap(selectedBuilding.id);
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi đổi trạng thái căn hộ.');
-    }
-  };
-
-  // State Machine Toggle: ACTIVE <-> INACTIVE
-  const handleToggleStatus = async () => {
-    const { building, targetStatus } = confirmStatusModal;
-    if (!building) return;
-
-    try {
-      await api.patch(`/api/v1/buildings/${building.id}/status`, { status: targetStatus });
-      setConfirmStatusModal({ isOpen: false, building: null, targetStatus: null });
-      loadBuildings();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi đổi trạng thái tòa nhà.');
-      setConfirmStatusModal({ isOpen: false, building: null, targetStatus: null });
-    }
-  };
-
-  const buildingColumns = [
-    { title: 'Tên tòa nhà', key: 'name', sortable: true },
-    { title: 'Mã tòa', key: 'code', sortable: true },
-    { title: 'Địa chỉ', key: 'address' },
-    {
-      title: 'Tầng / Căn',
-      key: 'total_apartments',
-      render: (_, row) => (
-        <span className="font-medium text-xs text-slate-700">
-          {row.total_floors || 0} tầng · {row.total_apartments || 0} căn
-        </span>
-      ),
+  const totals = buildings.reduce(
+    (acc, b) => {
+      acc.apts += Number(b.total_apartments || 0);
+      acc.occupied += Number(b.occupied_apartments || 0);
+      acc.available += Number(b.available_apartments || 0);
+      return acc;
     },
-    {
-      title: 'Trạng thái',
-      key: 'status',
-      render: (val) => <StatusBadge status={val} />,
-    },
-    {
-      title: 'Thao tác',
-      key: 'actions',
-      render: (_, row) => canChangeBuildingStatus ? (
-        <div className="flex gap-1.5">
-          <button
-            onClick={() => openEditBuilding(row)}
-            className="text-xs font-semibold px-2.5 py-1 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
-          >
-            Sửa
-          </button>
-          <button
-          onClick={() => setConfirmStatusModal({
-            isOpen: true,
-            building: row,
-            targetStatus: row.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE',
-          })}
-          className={`text-xs font-semibold px-2.5 py-1 rounded-lg border transition-colors ${
-            row.status === 'ACTIVE'
-              ? 'text-amber-700 bg-amber-50 border-amber-200 hover:bg-amber-100'
-              : 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
-          }`}
-        >
-          {row.status === 'ACTIVE' ? 'Tạm dừng' : 'Kích hoạt lại'}
-        </button>
-        </div>
-      ) : (
-        <span className="text-xs text-slate-400 italic">Chỉ xem</span>
-      ),
-    },
-  ];
-
-  const needsFloorConfig = selectedBuilding && floorMap.length === 0;
+    { apts: 0, occupied: 0, available: 0 }
+  );
+  const avgOccupancy = totals.apts > 0 ? ((totals.occupied / totals.apts) * 100).toFixed(1) : '0.0';
 
   return (
     <div className="space-y-6">
-      {/* Header & Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Quản lý Bất động sản (M03)
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Khởi tạo tòa nhà (NV-03), sơ đồ phân bổ tầng & phòng (NV-04) và cấu hình vận hành
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2.5">
-          {canCreateBuilding && (
-            <Button
-              variant="primary"
-              size="md"
-              onClick={() => {
-                setEditingBuilding(null);
-                setNewBuilding({
-                  name: '',
-                  code: '',
-                  address: '',
-                  bank: '',
-                  account_no: '',
-                  account_name: '',
-                  account_type: 'personal',
-                  lease_notes: '',
-                  owner_id: '',
-                });
-                setIsBuildingModalOpen(true);
-              }}
-              leftIcon={Plus}
-            >
-              Thêm tòa mới
+      <PageHeader
+        title="Quản lý Bất động sản"
+        subtitle="Danh mục các tòa nhà, khu phân khu, tầng và sơ đồ căn hộ trong phạm vi quản lý"
+        actions={
+          canManageBuildings ? (
+            <Button icon={Plus} onClick={openCreate}>
+              Thêm tòa nhà mới
             </Button>
-          )}
+          ) : null
+        }
+      />
 
-          {canManageUnits && (
-            <>
-              <Button
-                variant="secondary"
-                size="md"
-                onClick={() => setIsZoneModalOpen(true)}
-                leftIcon={Layers}
-                disabled={!selectedBuilding}
-              >
-                Thêm khu
-              </Button>
-
-              <Button
-                variant="secondary"
-                size="md"
-                onClick={() => setIsFloorModalOpen(true)}
-                leftIcon={Layers}
-                disabled={!selectedBuilding}
-              >
-                Thêm tầng
-              </Button>
-
-              <Button
-                variant="secondary"
-                size="md"
-                onClick={() => setIsApartmentModalOpen(true)}
-                leftIcon={Plus}
-                disabled={!selectedBuilding || floorMap.length === 0}
-              >
-                Thêm căn hộ
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-
-
-      {/* Checklist "Hoàn thiện cấu hình tòa" (Phần 7 của Quy Trình Tạo Tòa Nhà) */}
-      {needsFloorConfig && (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-amber-900 shadow-sm animate-fade-in">
-          <div className="flex items-start gap-3">
-            <span className="text-xl">🚀</span>
-            <div className="flex-1">
-              <h4 className="font-bold text-sm">
-                Hoàn thiện cấu hình cho tòa "{selectedBuilding.name}" để bắt đầu vận hành
-              </h4>
-              <p className="text-xs text-amber-800 mt-1">
-                Tòa nhà mới tạo ở trạng thái <strong>ACTIVE</strong> nhưng chưa có tầng và phòng. Vui lòng thêm tầng trước khi phân bổ căn hộ.
-              </p>
-
-              <div className="mt-3.5 flex flex-wrap items-center gap-4 text-xs font-medium">
-                <span className="flex items-center gap-1.5 text-emerald-700 bg-white px-2.5 py-1 rounded-lg border border-emerald-200">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  Thông tin tòa nhà
-                </span>
-                <span className="flex items-center gap-1.5 text-amber-800 bg-amber-100/80 px-2.5 py-1 rounded-lg border border-amber-300">
-                  <span className="w-2 h-2 rounded-full bg-amber-600" />
-                  Thêm tầng (Hiện có 0 tầng)
-                </span>
-                <span className="text-slate-400">→ Thêm căn hộ (cần có tầng trước)</span>
-              </div>
-            </div>
-
-            {canManageUnits && (
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={() => setIsFloorModalOpen(true)}
-                leftIcon={Plus}
-                className="text-xs shadow-sm flex-shrink-0"
-              >
-                Thêm tầng ngay
-              </Button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Buildings Pills & View Toggle */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-3">
-        {/* Buildings Pills */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          {buildings.map((b) => (
-            <button
-              key={b.id}
-              onClick={() => setSelectedBuilding(b)}
-              className={`px-3.5 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all duration-150 flex items-center gap-2 flex-shrink-0 ${
-                selectedBuilding?.id === b.id
-                  ? 'bg-primary-600 text-white shadow-sm shadow-primary-500/30'
-                  : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
-              }`}
-            >
-              <Building2 className="w-4 h-4" />
-              <span>{b.name}</span>
-              {b.status === 'INACTIVE' && (
-                <span className="text-[10px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded">Tạm dừng</span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* View mode toggle */}
-        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl self-start sm:self-auto">
-          <button
-            onClick={() => setActiveTab('floormap')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-              activeTab === 'floormap' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <LayoutGrid className="w-3.5 h-3.5" />
-            <span>Sơ đồ tầng</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('list')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-              activeTab === 'list' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <List className="w-3.5 h-3.5" />
-            <span>Danh sách tòa</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Main View */}
-      {activeTab === 'list' ? (
-        <DataTable
-          columns={buildingColumns}
-          data={buildings}
-          isLoading={isLoading}
-          searchKeys={['name', 'code', 'address']}
+      {/* Summary KPIs */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatsCard
+          title="Tổng số tòa nhà"
+          value={buildings.length}
+          subtext="Các tòa trong phạm vi phân quyền"
+          icon={Building2}
+          color="sky"
         />
+        <StatsCard
+          title="Tổng quy mô căn hộ"
+          value={totals.apts}
+          subtext={`${totals.occupied} đang thuê · ${totals.available} còn trống`}
+          icon={DoorOpen}
+          color="indigo"
+        />
+        <StatsCard
+          title="Tỷ lệ lấp đầy trung bình"
+          value={`${avgOccupancy}%`}
+          subtext="Tính trên tổng quỹ căn hộ khai thác"
+          icon={LayoutGrid}
+          color="emerald"
+        />
+      </div>
+
+      <div className="flex items-center justify-between gap-4">
+        <SearchBar
+          value={search}
+          onChange={setSearch}
+          placeholder="Tìm theo tên tòa nhà, mã tòa, địa chỉ..."
+          className="w-full max-w-md"
+        />
+      </div>
+
+      {/* Building Card Grid */}
+      {filtered.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={Building2}
+            title="Không tìm thấy tòa nhà nào"
+            description="Thử thay đổi từ khóa tìm kiếm hoặc thêm tòa nhà mới."
+          />
+        </Card>
       ) : (
-        <div className="space-y-6">
-          {/* Status Legend */}
-          <div className="flex flex-wrap items-center gap-4 p-4 bg-white rounded-xl border border-slate-200/80 text-xs text-slate-600 shadow-sm">
-            <span className="font-semibold text-slate-800 mr-2">Trạng thái:</span>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-emerald-500" />
-              <span>🟢 Có sẵn</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-indigo-500" />
-              <span>🔵 Đang thuê</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-amber-500" />
-              <span>🟡 Đã đặt cọc</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-rose-500" />
-              <span>🔴 Bảo trì</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-slate-400" />
-              <span>⚫ Không KD</span>
-            </div>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {filtered.map((b) => {
+            const total = Number(b.total_apartments || 0);
+            const occ = Number(b.occupied_apartments || 0);
+            const avail = Number(b.available_apartments || 0);
+            const rate = total > 0 ? Math.round((occ / total) * 100) : 0;
 
-          {/* B1: dải phân khu Khu/Block */}
-          {zones.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Khu/Block:</span>
-              {zones.map((z) => (
-                <span
-                  key={z.id}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border bg-primary-50 text-primary-800 border-primary-200"
-                  title={`${z.apartment_count || 0} căn hộ`}
-                >
-                  {z.code}{z.name ? ` — ${z.name}` : ''} ({z.apartment_count || 0})
-                </span>
-              ))}
-            </div>
-          )}
+            return (
+              <div
+                key={b.id}
+                onClick={() => navigate(`/admin/buildings/${b.id}`)}
+                className="group bg-white rounded-2xl border border-slate-200/80 shadow-card hover:shadow-elevated hover:border-primary-300 transition-all cursor-pointer overflow-hidden flex flex-col"
+              >
+                {/* Decorative Top Banner */}
+                <div className="h-24 bg-gradient-to-r from-sky-600 via-primary-500 to-indigo-600 p-4 flex items-start justify-between text-white relative">
+                  <div>
+                    <span className="inline-block px-2.5 py-0.5 rounded-md bg-white/20 backdrop-blur text-xs font-bold tracking-wide">
+                      {b.code}
+                    </span>
+                    <h3 className="text-base font-bold mt-1.5 line-clamp-1">{b.name}</h3>
+                  </div>
+                  <Badge variant={b.status === 'INACTIVE' ? 'slate' : 'emerald'}>
+                    {b.status === 'INACTIVE' ? 'Tạm ngưng' : 'Hoạt động'}
+                  </Badge>
+                </div>
 
-          {/* Sơ đồ tầng theo thiết kế PRD FR-010 */}
-          <div className="space-y-4">
-            {floorMap.length === 0 ? (
-              <div className="bg-white p-12 text-center rounded-xl border border-dashed border-slate-200 text-slate-500">
-                <p className="font-medium">Chưa có tầng nào được cấu hình cho tòa nhà này.</p>
-                <p className="text-xs text-slate-400 mt-1">Nhấn 'Thêm tầng' để bắt đầu thiết lập.</p>
-              </div>
-            ) : (
-              floorMap.map((floor) => (
-                <div key={floor.id} className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-5">
-                  <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md">
-                        {floor.name || `TẦNG ${floor.level}`}
-                      </span>
-                      <span className="text-xs text-slate-400">
-                        {floor.apartments?.length || 0} căn hộ
-                      </span>
-                      {canManageUnits && (
-                        <button
-                          onClick={async () => {
-                            const name = window.prompt('Tên hiển thị tầng mới:', floor.name || `Tầng ${floor.level}`);
-                            if (name === null) return;
-                            const levelStr = window.prompt('Số tầng (level): <0 hầm, 0 trệt, >0 tầng', String(floor.level));
-                            if (levelStr === null) return;
-                            try {
-                              await api.patch(`/api/v1/buildings/${selectedBuilding.id}/floors/${floor.id}`, {
-                                name,
-                                level: parseInt(levelStr, 10),
-                              });
-                              await loadFloorMap(selectedBuilding.id);
-                            } catch (err) {
-                              alert(err.response?.data?.message || 'Lỗi khi sửa tầng.');
-                            }
-                          }}
-                          className="text-slate-400 hover:text-primary-600 p-1 rounded transition-colors"
-                          title="Sửa tầng"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      {isSysAdmin && (!floor.apartments || floor.apartments.length === 0) && (
-                        <button
-                          onClick={() => handleDeleteFloor(floor.id)}
-                          className="text-slate-400 hover:text-red-500 p-1 rounded transition-colors"
-                          title="Xóa tầng trống"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                {/* Body */}
+                <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-500 flex items-start gap-1.5 line-clamp-2 min-h-[32px]">
+                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span>{b.address || 'Chưa cập nhật địa chỉ'}</span>
+                    </p>
+
+                    <div className="grid grid-cols-3 gap-2 py-2.5 px-3 rounded-xl bg-slate-50 border border-slate-100 text-center">
+                      <div>
+                        <p className="text-[11px] text-slate-400">Số tầng</p>
+                        <p className="text-sm font-bold text-slate-800 flex items-center justify-center gap-1 mt-0.5">
+                          <Layers className="w-3.5 h-3.5 text-sky-500" />
+                          {b.total_floors || 0}
+                        </p>
+                      </div>
+                      <div className="border-x border-slate-200/70">
+                        <p className="text-[11px] text-slate-400">Đang thuê</p>
+                        <p className="text-sm font-bold text-rose-600 mt-0.5">{occ}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] text-slate-400">Còn trống</p>
+                        <p className="text-sm font-bold text-emerald-600 mt-0.5">{avail}</p>
+                      </div>
+                    </div>
+
+                    {/* Occupancy Progress */}
+                    <div>
+                      <div className="flex items-center justify-between text-xs mb-1">
+                        <span className="text-slate-500">Tỷ lệ lấp đầy</span>
+                        <span className="font-semibold text-slate-800">
+                          {rate}% ({occ}/{total} căn)
+                        </span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-primary-500 to-secondary-500 transition-all"
+                          style={{ width: `${Math.min(100, rate)}%` }}
+                        />
+                      </div>
                     </div>
                   </div>
 
-                  {/* Apartment Blocks Grid */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                    {floor.apartments?.map((apt) => {
-                      const statusStyles = {
-                        AVAILABLE: 'border-emerald-300 bg-emerald-50/50 hover:bg-emerald-100/50 text-emerald-950',
-                        OCCUPIED: 'border-indigo-300 bg-indigo-50/50 hover:bg-indigo-100/50 text-indigo-950',
-                        RESERVED: 'border-amber-300 bg-amber-50/50 hover:bg-amber-100/50 text-amber-950',
-                        MAINTENANCE: 'border-rose-300 bg-rose-50/50 hover:bg-rose-100/50 text-rose-950',
-                        INACTIVE: 'border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-600',
-                      };
-
-                      return (
-                        <div
-                          key={apt.id}
-                          onClick={() => setSelectedApartment(apt)}
-                          className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all duration-150 transform hover:-translate-y-0.5 shadow-sm ${
-                            statusStyles[apt.status] || 'border-slate-200 bg-white'
-                          }`}
+                  {/* Card Footer */}
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="soft"
+                        size="xs"
+                        icon={LayoutGrid}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/admin/buildings/${b.id}/floor-plan`);
+                        }}
+                      >
+                        Sơ đồ tầng
+                      </Button>
+                      {canEditRealEstate ? (
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          icon={Edit3}
+                          onClick={(e) => openEdit(b, e)}
                         >
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-bold text-base">{apt.code}</span>
-                            <StatusBadge status={apt.status} size="sm" />
-                          </div>
-                          <div className="text-xs text-slate-500 font-medium">
-                            {apt.area_m2} m² · {apt.type || '1PN'}
-                          </div>
-                          <div className="mt-2 text-xs font-semibold">
-                            <Money amount={apt.base_rent} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Slide-over Apartment Detail Panel */}
-      {selectedApartment && (
-        <div className="fixed inset-0 z-50 overflow-hidden">
-          <div
-            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
-            onClick={() => setSelectedApartment(null)}
-          />
-          <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
-            <div className="w-screen max-w-md bg-white shadow-2xl p-6 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900">
-                      Căn hộ {selectedApartment.code}
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">{selectedBuilding?.name}</p>
-                  </div>
-                  <button
-                    onClick={() => setSelectedApartment(null)}
-                    className="p-1 rounded-lg text-slate-400 hover:text-slate-600"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-
-                <div className="mt-6 space-y-4 text-sm">
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Trạng thái</span>
-                    <StatusBadge status={selectedApartment.status} />
-                  </div>
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Giá thuê cơ bản</span>
-                    <Money amount={selectedApartment.base_rent} className="font-semibold text-slate-900" />
-                  </div>
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Diện tích</span>
-                    <span className="font-medium">{selectedApartment.area_m2} m²</span>
-                  </div>
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Loại phòng</span>
-                    <span className="font-medium">{selectedApartment.type || '1PN'}</span>
-                  </div>
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Khu / Block</span>
-                    <span className="font-medium">
-                      {zones.find((z) => z.id === selectedApartment.zone_id)
-                        ? `${zones.find((z) => z.id === selectedApartment.zone_id).code}`
-                        : '—'}
+                          Sửa
+                        </Button>
+                      ) : null}
+                    </div>
+                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-primary-600 group-hover:translate-x-0.5 transition-transform">
+                      Chi tiết
+                      <ArrowRight className="w-3.5 h-3.5" />
                     </span>
                   </div>
-                  <div className="flex justify-between py-2 border-b border-slate-50">
-                    <span className="text-slate-500">Số phòng ngủ</span>
-                    <span className="font-medium">{selectedApartment.bedrooms || 1} phòng</span>
-                  </div>
-
-                  <div className="pt-2">
-                    <span className="text-slate-500 block mb-2 font-medium">Tiện ích đi kèm</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {Object.entries(selectedApartment.amenities || {})
-                        .filter(([, v]) => v)
-                        .map(([key]) => (
-                          <span key={key} className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium">
-                            {AMENITY_LABELS[key] || key}
-                          </span>
-                        ))}
-                      {Object.values(selectedApartment.amenities || {}).filter(Boolean).length === 0 && (
-                        <span className="text-xs text-slate-400 italic">Không có tiện ích nào được ghi nhận.</span>
-                      )}
-                    </div>
-                  </div>
                 </div>
               </div>
-
-              <div className="pt-6 border-t border-slate-100 flex flex-col gap-2.5">
-                {selectedApartment.status === 'AVAILABLE' && isManager && (
-                  <Button
-                    variant="primary"
-                    className="w-full bg-amber-500 hover:bg-amber-600 text-white flex items-center justify-center gap-1.5"
-                    onClick={() => setIsReservationModalOpen(true)}
-                  >
-                    <BookmarkCheck className="w-4 h-4" />
-                    <span>Đặt cọc giữ chỗ (NV-06)</span>
-                  </Button>
-                )}
-
-                {selectedApartment.status === 'RESERVED' && (
-                  <div className="space-y-2 w-full">
-                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
-                      <p className="font-semibold flex items-center gap-1">
-                        <BookmarkCheck className="w-4 h-4 text-amber-600" />
-                        Căn hộ đang được giữ chỗ
-                      </p>
-                      <p className="text-[11px] mt-0.5">Khách đã đặt cọc giữ chỗ. Xử lý khi khách ký HĐ hoặc hủy:</p>
-                    </div>
-                    {isManager && (
-                      <>
-                        <Button
-                          variant="primary"
-                          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-1.5 shadow-sm"
-                          onClick={() => handleConvertReservationToContract(selectedApartment)}
-                        >
-                          <FileText className="w-4 h-4" />
-                          <span>Ký hợp đồng từ giữ chỗ này (NV-06)</span>
-                        </Button>
-                        <div className="flex gap-2">
-                          <Button
-                            variant="outline"
-                            className="flex-1 text-xs border-rose-200 text-rose-600 hover:bg-rose-50"
-                            onClick={() => handleForfeitReservation(selectedApartment.id)}
-                          >
-                            Hủy mất cọc
-                          </Button>
-                          <Button
-                            variant="outline"
-                            className="flex-1 text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
-                            onClick={() => handleRefundReservation(selectedApartment.id)}
-                          >
-                            Hoàn tiền cọc
-                          </Button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {selectedApartment.status === 'MAINTENANCE' && (
-                  <div className="space-y-2 w-full">
-                    <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
-                      <p className="font-semibold">Căn hộ đang bảo trì</p>
-                      <p className="text-[11px] mt-0.5">Sau chấm dứt hợp đồng, cần bàn giao & nghiệm thu trước khi kinh doanh lại.</p>
-                    </div>
-                    {canManageUnits && (
-                      <>
-                        <Button
-                          variant="primary"
-                          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5"
-                          onClick={handleHandover}
-                        >
-                          <span>Xác nhận bàn giao & nghiệm thu phòng</span>
-                        </Button>
-                        <Button
-                          variant="outline"
-                          className="w-full text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
-                          onClick={() => handleSetApartmentStatus('INACTIVE', 'Chuyển căn hộ sang Không kinh doanh (INACTIVE)?')}
-                        >
-                          Chuyển sang Không kinh doanh
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {selectedApartment.status === 'INACTIVE' && canManageUnits && (
-                  <Button
-                    variant="primary"
-                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
-                    onClick={() => handleSetApartmentStatus('AVAILABLE', 'Kinh doanh lại căn hộ này (AVAILABLE)?')}
-                  >
-                    <span>Kinh doanh lại</span>
-                  </Button>
-                )}
-
-                <Button
-                  variant="secondary"
-                  className="w-full text-slate-600"
-                  onClick={() => setSelectedApartment(null)}
-                >
-                  Đóng panel
-                </Button>
-              </div>
-            </div>
-          </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Drawer / Modal Tạo Tòa Nhà Mới (NV-03) */}
-      {isBuildingModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-slate-900">
-                  {editingBuilding ? `Sửa Tòa nhà (NV-03)` : 'Thêm Tòa nhà mới (NV-03)'}
-                </h3>
-                <p className="text-xs text-slate-500">Module: M03{editingBuilding ? ` · Code ${editingBuilding.code} (không đổi được)` : ''}</p>
-              </div>
-              <button onClick={() => setIsBuildingModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateBuilding} className="space-y-4">
-              {buildingFormError && (
-                <div className="p-3 bg-red-50 border border-red-200 text-xs text-red-700 rounded-xl flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>{buildingFormError}</span>
-                </div>
-              )}
-
-              <FormField
+      {/* Create / Edit Building Modal */}
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editing ? `Cập nhật tòa nhà ${editing.code}` : 'Khởi tạo tòa nhà mới'}
+        subtitle="Thiết lập thông tin định danh, chủ đầu tư sở hữu và tài khoản thụ hưởng"
+        size="lg"
+      >
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            <div className="sm:col-span-2">
+              <Input
                 label="Tên tòa nhà"
                 required
-                hint="Ví dụ: Tòa Sunrise A, Thảo Điền Tower"
-              >
-                <Input
-                  placeholder="VD: Tòa Sunrise A"
-                  value={newBuilding.name}
-                  onChange={(e) => setNewBuilding({ ...newBuilding, name: e.target.value })}
-                  autoFocus
-                />
-              </FormField>
-
-              <FormField
-                label="Mã tòa (Code)"
-                required={!editingBuilding}
-                hint={editingBuilding ? 'Mã tòa không được phép sửa sau khi tạo.' : (codeMessage || 'Chỉ chứa chữ hoa (A-Z), số (0-9) và dấu gạch ngang (-). VD: TN-A')}
-              >
-                <Input
-                  placeholder="VD: TN-A"
-                  value={newBuilding.code}
-                  onChange={(e) => {
-                    if (editingBuilding) return;
-                    setNewBuilding({ ...newBuilding, code: e.target.value.toUpperCase() });
-                    setCodeCheckStatus(null);
-                  }}
-                  onBlur={editingBuilding ? undefined : handleCodeBlur}
-                  disabled={!!editingBuilding}
-                  className="font-mono uppercase font-bold disabled:bg-slate-100 disabled:text-slate-500"
-                />
-              </FormField>
-
-              {isSysAdmin && (
-                <FormField label="Chủ sở hữu (tuỳ chọn)" hint="Danh sách owner thuộc tổ chức">
-                  <select
-                    value={newBuilding.owner_id || ''}
-                    onChange={(e) => setNewBuilding({ ...newBuilding, owner_id: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                  >
-                    <option value="">— Không gán —</option>
-                    {owners.map((o) => (
-                      <option key={o.id} value={o.id}>{o.full_name}</option>
-                    ))}
-                  </select>
-                </FormField>
-              )}
-
-              <FormField label="Địa chỉ">
-                <Input
-                  placeholder="123 Nguyễn Văn A, P.1, Q.1, TP.HCM"
-                  value={newBuilding.address}
-                  onChange={(e) => setNewBuilding({ ...newBuilding, address: e.target.value })}
-                />
-              </FormField>
-
-              {/* Thông tin tài khoản nhận tiền (Tùy chọn) */}
-              <div className="pt-2 border-t border-slate-100">
-                <p className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
-                  Tài khoản nhận tiền (Tùy chọn)
+                placeholder="VD: Vinhomes Ocean Park - Tòa A"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+            </div>
+            <div>
+              <Input
+                label="Mã tòa nhà"
+                required
+                disabled={Boolean(editing)}
+                placeholder="VD: VOP-A"
+                value={form.code}
+                onBlur={handleCodeBlur}
+                onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })}
+              />
+              {codeCheck && !editing ? (
+                <p
+                  className={`text-[11px] mt-1 flex items-center gap-1 ${
+                    codeCheck.available ? 'text-emerald-600' : 'text-rose-600'
+                  }`}
+                >
+                  {codeCheck.available ? (
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <XCircle className="w-3.5 h-3.5" />
+                  )}
+                  {codeCheck.message}
                 </p>
-                <div className="grid grid-cols-2 gap-3">
-                  <FormField label="Ngân hàng">
-                    <Input
-                      placeholder="Vietcombank"
-                      value={newBuilding.bank}
-                      onChange={(e) => setNewBuilding({ ...newBuilding, bank: e.target.value })}
-                    />
-                  </FormField>
-                  <FormField label="Số tài khoản">
-                    <Input
-                      placeholder="0123456789"
-                      value={newBuilding.account_no}
-                      onChange={(e) => setNewBuilding({ ...newBuilding, account_no: e.target.value })}
-                    />
-                  </FormField>
-                </div>
-                <div className="mt-3">
-                  <FormField label="Tên chủ tài khoản">
-                    <Input
-                      placeholder="NGUYEN VAN A"
-                      value={newBuilding.account_name}
-                      onChange={(e) => setNewBuilding({ ...newBuilding, account_name: e.target.value.toUpperCase() })}
-                    />
-                  </FormField>
-                </div>
-              </div>
-
-              <FormField label="Ghi chú điều khoản thuê lại">
-                <Input
-                  placeholder="Hợp đồng thuê 5 năm, kỳ thanh toán quý..."
-                  value={newBuilding.lease_notes}
-                  onChange={(e) => setNewBuilding({ ...newBuilding, lease_notes: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => { setIsBuildingModalOpen(false); setEditingBuilding(null); }}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  {editingBuilding ? 'Lưu thay đổi' : 'Tạo tòa nhà'}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Thêm Khu/Block (B1, FR-007) */}
-      {isZoneModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">
-                Thêm khu vào {selectedBuilding?.name}
-              </h3>
-              <button onClick={() => setIsZoneModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
+              ) : null}
             </div>
-
-            <form onSubmit={handleCreateZone} className="space-y-4">
-              <FormField label="Mã khu" required hint="Ví dụ: A, B, TOWER-1 (duy nhất trong tòa)">
-                <Input
-                  placeholder="A"
-                  value={newZone.code}
-                  onChange={(e) => setNewZone({ ...newZone, code: e.target.value.toUpperCase() })}
-                  autoFocus
-                />
-              </FormField>
-
-              <FormField label="Tên hiển thị" hint="Ví dụ: Khu A —Tower chính">
-                <Input
-                  placeholder="Khu A"
-                  value={newZone.name}
-                  onChange={(e) => setNewZone({ ...newZone, name: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsZoneModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  Thêm khu
-                </Button>
-              </div>
-            </form>
           </div>
-        </div>
-      )}
 
-      {/* Modal Thêm Tầng (NV-04) */}
-      {isFloorModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">
-                Thêm tầng vào {selectedBuilding?.name}
-              </h3>
-              <button onClick={() => setIsFloorModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
+          <Input
+            label="Địa chỉ chi tiết"
+            required
+            placeholder="Số nhà, đường, quận/huyện, tỉnh/thành phố"
+            value={form.address}
+            onChange={(e) => setForm({ ...form, address: e.target.value })}
+          />
+
+          {canManageBuildings && owners.length > 0 ? (
+            <Select
+              label="Chủ đầu tư sở hữu (OWNER)"
+              placeholder="-- Chọn chủ đầu tư --"
+              value={form.owner_id}
+              onChange={(e) => setForm({ ...form, owner_id: e.target.value })}
+              options={owners.map((o) => ({
+                value: o.id,
+                label: `${o.full_name || o.name}${o.email ? ` (${o.email})` : ''}`,
+              }))}
+            />
+          ) : null}
+
+          <div className="pt-2 border-t border-slate-100">
+            <p className="text-xs font-semibold text-slate-700 mb-2.5">
+              Tài khoản ngân hàng nhận tiền thuê / phí dịch vụ
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Input
+                label="Ngân hàng"
+                placeholder="Vietcombank"
+                value={form.bank_name}
+                onChange={(e) => setForm({ ...form, bank_name: e.target.value })}
+              />
+              <Input
+                label="Số tài khoản"
+                placeholder="001100..."
+                value={form.account_number}
+                onChange={(e) => setForm({ ...form, account_number: e.target.value })}
+              />
+              <Input
+                label="Chủ tài khoản"
+                placeholder="CONG TY..."
+                value={form.account_holder}
+                onChange={(e) => setForm({ ...form, account_holder: e.target.value })}
+              />
             </div>
-
-            <form onSubmit={handleCreateFloor} className="space-y-4">
-              <FormField label="Số tầng (Level)" required hint="< 0: Hầm (B1, B2); 0: Trệt; > 0: Tầng 1, 2...">
-                <Input
-                  type="number"
-                  value={newFloor.level}
-                  onChange={(e) => setNewFloor({ ...newFloor, level: parseInt(e.target.value, 10) || 1 })}
-                  autoFocus
-                />
-              </FormField>
-
-              <FormField label="Tên hiển thị tầng" hint="Ví dụ: Tầng 1 (Trệt), Tầng 2, Tầng Thượng">
-                <Input
-                  placeholder="Tầng 1"
-                  value={newFloor.name}
-                  onChange={(e) => setNewFloor({ ...newFloor, name: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsFloorModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  Thêm tầng
-                </Button>
-              </div>
-            </form>
           </div>
-        </div>
-      )}
 
-      {/* Modal Tạo Căn Hộ */}
-      {isApartmentModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">
-                Thêm Căn hộ mới vào {selectedBuilding?.name}
-              </h3>
-              <button onClick={() => setIsApartmentModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateApartment} className="space-y-4">
-              <FormField label="Chọn tầng" required>
-                <select
-                  value={newApartment.floor_id}
-                  onChange={(e) => setNewApartment({ ...newApartment, floor_id: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                >
-                  {floorMap.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name || `Tầng ${f.level}`}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-
-              <FormField label="Khu / Block (tuỳ chọn)" hint="Phân khu lớn trong tòa, ví dụ Block A">
-                <select
-                  value={newApartment.zone_id || ''}
-                  onChange={(e) => setNewApartment({ ...newApartment, zone_id: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                >
-                  <option value="">— Không phân khu —</option>
-                  {zones.map((z) => (
-                    <option key={z.id} value={z.id}>
-                      {z.code}{z.name ? ` — ${z.name}` : ''}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-
-              <FormField label="Mã căn hộ" required error={aptFormError} hint="Ví dụ: A101, B202">
-                <Input
-                  placeholder="A101"
-                  value={newApartment.code}
-                  onChange={(e) => setNewApartment({ ...newApartment, code: e.target.value.toUpperCase() })}
-                />
-              </FormField>
-
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Diện tích (m²)">
-                  <Input
-                    type="number"
-                    value={newApartment.area_m2}
-                    onChange={(e) => setNewApartment({ ...newApartment, area_m2: e.target.value })}
-                  />
-                </FormField>
-
-                <FormField label="Loại phòng">
-                  <select
-                    value={newApartment.type}
-                    onChange={(e) => setNewApartment({ ...newApartment, type: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                  >
-                    <option value="Studio">Studio</option>
-                    <option value="1PN">1 Phòng ngủ</option>
-                    <option value="2PN">2 Phòng ngủ</option>
-                    <option value="3PN">3 Phòng ngủ</option>
-                    <option value="Penthouse">Penthouse</option>
-                  </select>
-                </FormField>
-              </div>
-
-              <FormField label="Giá thuê cơ bản (VND/tháng)" required>
-                <Input
-                  type="number"
-                  value={newApartment.base_rent}
-                  onChange={(e) => setNewApartment({ ...newApartment, base_rent: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsApartmentModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  Thêm căn hộ
-                </Button>
-              </div>
-            </form>
+          <div className="flex justify-end gap-2.5 pt-3">
+            <Button variant="outline" onClick={() => setModalOpen(false)}>
+              Hủy bỏ
+            </Button>
+            <Button type="submit" loading={saving}>
+              {editing ? 'Lưu cập nhật' : 'Tạo tòa nhà'}
+            </Button>
           </div>
-        </div>
-      )}
-
-      {/* Modal Đặt Cọc Giữ Chỗ (NV-06) */}
-      {isReservationModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-slate-900">
-                  Đặt cọc giữ chỗ căn {selectedApartment?.code} (NV-06)
-                </h3>
-                <p className="text-xs text-slate-500">{selectedBuilding?.name} · Giá niêm yết: <Money amount={selectedApartment?.base_rent} /></p>
-              </div>
-              <button onClick={() => setIsReservationModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateReservation} className="space-y-4">
-              {reservationError && (
-                <div className="p-3 bg-red-50 border border-red-200 text-xs text-red-700 rounded-xl flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                  <span>{reservationError}</span>
-                </div>
-              )}
-
-              <FormField label="Họ tên khách tiềm năng" required>
-                <Input
-                  placeholder="VD: Nguyễn Văn A"
-                  value={reservationData.prospect_name}
-                  onChange={(e) => setReservationData({ ...reservationData, prospect_name: e.target.value })}
-                  autoFocus
-                />
-              </FormField>
-
-              <FormField label="Số điện thoại" required>
-                <Input
-                  placeholder="VD: 0901234567"
-                  value={reservationData.phone}
-                  onChange={(e) => setReservationData({ ...reservationData, phone: e.target.value })}
-                />
-              </FormField>
-
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Tiền giữ chỗ (VND)" required>
-                  <Input
-                    type="number"
-                    value={reservationData.hold_amount}
-                    onChange={(e) => setReservationData({ ...reservationData, hold_amount: parseInt(e.target.value, 10) || 0 })}
-                  />
-                </FormField>
-                <FormField label="Giữ đến ngày" required>
-                  <Input
-                    type="date"
-                    value={reservationData.hold_until}
-                    onChange={(e) => setReservationData({ ...reservationData, hold_until: e.target.value })}
-                  />
-                </FormField>
-              </div>
-
-              <FormField label="Ghi chú">
-                <Input
-                  placeholder="Khách hẹn thứ 7 tuần sau qua ký hợp đồng..."
-                  value={reservationData.note}
-                  onChange={(e) => setReservationData({ ...reservationData, note: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsReservationModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary" className="bg-amber-500 hover:bg-amber-600 text-white">
-                  Xác nhận giữ chỗ
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Confirm Deactivate / Reactivate Modal */}
-      <ConfirmDialog
-        isOpen={confirmStatusModal.isOpen}
-        onClose={() => setConfirmStatusModal({ isOpen: false, building: null, targetStatus: null })}
-        onConfirm={handleToggleStatus}
-        title={confirmStatusModal.targetStatus === 'INACTIVE' ? 'Tạm dừng hoạt động tòa nhà' : 'Kích hoạt lại tòa nhà'}
-        description={
-          confirmStatusModal.targetStatus === 'INACTIVE'
-            ? `Bạn có chắc muốn tạm dừng hoạt động tòa nhà "${confirmStatusModal.building?.name}"? Hệ thống sẽ kiểm tra và từ chối nếu còn hợp đồng thuê đang có hiệu lực (Rule State Machine NV-03).`
-            : `Kích hoạt lại hoạt động cho tòa nhà "${confirmStatusModal.building?.name}".`
-        }
-        confirmText={confirmStatusModal.targetStatus === 'INACTIVE' ? 'Xác nhận tạm dừng' : 'Kích hoạt lại'}
-        variant={confirmStatusModal.targetStatus === 'INACTIVE' ? 'warning' : 'primary'}
-      />
+        </form>
+      </Modal>
     </div>
   );
 }
+
+export default BuildingsPage;
+
