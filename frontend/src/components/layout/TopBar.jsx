@@ -1,389 +1,130 @@
-import React, { useEffect, useState, useRef } from 'react';
-import {
-  Menu,
-  Building2,
-  Bell,
-  CheckCircle2,
-  ChevronDown,
-  CheckCheck,
-  FileText,
-  Clock,
-  ShieldCheck,
-  AlertCircle,
-  ExternalLink,
-  X,
-} from 'lucide-react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../../services/api';
+import { Menu, Building2, LogOut, UserCircle2 } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
-import ProfileModal from '../common/ProfileModal';
+import { useNotificationStore } from '../../stores/notificationStore';
+import { authService } from '../../services/auth.service';
+import { buildingsService } from '../../services/buildings.service';
+import { NotificationBell } from '../common/NotificationBell';
+import { ProfileModal } from '../common/ProfileModal';
+import { Badge } from '../ui/Badge';
+import { ROLE_LABELS, ROLE_BADGE_VARIANTS } from '../../constants/roles';
 
-export default function TopBar({ onMenuClick }) {
+export function TopBar({ onOpenMobileMenu }) {
   const navigate = useNavigate();
-  const { user } = useAuthStore();
-  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const user = useAuthStore((s) => s.user);
+  const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
+  const setSelectedBuildingId = useAuthStore((s) => s.setSelectedBuildingId);
+  const clearSession = useAuthStore((s) => s.clearSession);
+  const getCurrentRole = useAuthStore((s) => s.getCurrentRole);
+  const resetNotifs = useNotificationStore((s) => s.reset);
 
-  // Building Switcher State
   const [buildings, setBuildings] = useState([]);
-  const [selectedBuildingId, setSelectedBuildingId] = useState(() => {
-    return localStorage.getItem('resihub_selected_building_id') || 'ALL';
-  });
+  const [profileOpen, setProfileOpen] = useState(false);
 
-  // Health Status
-  const [systemHealth, setSystemHealth] = useState('checking');
+  const primaryRole = getCurrentRole();
 
-  // Notifications State
-  const [notifications, setNotifications] = useState([]);
-  const [unreadCount, setUnreadCount] = useState(0);
-  const [isOpenNotifications, setIsOpenNotifications] = useState(false);
-  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'unread'
-  const [isLoadingNotifications, setIsLoadingNotifications] = useState(false);
-
-  const notifDropdownRef = useRef(null);
-
-  // Fetch health, buildings and notifications
   useEffect(() => {
-    // 1. Health check
-    api.get('/api/health')
-      .then(() => setSystemHealth('healthy'))
-      .catch(() => setSystemHealth('error'));
-
-    // 2. Fetch buildings for switcher (PRD 8.2)
-    api.get('/api/v1/buildings')
+    buildingsService
+      .list()
       .then((res) => {
-        const list = res.data?.data || [];
+        const list = res.data || [];
         setBuildings(list);
-        const saved = localStorage.getItem('resihub_selected_building_id');
-        if (saved && saved !== 'ALL' && !list.some((b) => b.id === saved)) {
-          setSelectedBuildingId('ALL');
-          localStorage.setItem('resihub_selected_building_id', 'ALL');
-          window.dispatchEvent(new CustomEvent('buildingChanged', { detail: 'ALL' }));
+        if (list.length === 1 && !selectedBuildingId) {
+          setSelectedBuildingId(list[0].id);
         }
       })
       .catch(() => {});
-
-    // 3. Fetch notifications initially
-    fetchNotifications();
-
-    // 4. Set interval polling for notifications every 30 seconds
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchNotifications = async () => {
+  const handleLogout = async () => {
     try {
-      const res = await api.get('/api/v1/notifications');
-      setNotifications(res.data?.data || []);
-      setUnreadCount(res.data?.unread_count || 0);
-    } catch (err) {
-      console.warn('Unable to load notifications:', err.message);
+      await authService.logout();
+    } catch {
+      // ignore
+    } finally {
+      resetNotifs();
+      clearSession();
+      navigate('/login');
     }
   };
-
-  // Close dropdown on click outside
-  useEffect(() => {
-    function handleClickOutside(event) {
-      if (notifDropdownRef.current && !notifDropdownRef.current.contains(event.target)) {
-        setIsOpenNotifications(false);
-      }
-    }
-    if (isOpenNotifications) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [isOpenNotifications]);
-
-  // Handle building switcher change
-  const handleBuildingChange = (e) => {
-    const val = e.target.value;
-    setSelectedBuildingId(val);
-    localStorage.setItem('resihub_selected_building_id', val);
-    // Dispatch a custom window event so child pages like Dashboard can react immediately
-    window.dispatchEvent(new CustomEvent('buildingChanged', { detail: val }));
-  };
-
-  // Mark 1 notification as read
-  const handleMarkAsRead = async (notif) => {
-    if (!notif.read_at) {
-      try {
-        await api.patch(`/api/v1/notifications/${notif.id}/read`);
-        setNotifications((prev) =>
-          prev.map((n) => (n.id === notif.id ? { ...n, read_at: new Date().toISOString() } : n))
-        );
-        setUnreadCount((prev) => Math.max(0, prev - 1));
-      } catch (err) {
-        console.error('Failed to mark read:', err);
-      }
-    }
-
-    setIsOpenNotifications(false);
-    if (notif.payload?.link) {
-      navigate(notif.payload.link);
-    }
-  };
-
-  // Mark all as read
-  const handleMarkAllRead = async () => {
-    try {
-      await api.post('/api/v1/notifications/read-all');
-      setNotifications((prev) =>
-        prev.map((n) => ({ ...n, read_at: n.read_at || new Date().toISOString() }))
-      );
-      setUnreadCount(0);
-    } catch (err) {
-      console.error('Failed to mark all read:', err);
-    }
-  };
-
-  // Helper for notification icon
-  const getNotificationIcon = (type) => {
-    switch (type) {
-      case 'CONTRACT_EXPIRING':
-        return {
-          icon: FileText,
-          bg: 'bg-indigo-50 text-indigo-600 border-indigo-100',
-        };
-      case 'RESERVATION_NEW':
-        return {
-          icon: Clock,
-          bg: 'bg-amber-50 text-amber-600 border-amber-100',
-        };
-      case 'DEPOSIT_SECURE':
-        return {
-          icon: ShieldCheck,
-          bg: 'bg-emerald-50 text-emerald-600 border-emerald-100',
-        };
-      default:
-        return {
-          icon: Bell,
-          bg: 'bg-slate-50 text-slate-600 border-slate-200',
-        };
-    }
-  };
-
-  // Format relative time helper
-  const formatTimeAgo = (dateStr) => {
-    if (!dateStr) return '';
-    const diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
-    if (diff < 60) return 'Vừa xong';
-    if (diff < 3600) return `${Math.floor(diff / 60)} phút trước`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)} giờ trước`;
-    return `${Math.floor(diff / 86400)} ngày trước`;
-  };
-
-  const displayedNotifications = notifications.filter((n) => {
-    if (activeTab === 'unread') return !n.read_at;
-    return true;
-  });
 
   return (
-    <header className="h-16 bg-white border-b border-surface-border px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 shadow-sm">
-      <div className="flex items-center gap-3">
-        {/* Mobile menu toggle */}
-        <button
-          onClick={onMenuClick}
-          className="p-2 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 lg:hidden"
-        >
-          <Menu className="w-5 h-5" />
-        </button>
-
-        {/* Building Switcher (PRD 8.2) */}
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-primary-50 text-primary-600 flex items-center justify-center">
-            <Building2 className="w-4 h-4" />
-          </div>
-          <div className="relative">
-            <select
-              value={selectedBuildingId}
-              onChange={handleBuildingChange}
-              className="appearance-none bg-slate-50 border border-slate-200 text-slate-800 text-xs sm:text-sm font-semibold rounded-lg pl-3 pr-8 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary-500 cursor-pointer max-w-[200px] sm:max-w-[320px] truncate"
-            >
-              <option value="ALL">🏢 Tất cả tòa nhà ({buildings.length} tòa)</option>
-              {buildings.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name} ({b.code})
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-          </div>
-        </div>
-      </div>
-
-      {/* Right Actions */}
-      <div className="flex items-center gap-3">
-        {/* System API Status */}
-        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-700 border-emerald-200">
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-          <span>API 200 OK</span>
-        </div>
-
-        {/* Notification Bell Dropdown Container */}
-        <div className="relative" ref={notifDropdownRef}>
+    <>
+      <header className="h-16 bg-white/95 backdrop-blur border-b border-slate-200/80 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-30 no-print">
+        <div className="flex items-center gap-3 min-w-0">
           <button
-            onClick={() => setIsOpenNotifications(!isOpenNotifications)}
-            className={`relative p-2 rounded-lg transition-colors ${
-              isOpenNotifications
-                ? 'bg-slate-100 text-slate-900 ring-2 ring-indigo-500/20'
-                : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
-            }`}
-            title="Thông báo hệ thống"
+            type="button"
+            onClick={onOpenMobileMenu}
+            className="lg:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100"
           >
-            <Bell className="w-5 h-5" />
-            {unreadCount > 0 && (
-              <span className="absolute -top-1 -right-1 px-1.5 py-0.5 min-w-[18px] text-[10px] font-bold rounded-full bg-red-500 text-white flex items-center justify-center animate-pulse shadow-sm">
-                {unreadCount > 9 ? '9+' : unreadCount}
-              </span>
-            )}
+            <Menu className="w-5 h-5" />
           </button>
 
-          {/* Popover Dropdown */}
-          {isOpenNotifications && (
-            <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-200/90 z-50 overflow-hidden animate-in fade-in duration-150">
-              {/* Header */}
-              <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
-                <div className="flex items-center gap-2">
-                  <h3 className="font-bold text-sm text-slate-800">Thông báo</h3>
-                  {unreadCount > 0 && (
-                    <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-100 text-indigo-700">
-                      {unreadCount} mới
-                    </span>
-                  )}
-                </div>
-
-                {unreadCount > 0 && (
-                  <button
-                    onClick={handleMarkAllRead}
-                    className="text-[11px] font-semibold text-primary-600 hover:text-primary-800 flex items-center gap-1 transition-colors"
-                  >
-                    <CheckCheck className="w-3.5 h-3.5" />
-                    Đã đọc tất cả
-                  </button>
-                )}
-              </div>
-
-              {/* Tabs */}
-              <div className="flex items-center px-4 pt-2.5 border-b border-slate-100 gap-3 text-xs">
-                <button
-                  onClick={() => setActiveTab('all')}
-                  className={`pb-2 font-semibold border-b-2 transition-colors ${
-                    activeTab === 'all'
-                      ? 'border-indigo-600 text-indigo-600'
-                      : 'border-transparent text-slate-400 hover:text-slate-700'
-                  }`}
-                >
-                  Tất cả ({notifications.length})
-                </button>
-                <button
-                  onClick={() => setActiveTab('unread')}
-                  className={`pb-2 font-semibold border-b-2 transition-colors ${
-                    activeTab === 'unread'
-                      ? 'border-indigo-600 text-indigo-600'
-                      : 'border-transparent text-slate-400 hover:text-slate-700'
-                  }`}
-                >
-                  Chưa đọc ({unreadCount})
-                </button>
-              </div>
-
-              {/* Notification List */}
-              <div className="max-h-[380px] overflow-y-auto divide-y divide-slate-100">
-                {displayedNotifications.length === 0 ? (
-                  <div className="py-12 px-4 text-center text-slate-400 flex flex-col items-center justify-center">
-                    <Bell className="w-8 h-8 stroke-1 text-slate-300 mb-2" />
-                    <p className="text-xs font-medium">Không có thông báo nào</p>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      {activeTab === 'unread' ? 'Bạn đã đọc hết mọi thông báo' : 'Hệ thống chưa có thông báo mới'}
-                    </p>
-                  </div>
-                ) : (
-                  displayedNotifications.map((n) => {
-                    const iconConfig = getNotificationIcon(n.type);
-                    const IconComponent = iconConfig.icon;
-                    const isUnread = !n.read_at;
-
-                    return (
-                      <div
-                        key={n.id}
-                        onClick={() => handleMarkAsRead(n)}
-                        className={`p-3.5 flex items-start gap-3 transition-colors cursor-pointer hover:bg-slate-50/80 ${
-                          isUnread ? 'bg-indigo-50/20' : 'bg-white'
-                        }`}
-                      >
-                        <div
-                          className={`w-9 h-9 rounded-xl flex items-center justify-center border shrink-0 mt-0.5 ${iconConfig.bg}`}
-                        >
-                          <IconComponent className="w-4 h-4" />
-                        </div>
-
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <h4
-                              className={`text-xs truncate ${
-                                isUnread ? 'font-bold text-slate-900' : 'font-medium text-slate-700'
-                              }`}
-                            >
-                              {n.title}
-                            </h4>
-                            <span className="text-[10px] text-slate-400 whitespace-nowrap shrink-0">
-                              {formatTimeAgo(n.created_at)}
-                            </span>
-                          </div>
-
-                          <p className="text-[11px] text-slate-500 line-clamp-2 mt-0.5 leading-relaxed">
-                            {n.content}
-                          </p>
-
-                          {n.payload?.link && (
-                            <div className="mt-1.5 flex items-center gap-1 text-[10px] text-indigo-600 font-semibold">
-                              <span>Xem chi tiết</span>
-                              <ExternalLink className="w-3 h-3" />
-                            </div>
-                          )}
-                        </div>
-
-                        {isUnread && (
-                          <span className="w-2 h-2 rounded-full bg-indigo-600 shrink-0 mt-1.5" />
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="p-2.5 bg-slate-50 border-t border-slate-100 text-center">
-                <button
-                  onClick={() => setIsOpenNotifications(false)}
-                  className="text-xs text-slate-500 hover:text-slate-800 font-medium py-1 px-3 rounded-lg hover:bg-slate-200/50 transition-colors"
-                >
-                  Đóng
-                </button>
-              </div>
+          {/* Building Filter */}
+          {buildings.length > 0 ? (
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 max-w-xs sm:max-w-sm">
+              <Building2 className="w-4 h-4 text-primary-500 shrink-0" />
+              <select
+                value={selectedBuildingId}
+                onChange={(e) => setSelectedBuildingId(e.target.value)}
+                disabled={buildings.length === 1}
+                className="bg-transparent text-xs sm:text-sm font-medium text-slate-700 focus:outline-none truncate pr-2 disabled:opacity-90"
+              >
+                {buildings.length > 1 ? (
+                  <option value="">Tất cả tòa nhà trong phạm vi ({buildings.length})</option>
+                ) : null}
+                {buildings.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.code} — {b.name}
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
+          ) : null}
         </div>
 
-        {/* User Profile & Password */}
-        <button
-          id="btn-admin-profile"
-          onClick={() => setIsProfileOpen(true)}
-          className="flex items-center gap-2 p-1 pl-2 rounded-xl border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all text-left"
-          title="Xem hồ sơ & đổi mật khẩu"
-        >
-          <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white font-bold flex items-center justify-center text-xs shadow-sm">
-            {user?.full_name ? user.full_name.charAt(0).toUpperCase() : 'U'}
-          </div>
-          <div className="hidden md:block pr-1">
-            <p className="text-xs font-bold text-slate-800 leading-none">{user?.full_name || 'Quản lý'}</p>
-            <p className="text-[10px] text-slate-400 font-mono mt-0.5">{user?.phone || ''}</p>
-          </div>
-        </button>
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <Badge variant={ROLE_BADGE_VARIANTS[primaryRole] || 'sky'} className="hidden md:inline-flex">
+            {ROLE_LABELS[primaryRole] || primaryRole}
+          </Badge>
 
-        <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
-      </div>
-    </header>
+          <NotificationBell onViewAll={() => navigate('/admin/notifications')} />
+
+          <button
+            type="button"
+            onClick={() => setProfileOpen(true)}
+            className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-xl hover:bg-slate-100 transition-colors border border-transparent hover:border-slate-200"
+          >
+            <div className="w-7 h-7 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center font-semibold text-xs">
+              {(user?.full_name || user?.email || 'U').slice(0, 1).toUpperCase()}
+            </div>
+            <div className="hidden sm:block text-left">
+              <p className="text-xs font-semibold text-slate-800 leading-tight max-w-[140px] truncate">
+                {user?.full_name || 'Người dùng'}
+              </p>
+              <p className="text-[11px] text-slate-400 leading-tight max-w-[140px] truncate">
+                {user?.email || user?.phone || ''}
+              </p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Đăng xuất"
+            className="p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
+
+      <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+    </>
   );
 }
+
+export default TopBar;
+

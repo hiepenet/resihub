@@ -1,117 +1,165 @@
-import React, { useState } from 'react';
-import { Outlet, useNavigate } from 'react-router-dom';
-import { Building2, LogOut, PhoneCall, Bell, Shield, User, Home, Sparkles } from 'lucide-react';
-import NotificationBell from '../common/NotificationBell';
-import ProfileModal from '../common/ProfileModal';
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Home,
+  FileText,
+  Receipt,
+  Sparkles,
+  Wrench,
+  Bell,
+  PhoneCall,
+  UserCircle,
+  LogOut,
+  Building2,
+} from 'lucide-react';
+import { RESIDENT_PORTAL_TABS } from '../../constants/navigation';
 import { useAuthStore } from '../../stores/authStore';
+import { useNotificationStore } from '../../stores/notificationStore';
+import { authService } from '../../services/auth.service';
+import { NotificationBell } from '../common/NotificationBell';
 
-export default function ResidentLayout() {
+const TAB_ICONS = {
+  Home,
+  FileText,
+  Receipt,
+  Sparkles,
+  Wrench,
+  Bell,
+  PhoneCall,
+  UserCircle,
+};
+
+export function ResidentLayout({ activeTab, onChangeTab, apartmentBadge, children }) {
   const navigate = useNavigate();
-  const { user, logout } = useAuthStore();
-  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const user = useAuthStore((s) => s.user);
+  const clearSession = useAuthStore((s) => s.clearSession);
+  const unreadCount = useNotificationStore((s) => s.unreadCount);
+  const resetNotifs = useNotificationStore((s) => s.reset);
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
+  const handleLogout = async () => {
+    try {
+      await authService.logout();
+    } catch {
+      // ignore
+    } finally {
+      resetNotifs();
+      clearSession();
+      navigate('/login');
+    }
   };
 
-  const displayName = user?.name || user?.full_name || 'Cư dân';
-  const displayPhone = user?.phone || '';
-
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800">
-      {/* Resident Portal Topbar */}
-      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          {/* Logo & Portal Badge */}
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-100">
-              <Building2 className="w-5 h-5" />
-            </div>
-            <div className="flex flex-col">
-              <div className="flex items-center space-x-2">
-                <span className="text-lg font-bold bg-gradient-to-r from-slate-900 via-indigo-950 to-indigo-700 bg-clip-text text-transparent">
-                  ResiHub
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded-full font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200/60">
-                  Cổng Cư Dân
-                </span>
-              </div>
-              <span className="text-[11px] text-slate-500 hidden sm:inline">
-                Hệ thống Quản lý Dịch vụ Căn hộ
+    <div className="min-h-screen bg-slate-50 flex flex-col pb-16 lg:pb-0">
+      {/* Top Header */}
+      <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 no-print">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-500 to-secondary-600 flex items-center justify-center text-white shadow-sm shrink-0">
+            <Home className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-base font-bold text-slate-900">ResiHub</span>
+              <span className="text-xs font-medium text-primary-600 bg-primary-50 px-2 py-0.5 rounded-full border border-primary-100">
+                Cổng cư dân
               </span>
             </div>
+            {apartmentBadge ? (
+              <p className="text-xs text-slate-500 flex items-center gap-1 truncate mt-0.5">
+                <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="truncate">{apartmentBadge}</span>
+              </p>
+            ) : null}
           </div>
+        </div>
 
-          {/* Right actions: Support hotline, Notifications, Profile & Logout */}
-          <div className="flex items-center space-x-2 sm:space-x-3">
-            {/* Hotline chip */}
-            <a
-              href="tel:0901234567"
-              className="hidden md:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors text-xs font-medium border border-emerald-200/60"
-              title="Tổng đài hỗ trợ cư dân 24/7"
-            >
-              <PhoneCall className="w-3.5 h-3.5" />
-              <span>Hotline BQL: 0901.234.567</span>
-            </a>
-
-            {/* Chuông thông báo cư dân */}
-            <NotificationBell />
-
-            {/* User Info chip */}
-            <div
-              onClick={() => setIsProfileOpen(true)}
-              className="flex items-center space-x-2.5 pl-2 sm:border-l sm:border-slate-200 cursor-pointer hover:opacity-80 transition-opacity"
-              title="Xem hồ sơ & đổi mật khẩu"
-            >
-              <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-sm border border-indigo-200">
-                {displayName.charAt(0).toUpperCase()}
-              </div>
-              <div className="hidden sm:flex flex-col text-left">
-                <span className="text-xs font-semibold text-slate-800 leading-tight">
-                  {displayName}
-                </span>
-                <span className="text-[11px] text-slate-500 font-mono">
-                  {displayPhone || 'Tài khoản Cư dân'}
-                </span>
-              </div>
+        <div className="flex items-center gap-2">
+          <NotificationBell onViewAll={() => onChangeTab?.('notifications')} />
+          <button
+            type="button"
+            onClick={() => onChangeTab?.('profile')}
+            className="hidden sm:flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-slate-100 transition-colors"
+          >
+            <div className="w-7 h-7 rounded-full bg-primary-100 text-primary-700 font-semibold text-xs flex items-center justify-center">
+              {(user?.full_name || 'C').slice(0, 1).toUpperCase()}
             </div>
-
-            {/* Logout button */}
-            <button
-              id="btn-resident-logout"
-              onClick={handleLogout}
-              className="p-2 rounded-lg text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors"
-              title="Đăng xuất"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
-
-            <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
-          </div>
+            <span className="text-xs font-semibold text-slate-700 max-w-[130px] truncate">
+              {user?.full_name || 'Cư dân'}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={handleLogout}
+            title="Đăng xuất"
+            className="p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        <Outlet />
-      </main>
+      {/* Main Content + Desktop Sidebar */}
+      <div className="flex-1 max-w-7xl w-full mx-auto flex gap-6 p-4 sm:p-6">
+        <aside className="hidden lg:block w-60 shrink-0 no-print">
+          <div className="bg-white rounded-2xl border border-slate-200/80 shadow-card p-2.5 sticky top-22 space-y-1">
+            {RESIDENT_PORTAL_TABS.map((t) => {
+              const Icon = TAB_ICONS[t.icon] || Home;
+              const isActive = activeTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => onChangeTab?.(t.id)}
+                  className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                    isActive
+                      ? 'bg-primary-500 text-white shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span>{t.label}</span>
+                  </span>
+                  {t.id === 'notifications' && unreadCount > 0 ? (
+                    <span
+                      className={`text-[11px] font-bold px-1.5 py-0.5 rounded-full ${
+                        isActive ? 'bg-white text-primary-600' : 'bg-rose-500 text-white'
+                      }`}
+                    >
+                      {unreadCount}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        </aside>
 
-      {/* Footer */}
-      <footer className="bg-white border-t border-slate-200 py-6 mt-auto">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
-          <div className="flex items-center space-x-2">
-            <span className="font-semibold text-slate-700">ResiHub Resident Portal v2.0</span>
-            <span>•</span>
-            <span>Dành riêng cho khách thuê và cư dân căn hộ</span>
-          </div>
-          <div className="flex items-center space-x-4">
-            <span>Hỗ trợ kỹ thuật: 1900 6868</span>
-            <span>•</span>
-            <span>Bảo mật & Điều khoản</span>
-          </div>
-        </div>
-      </footer>
+        <main className="flex-1 min-w-0">{children}</main>
+      </div>
+
+      {/* Mobile Bottom Nav */}
+      <nav className="lg:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-30 flex items-center overflow-x-auto px-2 py-1.5 gap-1 no-print">
+        {RESIDENT_PORTAL_TABS.map((t) => {
+          const Icon = TAB_ICONS[t.icon] || Home;
+          const isActive = activeTab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onChangeTab?.(t.id)}
+              className={`flex flex-col items-center justify-center px-3 py-1.5 rounded-xl min-w-[68px] shrink-0 text-[11px] font-medium transition-colors ${
+                isActive ? 'text-primary-600 bg-primary-50' : 'text-slate-500'
+              }`}
+            >
+              <Icon className="w-4 h-4 mb-0.5" />
+              <span className="truncate">{t.shortLabel}</span>
+            </button>
+          );
+        })}
+      </nav>
     </div>
   );
 }
+
+export default ResidentLayout;
+

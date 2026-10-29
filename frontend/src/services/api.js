@@ -1,6 +1,6 @@
 import axios from 'axios';
+import { useAuthStore } from '../stores/authStore';
 
-// Leave baseURL empty so browser requests go to relative /api/... and get forwarded by Vite proxy
 const api = axios.create({
   baseURL: '',
   headers: {
@@ -8,7 +8,6 @@ const api = axios.create({
   },
 });
 
-// Request Interceptor: Attach Access Token
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('accessToken');
@@ -20,40 +19,61 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response Interceptor: Handle 401 and refresh token
+let refreshPromise = null;
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+    const isAuthEndpoint = originalRequest?.url?.includes('/api/v1/auth/login') ||
+      originalRequest?.url?.includes('/api/v1/auth/otp/') ||
+      originalRequest?.url?.includes('/api/v1/auth/refresh');
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    if (error.response?.status === 401 && !originalRequest?._retry && !isAuthEndpoint) {
       originalRequest._retry = true;
       const refreshToken = localStorage.getItem('refreshToken');
 
       if (refreshToken) {
         try {
-          const res = await axios.post('/api/v1/auth/refresh', { refreshToken });
-          const newAccessToken = res.data.accessToken;
+          if (!refreshPromise) {
+            refreshPromise = axios
+              .post('/api/v1/auth/refresh', { refreshToken })
+              .finally(() => {
+                refreshPromise = null;
+              });
+          }
+          const res = await refreshPromise;
+          const { accessToken: newAccessToken, user: refreshedUser } = res.data;
 
           localStorage.setItem('accessToken', newAccessToken);
-          originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+          if (refreshedUser) {
+            useAuthStore.getState().updateUser(refreshedUser);
+          }
 
+          originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
           return api(originalRequest);
-        } catch (refreshErr) {
-          localStorage.removeItem('accessToken');
-          localStorage.removeItem('refreshToken');
-          localStorage.removeItem('user');
-          window.location.href = '/login';
+        } catch {
+          useAuthStore.getState().clearSession();
+          if (window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
         }
       } else {
-        localStorage.removeItem('accessToken');
-        localStorage.removeItem('refreshToken');
-        localStorage.removeItem('user');
+        useAuthStore.getState().clearSession();
       }
     }
 
     return Promise.reject(error);
   }
 );
+
+export async function fetchAuthBlobUrl(url) {
+  if (!url) return null;
+  if (url.startsWith('data:') || url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  const res = await api.get(url, { responseType: 'blob' });
+  return URL.createObjectURL(res.data);
+}
 
 export default api;

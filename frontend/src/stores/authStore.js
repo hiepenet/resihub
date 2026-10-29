@@ -1,88 +1,96 @@
 import { create } from 'zustand';
-import api from '../services/api';
+import {
+  extractRoleCodes,
+  getPrimaryRole,
+  hasAnyRole,
+  getAssignedBuildingIds,
+  isAdminPortalUser,
+} from '../utils/permissions';
+import { ROLE_LABELS, ROLES } from '../constants/roles';
 
-// Xóa bỏ hoàn toàn activeRole lưu trữ cục bộ cũ nếu có để đảm bảo vai trò được lấy chuẩn 100% từ CSDL
-try {
-  localStorage.removeItem('activeRole');
-} catch (e) {
-  // ignore
+function safeParseUser() {
+  try {
+    const raw = localStorage.getItem('user');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 export const useAuthStore = create((set, get) => ({
-  user: JSON.parse(localStorage.getItem('user') || 'null'),
+  user: safeParseUser(),
   accessToken: localStorage.getItem('accessToken') || null,
   refreshToken: localStorage.getItem('refreshToken') || null,
-  isAuthenticated: !!localStorage.getItem('accessToken'),
+  isAuthenticated: Boolean(localStorage.getItem('accessToken')),
+  selectedBuildingId: localStorage.getItem('resihub_selected_building_id') || '',
 
   setAuthData: (accessToken, refreshToken, user) => {
     localStorage.setItem('accessToken', accessToken);
-    localStorage.setItem('refreshToken', refreshToken);
+    if (refreshToken) localStorage.setItem('refreshToken', refreshToken);
     localStorage.setItem('user', JSON.stringify(user));
     localStorage.removeItem('activeRole');
     localStorage.removeItem('resihub_selected_building_id');
 
     set({
       accessToken,
-      refreshToken,
+      refreshToken: refreshToken || get().refreshToken,
       user,
       isAuthenticated: true,
+      selectedBuildingId: '',
     });
   },
 
-  // Vai trò được cố định từ CSDL theo đúng tài khoản, không cho phép thay đổi
-  setActiveRole: () => {
-    console.warn('[RBAC] Vai trò người dùng được cố định từ CSDL, không thể thay đổi.');
+  updateUser: (partialUser) => {
+    const merged = { ...(get().user || {}), ...partialUser };
+    localStorage.setItem('user', JSON.stringify(merged));
+    set({ user: merged });
   },
 
-  getCurrentRole: () => {
-    const { user } = get();
-    return user?.roles?.[0]?.code || 'RESIDENT';
+  setSelectedBuildingId: (buildingId) => {
+    const val = buildingId || '';
+    if (val) localStorage.setItem('resihub_selected_building_id', val);
+    else localStorage.removeItem('resihub_selected_building_id');
+    set({ selectedBuildingId: val });
   },
+
+  getRoleCodes: () => extractRoleCodes(get().user),
+
+  getCurrentRole: () => getPrimaryRole(get().user),
 
   getCurrentRoleInfo: () => {
     const { user } = get();
-    return user?.roles?.[0] || { code: 'RESIDENT', name: 'Cư dân' };
-  },
-
-  hasRole: (allowedRoles) => {
-    const { user } = get();
-    const currentRole = user?.roles?.[0]?.code || 'RESIDENT';
-    const rolesArr = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-    return rolesArr.includes(currentRole);
-  },
-
-  logout: async () => {
-    try {
-      await api.post('/api/v1/auth/logout');
-    } catch (e) {
-      // ignore
-    } finally {
-      localStorage.removeItem('accessToken');
-      localStorage.removeItem('refreshToken');
-      localStorage.removeItem('user');
-      localStorage.removeItem('activeRole');
-      set({
-        user: null,
-        accessToken: null,
-        refreshToken: null,
-        isAuthenticated: false,
-      });
+    const primary = getPrimaryRole(user);
+    const matched = Array.isArray(user?.roles)
+      ? user.roles.find((r) => (typeof r === 'string' ? r === primary : r?.code === primary))
+      : null;
+    if (matched && typeof matched === 'object') {
+      return {
+        ...matched,
+        name: matched.name || ROLE_LABELS[primary] || primary,
+      };
     }
+    return { code: primary, name: ROLE_LABELS[primary] || ROLE_LABELS[ROLES.RESIDENT] };
   },
 
-  fetchCurrentUser: async () => {
-    try {
-      const res = await api.get('/api/v1/auth/me');
-      const user = res.data.user;
-      localStorage.setItem('user', JSON.stringify(user));
-      localStorage.removeItem('activeRole');
-      set({
-        user,
-        isAuthenticated: true,
-      });
-    } catch (err) {
-      get().logout();
-    }
+  // Hỗ trợ kiểm tra đầy đủ mảng multi-role thay vì chỉ lấy roles[0]
+  hasRole: (allowedRoles) => hasAnyRole(get().user, allowedRoles),
+
+  isAdminPortal: () => isAdminPortalUser(get().user),
+
+  getAssignedBuildings: () => getAssignedBuildingIds(get().user),
+
+  clearSession: () => {
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('user');
+    localStorage.removeItem('activeRole');
+    localStorage.removeItem('resihub_selected_building_id');
+    set({
+      user: null,
+      accessToken: null,
+      refreshToken: null,
+      isAuthenticated: false,
+      selectedBuildingId: '',
+    });
   },
 }));
-
