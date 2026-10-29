@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
@@ -10,8 +11,27 @@ import {
   managerBuildingFilter,
   logAccessDenied,
 } from '../services/ownerScope.js';
+import { normalizeVnPhone } from '../services/residentAccount.js';
+import { buildOwnerPreview, checkLookupRateLimit } from '../utils/piiMask.js';
 
 const router = express.Router();
+const ownerLookupBuckets = new Map();
+
+async function attachOwnerPreviews(rows, orgId) {
+  const ownerIds = Array.from(new Set((rows || []).map((r) => r.owner_id).filter(Boolean)));
+  if (ownerIds.length === 0) {
+    return (rows || []).map((r) => ({ ...r, owner_preview: null }));
+  }
+  const ownRes = await adminPool.query(
+    'SELECT id, full_name, email, phone FROM owner WHERE org_id = $1 AND id = ANY($2::uuid[])',
+    [orgId, ownerIds]
+  );
+  const byId = Object.fromEntries(ownRes.rows.map((o) => [o.id, buildOwnerPreview(o)]));
+  return (rows || []).map((r) => ({
+    ...r,
+    owner_preview: r.owner_id ? byId[r.owner_id] || null : null,
+  }));
+}
 
 /**
  * Helper kiểm tra quyền truy cập tòa nhà theo PRD v2.0 (v0.2) Mục 6.2 & AC-019.1:
@@ -201,8 +221,9 @@ router.get('/', authenticateToken, async (req, res) => {
 
     sql += ` ORDER BY b.code ASC, b.created_at ASC`;
     const result = await pool.query(sql, params);
+    const enriched = await attachOwnerPreviews(result.rows, orgId);
 
-    res.json({ data: result.rows });
+    res.json({ data: enriched });
   } catch (err) {
     console.error('[Buildings Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Không thể lấy danh sách tòa nhà.' });
@@ -210,11 +231,13 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/buildings (NV-03 — TẠO TÒA NHÀ MỚI)
- * Quyền theo PRD v2.0 (v0.2): Chỉ SYS_ADMIN tạo tòa nhà mới cấp tổ chức và gán owner_id.
- * MANAGER chỉ vận hành trong tòa đã được gán; OWNER chỉ có quyền R.
+ * POST /api/v1/buildings (FR-007 / US-008 / NV-03 — TẠO TÒA NHÀ MỚI)
+ * Quyền theo PRD v2.0 Mục 6.2 & FR-007:
+ * - SYS_ADMIN (CRUD): Tạo tòa nhà mới cấp tổ chức.
+ * - MANAGER (CRU): Khởi tạo tòa nhà mới và tự động nhận quyền quản lý (user_role) trên tòa vừa tạo.
+ * - OWNER (R): Chỉ có quyền Xem.
  */
-router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { name, code, address, owner_id, timezone, lease_terms, payment_account } = req.body;
 
   if (!name || name.trim().length < 2 || name.trim().length > 100) {
@@ -242,7 +265,8 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
   try {
     const orgId = req.user.org_id;
 
-    const checkDup = await pool.query('SELECT id FROM building WHERE org_id = $1 AND code = $2', [orgId, cleanCode]);
+    // Dùng adminPool kiểm tra trùng mã toàn tổ chức (không lộ thông tin tòa khác cho MANAGER)
+    const checkDup = await adminPool.query('SELECT id FROM building WHERE org_id = $1 AND code = $2', [orgId, cleanCode]);
     if (checkDup.rows.length > 0) {
       return res.status(409).json({
         code: 'BUILDING_CODE_EXISTS',
@@ -251,21 +275,24 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
     }
 
     if (owner_id) {
-      const ownerOk = await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, orgId]);
+      const ownerOk = await adminPool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, orgId]);
       if (ownerOk.rows.length === 0) {
         return res.status(400).json({ code: 'INVALID_OWNER', message: 'Chủ sở hữu không tồn tại trong tổ chức.' });
       }
     }
 
+    const newBuildingId = crypto.randomUUID();
     const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
 
-      const result = await client.query(
-        `INSERT INTO building (org_id, owner_id, name, code, address, timezone, lease_terms, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
-         RETURNING *`,
+      // Chèn tòa nhà trước (trigger AFTER INSERT tự động gán user_role MANAGER cho người tạo nếu là MANAGER),
+      // sau đó SELECT lại bản ghi để tuân thủ đầy đủ rls_building_select.
+      await client.query(
+        `INSERT INTO building (id, org_id, owner_id, name, code, address, timezone, lease_terms, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE')`,
         [
+          newBuildingId,
           orgId,
           owner_id || null,
           name.trim(),
@@ -279,7 +306,8 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
         ]
       );
 
-      const newBuilding = result.rows[0];
+      const selRes = await client.query('SELECT * FROM building WHERE id = $1', [newBuildingId]);
+      const newBuilding = selRes.rows[0];
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -312,10 +340,89 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
 });
 
 /**
- * GET /api/v1/buildings/owners — danh sách chủ sở hữu để chọn khi tạo/sửa tòa (B3)
+ * GET /api/v1/buildings/lookup-owner?identifier=...
+ * Cơ chế bảo mật Know-Before-You-Link (PRD FR-007 & FR-070 & NFR-007):
+ * - KHÔNG công khai danh sách Chủ đầu tư.
+ * - Chỉ khớp chính xác 100% Email hoặc SĐT 10 chữ số (không tìm kiếm gần đúng / wildcard).
+ * - Có Rate Limit chống dò quét và chỉ trả về thông tin Chủ đầu tư đã che một phần (masked PII).
+ */
+router.get('/lookup-owner', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+  const raw = String(req.query.identifier || '').trim();
+  if (!raw) {
+    return res.status(400).json({
+      code: 'MISSING_IDENTIFIER',
+      message: 'Vui lòng nhập Email hoặc Số điện thoại của Chủ đầu tư để kiểm tra.',
+    });
+  }
+
+  const rl = checkLookupRateLimit(ownerLookupBuckets, String(req.user.sub), 20, 5 * 60 * 1000);
+  if (!rl.allowed) {
+    return res.status(429).json({
+      code: 'TOO_MANY_REQUESTS',
+      message: `Bạn đã tra cứu quá nhiều lần. Vui lòng thử lại sau ${rl.retryAfterSec} giây.`,
+    });
+  }
+
+  const isEmail = raw.includes('@');
+  let cleanEmail = null;
+  let cleanPhone = null;
+
+  if (isEmail) {
+    cleanEmail = raw.toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(422).json({
+        code: 'INVALID_EMAIL_FORMAT',
+        message: 'Định dạng Email không hợp lệ (ví dụ hợp lệ: chudautu@congty.vn).',
+      });
+    }
+  } else {
+    cleanPhone = normalizeVnPhone(raw);
+    if (!/^0[0-9]{9}$/.test(cleanPhone)) {
+      return res.status(422).json({
+        code: 'INVALID_PHONE_FORMAT',
+        message: 'Số điện thoại không đúng định dạng 10 chữ số Việt Nam (ví dụ: 0912345678).',
+      });
+    }
+  }
+
+  try {
+    const orgId = req.user.org_id;
+    const ownerRes = isEmail
+      ? await adminPool.query(
+          'SELECT id, full_name, email, phone FROM owner WHERE org_id = $1 AND LOWER(email) = $2 LIMIT 1',
+          [orgId, cleanEmail]
+        )
+      : await adminPool.query(
+          'SELECT id, full_name, email, phone FROM owner WHERE org_id = $1 AND phone = $2 LIMIT 1',
+          [orgId, cleanPhone]
+        );
+
+    if (ownerRes.rows.length === 0) {
+      return res.json({
+        found: false,
+        owner: null,
+        message:
+          'Không tìm thấy hồ sơ Chủ đầu tư khớp với Email/SĐT này trong hệ thống. Vui lòng kiểm tra lại hoặc để trống để Quản trị hệ thống gán sau.',
+      });
+    }
+
+    return res.json({
+      found: true,
+      owner: buildOwnerPreview(ownerRes.rows[0]),
+      message: 'Đã tìm thấy hồ sơ Chủ đầu tư hợp lệ.',
+    });
+  } catch (err) {
+    console.error('[Lookup Owner Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tra cứu Chủ đầu tư.' });
+  }
+});
+
+/**
+ * GET /api/v1/buildings/owners — Chỉ SYS_ADMIN (quản trị cấp tổ chức) hoặc chính OWNER đó xem bản ghi của mình.
+ * Tuyệt đối KHÔNG công khai danh sách Chủ đầu tư cho MANAGER.
  * Đặt TRƯỚC router.get('/:id') để không bị nuốt bởi pattern /:id
  */
-router.get('/owners', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
+router.get('/owners', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
   try {
     const roleCodes = getUserRoleCodes(req);
     const orgId = req.user.org_id;
@@ -328,25 +435,9 @@ router.get('/owners', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MAN
       return res.json({ data: result.rows });
     }
 
-    if (roleCodes.includes('OWNER')) {
-      const result = await pool.query(
-        'SELECT id, full_name, email FROM owner WHERE org_id = $1 AND person_id = $2 ORDER BY full_name ASC',
-        [orgId, req.user.person_id]
-      );
-      return res.json({ data: result.rows });
-    }
-
-    const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
-    if (mgrBuildingIds.length === 0) {
-      return res.json({ data: [] });
-    }
     const result = await pool.query(
-      `SELECT DISTINCT o.id, o.full_name, o.email
-       FROM owner o
-       JOIN building b ON b.owner_id = o.id
-       WHERE o.org_id = $1 AND b.id = ANY($2::uuid[])
-       ORDER BY o.full_name ASC`,
-      [orgId, mgrBuildingIds]
+      'SELECT id, full_name, email FROM owner WHERE org_id = $1 AND person_id = $2 ORDER BY full_name ASC',
+      [orgId, req.user.person_id]
     );
     res.json({ data: result.rows });
   } catch (err) {
@@ -366,8 +457,69 @@ router.get('/:id', authenticateToken, async (req, res) => {
     'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
     [id]
   );
+  const [withOwner] = await attachOwnerPreviews([check.building], req.user.org_id);
 
-  res.json({ data: { ...check.building, zones: zones.rows } });
+  res.json({ data: { ...withOwner, zones: zones.rows } });
+});
+
+/**
+ * DELETE /api/v1/buildings/:id
+ * Quyền theo PRD 6.2: Chỉ SYS_ADMIN có quyền D (xóa tòa nhà trống). MANAGER chỉ có CRU, OWNER chỉ có R.
+ */
+router.delete('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const roleCodes = getUserRoleCodes(req);
+
+    if (!roleCodes.includes('SYS_ADMIN')) {
+      const checkRead = await checkBuildingAccess(req, id, 'update');
+      if (!checkRead.allowed) {
+        return res.status(checkRead.status).json({ code: 'FORBIDDEN', message: checkRead.message });
+      }
+      await logAccessDenied(req, 'building', id, 'MANAGER attempted to delete building (CRU only)');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa tòa nhà.',
+      });
+    }
+
+    const access = await checkBuildingAccess(req, id, 'delete');
+    if (!access.allowed) {
+      return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
+    }
+
+    const depRes = await pool.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM apartment WHERE building_id = $1) AS apt_cnt,
+         (SELECT COUNT(*)::int FROM floor WHERE building_id = $1) AS floor_cnt,
+         (SELECT COUNT(*)::int FROM zone WHERE building_id = $1) AS zone_cnt,
+         (SELECT COUNT(*)::int FROM contract WHERE building_id = $1) AS contract_cnt`,
+      [id]
+    );
+    const { apt_cnt, floor_cnt, zone_cnt, contract_cnt } = depRes.rows[0] || {};
+    if (apt_cnt > 0 || floor_cnt > 0 || zone_cnt > 0 || contract_cnt > 0) {
+      return res.status(400).json({
+        code: 'BUILDING_NOT_EMPTY',
+        message: 'Không thể xóa tòa nhà đang chứa phân khu, tầng, căn hộ hoặc hợp đồng.',
+      });
+    }
+
+    const delRes = await pool.query('DELETE FROM building WHERE id = $1 RETURNING *', [id]);
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+    }
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'building', $2, $3)`,
+      [req.user.sub, id, JSON.stringify(delRes.rows[0])]
+    );
+
+    return res.json({ message: 'Đã xóa tòa nhà trống thành công.', data: delRes.rows[0] });
+  } catch (err) {
+    console.error('[Delete Building Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa tòa nhà.' });
+  }
 });
 
 /**
@@ -467,17 +619,20 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
   }
 
   try {
-    // MANAGER không được phép chuyển nhượng chủ sở hữu tòa nhà
+    // MANAGER chỉ được gắn owner_id nếu tòa nhà hiện đang chưa có chủ sở hữu (owner_id IS NULL);
+    // nếu tòa nhà đã có chủ sở hữu, chỉ SYS_ADMIN mới được thay đổi / chuyển nhượng (FR-070).
     if (!isSysAdmin && owner_id !== undefined && owner_id !== check.building.owner_id) {
-      await logAccessDenied(req, 'building', id, 'MANAGER attempted to change building owner_id');
-      return res.status(403).json({
-        code: 'FORBIDDEN_OWNER_CHANGE',
-        message: 'Chỉ Quản trị hệ thống (SYS_ADMIN) mới có quyền thay đổi Chủ sở hữu (owner_id) của tòa nhà.',
-      });
+      if (check.building.owner_id !== null || !owner_id) {
+        await logAccessDenied(req, 'building', id, 'MANAGER attempted to change existing building owner_id');
+        return res.status(403).json({
+          code: 'FORBIDDEN_OWNER_CHANGE',
+          message: 'Chỉ Quản trị hệ thống (SYS_ADMIN) mới có quyền thay đổi Chủ sở hữu (owner_id) của tòa nhà đã gắn chủ đầu tư.',
+        });
+      }
     }
 
-    if (isSysAdmin && owner_id !== undefined && owner_id !== null) {
-      const ownerOk = await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, req.user.org_id]);
+    if (owner_id !== undefined && owner_id !== null) {
+      const ownerOk = await adminPool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, req.user.org_id]);
       if (ownerOk.rows.length === 0) {
         return res.status(400).json({ code: 'INVALID_OWNER', message: 'Chủ sở hữu không tồn tại trong tổ chức.' });
       }
@@ -502,7 +657,8 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
             ...(payment_account !== undefined ? { payment_account } : {}),
           };
 
-      const canUpdateOwner = isSysAdmin && owner_id !== undefined;
+      const canUpdateOwner =
+        owner_id !== undefined && (isSysAdmin || (before.owner_id === null && Boolean(owner_id)));
 
       const updated = await client.query(
         `UPDATE building
