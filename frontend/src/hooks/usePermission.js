@@ -26,7 +26,8 @@ export function usePermission() {
     isAccountant,
     isStaff,
     isResident,
-    // Helpers theo ma trận quyền PRD 6.2
+    // Helpers theo ma trận quyền PRD 6.2 (SYS_ADMIN = CRUD, MANAGER = CRU trên Tòa/Khu/Tầng/Căn hộ)
+    canCreateBuildings: isSysAdmin || isManager,
     canManageBuildings: isSysAdmin,
     canEditRealEstate: isSysAdmin || isManager,
     canManageTenants: isSysAdmin || isManager,

@@ -25,18 +25,24 @@ export function TopBar({ onOpenMobileMenu }) {
   const primaryRole = getCurrentRole();
 
   useEffect(() => {
-    buildingsService
-      .list()
-      .then((res) => {
-        const list = res.data || [];
-        setBuildings(list);
-        if (list.length === 1 && !selectedBuildingId) {
-          setSelectedBuildingId(list[0].id);
-        }
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const fetchBuildings = () => {
+      buildingsService
+        .list()
+        .then((res) => {
+          const list = res.data || [];
+          setBuildings(list);
+          const currentSelected = useAuthStore.getState().selectedBuildingId;
+          if (list.length === 1 && !currentSelected) {
+            setSelectedBuildingId(list[0].id);
+          }
+        })
+        .catch(() => {});
+    };
+
+    fetchBuildings();
+    window.addEventListener('resihub:buildings-updated', fetchBuildings);
+    return () => window.removeEventListener('resihub:buildings-updated', fetchBuildings);
+  }, [setSelectedBuildingId]);
 
   const handleLogout = async () => {
     try {
