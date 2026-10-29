@@ -35,8 +35,8 @@ export default function LoginPage() {
   const [resendCooldown, setResendCooldown] = useState(60);
 
   // NV-02: Email/Password State
-  const [email, setEmail] = useState('manager@resihub.vn');
-  const [password, setPassword] = useState('password123');
+  const [email, setEmail] = useState('manager.vop.a@resihub.vn');
+  const [password, setPassword] = useState('Demo@123456');
   const [showPassword, setShowPassword] = useState(false);
 
   // Shared Form State
@@ -75,7 +75,7 @@ export default function LoginPage() {
   // Handle redirect by user roles
   const redirectByRole = (user) => {
     const roleCodes = user.roles?.map((r) => (typeof r === 'string' ? r : r.code)) || [];
-    if (roleCodes.includes('RESIDENT') && !roleCodes.includes('MANAGER') && !roleCodes.includes('OWNER')) {
+    if (roleCodes.includes('RESIDENT') && !roleCodes.some((c) => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(c))) {
       navigate('/resident');
     } else {
       navigate('/admin/dashboard');
@@ -393,45 +393,45 @@ export default function LoginPage() {
 
             <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-xs text-slate-500 space-y-2">
               <div className="flex items-center justify-between font-semibold text-slate-700">
-                <span>💡 Tài khoản kiểm thử theo vai trò cố định:</span>
-                <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">pass: password123</span>
+                <span>💡 Tài khoản kiểm thử theo vai trò PRD v2.0:</span>
+                <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded font-mono">Demo@123456</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                 <button
-                  id="btn-quick-owner"
+                  id="btn-quick-admin"
                   type="button"
-                  onClick={() => { setEmail('owner@resihub.vn'); setPassword('password123'); }}
+                  onClick={() => { setEmail('admin@resihub.vn'); setPassword('Admin@123456'); }}
                   className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-amber-600 block font-bold">OWNER</strong>
-                  <span className="text-slate-400 text-[10px]">Chủ sở hữu</span>
+                  <strong className="text-rose-600 block font-bold">SYS_ADMIN</strong>
+                  <span className="text-slate-400 text-[10px]">Toàn hệ thống (9 tòa)</span>
+                </button>
+                <button
+                  id="btn-quick-owner"
+                  type="button"
+                  onClick={() => { setEmail('owner.vop@resihub.vn'); setPassword('Demo@123456'); }}
+                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
+                >
+                  <strong className="text-amber-600 block font-bold">OWNER (VOP)</strong>
+                  <span className="text-slate-400 text-[10px]">3 tòa VOP-A/B/C</span>
                 </button>
                 <button
                   id="btn-quick-manager"
                   type="button"
-                  onClick={() => { setEmail('manager@resihub.vn'); setPassword('password123'); }}
+                  onClick={() => { setEmail('manager.vop.a@resihub.vn'); setPassword('Demo@123456'); }}
                   className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-indigo-600 block font-bold">MANAGER</strong>
-                  <span className="text-slate-400 text-[10px]">Quản lý tòa</span>
-                </button>
-                <button
-                  id="btn-quick-resident"
-                  type="button"
-                  onClick={() => { setEmail('resident@resihub.vn'); setPassword('password123'); }}
-                  className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
-                >
-                  <strong className="text-purple-600 block font-bold truncate">CƯ DÂN (Chưa HĐ)</strong>
-                  <span className="text-slate-400 text-[10px]">Cọc phòng A202</span>
+                  <strong className="text-indigo-600 block font-bold">MANAGER (A)</strong>
+                  <span className="text-slate-400 text-[10px]">Chỉ VOP - Tòa A</span>
                 </button>
                 <button
                   id="btn-quick-resident-active"
                   type="button"
-                  onClick={() => { setEmail('resident_active@resihub.vn'); setPassword('password123'); }}
+                  onClick={() => { setEmail('tenant1@resihub.vn'); setPassword('Demo@123456'); }}
                   className="p-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-left transition shadow-xs"
                 >
-                  <strong className="text-emerald-600 block font-bold truncate">CƯ DÂN (Đã ký HĐ)</strong>
-                  <span className="text-slate-400 text-[10px]">Đang thuê A102</span>
+                  <strong className="text-emerald-600 block font-bold truncate">RESIDENT</strong>
+                  <span className="text-slate-400 text-[10px]">Cư dân căn A101</span>
                 </button>
               </div>
             </div>

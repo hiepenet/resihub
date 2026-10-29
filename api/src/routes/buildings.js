@@ -1,66 +1,116 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import {
+  getUserRoleCodes,
+  getOwnerBuildingIds,
+  getManagerBuildingIds,
+  ownerBuildingFilter,
+  managerBuildingFilter,
+  logAccessDenied,
+} from '../services/ownerScope.js';
 
 const router = express.Router();
 
 /**
- * Helper kiểm tra quyền truy cập tòa nhà theo vai trò:
- * - OWNER: Xem toàn bộ tòa trong tổ chức (R)
- * - MANAGER: CRU trên các tòa do mình quản lý (user_role.building_id)
- * - RESIDENT: Xem tòa có căn hộ của mình (R)
+ * Helper kiểm tra quyền truy cập tòa nhà theo PRD v2.0 (v0.2) Mục 6.2 & AC-019.1:
+ * - SYS_ADMIN: CRUD toàn bộ tòa trong tổ chức
+ * - OWNER: R trên các tòa mình sở hữu (owner.person_id)
+ * - MANAGER: RU trên tòa được gán (user_role.building_id) và CRU trên khu/tầng/căn hộ trong tòa đó
+ * - RESIDENT: R trên tòa có hợp đồng / giữ chỗ của mình
  */
-async function checkBuildingAccess(userId, userRoleCodes, orgId, buildingId, requiredAction = 'read') {
+async function checkBuildingAccess(req, buildingId, requiredAction = 'read') {
+  const userId = req.user.sub;
+  const orgId = req.user.org_id;
+  const userRoleCodes = getUserRoleCodes(req);
+
+  // Kiểm tra sự tồn tại của tòa trong tổ chức (qua adminPool để phân biệt chuẩn 404 vs 403 AC-019.1)
+  const bExist = await adminPool.query(
+    'SELECT * FROM building WHERE id = $1 AND org_id = $2',
+    [buildingId, orgId]
+  );
+  if (bExist.rows.length === 0) {
+    return { allowed: false, status: 404, message: 'Không tìm thấy tòa nhà.' };
+  }
+  const buildingRow = bExist.rows[0];
+
+  if (userRoleCodes.includes('SYS_ADMIN')) {
+    return { allowed: true, status: 200, building: buildingRow, message: 'OK' };
+  }
+
   if (userRoleCodes.includes('OWNER')) {
     if (requiredAction !== 'read') {
-      return { allowed: false, status: 403, message: 'Chủ đầu tư (OWNER) có quyền Xem (R), không được Tạo/Sửa/Xóa tòa nhà.' };
+      await logAccessDenied(req, 'building', buildingId, `OWNER attempted ${requiredAction} on building`);
+      return {
+        allowed: false,
+        status: 403,
+        message: 'Chủ đầu tư (OWNER) có quyền Xem (R), không được Tạo/Sửa/Xóa tòa nhà.',
+      };
     }
-    const b = await pool.query('SELECT * FROM building WHERE id = $1 AND org_id = $2', [buildingId, orgId]);
-    return {
-      allowed: b.rows.length > 0,
-      status: b.rows.length > 0 ? 200 : 404,
-      building: b.rows[0],
-      message: b.rows.length > 0 ? 'OK' : 'Không tìm thấy tòa nhà.',
-    };
+    const ownedIds = await getOwnerBuildingIds(userId, orgId);
+    if (!ownedIds.includes(buildingId)) {
+      await logAccessDenied(req, 'building', buildingId, 'OWNER accessed building owned by another owner');
+      return {
+        allowed: false,
+        status: 403,
+        message: 'Bạn không sở hữu tòa nhà này.',
+      };
+    }
+    return { allowed: true, status: 200, building: buildingRow, message: 'OK' };
   }
 
   if (userRoleCodes.includes('MANAGER')) {
     if (requiredAction === 'delete') {
-      return { allowed: false, status: 403, message: 'Quy tắc RBAC: Quản lý (MANAGER) chỉ có quyền CRU (Tạo, Xem, Sửa), không được Xóa.' };
+      await logAccessDenied(req, 'building', buildingId, 'MANAGER attempted delete action');
+      return {
+        allowed: false,
+        status: 403,
+        message: 'Quy tắc RBAC: Quản lý (MANAGER) chỉ có quyền CRU (Tạo, Xem, Sửa), không được Xóa.',
+      };
     }
 
-    // Kiểm tra tòa nhà có thuộc quyền quản lý của Manager này không
-    const b = await pool.query(
-      `SELECT b.* FROM building b
-       JOIN user_role ur ON ur.building_id = b.id
-       WHERE b.id = $1 AND ur.user_id = $2 AND b.org_id = $3`,
-      [buildingId, userId, orgId]
-    );
-
-    if (b.rows.length === 0) {
-      return { allowed: false, status: 403, message: 'Bạn không có quyền quản lý tòa nhà này.' };
+    const mgrIds = await getManagerBuildingIds(userId, orgId);
+    if (!mgrIds.includes(buildingId)) {
+      await logAccessDenied(req, 'building', buildingId, 'MANAGER accessed unassigned building (AC-019.1)');
+      return {
+        allowed: false,
+        status: 403,
+        message: 'Bạn không có quyền quản lý tòa nhà này.',
+      };
     }
-    return { allowed: true, status: 200, building: b.rows[0], message: 'OK' };
+    return { allowed: true, status: 200, building: buildingRow, message: 'OK' };
   }
 
   if (userRoleCodes.includes('RESIDENT')) {
     if (requiredAction !== 'read') {
+      await logAccessDenied(req, 'building', buildingId, `RESIDENT attempted ${requiredAction} on building`);
       return { allowed: false, status: 403, message: 'Cư dân chỉ có quyền xem thông tin căn hộ của mình.' };
     }
     const b = await pool.query(
       `SELECT b.* FROM building b
-       JOIN contract c ON c.building_id = b.id
-       JOIN tenant t ON t.id = c.primary_tenant_id
-       WHERE b.id = $1 AND t.person_id = (SELECT person_id FROM app_user WHERE id = $2)`,
-      [buildingId, userId]
+       WHERE b.id = $1 AND (
+         EXISTS (
+           SELECT 1 FROM contract c
+           JOIN tenant t ON t.id = c.primary_tenant_id
+           WHERE c.building_id = b.id AND t.person_id = $2
+         )
+         OR EXISTS (
+           SELECT 1 FROM reservation rsv
+           JOIN person p ON p.phone = rsv.phone
+           WHERE rsv.building_id = b.id AND p.id = $2
+         )
+       )`,
+      [buildingId, req.user.person_id]
     );
     if (b.rows.length === 0) {
+      await logAccessDenied(req, 'building', buildingId, 'RESIDENT accessed building without contract/reservation');
       return { allowed: false, status: 403, message: 'Bạn không có quyền xem tòa nhà này.' };
     }
-    return { allowed: true, status: 200, building: b.rows[0], message: 'OK' };
+    return { allowed: true, status: 200, building: buildingRow, message: 'OK' };
   }
 
+  await logAccessDenied(req, 'building', buildingId, 'Unrecognized role');
   return { allowed: false, status: 403, message: 'Bạn không có quyền truy cập.' };
 }
 
@@ -68,7 +118,7 @@ async function checkBuildingAccess(userId, userRoleCodes, orgId, buildingId, req
  * GET /api/v1/buildings/check-code?code=TN-A
  * Kiểm tra mã tòa có sẵn hay đã trùng (FR-007 / NV-03)
  */
-router.get('/check-code', authenticateToken, async (req, res) => {
+router.get('/check-code', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { code } = req.query;
   const orgId = req.user.org_id;
 
@@ -87,7 +137,7 @@ router.get('/check-code', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await pool.query(
+    const result = await adminPool.query(
       'SELECT id FROM building WHERE org_id = $1 AND code = $2',
       [orgId, cleanCode]
     );
@@ -105,14 +155,16 @@ router.get('/check-code', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/v1/buildings
- * - OWNER: Xem toàn bộ tòa nhà thuộc sở hữu trong tổ chức (R)
- * - MANAGER: Xem danh sách tòa nhà do mình quản lý (CRU)
- * - RESIDENT: Xem tòa nhà của căn hộ mình đang ở (R)
+ * - SYS_ADMIN: Xem toàn bộ tòa nhà trong tổ chức (CRUD)
+ * - OWNER: Xem các tòa nhà thuộc sở hữu (R)
+ * - MANAGER: Xem danh sách tòa nhà được phân công quản lý (RU)
+ * - RESIDENT: Xem tòa nhà của căn hộ mình đang thuê (R)
  */
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const userRoleCodes = getUserRoleCodes(req);
+    const isSysAdmin = userRoleCodes.includes('SYS_ADMIN');
     const isOwner = userRoleCodes.includes('OWNER');
     const isManager = userRoleCodes.includes('MANAGER');
     const isResident = userRoleCodes.includes('RESIDENT');
@@ -128,23 +180,26 @@ router.get('/', authenticateToken, async (req, res) => {
     `;
     const params = [orgId];
 
-    if (isManager && !isOwner) {
-      // Manager: Chỉ xem các tòa do mình quản lý
-      params.push(req.user.sub);
-      sql += ` AND b.id IN (
-        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
-      )`;
-    } else if (isResident && !isOwner && !isManager) {
-      // Resident: Chỉ xem tòa của căn hộ mình đang thuê
+    if (isSysAdmin) {
+      // SYS_ADMIN: Toàn bộ tòa thuộc org
+    } else if (isOwner) {
+      const { sql: ownerSql } = await ownerBuildingFilter('b.id', req.user.sub, orgId, params);
+      sql += ownerSql;
+    } else if (isManager) {
+      const { sql: mgrSql } = await managerBuildingFilter('b.id', req.user.sub, orgId, params);
+      sql += mgrSql;
+    } else if (isResident) {
       params.push(req.user.person_id);
       sql += ` AND b.id IN (
         SELECT c.building_id FROM contract c
         JOIN tenant t ON t.id = c.primary_tenant_id
         WHERE t.person_id = $${params.length}
       )`;
+    } else {
+      return res.json({ data: [] });
     }
 
-    sql += ` ORDER BY b.created_at DESC`;
+    sql += ` ORDER BY b.code ASC, b.created_at ASC`;
     const result = await pool.query(sql, params);
 
     res.json({ data: result.rows });
@@ -156,10 +211,10 @@ router.get('/', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/buildings (NV-03 — TẠO TÒA NHÀ MỚI)
- * Quyền: Chỉ MANAGER có quyền tạo tòa nhà (CRU). OWNER có quyền R (bị chặn).
- * Sau khi tạo, tòa nhà mới tự động được gán quyền quản lý cho Manager.
+ * Quyền theo PRD v2.0 (v0.2): Chỉ SYS_ADMIN tạo tòa nhà mới cấp tổ chức và gán owner_id.
+ * MANAGER chỉ vận hành trong tòa đã được gán; OWNER chỉ có quyền R.
  */
-router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) => {
   const { name, code, address, owner_id, timezone, lease_terms, payment_account } = req.body;
 
   if (!name || name.trim().length < 2 || name.trim().length > 100) {
@@ -187,7 +242,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   try {
     const orgId = req.user.org_id;
 
-    // Rule: Mã tòa unique trong org
     const checkDup = await pool.query('SELECT id FROM building WHERE org_id = $1 AND code = $2', [orgId, cleanCode]);
     if (checkDup.rows.length > 0) {
       return res.status(409).json({
@@ -196,29 +250,22 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       });
     }
 
+    if (owner_id) {
+      const ownerOk = await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, orgId]);
+      if (ownerOk.rows.length === 0) {
+        return res.status(400).json({ code: 'INVALID_OWNER', message: 'Chủ sở hữu không tồn tại trong tổ chức.' });
+      }
+    }
+
     const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
 
-      const newBuildingId = (await client.query('SELECT gen_random_uuid() as id')).rows[0].id;
-
-      // Tự động gán quyền quản lý tòa nhà mới cho Manager tạo tòa này trước để RLS cho phép RETURNING
-      const roleRes = await client.query("SELECT id FROM role WHERE code = 'MANAGER' AND org_id = $1", [orgId]);
-      if (roleRes.rows.length > 0) {
-        await client.query(
-          `INSERT INTO user_role (user_id, role_id, building_id)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (user_id, role_id, building_id) DO NOTHING`,
-          [req.user.sub, roleRes.rows[0].id, newBuildingId]
-        );
-      }
-
       const result = await client.query(
-        `INSERT INTO building (id, org_id, owner_id, name, code, address, timezone, lease_terms, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE')
+        `INSERT INTO building (org_id, owner_id, name, code, address, timezone, lease_terms, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
          RETURNING *`,
         [
-          newBuildingId,
           orgId,
           owner_id || null,
           name.trim(),
@@ -234,7 +281,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
       const newBuilding = result.rows[0];
 
-      // Ghi audit log
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
          VALUES ($1, 'CREATE', 'building', $2, NULL, $3)`,
@@ -244,7 +290,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       await client.query('COMMIT');
 
       res.status(201).json({
-        message: `Đã tạo tòa nhà ${newBuilding.name} (${newBuilding.code}) và gán quản lý thành công.`,
+        message: `Đã tạo tòa nhà ${newBuilding.name} (${newBuilding.code}) thành công.`,
         data: newBuilding,
       });
     } catch (dbErr) {
@@ -266,17 +312,41 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 });
 
 /**
- * GET /api/v1/buildings/:id
- */
-/**
  * GET /api/v1/buildings/owners — danh sách chủ sở hữu để chọn khi tạo/sửa tòa (B3)
  * Đặt TRƯỚC router.get('/:id') để không bị nuốt bởi pattern /:id
  */
-router.get('/owners', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/owners', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   try {
+    const roleCodes = getUserRoleCodes(req);
+    const orgId = req.user.org_id;
+
+    if (roleCodes.includes('SYS_ADMIN')) {
+      const result = await pool.query(
+        'SELECT id, full_name, email FROM owner WHERE org_id = $1 ORDER BY full_name ASC',
+        [orgId]
+      );
+      return res.json({ data: result.rows });
+    }
+
+    if (roleCodes.includes('OWNER')) {
+      const result = await pool.query(
+        'SELECT id, full_name, email FROM owner WHERE org_id = $1 AND person_id = $2 ORDER BY full_name ASC',
+        [orgId, req.user.person_id]
+      );
+      return res.json({ data: result.rows });
+    }
+
+    const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
+    if (mgrBuildingIds.length === 0) {
+      return res.json({ data: [] });
+    }
     const result = await pool.query(
-      'SELECT id, full_name FROM owner WHERE org_id = $1 ORDER BY full_name ASC',
-      [req.user.org_id]
+      `SELECT DISTINCT o.id, o.full_name, o.email
+       FROM owner o
+       JOIN building b ON b.owner_id = o.id
+       WHERE o.org_id = $1 AND b.id = ANY($2::uuid[])
+       ORDER BY o.full_name ASC`,
+      [orgId, mgrBuildingIds]
     );
     res.json({ data: result.rows });
   } catch (err) {
@@ -287,14 +357,11 @@ router.get('/owners', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
 
 router.get('/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-  
-  const check = await checkBuildingAccess(req.user.sub, userRoleCodes, req.user.org_id, id, 'read');
+  const check = await checkBuildingAccess(req, id, 'read');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
 
-  // Kèm phân khu (B1) để UI tạo căn hộ chọn khu
   const zones = await pool.query(
     'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
     [id]
@@ -306,14 +373,13 @@ router.get('/:id', authenticateToken, async (req, res) => {
 /**
  * PATCH /api/v1/buildings/:id/status
  * Đổi trạng thái tòa nhà: ACTIVE <-> INACTIVE (State Machine NV-03)
- * Quyền: Chỉ MANAGER có quyền cập nhật trạng thái tòa mình quản lý (CRU)
+ * Quyền: SYS_ADMIN hoặc MANAGER của tòa đó
  */
-router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id/status', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
-  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
 
-  const check = await checkBuildingAccess(req.user.sub, userRoleCodes, req.user.org_id, id, 'update');
+  const check = await checkBuildingAccess(req, id, 'update');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -327,7 +393,6 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
     await client.query('BEGIN');
     const before = check.building;
 
-    // Kiểm tra ràng buộc hợp đồng hiệu lực khi Deactivate
     if (status === 'INACTIVE') {
       const activeContractsRes = await client.query(
         `SELECT COUNT(*) FROM contract WHERE building_id = $1 AND status = 'ACTIVE'`,
@@ -335,19 +400,20 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
       );
       const activeCount = parseInt(activeContractsRes.rows[0].count, 10);
       if (activeCount > 0) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           code: 'ACTIVE_CONTRACTS_EXIST',
           message: `Không thể tạm dừng hoạt động tòa nhà này vì đang có ${activeCount} hợp đồng đang có hiệu lực. Vui lòng thanh lý hết hợp đồng trước.`,
         });
       }
 
-      // C7: còn giữ chỗ (reservation HELD) thì cũng không cho tạm dừng
       const heldRes = await client.query(
         `SELECT COUNT(*) FROM reservation WHERE building_id = $1 AND status = 'HELD'`,
         [id]
       );
       const heldCount = parseInt(heldRes.rows[0].count, 10);
       if (heldCount > 0) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           code: 'RESERVED_APARTMENTS_EXIST',
           message: `Không thể tạm dừng hoạt động tòa nhà này vì đang có ${heldCount} căn đang được giữ chỗ.`,
@@ -360,7 +426,6 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
       [status, id]
     );
 
-    // Audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'UPDATE', 'building', $2, $3, $4)`,
@@ -382,15 +447,17 @@ router.patch('/:id/status', authenticateToken, requireRole(['MANAGER']), async (
 });
 
 /**
- * PATCH /api/v1/buildings/:id — sửa thông tin tòa (B3): name, address, owner_id,
- * timezone, lease_terms, payment_account. Mã tòa (code) KHÔNG cho sửa.
+ * PATCH /api/v1/buildings/:id — sửa thông tin tòa:
+ * - SYS_ADMIN: sửa mọi trường vận hành + owner_id
+ * - MANAGER (được gán tòa): sửa thông tin vận hành (name, address, timezone, lease_terms, payment_account), KHÔNG được đổi owner_id
  */
-router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { name, address, owner_id, timezone, lease_terms, payment_account } = req.body;
-  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+  const roleCodes = getUserRoleCodes(req);
+  const isSysAdmin = roleCodes.includes('SYS_ADMIN');
 
-  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  const check = await checkBuildingAccess(req, id, 'update');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -400,12 +467,18 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
   }
 
   try {
-    let ownerOk = true;
-    if (owner_id !== undefined) {
-      // null = gỡ owner, còn lại phải thuộc org
-      ownerOk = owner_id === null ||
-        (await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, req.user.org_id])).rows.length > 0;
-      if (!ownerOk) {
+    // MANAGER không được phép chuyển nhượng chủ sở hữu tòa nhà
+    if (!isSysAdmin && owner_id !== undefined && owner_id !== check.building.owner_id) {
+      await logAccessDenied(req, 'building', id, 'MANAGER attempted to change building owner_id');
+      return res.status(403).json({
+        code: 'FORBIDDEN_OWNER_CHANGE',
+        message: 'Chỉ Quản trị hệ thống (SYS_ADMIN) mới có quyền thay đổi Chủ sở hữu (owner_id) của tòa nhà.',
+      });
+    }
+
+    if (isSysAdmin && owner_id !== undefined && owner_id !== null) {
+      const ownerOk = await pool.query('SELECT 1 FROM owner WHERE id = $1 AND org_id = $2', [owner_id, req.user.org_id]);
+      if (ownerOk.rows.length === 0) {
         return res.status(400).json({ code: 'INVALID_OWNER', message: 'Chủ sở hữu không tồn tại trong tổ chức.' });
       }
     }
@@ -420,7 +493,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       }
       const before = beforeRes.rows[0];
 
-      // lease_terms JSONB merge — payment_account nằm trong lease_terms
       const oldTerms = before.lease_terms || {};
       const nextTerms = lease_terms === undefined && payment_account === undefined
         ? undefined
@@ -429,6 +501,8 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
             ...(lease_terms || {}),
             ...(payment_account !== undefined ? { payment_account } : {}),
           };
+
+      const canUpdateOwner = isSysAdmin && owner_id !== undefined;
 
       const updated = await client.query(
         `UPDATE building
@@ -442,7 +516,8 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         [
           name?.trim() || null,
           address?.trim() || null,
-          owner_id !== undefined, owner_id ?? null, // hasOwnerKey, ownerValue
+          canUpdateOwner,
+          owner_id ?? null,
           timezone || null,
           nextTerms ? JSON.stringify(nextTerms) : null,
           id,
@@ -472,12 +547,11 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 /**
  * PATCH /api/v1/buildings/:id/floors/:floor_id — sửa tầng (B3): level, name.
  */
-router.patch('/:id/floors/:floor_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id/floors/:floor_id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id, floor_id } = req.params;
   const { level, name } = req.body;
-  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
 
-  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  const check = await checkBuildingAccess(req, id, 'update');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -528,9 +602,8 @@ router.patch('/:id/floors/:floor_id', authenticateToken, requireRole(['MANAGER']
  */
 router.get('/:id/floor-map', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
 
-  const check = await checkBuildingAccess(req.user.sub, userRoleCodes, req.user.org_id, id, 'read');
+  const check = await checkBuildingAccess(req, id, 'read');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -566,9 +639,8 @@ router.get('/:id/floor-map', authenticateToken, async (req, res) => {
  */
 router.get('/:id/floors', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
 
-  const check = await checkBuildingAccess(req.user.sub, userRoleCodes, req.user.org_id, id, 'read');
+  const check = await checkBuildingAccess(req, id, 'read');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -592,14 +664,13 @@ router.get('/:id/floors', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/buildings/:id/floors (NV-04)
- * Quyền: Chỉ MANAGER được thêm tầng cho tòa nhà mình quản lý (CRU)
+ * Quyền: SYS_ADMIN hoặc MANAGER của tòa nhà đó
  */
-router.post('/:id/floors', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/floors', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { level, name } = req.body;
-  const userRoleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
 
-  const check = await checkBuildingAccess(req.user.sub, userRoleCodes, req.user.org_id, id, 'create');
+  const check = await checkBuildingAccess(req, id, 'create');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -639,7 +710,6 @@ router.post('/:id/floors', authenticateToken, requireRole(['MANAGER']), async (r
       [id, lvl, floorName]
     );
 
-    // C3: audit khi tạo tầng (đồng bộ pattern audit của zone/căn)
     await pool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'CREATE', 'floor', $2, $3)`,
@@ -655,15 +725,36 @@ router.post('/:id/floors', authenticateToken, requireRole(['MANAGER']), async (r
 
 /**
  * DELETE /api/v1/buildings/:id/floors/:floor_id
- * Quyền: Bị chặn (Manager có quyền CRU - không xóa; Owner có quyền R)
- * Nếu tầng đang có căn hộ, trả về lỗi 400 FLOOR_HAS_APARTMENTS.
- * Nếu không có căn hộ, trả về lỗi 403 DELETE_PROHIBITED (chỉ có quyền CRU).
+ * Quyền theo PRD 6.2: Chỉ SYS_ADMIN có quyền D (xóa tầng rỗng). MANAGER chỉ có CRU, OWNER chỉ có R.
  */
 router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
   try {
     const { id, floor_id } = req.params;
-    const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const access = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+    const roleCodes = getUserRoleCodes(req);
+
+    if (!roleCodes.includes('SYS_ADMIN')) {
+      const checkRead = await checkBuildingAccess(req, id, 'update');
+      if (!checkRead.allowed) {
+        return res.status(checkRead.status).json({ code: 'FORBIDDEN', message: checkRead.message });
+      }
+
+      const aptCountRes = await pool.query('SELECT COUNT(*) FROM apartment WHERE floor_id = $1', [floor_id]);
+      const count = parseInt(aptCountRes.rows[0]?.count || 0, 10);
+      if (count > 0) {
+        return res.status(400).json({
+          code: 'FLOOR_HAS_APARTMENTS',
+          message: `Không thể xóa tầng này vì đang chứa ${count} căn hộ. Vui lòng chuyển hoặc xóa căn hộ trước.`,
+        });
+      }
+
+      await logAccessDenied(req, 'floor', floor_id, 'MANAGER attempted to delete floor (CRU only)');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa tầng.',
+      });
+    }
+
+    const access = await checkBuildingAccess(req, id, 'delete');
     if (!access.allowed) {
       return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
     }
@@ -677,10 +768,21 @@ router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
       });
     }
 
-    return res.status(403).json({
-      code: 'DELETE_PROHIBITED',
-      message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa tầng.',
-    });
+    const delRes = await pool.query(
+      'DELETE FROM floor WHERE id = $1 AND building_id = $2 RETURNING *',
+      [floor_id, id]
+    );
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tầng trong tòa này.' });
+    }
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'floor', $2, $3)`,
+      [req.user.sub, floor_id, JSON.stringify(delRes.rows[0])]
+    );
+
+    return res.json({ message: 'Đã xóa tầng trống thành công.', data: delRes.rows[0] });
   } catch (err) {
     console.error('Lỗi kiểm tra xóa tầng:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi kiểm tra xóa tầng.' });
@@ -696,8 +798,7 @@ router.delete('/:id/floors/:floor_id', authenticateToken, async (req, res) => {
  */
 router.get('/:id/zones', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'read');
+  const check = await checkBuildingAccess(req, id, 'read');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -715,13 +816,12 @@ router.get('/:id/zones', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/buildings/:id/zones — MANAGER khởi tạo khu (NV-03, FR-007)
+ * POST /api/v1/buildings/:id/zones — SYS_ADMIN / MANAGER khởi tạo khu (NV-03, FR-007)
  */
-router.post('/:id/zones', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/zones', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { code, name } = req.body;
-  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'create');
+  const check = await checkBuildingAccess(req, id, 'create');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }
@@ -729,14 +829,10 @@ router.post('/:id/zones', authenticateToken, requireRole(['MANAGER']), async (re
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Mã khu (code) là bắt buộc.' });
   }
   try {
-    const bRes = await pool.query('SELECT org_id FROM building WHERE id = $1', [id]);
-    if (bRes.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
-    }
     const result = await pool.query(
       `INSERT INTO zone (org_id, building_id, code, name)
        VALUES ($1, $2, $3, $4) RETURNING *`,
-      [bRes.rows[0].org_id, id, String(code).trim().toUpperCase(), name || null]
+      [check.building.org_id, id, String(code).trim().toUpperCase(), name || null]
     );
     await pool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
@@ -759,11 +855,10 @@ router.post('/:id/zones', authenticateToken, requireRole(['MANAGER']), async (re
 /**
  * PATCH /api/v1/buildings/:id/zones/:zone_id — đổi tên khu
  */
-router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id, zone_id } = req.params;
   const { name } = req.body;
-  const roleCodes = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-  const check = await checkBuildingAccess(req.user.sub, roleCodes, req.user.org_id, id, 'update');
+  const check = await checkBuildingAccess(req, id, 'update');
   if (!check.allowed) {
     return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
   }

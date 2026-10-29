@@ -53,6 +53,12 @@ export default function TopBar({ onMenuClick }) {
       .then((res) => {
         const list = res.data?.data || [];
         setBuildings(list);
+        const saved = localStorage.getItem('resihub_selected_building_id');
+        if (saved && saved !== 'ALL' && !list.some((b) => b.id === saved)) {
+          setSelectedBuildingId('ALL');
+          localStorage.setItem('resihub_selected_building_id', 'ALL');
+          window.dispatchEvent(new CustomEvent('buildingChanged', { detail: 'ALL' }));
+        }
       })
       .catch(() => {});
 

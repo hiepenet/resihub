@@ -52,7 +52,7 @@ export default function ContractsPage() {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
+        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
       />
     );
   }
@@ -285,7 +285,7 @@ export default function ContractsPage() {
       key: 'status',
       render: (val) => <StatusBadge status={val} />,
     },
-    ...(canCreateContract || currentRole === 'OWNER' ? [{
+    ...(['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(currentRole) ? [{
       title: 'Thao tác',
       key: 'actions',
       render: (val, row) => <ContractActions row={row} currentRole={currentRole} onChanged={loadInitialData} />,
@@ -365,7 +365,7 @@ export default function ContractsPage() {
       render: (val, row) => (
         <div className="flex items-center gap-1.5">
           {row.status === 'SUBMITTED' ? (
-            currentRole === 'OWNER' ? (
+            ['OWNER', 'MANAGER'].includes(currentRole) ? (
               <>
                 <button
                   type="button"
@@ -383,7 +383,7 @@ export default function ContractsPage() {
                 </button>
               </>
             ) : (
-              <span className="text-xs text-slate-400 italic">Chờ Chủ nhà duyệt</span>
+              <span className="text-xs text-slate-400 italic">Chỉ xem</span>
             )
           ) : (
             <span className="text-xs text-slate-400 italic">Đã xử lý</span>
@@ -688,8 +688,8 @@ function ContractActions({ row, currentRole, onChanged }) {
         )}
         <PrintButton onClick={handlePrintTemplate} />
       </div>
-      {isOccupantsOpen && <OccupantsModal contractId={row.id} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
-      {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
+      {isOccupantsOpen && <OccupantsModal contractId={row.id} currentRole={currentRole} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
+      {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} currentRole={currentRole} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
       {isAmendmentsOpen && <AmendmentsModal contract={row} currentRole={currentRole} onClose={() => { setIsAmendmentsOpen(false); onChanged(); }} />}
     </>
   );
@@ -698,27 +698,33 @@ function ContractActions({ row, currentRole, onChanged }) {
     return (
       <div className="flex flex-col gap-1.5 min-w-[150px]">
         {renderNavButtons()}
-        <button
-          className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
-          onClick={handleActivate}
-        >
-          Kích hoạt
-        </button>
-        <div className="flex gap-1.5">
-          <button
-            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
-            onClick={() => fileRef.current?.click()}
-          >
-            Đính bản ký
-          </button>
-          <button
-            className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
-            onClick={handleCancel}
-          >
-            Hủy
-          </button>
-        </div>
-        <input ref={fileRef} type="file" accept="image/jpeg,image/png" className="hidden" onChange={handleScanFile} />
+        {currentRole === 'MANAGER' ? (
+          <>
+            <button
+              className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
+              onClick={handleActivate}
+            >
+              Kích hoạt
+            </button>
+            <div className="flex gap-1.5">
+              <button
+                className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
+                onClick={() => fileRef.current?.click()}
+              >
+                Đính bản ký
+              </button>
+              <button
+                className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
+                onClick={handleCancel}
+              >
+                Hủy
+              </button>
+            </div>
+            <input ref={fileRef} type="file" accept="image/jpeg,image/png" className="hidden" onChange={handleScanFile} />
+          </>
+        ) : (
+          <span className="text-xs text-slate-400 italic">Bản nháp (Chỉ xem)</span>
+        )}
       </div>
     );
   }
@@ -792,32 +798,34 @@ function ContractActions({ row, currentRole, onChanged }) {
     return (
       <div className="flex flex-col gap-1.5">
         {renderNavButtons()}
-        <button
-          className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium"
-          onClick={async () => {
-            const todayStr = new Date().toISOString().split('T')[0];
-            const termDate = window.prompt(`Ngày chấm dứt hợp đồng (YYYY-MM-DD):`, todayStr);
-            if (!termDate) return;
-            const reason = window.prompt('Lý do chấm dứt hợp đồng:');
-            if (reason === null) return;
-            if (!reason.trim()) {
-              alert('Vui lòng nhập lý do chấm dứt');
-              return;
-            }
-            try {
-              await api.post(`/api/v1/contracts/${row.id}/terminate`, {
-                terminated_date: termDate.trim(),
-                reason: reason.trim(),
-                note: `Chấm dứt sớm: ${reason.trim()}`,
-              });
-              onChanged();
-            } catch (err) {
-              alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
-            }
-          }}
-        >
-          Chấm dứt
-        </button>
+        {currentRole === 'MANAGER' && (
+          <button
+            className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium"
+            onClick={async () => {
+              const todayStr = new Date().toISOString().split('T')[0];
+              const termDate = window.prompt(`Ngày chấm dứt hợp đồng (YYYY-MM-DD):`, todayStr);
+              if (!termDate) return;
+              const reason = window.prompt('Lý do chấm dứt hợp đồng:');
+              if (reason === null) return;
+              if (!reason.trim()) {
+                alert('Vui lòng nhập lý do chấm dứt');
+                return;
+              }
+              try {
+                await api.post(`/api/v1/contracts/${row.id}/terminate`, {
+                  terminated_date: termDate.trim(),
+                  reason: reason.trim(),
+                  note: `Chấm dứt sớm: ${reason.trim()}`,
+                });
+                onChanged();
+              } catch (err) {
+                alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
+              }
+            }}
+          >
+            Chấm dứt
+          </button>
+        )}
       </div>
     );
   }
@@ -865,7 +873,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     );
   }
 
-  function ServicePricesModal({ contractId, startDate, onClose }) {
+  function ServicePricesModal({ contractId, startDate, currentRole, onClose }) {
     const [prices, setPrices] = useState([]);
     const [form, setForm] = useState({
       service_code: 'INTERNET',
@@ -938,59 +946,63 @@ function ContractActions({ row, currentRole, onChanged }) {
                 </div>
                 <div className="flex items-center gap-3">
                   <Money amount={p.unit_price} className="font-bold text-indigo-600 text-sm" />
-                  <button
-                    className="text-xs text-rose-600 hover:text-rose-700 font-medium"
-                    onClick={() => handleDelete(p.id)}
-                  >
-                    Xóa
-                  </button>
+                  {currentRole === 'MANAGER' && (
+                    <button
+                      className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                      onClick={() => handleDelete(p.id)}
+                    >
+                      Xóa
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
           </div>
 
-          <form onSubmit={handleAdd} className="space-y-3 pt-3 border-t border-slate-100">
-            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm / Cập nhật đơn giá</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="col-span-2 sm:col-span-1">
-                <label className="text-[11px] text-slate-500 font-medium block mb-1">Mã dịch vụ *</label>
-                <select
-                  value={form.service_code}
-                  onChange={(e) => setForm({ ...form, service_code: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 py-1.5 px-2.5 text-xs bg-white"
-                >
-                  {Object.entries(SERVICE_LABELS).map(([code, label]) => (
-                    <option key={code} value={code}>{label} ({code})</option>
-                  ))}
-                </select>
+          {currentRole === 'MANAGER' && (
+            <form onSubmit={handleAdd} className="space-y-3 pt-3 border-t border-slate-100">
+              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm / Cập nhật đơn giá</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Mã dịch vụ *</label>
+                  <select
+                    value={form.service_code}
+                    onChange={(e) => setForm({ ...form, service_code: e.target.value })}
+                    className="w-full rounded-lg border border-slate-300 py-1.5 px-2.5 text-xs bg-white"
+                  >
+                    {Object.entries(SERVICE_LABELS).map(([code, label]) => (
+                      <option key={code} value={code}>{label} ({code})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Đơn giá riêng (VND) *</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    value={form.unit_price}
+                    onChange={(e) => setForm({ ...form, unit_price: e.target.value })}
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Ngày hiệu lực *</label>
+                  <Input
+                    type="date"
+                    value={form.effective_from}
+                    onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
+                  />
+                </div>
               </div>
 
-              <div className="col-span-2 sm:col-span-1">
-                <label className="text-[11px] text-slate-500 font-medium block mb-1">Đơn giá riêng (VND) *</label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={form.unit_price}
-                  onChange={(e) => setForm({ ...form, unit_price: e.target.value })}
-                />
+              <div className="flex justify-end pt-2">
+                <Button type="submit" variant="primary" size="sm">
+                  Lưu đơn giá
+                </Button>
               </div>
-
-              <div className="col-span-2">
-                <label className="text-[11px] text-slate-500 font-medium block mb-1">Ngày hiệu lực *</label>
-                <Input
-                  type="date"
-                  value={form.effective_from}
-                  onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <Button type="submit" variant="primary" size="sm">
-                Lưu đơn giá
-              </Button>
-            </div>
-          </form>
+            </form>
+          )}
         </div>
       </div>
     );
@@ -1154,10 +1166,10 @@ function ContractActions({ row, currentRole, onChanged }) {
             })}
           </div>
 
-          {/* Form lập đề xuất phụ lục mới */}
-          {['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) && (
+          {/* Form lập đề xuất phụ lục mới (chỉ MANAGER được đề xuất theo PRD 6.2) */}
+          {['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) && currentRole === 'MANAGER' && (
             <form onSubmit={handleCreate} className="space-y-3 pt-3 border-t border-slate-100">
-              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Đề xuất phụ lục mới (MANAGER/OWNER)</p>
+              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Đề xuất phụ lục mới (MANAGER)</p>
 
               <div>
                 <label className="text-xs text-slate-600 font-medium block mb-1">Nội dung thay đổi</label>
@@ -1260,7 +1272,7 @@ function ContractActions({ row, currentRole, onChanged }) {
     );
   }
 
-  function OccupantsModal({ contractId, onClose }) {
+  function OccupantsModal({ contractId, currentRole, onClose }) {
     const [list, setList] = useState([]);
     const [form, setForm] = useState({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
 
@@ -1289,49 +1301,53 @@ function ContractActions({ row, currentRole, onChanged }) {
                   <span className="text-sm font-medium text-slate-900">{m.full_name}</span>
                   <span className="text-xs text-slate-400 block">{m.phone} · {m.relationship || '—'}</span>
                 </div>
-                <button
-                  className="text-xs text-rose-600 hover:text-rose-700 font-medium"
-                  onClick={async () => {
-                    if (!window.confirm(`Gỡ ${m.full_name} khỏi hợp đồng? Hồ sơ cư dân sẽ được giữ nguyên.`)) return;
-                    try {
-                      await api.delete(`/api/v1/contracts/${contractId}/occupants/${m.tenant_id}`);
-                      load();
-                    } catch (err) {
-                      alert(err.response?.data?.message || 'Lỗi khi gỡ thành viên.');
-                    }
-                  }}
-                >
-                  Gỡ
-                </button>
+                {currentRole === 'MANAGER' && (
+                  <button
+                    className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                    onClick={async () => {
+                      if (!window.confirm(`Gỡ ${m.full_name} khỏi hợp đồng? Hồ sơ cư dân sẽ được giữ nguyên.`)) return;
+                      try {
+                        await api.delete(`/api/v1/contracts/${contractId}/occupants/${m.tenant_id}`);
+                        load();
+                      } catch (err) {
+                        alert(err.response?.data?.message || 'Lỗi khi gỡ thành viên.');
+                      }
+                    }}
+                  >
+                    Gỡ
+                  </button>
+                )}
               </div>
             ))}
           </div>
 
-          <form
-            className="space-y-3 pt-3 border-t border-slate-100"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              try {
-                await api.post(`/api/v1/contracts/${contractId}/occupants`, form);
-                setForm({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
-                load();
-              } catch (err) {
-                alert(err.response?.data?.message || 'Lỗi khi thêm thành viên.');
-              }
-            }}
-          >
-            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm thành viên</p>
-            <div className="grid grid-cols-2 gap-3">
-              <input required placeholder="Họ tên *" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-              <input required placeholder="SĐT *" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-              <input required placeholder="Quan hệ * (vd: vợ, con)" value={form.relationship} onChange={(e) => setForm({ ...form, relationship: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-              <input placeholder="Số CCCD" value={form.id_number} onChange={(e) => setForm({ ...form, id_number: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-              <input placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="col-span-2 w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-            </div>
-            <div className="flex justify-end">
-              <Button type="submit" variant="primary" size="sm">Thêm</Button>
-            </div>
-          </form>
+          {currentRole === 'MANAGER' && (
+            <form
+              className="space-y-3 pt-3 border-t border-slate-100"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  await api.post(`/api/v1/contracts/${contractId}/occupants`, form);
+                  setForm({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
+                  load();
+                } catch (err) {
+                  alert(err.response?.data?.message || 'Lỗi khi thêm thành viên.');
+                }
+              }}
+            >
+              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm thành viên</p>
+              <div className="grid grid-cols-2 gap-3">
+                <input required placeholder="Họ tên *" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+                <input required placeholder="SĐT *" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+                <input required placeholder="Quan hệ * (vd: vợ, con)" value={form.relationship} onChange={(e) => setForm({ ...form, relationship: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+                <input placeholder="Số CCCD" value={form.id_number} onChange={(e) => setForm({ ...form, id_number: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+                <input placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="col-span-2 w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
+              </div>
+              <div className="flex justify-end">
+                <Button type="submit" variant="primary" size="sm">Thêm</Button>
+              </div>
+            </form>
+          )}
         </div>
       </div>
     );

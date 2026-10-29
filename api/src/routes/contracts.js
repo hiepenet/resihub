@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
@@ -7,22 +7,136 @@ import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
 import { splitDepositOpening } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
+import {
+  getUserRoleCodes,
+  getOwnerBuildingIds,
+  getManagerBuildingIds,
+  ownerBuildingFilter,
+  managerBuildingFilter,
+  logAccessDenied,
+} from '../services/ownerScope.js';
 
 const router = express.Router();
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Kiểm tra quyền phạm vi tòa nhà trên một hợp đồng cụ thể (trước khi RLS lọc mất bản ghi thành 404).
+ * Trả về { ok: true, meta } hoặc { ok: false, status, body }.
+ */
+async function checkContractAccess(req, contractId) {
+  if (!UUID_REGEX.test(String(contractId || ''))) {
+    return { ok: false, status: 404, body: { code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' } };
+  }
+
+  const metaRes = await adminPool.query(
+    `SELECT c.id, c.building_id, b.org_id, t.person_id
+     FROM contract c
+     JOIN building b ON b.id = c.building_id
+     JOIN tenant t ON t.id = c.primary_tenant_id
+     WHERE c.id = $1`,
+    [contractId]
+  );
+
+  if (metaRes.rows.length === 0 || metaRes.rows[0].org_id !== req.user.org_id) {
+    return { ok: false, status: 404, body: { code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' } };
+  }
+
+  const meta = metaRes.rows[0];
+  const userRoles = getUserRoleCodes(req);
+
+  if (userRoles.includes('SYS_ADMIN')) {
+    return { ok: true, meta };
+  }
+
+  if (userRoles.includes('OWNER')) {
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (ownedIds.includes(meta.building_id)) {
+      return { ok: true, meta };
+    }
+    if (!userRoles.includes('MANAGER')) {
+      await logAccessDenied(req, 'contract', contractId, 'OWNER does not own contract building');
+      return {
+        ok: false,
+        status: 403,
+        body: { code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà chứa hợp đồng này.' },
+      };
+    }
+  }
+
+  if (userRoles.includes('MANAGER')) {
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (mgrIds.includes(meta.building_id)) {
+      return { ok: true, meta };
+    }
+    await logAccessDenied(req, 'contract', contractId, 'MANAGER is not assigned to contract building');
+    return {
+      ok: false,
+      status: 403,
+      body: { code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' },
+    };
+  }
+
+  if (userRoles.includes('RESIDENT')) {
+    const isPrimary = Boolean(req.user.person_id && meta.person_id === req.user.person_id);
+    let isOccupant = false;
+    if (!isPrimary && req.user.person_id) {
+      const occRes = await adminPool.query(
+        `SELECT 1
+         FROM contract_occupant co
+         JOIN tenant t ON t.id = co.tenant_id
+         WHERE co.contract_id = $1 AND t.person_id = $2
+         LIMIT 1`,
+        [contractId, req.user.person_id]
+      );
+      isOccupant = occRes.rows.length > 0;
+    }
+    if (isPrimary || isOccupant) {
+      return { ok: true, meta };
+    }
+    await logAccessDenied(req, 'contract', contractId, 'RESIDENT does not belong to contract');
+    return {
+      ok: false,
+      status: 403,
+      body: { code: 'ACCESS_DENIED', message: 'Bạn chỉ có quyền xem hợp đồng của chính mình.' },
+    };
+  }
+
+  await logAccessDenied(req, 'contract', contractId, 'Unauthorized role for contract');
+  return { ok: false, status: 403, body: { code: 'ACCESS_DENIED', message: 'Không có quyền truy cập hợp đồng.' } };
+}
 
 /**
  * GET /api/v1/contracts
- * - OWNER: Xem toàn bộ hợp đồng trong tổ chức (R)
- * - MANAGER: Xem hợp đồng thuộc các tòa do mình quản lý (CRU)
+ * - SYS_ADMIN: Xem toàn bộ hợp đồng trong tổ chức (R)
+ * - OWNER: Xem hợp đồng thuộc các tòa mình sở hữu (R + A)
+ * - MANAGER: Xem hợp đồng thuộc tòa được gán (CRU + A(gia hạn))
  * - RESIDENT: Xem hợp đồng của chính mình (R)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const userRoles = getUserRoleCodes(req);
+    const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
     const isResident = userRoles.includes('RESIDENT');
+    const { building_id, status } = req.query;
+
+    if (building_id && !isSysAdmin) {
+      if (isOwner) {
+        const ownedIds = await getOwnerBuildingIds(req.user.sub, orgId);
+        if (!ownedIds.includes(building_id)) {
+          await logAccessDenied(req, 'building', building_id, 'OWNER requested contracts of unowned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà này.' });
+        }
+      } else if (isManager) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
+        if (!mgrIds.includes(building_id)) {
+          await logAccessDenied(req, 'building', building_id, 'MANAGER requested contracts of unassigned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công quản lý tòa nhà này.' });
+        }
+      }
+    }
 
     let sql = `SELECT c.*, 
         a.code as apartment_code, 
@@ -37,20 +151,37 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
        WHERE b.org_id = $1`;
     const params = [orgId];
 
-    if (isManager && !isOwner) {
-      params.push(req.user.sub);
-      sql += ` AND c.building_id IN (
-        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
-      )`;
-    } else if (isResident && !isOwner && !isManager) {
+    if (isSysAdmin) {
+      // SYS_ADMIN: Xem toàn bộ hợp đồng trong org
+    } else if (isOwner) {
+      const { sql: ownerSql } = await ownerBuildingFilter('c.building_id', req.user.sub, orgId, params);
+      sql += ownerSql;
+    } else if (isManager) {
+      const { sql: mgrSql } = await managerBuildingFilter('c.building_id', req.user.sub, orgId, params);
+      sql += mgrSql;
+    } else if (isResident) {
       params.push(req.user.person_id);
       sql += ` AND p.id = $${params.length}`;
     }
 
-    sql += ` ORDER BY c.created_at DESC`;
-    const result = await pool.query(sql, params);
+    if (building_id) {
+      params.push(building_id);
+      sql += ` AND c.building_id = $${params.length}`;
+    }
 
-    res.json({ data: result.rows });
+    if (status) {
+      params.push(status);
+      sql += ` AND c.status = $${params.length}`;
+    }
+
+    sql += ` ORDER BY c.created_at DESC`;
+    const { client, release } = await getUserClient(req);
+    try {
+      const result = await client.query(sql, params);
+      res.json({ data: result.rows });
+    } finally {
+      await release();
+    }
   } catch (err) {
     console.error('[Contracts Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách hợp đồng.' });
@@ -59,15 +190,32 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
 
 /**
  * GET /api/v1/contracts/requests (FR-019)
- * Danh sách đề nghị gia hạn/chấm dứt từ cư dân dành cho BQL/Chủ nhà
+ * Danh sách đề nghị gia hạn/chấm dứt từ cư dân dành cho BQL/Chủ nhà/Admin (R)
  */
-router.get('/requests', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/requests', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const userRoles = getUserRoleCodes(req);
+    const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
     const { building_id, status } = req.query;
+
+    if (building_id && !isSysAdmin) {
+      if (isOwner) {
+        const ownedIds = await getOwnerBuildingIds(req.user.sub, orgId);
+        if (!ownedIds.includes(building_id)) {
+          await logAccessDenied(req, 'building', building_id, 'OWNER requested contract_requests of unowned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà này.' });
+        }
+      } else if (isManager) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
+        if (!mgrIds.includes(building_id)) {
+          await logAccessDenied(req, 'building', building_id, 'MANAGER requested contract_requests of unassigned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công quản lý tòa nhà này.' });
+        }
+      }
+    }
 
     let sql = `
       SELECT cr.id, cr.org_id, cr.contract_id, cr.building_id, cr.type, cr.desired_date, cr.note, cr.status, cr.created_by, cr.created_at, cr.updated_at,
@@ -86,11 +234,14 @@ router.get('/requests', authenticateToken, requireRole(['OWNER', 'MANAGER']), as
     `;
     const params = [orgId];
 
-    if (isManager && !isOwner) {
-      params.push(req.user.sub);
-      sql += ` AND cr.building_id IN (
-        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
-      )`;
+    if (isSysAdmin) {
+      // SYS_ADMIN: R toàn tổ chức
+    } else if (isOwner) {
+      const { sql: ownerSql } = await ownerBuildingFilter('cr.building_id', req.user.sub, orgId, params);
+      sql += ownerSql;
+    } else if (isManager) {
+      const { sql: mgrSql } = await managerBuildingFilter('cr.building_id', req.user.sub, orgId, params);
+      sql += mgrSql;
     }
 
     if (building_id) {
@@ -104,8 +255,13 @@ router.get('/requests', authenticateToken, requireRole(['OWNER', 'MANAGER']), as
     }
 
     sql += ` ORDER BY cr.created_at DESC`;
-    const result = await pool.query(sql, params);
-    res.json({ data: result.rows });
+    const { client, release } = await getUserClient(req);
+    try {
+      const result = await client.query(sql, params);
+      res.json({ data: result.rows });
+    } finally {
+      await release();
+    }
   } catch (err) {
     console.error('[Contract Requests Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách đề nghị hợp đồng.' });
@@ -113,11 +269,38 @@ router.get('/requests', authenticateToken, requireRole(['OWNER', 'MANAGER']), as
 });
 
 /**
- * POST /api/v1/contracts/requests/:id/approve (OWNER)
+ * POST /api/v1/contracts/requests/:id/approve (OWNER, MANAGER theo AC-006.1 & Mục 6.2)
  * Phê duyệt đề nghị gia hạn/chấm dứt từ cư dân
  */
-router.post('/requests/:id/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+router.post('/requests/:id/approve', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
+  if (!UUID_REGEX.test(String(id || ''))) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+  }
+
+  const metaRes = await adminPool.query(
+    `SELECT id, org_id, building_id, type FROM contract_request WHERE id = $1`,
+    [id]
+  );
+  if (metaRes.rows.length === 0 || metaRes.rows[0].org_id !== req.user.org_id) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+  }
+  const reqMeta = metaRes.rows[0];
+  const userRoles = getUserRoleCodes(req);
+  if (userRoles.includes('OWNER')) {
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (!ownedIds.includes(reqMeta.building_id)) {
+      await logAccessDenied(req, 'contract_request', id, 'OWNER does not own contract_request building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của đề nghị này.' });
+    }
+  } else if (userRoles.includes('MANAGER')) {
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (!mgrIds.includes(reqMeta.building_id)) {
+      await logAccessDenied(req, 'contract_request', id, 'MANAGER not assigned to contract_request building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công quản lý tòa nhà của đề nghị này.' });
+    }
+  }
+
   const { client, release } = await getUserClient(req);
 
   try {
@@ -214,12 +397,39 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['OWNER']), 
 });
 
 /**
- * POST /api/v1/contracts/requests/:id/reject (OWNER)
+ * POST /api/v1/contracts/requests/:id/reject (OWNER, MANAGER theo AC-006.1 & Mục 6.2)
  * Từ chối đề nghị gia hạn/chấm dứt từ cư dân
  */
-router.post('/requests/:id/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+router.post('/requests/:id/reject', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
+  if (!UUID_REGEX.test(String(id || ''))) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+  }
+
+  const metaRes = await adminPool.query(
+    `SELECT id, org_id, building_id FROM contract_request WHERE id = $1`,
+    [id]
+  );
+  if (metaRes.rows.length === 0 || metaRes.rows[0].org_id !== req.user.org_id) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đề nghị.' });
+  }
+  const reqMeta = metaRes.rows[0];
+  const userRoles = getUserRoleCodes(req);
+  if (userRoles.includes('OWNER')) {
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (!ownedIds.includes(reqMeta.building_id)) {
+      await logAccessDenied(req, 'contract_request', id, 'OWNER does not own contract_request building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của đề nghị này.' });
+    }
+  } else if (userRoles.includes('MANAGER')) {
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (!mgrIds.includes(reqMeta.building_id)) {
+      await logAccessDenied(req, 'contract_request', id, 'MANAGER not assigned to contract_request building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công quản lý tòa nhà của đề nghị này.' });
+    }
+  }
+
   const { client, release } = await getUserClient(req);
 
   try {
@@ -320,51 +530,41 @@ router.post('/requests/:id/reject', authenticateToken, requireRole(['OWNER']), a
 /**
  * GET /api/v1/contracts/:id
  */
-router.get('/:id', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await pool.query(
-      `SELECT c.*, 
-        a.code as apartment_code, 
-        b.name as building_name, 
-        p.id as person_id,
-        p.full_name as tenant_name, 
-        p.phone as tenant_phone,
-        p.email as tenant_email
-       FROM contract c
-       JOIN apartment a ON a.id = c.apartment_id
-       JOIN building b ON b.id = c.building_id
-       JOIN tenant t ON t.id = c.primary_tenant_id
-       JOIN person p ON p.id = t.person_id
-       WHERE c.id = $1`,
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    const access = await checkContractAccess(req, id);
+    if (!access.ok) {
+      return res.status(access.status).json(access.body);
     }
 
-    const row = result.rows[0];
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    const isOwner = userRoles.includes('OWNER');
-    const isManager = userRoles.includes('MANAGER');
-    const isResident = userRoles.includes('RESIDENT');
-
-    if (isManager && !isOwner) {
-      const checkMgr = await pool.query(
-        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-        [req.user.sub, row.building_id]
+    const { client, release } = await getUserClient(req);
+    try {
+      const result = await client.query(
+        `SELECT c.*, 
+          a.code as apartment_code, 
+          b.name as building_name, 
+          p.id as person_id,
+          p.full_name as tenant_name, 
+          p.phone as tenant_phone,
+          p.email as tenant_email
+         FROM contract c
+         JOIN apartment a ON a.id = c.apartment_id
+         JOIN building b ON b.id = c.building_id
+         JOIN tenant t ON t.id = c.primary_tenant_id
+         JOIN person p ON p.id = t.person_id
+         WHERE c.id = $1`,
+        [id]
       );
-      if (checkMgr.rows.length === 0) {
-        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' });
-      }
-    } else if (isResident && !isOwner && !isManager) {
-      if (row.person_id !== req.user.person_id) {
-        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn chỉ có quyền xem hợp đồng của chính mình.' });
-      }
-    }
 
-    res.json({ data: row });
+      if (result.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+      }
+
+      res.json({ data: result.rows[0] });
+    } finally {
+      await release();
+    }
   } catch (err) {
     console.error('[Get Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy chi tiết hợp đồng.' });
@@ -406,6 +606,28 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     });
   }
 
+  // Pre-check quyền tòa nhà qua adminPool trước khi RLS lọc căn hộ thành 404 (AC-019.1)
+  if (!UUID_REGEX.test(String(apartment_id))) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+  }
+  const aptMeta = await adminPool.query(
+    `SELECT a.id, a.building_id, b.org_id
+     FROM apartment a JOIN building b ON b.id = a.building_id
+     WHERE a.id = $1`,
+    [apartment_id]
+  );
+  if (aptMeta.rows.length === 0 || aptMeta.rows[0].org_id !== req.user.org_id) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+  }
+  const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+  if (!mgrIds.includes(aptMeta.rows[0].building_id)) {
+    await logAccessDenied(req, 'building', aptMeta.rows[0].building_id, 'MANAGER attempted to create contract in unassigned building');
+    return res.status(403).json({
+      code: 'ACCESS_DENIED',
+      message: 'Bạn không có quyền quản lý tòa nhà này để lập hợp đồng.',
+    });
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -429,19 +651,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       return res.status(409).json({
         code: 'BUILDING_MISMATCH',
         message: 'Tòa nhà được chọn không khớp với tòa nhà của căn hộ.',
-      });
-    }
-
-    // Kiểm tra quyền quản lý tòa nhà của Manager
-    const checkMgr = await client.query(
-      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-      [req.user.sub, effectiveBuildingId]
-    );
-    if (checkMgr.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        code: 'ACCESS_DENIED',
-        message: 'Bạn không có quyền quản lý tòa nhà này để lập hợp đồng.',
       });
     }
 
@@ -539,8 +748,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 /**
  * GET /api/v1/contracts/:id/occupants — thành viên cùng ở theo hợp đồng (B6)
  */
-router.get('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
   const { client, release } = await getUserClient(req);
   try {
     const result = await client.query(
@@ -573,25 +786,14 @@ router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại là bắt buộc.' });
   }
 
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
-
-    // Guard tòa (mẫu checkMgr)
-    const contractRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
-    if (contractRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
-    }
-    const contract = contractRes.rows[0];
-    const okRes = await client.query(
-      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-      [req.user.sub, contract.building_id]
-    );
-    if (okRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
-    }
 
     // Tái dùng person trùng SĐT trong org, không thì tạo mới
     let personRes = await client.query(
@@ -673,23 +875,13 @@ router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async
  */
 router.delete('/:id/occupants/:tenant_id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id, tenant_id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
-
-    const contractRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
-    if (contractRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
-    }
-    const okRes = await client.query(
-      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-      [req.user.sub, contractRes.rows[0].building_id]
-    );
-    if (okRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
-    }
 
     const linkRes = await client.query(
       'SELECT 1 FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2',
@@ -729,6 +921,11 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     deposit_amount, deposit_months, apartment_id, primary_tenant_id, note,
   } = req.body;
 
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -739,19 +936,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
     }
     const cur = curRes.rows[0];
-
-    // C6: Guard quyền quản lý tòa nhà của Manager
-    const checkMgr = await client.query(
-      'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-      [req.user.sub, cur.building_id]
-    );
-    if (checkMgr.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        code: 'ACCESS_DENIED',
-        message: 'Bạn không có quyền quản lý tòa nhà của hợp đồng này.',
-      });
-    }
 
     if (cur.status !== 'DRAFT') {
       await client.query('ROLLBACK');
@@ -858,38 +1042,29 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
 /**
  * POST /api/v1/contracts/:id/terminate
- * Đề xuất chấm dứt hợp đồng thuê (FR-017, C8, D4)
- * Quyền: OWNER (R), MANAGER (CRU)
- * Hợp đồng chuyển sang TERMINATION_PENDING, căn hộ vẫn OCCUPIED, chờ OWNER phê duyệt
+ * Đề xuất chấm dứt hợp đồng thuê (FR-017, C8, D4, Mục 6.2)
+ * Quyền: MANAGER (CRU) lập đề xuất chấm dứt trên tòa mình quản lý; OWNER (R + A) phê duyệt
  */
-router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { terminated_date, reason, note } = req.body;
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
 
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
-    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
     if (contractCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
     }
 
     const currentContract = contractCheck.rows[0];
-
-    // Guard quyền theo tòa nếu là Manager
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    if (userRoles.includes('MANAGER') && !userRoles.includes('OWNER')) {
-      const checkMgr = await client.query(
-        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-        [req.user.sub, currentContract.building_id]
-      );
-      if (checkMgr.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý tòa nhà của hợp đồng này.' });
-      }
-    }
 
     if (currentContract.status !== 'ACTIVE') {
       await client.query('ROLLBACK');
@@ -948,17 +1123,22 @@ router.post('/:id/terminate', authenticateToken, requireRole(['OWNER', 'MANAGER'
 /**
  * POST /api/v1/contracts/:id/terminate/approve
  * Phê duyệt chấm dứt hợp đồng thuê (FR-017, C8, D4)
- * Quyền: Chỉ OWNER có quyền duyệt
+ * Quyền: Chỉ OWNER sở hữu tòa nhà có quyền duyệt
  * Ràng buộc Four-eyes: Người đề xuất không được tự duyệt
  */
 router.post('/:id/terminate/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
 
   try {
     await client.query('BEGIN');
 
-    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
     if (contractCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
@@ -1058,7 +1238,7 @@ router.post('/:id/terminate/approve', authenticateToken, requireRole(['OWNER']),
 /**
  * POST /api/v1/contracts/:id/terminate/reject
  * Từ chối đề xuất chấm dứt hợp đồng (quay lại ACTIVE)
- * Quyền: Chỉ OWNER
+ * Quyền: Chỉ OWNER sở hữu tòa nhà
  */
 router.post('/:id/terminate/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
   const { id } = req.params;
@@ -1068,11 +1248,16 @@ router.post('/:id/terminate/reject', authenticateToken, requireRole(['OWNER']), 
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Lý do từ chối là bắt buộc.' });
   }
 
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
 
-    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    const contractCheck = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
     if (contractCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
@@ -1244,6 +1429,11 @@ async function assertActivatable(client, contractId) {
 
 router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -1320,6 +1510,11 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
 
 router.post('/:id/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -1365,10 +1560,15 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER']), async (re
 router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
-    const curRes = await client.query('SELECT * FROM contract WHERE id = $1', [id]);
+    const curRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
     if (curRes.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
@@ -1407,18 +1607,13 @@ router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (r
 router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { image_base64 } = req.body;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
+  const { client, release } = await getUserClient(req);
   try {
-    const contractRes = await pool.query('SELECT id, building_id FROM contract WHERE id = $1', [id]);
-    if (contractRes.rows.length === 0 || contractRes.rows[0].building_id === null) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
-    }
-    const ok = await pool.query(
-      `SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2`,
-      [req.user.sub, contractRes.rows[0].building_id]
-    );
-    if (ok.rows.length === 0) {
-      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng này.' });
-    }
     const saved = await saveBase64Image({
       imageBase64: image_base64,
       folder: 'contract',
@@ -1426,12 +1621,12 @@ router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req
       entity: 'contract',
       ownerId: id,
       req,
-      query: (sql, params) => pool.query(sql, params),
+      query: (sql, params) => client.query(sql, params),
     });
     if (saved.error) {
       return res.status(400).json(saved.error);
     }
-    await pool.query(
+    await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'UPLOAD', 'attachment', $2, $3)`,
       [req.user.sub, saved.attachment.id, JSON.stringify(saved.attachment)]
@@ -1440,6 +1635,8 @@ router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req
   } catch (err) {
     console.error('[Upload Contract Scan Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi đính kèm bản scan.' });
+  } finally {
+    await release();
   }
 });
 
@@ -1448,8 +1645,12 @@ export const SERVICE_CODES = ['INTERNET', 'MOTORBIKE_PARKING', 'ELECTRICBIKE_PAR
 /**
  * GET /api/v1/contracts/:id/service-prices (FR-065, C1)
  */
-router.get('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/:id/service-prices', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
   const { client, release } = await getUserClient(req);
   try {
     const pricesRes = await client.query(
@@ -1467,8 +1668,9 @@ router.get('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MANA
 
 /**
  * POST /api/v1/contracts/:id/service-prices (FR-065, C1)
+ * Quyền: MANAGER (CRU trên tòa được gán)
  */
-router.post('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/service-prices', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { service_code, unit_price, effective_from } = req.body;
 
@@ -1485,6 +1687,11 @@ router.post('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MAN
       code: 'INVALID_UNIT_PRICE',
       message: 'Đơn giá dịch vụ phải lớn hơn hoặc bằng 0.'
     });
+  }
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
   }
 
   const { client, release } = await getUserClient(req);
@@ -1529,8 +1736,12 @@ router.post('/:id/service-prices', authenticateToken, requireRole(['OWNER', 'MAN
  * DELETE /api/v1/contracts/:id/service-prices/:priceId (FR-065, C1)
  * # ponytail: chưa chặn theo invoice vì M09 chưa dựng — thêm guard khi M09 có kỳ phát hành < effective_from thay đổi
  */
-router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id, priceId } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -1565,8 +1776,12 @@ router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['O
 /**
  * GET /api/v1/contracts/:id/amendments (FR-016, C7)
  */
-router.get('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/:id/amendments', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
   const { client, release } = await getUserClient(req);
   try {
     const versionsRes = await client.query(
@@ -1590,15 +1805,20 @@ router.get('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER'
 });
 
 /**
- * POST /api/v1/contracts/:id/amendments (FR-016, FR-015, C7)
- * Đề xuất phụ lục hợp đồng (MANAGER/OWNER) — Lưu ý 1: Không áp dụng diff trước khi duyệt
+ * POST /api/v1/contracts/:id/amendments (FR-016, FR-015, C7, Mục 6.2)
+ * Đề xuất phụ lục hợp đồng (MANAGER lập trên tòa được gán) — Không áp dụng diff trước khi duyệt
  */
-router.post('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/amendments', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { changes, reason, effective_from } = req.body;
 
   if (!reason || !reason.trim()) {
     return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do lập phụ lục hợp đồng.' });
+  }
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
   }
 
   const { client, release } = await getUserClient(req);
@@ -1713,10 +1933,18 @@ router.post('/:id/amendments', authenticateToken, requireRole(['OWNER', 'MANAGER
 
 /**
  * POST /api/v1/contracts/:id/amendments/:versionId/approve (FR-016, C7)
- * OWNER phê duyệt và áp dụng phụ lục vào hợp đồng
+ * OWNER phê duyệt và áp dụng phụ lục vào hợp đồng (hoặc MANAGER khác duyệt phụ lục gia hạn thuần túy theo Mục 6.2)
  */
-router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
+router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
   const { id, versionId } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
+  const userRoles = getUserRoleCodes(req);
+  const isOwner = userRoles.includes('OWNER');
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -1741,6 +1969,26 @@ router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole
     if (diff.status === 'REJECTED') {
       await client.query('ROLLBACK');
       return res.status(409).json({ code: 'ALREADY_REJECTED', message: 'Phụ lục này đã bị từ chối trước đó.' });
+    }
+
+    // Mục 6.2: MANAGER chỉ có quyền A(gia hạn) không đổi giá/cọc và phải thỏa Four-eyes
+    if (!isOwner) {
+      const isPureExtension = Boolean(diff.end_date) && !diff.rent_amount && !diff.deposit_amount;
+      if (!isPureExtension) {
+        await client.query('ROLLBACK');
+        await logAccessDenied(req, 'contract_version', versionId, 'MANAGER attempted to approve price/deposit amendment');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Phụ lục thay đổi giá thuê hoặc tiền cọc bắt buộc phải do Chủ đầu tư (OWNER) phê duyệt.',
+        });
+      }
+      if (diff.created_by && diff.created_by === req.user.sub) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'SELF_APPROVAL',
+          message: 'Người lập phụ lục không được tự phê duyệt (Nguyên tắc Four-eyes). Vui lòng chuyển Chủ đầu tư (OWNER) phê duyệt.',
+        });
+      }
     }
 
     // Áp dụng các thay đổi từ diff vào bảng contract (Lưu ý 1)
@@ -1802,6 +2050,11 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
     return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do từ chối phụ lục.' });
   }
 
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
   const { client, release } = await getUserClient(req);
   try {
     await client.query('BEGIN');
@@ -1843,9 +2096,9 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
     );
 
     await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, note, after)
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'REJECT_AMENDMENT', 'contract_version', $2, $3, $4)`,
-      [req.user.sub, versionId, reason.trim(), JSON.stringify(updatedDiff)]
+      [req.user.sub, versionId, JSON.stringify(diff), JSON.stringify(updatedDiff)]
     );
 
     await client.query('COMMIT');
@@ -1863,10 +2116,19 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
  * GET /api/v1/contracts/:id/template (FR-020, C10)
  * Xuất mẫu hợp đồng thuê A4 chuẩn pháp lý (HTML printable)
  */
-router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    if (access.status === 403) {
+      return res.status(403).send('<h1>403 Bạn không có quyền truy cập hợp đồng của tòa nhà này</h1>');
+    }
+    return res.status(404).send('<h1>404 Không tìm thấy hợp đồng</h1>');
+  }
+
+  const { client, release } = await getUserClient(req);
   try {
-    const contractRes = await pool.query(
+    const contractRes = await client.query(
       `SELECT c.*,
               a.code as apartment_code, a.area_m2, a.bedrooms,
               b.id as building_id, b.name as building_name, b.address as building_address,
@@ -1889,23 +2151,12 @@ router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER'])
 
     const c = contractRes.rows[0];
 
-    // Kiểm tra quyền theo tòa nếu là MANAGER
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
-    if (userRoles.includes('MANAGER') && !userRoles.includes('OWNER')) {
-      const checkMgr = await pool.query(
-        'SELECT 1 FROM user_role WHERE user_id = $1 AND building_id = $2',
-        [req.user.sub, c.building_id]
-      );
-      if (checkMgr.rows.length === 0) {
-        return res.status(403).send('<h1>403 Bạn không có quyền truy cập tòa nhà này</h1>');
-      }
-    }
-
     // Lấy thành viên cùng ở
-    const occRes = await pool.query(
+    const occRes = await client.query(
       `SELECT co.relationship, p.full_name, p.phone, p.id_number
        FROM contract_occupant co
-       JOIN person p ON p.id = co.person_id
+       JOIN tenant t ON t.id = co.tenant_id
+       JOIN person p ON p.id = t.person_id
        WHERE co.contract_id = $1
        ORDER BY co.created_at ASC`,
       [id]
@@ -1913,11 +2164,11 @@ router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER'])
     const occupants = occRes.rows;
 
     // Lấy bảng giá dịch vụ
-    const spRes = await pool.query(
-      `SELECT code, custom_price, effective_from
+    const spRes = await client.query(
+      `SELECT service_code, unit_price, effective_from
        FROM contract_service_price
        WHERE contract_id = $1
-       ORDER BY code ASC`,
+       ORDER BY service_code ASC`,
       [id]
     );
     const servicePrices = spRes.rows;
@@ -1944,6 +2195,10 @@ router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER'])
       ELEC: { name: 'Điện sinh hoạt', unit: 'kWh' },
       WATER: { name: 'Nước sinh hoạt', unit: 'm³' },
       INTERNET: { name: 'Internet / Wifi', unit: 'tháng' },
+      MOTORBIKE_PARKING: { name: 'Gửi xe máy xăng', unit: 'xe/tháng' },
+      ELECTRICBIKE_PARKING: { name: 'Gửi xe đạp/máy điện', unit: 'xe/tháng' },
+      TRASH: { name: 'Phí thu gom rác', unit: 'tháng' },
+      COMMON_SERVICE: { name: 'Dịch vụ chung', unit: 'tháng' },
       CLEANING: { name: 'Vệ sinh & Rác thải', unit: 'tháng' },
       PARKING_MOTO: { name: 'Gửi xe máy', unit: 'xe/tháng' },
       PARKING_CAR: { name: 'Gửi xe ô tô', unit: 'xe/tháng' },
@@ -1952,13 +2207,14 @@ router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER'])
 
     const serviceRowsHtml = servicePrices.length > 0
       ? servicePrices.map((sp, idx) => {
-          const meta = serviceCodeLabels[sp.code] || { name: sp.code, unit: 'tháng' };
+          const codeKey = sp.service_code;
+          const meta = serviceCodeLabels[codeKey] || { name: codeKey, unit: 'tháng' };
           return `
             <tr>
               <td style="text-align:center;">${idx + 1}</td>
-              <td><strong>${meta.name}</strong> (${sp.code})</td>
+              <td><strong>${meta.name}</strong> (${codeKey})</td>
               <td style="text-align:center;">${meta.unit}</td>
-              <td style="text-align:right; font-weight:600;">${fmtMoney(sp.custom_price)}</td>
+              <td style="text-align:right; font-weight:600;">${fmtMoney(sp.unit_price)}</td>
               <td style="text-align:center;">${fmtDate(sp.effective_from)}</td>
             </tr>
           `;
@@ -2296,6 +2552,8 @@ router.get('/:id/template', authenticateToken, requireRole(['OWNER', 'MANAGER'])
   } catch (err) {
     console.error('[Contract Template Error]:', err);
     res.status(500).send('<h1>500 Lỗi máy chủ khi tạo mẫu in hợp đồng</h1>');
+  } finally {
+    await release();
   }
 });
 

@@ -41,26 +41,28 @@ export default function DashboardPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // Phân quyền Dashboard theo yêu cầu:
-  // - MANAGER: R (tòa của mình quản lý), CRU (tạo tòa, tạo hợp đồng)
-  // - OWNER: R (toàn bộ tòa thuộc sở hữu - Read-only, không được tạo)
+  // Phân quyền Dashboard theo PRD v2.0 Mục 6.2:
+  // - SYS_ADMIN: R toàn bộ, C tòa nhà
+  // - MANAGER: R (tòa được phân công), C hợp đồng
+  // - OWNER: R (các tòa thuộc sở hữu)
   // - RESIDENT: Chặn truy cập
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
+        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
       />
     );
   }
 
+  const isSysAdmin = currentRole === 'SYS_ADMIN';
   const isOwner = currentRole === 'OWNER';
   const isManager = currentRole === 'MANAGER';
 
   const canViewContracts = true;
   const canViewFinancials = true;
-  const canCreateBuilding = isManager; // Manager CRU, Owner R
-  const canCreateContract = isManager; // Manager CRU, Owner R
+  const canCreateBuilding = isSysAdmin; // PRD 6.2: Chỉ SYS_ADMIN tạo mới tòa nhà
+  const canCreateContract = isManager;  // PRD 6.2: Chỉ MANAGER tạo mới hợp đồng
 
   // Raw data from database
   const [buildings, setBuildings] = useState([]);
@@ -318,13 +320,19 @@ export default function DashboardPage() {
               )}
             </div>
             <h2 className="text-xl sm:text-2xl font-bold tracking-tight">
-              {isManager ? 'Tổng quan Vận hành Tòa nhà (Quản lý)' : 'Tổng quan Bất động sản (Chủ sở hữu)'}
+              {isSysAdmin
+                ? 'Tổng quan Hệ thống (Quản trị viên)'
+                : isManager
+                  ? 'Tổng quan Vận hành Tòa nhà (Quản lý)'
+                  : 'Tổng quan Bất động sản (Chủ sở hữu)'}
             </h2>
             <p className="text-xs sm:text-sm text-slate-300 mt-1">
               {selectedBuildingId === 'ALL'
-                ? (isManager
-                    ? `Toàn bộ ${buildings.length} tòa nhà do bạn quản lý`
-                    : `Toàn bộ ${buildings.length} tòa nhà thuộc sở hữu trong tổ chức`)
+                ? (isSysAdmin
+                    ? `Toàn bộ ${buildings.length} tòa nhà trong tổ chức`
+                    : isManager
+                      ? `Toàn bộ ${buildings.length} tòa nhà do bạn quản lý`
+                      : `Toàn bộ ${buildings.length} tòa nhà thuộc sở hữu`)
                 : `Thống kê chi tiết riêng cho ${selectedBuildingObj?.name || 'tòa nhà được chọn'}`}
             </p>
           </div>

@@ -3,6 +3,11 @@ import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
+import {
+  getUserRoleCodes,
+  getOwnerBuildingIds,
+  getManagerBuildingIds,
+} from '../services/ownerScope.js';
 
 const router = express.Router();
 
@@ -10,7 +15,7 @@ const router = express.Router();
  * GET /api/v1/tenants/check-dup
  * Kiểm tra trùng SĐT hoặc CCCD (FR-021)
  */
-router.get('/check-dup', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { phone, id_number } = req.query;
   const orgId = req.user.org_id;
 
@@ -47,12 +52,13 @@ router.get('/check-dup', authenticateToken, requireRole(['OWNER', 'MANAGER']), a
 
 /**
  * GET /api/v1/tenants
- * Quyền: OWNER (R), MANAGER (CRU)
+ * Quyền theo PRD 6.2: SYS_ADMIN (CRUD), OWNER (R trên tòa sở hữu), MANAGER (CRU trên tòa quản lý)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const userRoles = getUserRoleCodes(req);
+    const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
 
@@ -64,32 +70,65 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req
     `;
     const params = [orgId];
 
-    if (isManager && !isOwner) {
-      params.push(req.user.sub);
+    if (isSysAdmin) {
+      // SYS_ADMIN: Toàn bộ cư dân trong tổ chức
+    } else if (isOwner) {
+      const ownedBuildingIds = await getOwnerBuildingIds(req.user.sub, orgId);
+      if (ownedBuildingIds.length === 0) {
+        return res.json({ data: [] });
+      }
+      params.push(ownedBuildingIds);
       sql += ` AND (
         t.id IN (
           SELECT c.primary_tenant_id FROM contract c
-          WHERE c.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
+          WHERE c.building_id = ANY($${params.length}::uuid[])
         )
         OR t.id IN (
           SELECT co.tenant_id FROM contract_occupant co
           JOIN contract c ON c.id = co.contract_id
-          WHERE c.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
+          WHERE c.building_id = ANY($${params.length}::uuid[])
         )
         OR t.id IN (
           SELECT t2.id FROM tenant t2
           JOIN person p2 ON p2.id = t2.person_id
           JOIN reservation r ON r.phone = p2.phone
-          WHERE r.building_id IN (SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL)
+          WHERE r.building_id = ANY($${params.length}::uuid[])
         )
       )`;
-
+    } else if (isManager) {
+      const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
+      if (mgrBuildingIds.length === 0) {
+        return res.json({ data: [] });
+      }
+      params.push(mgrBuildingIds);
+      const idx = params.length;
+      sql += ` AND (
+        t.id IN (
+          SELECT c.primary_tenant_id FROM contract c
+          WHERE c.building_id = ANY($${idx}::uuid[])
+        )
+        OR t.id IN (
+          SELECT co.tenant_id FROM contract_occupant co
+          JOIN contract c ON c.id = co.contract_id
+          WHERE c.building_id = ANY($${idx}::uuid[])
+        )
+        OR t.id IN (
+          SELECT t2.id FROM tenant t2
+          JOIN person p2 ON p2.id = t2.person_id
+          JOIN reservation r ON r.phone = p2.phone
+          WHERE r.building_id = ANY($${idx}::uuid[])
+        )
+        OR (
+          -- Hồ sơ mới tạo chưa có hợp đồng ở bất kỳ tòa nào (để BQL chọn khi lập HĐ mới)
+          NOT EXISTS (SELECT 1 FROM contract c_any WHERE c_any.primary_tenant_id = t.id)
+          AND NOT EXISTS (SELECT 1 FROM contract_occupant co_any WHERE co_any.tenant_id = t.id)
+        )
+      )`;
     }
 
     sql += ` ORDER BY t.created_at DESC`;
 
     const result = await pool.query(sql, params);
-
     res.json({ data: result.rows });
   } catch (err) {
     console.error('[Tenants Error]:', err);
@@ -99,9 +138,9 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req
 
 /**
  * POST /api/v1/tenants
- * Quyền: Chỉ MANAGER có quyền tạo hồ sơ cư dân (CRU)
+ * Quyền theo PRD 6.2: SYS_ADMIN hoặc MANAGER (CRU). OWNER chỉ có R.
  */
-router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { full_name, phone, email, dob, id_number, type } = req.body;
   const orgId = req.user.org_id;
 
@@ -113,7 +152,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   try {
     await client.query('BEGIN');
 
-    // 1. Kiểm tra trùng số CCCD/CMND trước khi tạo (FR-021 check)
     if (id_number && id_number.trim()) {
       const cleanId = id_number.trim();
       const dupIdRes = await client.query(
@@ -130,7 +168,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       }
     }
 
-    // 2. Tạo hoặc lấy person
     let personRes = await client.query('SELECT * FROM person WHERE org_id = $1 AND phone = $2', [orgId, phone]);
     let personId;
     if (personRes.rows.length === 0) {
@@ -145,7 +182,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       personId = personRes.rows[0].id;
     }
 
-    // 3. Tạo tenant — thiếu CCCD/hộ chiếu thì PENDING, đủ giấy tờ mới APPROVED (A6, FR-021)
     const tenantStatus = id_number ? 'APPROVED' : 'PENDING';
     const tenantRes = await client.query(
       `INSERT INTO tenant (person_id, org_id, type, status)
@@ -154,7 +190,6 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       [personId, orgId, type || 'primary', tenantStatus]
     );
 
-    // Audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'CREATE', 'tenant', $2, $3)`,
@@ -186,10 +221,9 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 /**
  * POST /api/v1/tenants/merge
  * Gộp 2 hồ sơ cư dân bị trùng lặp (FR-021 / P0)
- * Actor: OWNER, MANAGER
- * Body: { source_tenant_id, target_tenant_id, reason }
+ * Quyền theo PRD 6.2: SYS_ADMIN hoặc MANAGER (CRU). OWNER chỉ có quyền R.
  */
-router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/merge', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { source_tenant_id, target_tenant_id, reason } = req.body;
   const orgId = req.user.org_id;
 
@@ -211,7 +245,6 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
   try {
     await client.query('BEGIN');
 
-    // 1. Kiểm tra tồn tại 2 hồ sơ tenant
     const sourceRes = await client.query(
       `SELECT t.*, p.full_name, p.phone, p.id_number, p.id as person_id 
        FROM tenant t JOIN person p ON p.id = t.person_id 
@@ -236,13 +269,11 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
     const sourceTenant = sourceRes.rows[0];
     const targetTenant = targetRes.rows[0];
 
-    // 2. Chuyển đổi các hợp đồng mà source làm primary_tenant sang target
     await client.query(
       `UPDATE contract SET primary_tenant_id = $1, updated_at = NOW() WHERE primary_tenant_id = $2`,
       [target_tenant_id, source_tenant_id]
     );
 
-    // 3. Chuyển đổi occupants từ source sang target (tránh trùng khóa unique)
     await client.query(
       `UPDATE contract_occupant SET tenant_id = $1 WHERE tenant_id = $2
        AND NOT EXISTS (
@@ -252,13 +283,6 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
     );
     await client.query(`DELETE FROM contract_occupant WHERE tenant_id = $1`, [source_tenant_id]);
 
-    // 4. Chuyển đổi contract_request từ source sang target
-    await client.query(
-      `UPDATE contract_request SET tenant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
-      [target_tenant_id, source_tenant_id]
-    );
-
-    // 5. Nếu target thiếu CCCD mà source có -> Cập nhật CCCD từ source sang target person
     if (!targetTenant.id_number && sourceTenant.id_number) {
       await client.query(
         `UPDATE person SET id_number = $1, updated_at = NOW() WHERE id = $2`,
@@ -270,7 +294,6 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
       );
     }
 
-    // 6. Đổi trạng thái source_tenant thành MERGED và đổi tên person để tránh nhầm lẫn
     await client.query(
       `UPDATE tenant SET status = 'MERGED', updated_at = NOW() WHERE id = $1`,
       [source_tenant_id]
@@ -280,7 +303,6 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
       [sourceTenant.person_id]
     );
 
-    // 7. Ghi audit_log chi tiết (FR-021)
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'MERGE_TENANT', 'tenant', $2, $3, $4)`,
@@ -311,9 +333,8 @@ router.post('/merge', authenticateToken, requireRole(['OWNER', 'MANAGER']), asyn
 
 /**
  * PATCH /api/v1/tenants/:id — sửa hồ sơ + duyệt cư dân (A8, FR-021)
- * body: { full_name?, phone?, email?, dob?, id_number?, action?: 'approve' | 'reject' }
  */
-router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { full_name, phone, email, dob, id_number, action } = req.body;
   const orgId = req.user.org_id;
@@ -334,7 +355,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     }
     const tenant = tenantRes.rows[0];
 
-    // Duyệt / từ chối
     if (action === 'approve' || action === 'reject') {
       if (tenant.status !== 'PENDING') {
         await client.query('ROLLBACK');
@@ -356,7 +376,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         `UPDATE tenant SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
         [nextStatus, id]
       );
-      // Duyệt kèm bổ sung giấy tờ ngay trong request
       if (id_number) {
         await client.query(`UPDATE person SET id_number = $1 WHERE id = $2`, [finalIdNumber, tenant.person_id]);
       }
@@ -369,7 +388,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       return res.json({ message: nextStatus === 'APPROVED' ? 'Đã duyệt hồ sơ cư dân.' : 'Đã từ chối hồ sơ cư dân.', data: upd.rows[0] });
     }
 
-    // Sửa thông tin (A8) — chọn trường cho phép
     const nextPerson = {
       full_name: full_name ?? tenant.full_name,
       phone: phone ?? tenant.phone,
@@ -382,7 +400,6 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại không được để trống.' });
     }
 
-    // FR-021: SĐT/CCCD mới không được trùng người khác trong tổ chức
     const dup = await client.query(
       `SELECT 1 FROM person
        WHERE org_id = $1 AND id <> $2 AND (
@@ -398,7 +415,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       });
     }
 
-    const updPerson = await client.query(
+    await client.query(
       `UPDATE person SET full_name = $1, phone = $2, email = $3, dob = $4, id_number = $5
        WHERE id = $6 RETURNING id`,
       [nextPerson.full_name, nextPerson.phone, nextPerson.email, nextPerson.dob, nextPerson.id_number, tenant.person_id]
@@ -423,10 +440,8 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
 /**
  * POST /api/v1/tenants/:id/id-images — upload ảnh CCCD (B7, L1)
- * body: { image_base64, side: 'front'|'back' } — lưu disk + attachment, KHÔNG serve tĩnh,
- * xem ảnh chỉ qua GET /api/v1/attachments/:id/view (auth + audit READ).
  */
-router.post('/:id/id-images', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/id-images', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { image_base64, side } = req.body;
 
@@ -458,7 +473,6 @@ router.post('/:id/id-images', authenticateToken, requireRole(['MANAGER']), async
       return res.status(400).json(saved.error);
     }
 
-    // Đánh dấu cạnh ảnh trong person.id_images: [{attachmentId, side}] dạng text mảng JSON
     const marker = JSON.stringify({ attachmentId: saved.attachment.id, side });
     await pool.query(
       `UPDATE person SET id_images = array_append(COALESCE(id_images, '{}'), $1) WHERE id = $2`,
@@ -479,9 +493,9 @@ router.post('/:id/id-images', authenticateToken, requireRole(['MANAGER']), async
 });
 
 /**
- * GET /api/v1/tenants/:id/id-images — danh sách ảnh (trả attachment_id để UI render qua /attachments/:id/view)
+ * GET /api/v1/tenants/:id/id-images — danh sách ảnh CCCD
  */
-router.get('/:id/id-images', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.get('/:id/id-images', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   try {
     const tenantRes = await pool.query(
@@ -497,7 +511,6 @@ router.get('/:id/id-images', authenticateToken, requireRole(['OWNER', 'MANAGER']
        WHERE owner_entity = 'person' AND owner_id = $1 ORDER BY created_at ASC`,
       [tenantRes.rows[0].person_id]
     );
-    // Lấy side từ marker trong person.id_images
     const markers = (tenantRes.rows[0].id_images || [])
       .map((m) => { try { return JSON.parse(m); } catch { return null; } })
       .filter(Boolean);

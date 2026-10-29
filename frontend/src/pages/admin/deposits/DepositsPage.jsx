@@ -14,14 +14,15 @@ export default function DepositsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // Phân quyền Cọc: OWNER (R+A hoàn cọc), MANAGER (CRU), RESIDENT (chặn truy cập)
-  const canManageDeposit = ['MANAGER', 'OWNER'].includes(currentRole);
+  // Phân quyền Cọc theo PRD v2.0 Mục 6.2:
+  // SYS_ADMIN: R, OWNER: R + A (hoàn cọc), MANAGER: CRU, RESIDENT: chặn truy cập
+  const canManageDeposit = currentRole === 'MANAGER';
 
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
+        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
       />
     );
   }
@@ -310,6 +311,10 @@ export default function DepositsPage() {
             >
               💵 Thu bổ sung cọc
             </button>
+          )}
+
+          {!row.settlement && !canManageDeposit && (
+            <span className="text-xs text-slate-400 italic">Chỉ xem</span>
           )}
         </div>
       ),

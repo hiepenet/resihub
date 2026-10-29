@@ -46,22 +46,25 @@ export default function BuildingsPage() {
   const { user, getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // Phân quyền theo yêu cầu:
-  // Tòa/khu/tầng/căn hộ: Manager: CRU (tòa của mình quản lý), Owner: R, RESIDENT (căn của mình)
+  // Phân quyền theo PRD v2.0 Mục 6.2:
+  // - SYS_ADMIN: CRUD toàn bộ tòa/khu/tầng/căn hộ
+  // - MANAGER: RU tòa được phân công, CRU khu/tầng/căn hộ thuộc tòa đó
+  // - OWNER: R các tòa thuộc sở hữu (Chỉ xem)
+  // - RESIDENT: chặn truy cập trang quản trị tòa nhà
+  const isSysAdmin = currentRole === 'SYS_ADMIN';
   const isManager = currentRole === 'MANAGER';
   const isOwner = currentRole === 'OWNER';
 
-  const canCreateBuilding = isManager; // Manager CRU, Owner R
-  const canManageUnits = isManager;    // Manager CRU, Owner R
-  const canChangeBuildingStatus = isManager;
-  const isSysAdmin = false; // SYS_ADMIN đã xóa khỏi hệ thống
+  const canCreateBuilding = isSysAdmin;               // Chỉ SYS_ADMIN tạo mới tòa nhà
+  const canManageUnits = isSysAdmin || isManager;     // SYS_ADMIN CRUD, MANAGER CRU, OWNER R
+  const canChangeBuildingStatus = isSysAdmin || isManager;
 
   // Nếu người dùng là RESIDENT -> chặn hiển thị trang quản trị tòa nhà chung
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
+        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
       />
     );
   }
@@ -104,10 +107,11 @@ export default function BuildingsPage() {
   const [owners, setOwners] = useState([]);
 
   useEffect(() => {
+    if (!isSysAdmin) return;
     api.get('/api/v1/buildings/owners')
       .then((res) => setOwners(res.data?.data || []))
       .catch(() => {});
-  }, []);
+  }, [isSysAdmin]);
 
   const openEditBuilding = async (row) => {
     const res = await api.get(`/api/v1/buildings/${row.id}`).catch(() => null);
@@ -281,11 +285,11 @@ export default function BuildingsPage() {
       const lease_terms = { notes: newBuilding.lease_notes, payment_account };
 
       if (editingBuilding) {
-        // B3: sửa tòa — mã KHÔNG được sửa
+        // B3: sửa tòa — mã KHÔNG được sửa; chỉ SYS_ADMIN mới được gán/đổi owner_id
         await api.patch(`/api/v1/buildings/${editingBuilding.id}`, {
           name: newBuilding.name.trim(),
           address: newBuilding.address.trim(),
-          owner_id: newBuilding.owner_id === '' ? null : (newBuilding.owner_id || undefined),
+          ...(isSysAdmin ? { owner_id: newBuilding.owner_id === '' ? null : (newBuilding.owner_id || undefined) } : {}),
           payment_account,
           lease_terms: { notes: newBuilding.lease_notes },
         });
@@ -568,7 +572,21 @@ export default function BuildingsPage() {
             <Button
               variant="primary"
               size="md"
-              onClick={() => setIsBuildingModalOpen(true)}
+              onClick={() => {
+                setEditingBuilding(null);
+                setNewBuilding({
+                  name: '',
+                  code: '',
+                  address: '',
+                  bank: '',
+                  account_no: '',
+                  account_name: '',
+                  account_type: 'personal',
+                  lease_notes: '',
+                  owner_id: '',
+                });
+                setIsBuildingModalOpen(true);
+              }}
               leftIcon={Plus}
             >
               Thêm tòa mới
@@ -638,15 +656,17 @@ export default function BuildingsPage() {
               </div>
             </div>
 
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => setIsFloorModalOpen(true)}
-              leftIcon={Plus}
-              className="text-xs shadow-sm flex-shrink-0"
-            >
-              Thêm tầng ngay
-            </Button>
+            {canManageUnits && (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => setIsFloorModalOpen(true)}
+                leftIcon={Plus}
+                className="text-xs shadow-sm flex-shrink-0"
+              >
+                Thêm tầng ngay
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -915,7 +935,7 @@ export default function BuildingsPage() {
               </div>
 
               <div className="pt-6 border-t border-slate-100 flex flex-col gap-2.5">
-                {selectedApartment.status === 'AVAILABLE' && (
+                {selectedApartment.status === 'AVAILABLE' && isManager && (
                   <Button
                     variant="primary"
                     className="w-full bg-amber-500 hover:bg-amber-600 text-white flex items-center justify-center gap-1.5"
@@ -935,30 +955,34 @@ export default function BuildingsPage() {
                       </p>
                       <p className="text-[11px] mt-0.5">Khách đã đặt cọc giữ chỗ. Xử lý khi khách ký HĐ hoặc hủy:</p>
                     </div>
-                    <Button
-                      variant="primary"
-                      className="w-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-1.5 shadow-sm"
-                      onClick={() => handleConvertReservationToContract(selectedApartment)}
-                    >
-                      <FileText className="w-4 h-4" />
-                      <span>Ký hợp đồng từ giữ chỗ này (NV-06)</span>
-                    </Button>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        className="flex-1 text-xs border-rose-200 text-rose-600 hover:bg-rose-50"
-                        onClick={() => handleForfeitReservation(selectedApartment.id)}
-                      >
-                        Hủy mất cọc
-                      </Button>
-                      <Button
-                        variant="outline"
-                        className="flex-1 text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
-                        onClick={() => handleRefundReservation(selectedApartment.id)}
-                      >
-                        Hoàn tiền cọc
-                      </Button>
-                    </div>
+                    {isManager && (
+                      <>
+                        <Button
+                          variant="primary"
+                          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center gap-1.5 shadow-sm"
+                          onClick={() => handleConvertReservationToContract(selectedApartment)}
+                        >
+                          <FileText className="w-4 h-4" />
+                          <span>Ký hợp đồng từ giữ chỗ này (NV-06)</span>
+                        </Button>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            className="flex-1 text-xs border-rose-200 text-rose-600 hover:bg-rose-50"
+                            onClick={() => handleForfeitReservation(selectedApartment.id)}
+                          >
+                            Hủy mất cọc
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="flex-1 text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
+                            onClick={() => handleRefundReservation(selectedApartment.id)}
+                          >
+                            Hoàn tiền cọc
+                          </Button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -968,24 +992,28 @@ export default function BuildingsPage() {
                       <p className="font-semibold">Căn hộ đang bảo trì</p>
                       <p className="text-[11px] mt-0.5">Sau chấm dứt hợp đồng, cần bàn giao & nghiệm thu trước khi kinh doanh lại.</p>
                     </div>
-                    <Button
-                      variant="primary"
-                      className="w-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5"
-                      onClick={handleHandover}
-                    >
-                      <span>Xác nhận bàn giao & nghiệm thu phòng</span>
-                    </Button>
-                    <Button
-                      variant="outline"
-                      className="w-full text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
-                      onClick={() => handleSetApartmentStatus('INACTIVE', 'Chuyển căn hộ sang Không kinh doanh (INACTIVE)?')}
-                    >
-                      Chuyển sang Không kinh doanh
-                    </Button>
+                    {canManageUnits && (
+                      <>
+                        <Button
+                          variant="primary"
+                          className="w-full bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5"
+                          onClick={handleHandover}
+                        >
+                          <span>Xác nhận bàn giao & nghiệm thu phòng</span>
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="w-full text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
+                          onClick={() => handleSetApartmentStatus('INACTIVE', 'Chuyển căn hộ sang Không kinh doanh (INACTIVE)?')}
+                        >
+                          Chuyển sang Không kinh doanh
+                        </Button>
+                      </>
+                    )}
                   </div>
                 )}
 
-                {selectedApartment.status === 'INACTIVE' && (
+                {selectedApartment.status === 'INACTIVE' && canManageUnits && (
                   <Button
                     variant="primary"
                     className="w-full bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -1064,18 +1092,20 @@ export default function BuildingsPage() {
                 />
               </FormField>
 
-              <FormField label="Chủ sở hữu (tuỳ chọn)" hint="Danh sách owner thuộc tổ chức">
-                <select
-                  value={newBuilding.owner_id || ''}
-                  onChange={(e) => setNewBuilding({ ...newBuilding, owner_id: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                >
-                  <option value="">— Không gán —</option>
-                  {owners.map((o) => (
-                    <option key={o.id} value={o.id}>{o.full_name}</option>
-                  ))}
-                </select>
-              </FormField>
+              {isSysAdmin && (
+                <FormField label="Chủ sở hữu (tuỳ chọn)" hint="Danh sách owner thuộc tổ chức">
+                  <select
+                    value={newBuilding.owner_id || ''}
+                    onChange={(e) => setNewBuilding({ ...newBuilding, owner_id: e.target.value })}
+                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  >
+                    <option value="">— Không gán —</option>
+                    {owners.map((o) => (
+                      <option key={o.id} value={o.id}>{o.full_name}</option>
+                    ))}
+                  </select>
+                </FormField>
+              )}
 
               <FormField label="Địa chỉ">
                 <Input

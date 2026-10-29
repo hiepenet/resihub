@@ -1,19 +1,28 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { validateDeduction, computeRefund } from '../services/depositSettlement.js';
+import {
+  getUserRoleCodes,
+  getOwnerBuildingIds,
+  getManagerBuildingIds,
+  ownerBuildingFilter,
+  managerBuildingFilter,
+  logAccessDenied,
+} from '../services/ownerScope.js';
 
 const router = express.Router();
 
 /**
  * GET /api/v1/deposits
- * Quyền: OWNER (R+A), MANAGER (CRU), RESIDENT (R của mình)
+ * Quyền theo PRD 6.2: SYS_ADMIN (R), OWNER (R+A hoàn cọc), MANAGER (CRU), RESIDENT (R của mình)
  */
-router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const userRoles = (req.user.roles || []).map((r) => (typeof r === 'string' ? r : r.code));
+    const userRoles = getUserRoleCodes(req);
+    const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
     const isResident = userRoles.includes('RESIDENT');
@@ -27,6 +36,7 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
         c.building_id,
         a.code as apartment_code, 
         b.name as building_name, 
+        b.code as building_code,
         p.full_name as tenant_name
        FROM deposit d
        JOIN contract c ON c.id = d.contract_id
@@ -37,12 +47,15 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
        WHERE b.org_id = $1`;
     const params = [orgId];
 
-    if (isManager && !isOwner) {
-      params.push(req.user.sub);
-      sql += ` AND c.building_id IN (
-        SELECT building_id FROM user_role WHERE user_id = $${params.length} AND building_id IS NOT NULL
-      )`;
-    } else if (isResident && !isOwner && !isManager) {
+    if (isSysAdmin) {
+      // SYS_ADMIN: Xem toàn bộ sổ cọc trong org
+    } else if (isOwner) {
+      const { sql: ownerSql } = await ownerBuildingFilter('c.building_id', req.user.sub, orgId, params);
+      sql += ownerSql;
+    } else if (isManager) {
+      const { sql: mgrSql } = await managerBuildingFilter('c.building_id', req.user.sub, orgId, params);
+      sql += mgrSql;
+    } else if (isResident) {
       params.push(req.user.person_id);
       sql += ` AND p.id = $${params.length}`;
     }
@@ -59,10 +72,9 @@ router.get('/', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT'])
 
 /**
  * POST /api/v1/deposits/:id/transactions
- * Thêm giao dịch cọc (chỉ cho phép collect hoặc transfer)
- * deduct/refund chỉ được thực hiện qua luồng /settlement có phê duyệt (FR-024)
+ * Quyền theo PRD 6.2: Chỉ MANAGER (CRU) của tòa chứa hợp đồng được thu bổ sung cọc. OWNER là R + A(hoàn cọc).
  */
-router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/transactions', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { type, amount, description, method } = req.body;
 
@@ -97,6 +109,22 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
 
   const { client, release } = await getUserClient(req);
   try {
+    const depCheck = await adminPool.query(
+      `SELECT d.id, c.building_id
+       FROM deposit d JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (depCheck.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (!mgrIds.includes(depCheck.rows[0].building_id)) {
+      await logAccessDenied(req, 'deposit', id, 'MANAGER attempted deposit transaction on unassigned building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc của tòa nhà này.' });
+    }
+
     await client.query('BEGIN');
 
     const depositRes = await client.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
@@ -132,7 +160,6 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
       [newAmount.toString(), newStatus, id]
     );
 
-    // Audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'CREATE', 'deposit_transaction', $2, $3)`,
@@ -152,12 +179,45 @@ router.post('/:id/transactions', authenticateToken, requireRole(['OWNER', 'MANAG
 
 /**
  * GET /api/v1/deposits/:id/settlement
- * # ponytail: outstanding_debt là input kế toán, thay bằng query invoice khi M09 dựng
  */
-router.get('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
+router.get('/:id/settlement', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const { client, release } = await getUserClient(req);
   try {
+    const existRes = await adminPool.query(
+      `SELECT d.id, c.building_id, t.person_id
+       FROM deposit d
+       JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (existRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const meta = existRes.rows[0];
+    const roleCodes = getUserRoleCodes(req);
+
+    if (!roleCodes.includes('SYS_ADMIN')) {
+      if (roleCodes.includes('OWNER')) {
+        const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+        if (!ownedIds.includes(meta.building_id)) {
+          await logAccessDenied(req, 'deposit', id, 'OWNER accessed settlement of unowned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của sổ cọc này.' });
+        }
+      } else if (roleCodes.includes('MANAGER')) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+        if (!mgrIds.includes(meta.building_id)) {
+          await logAccessDenied(req, 'deposit', id, 'MANAGER accessed settlement of unassigned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc này.' });
+        }
+      } else if (roleCodes.includes('RESIDENT') && meta.person_id !== req.user.person_id) {
+        await logAccessDenied(req, 'deposit', id, 'RESIDENT accessed another resident settlement');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem sổ cọc này.' });
+      }
+    }
+
     const q = await client.query(
       `SELECT d.id, d.contract_id, d.amount_held, d.status, d.settlement, d.refund_due_date,
               c.status as contract_status, c.building_id, c.start_date, c.end_date, c.terminated_at,
@@ -200,14 +260,30 @@ router.get('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER'
 
 /**
  * POST /api/v1/deposits/:id/settlement
- * Lập hồ sơ tất toán (MANAGER/OWNER)
+ * Lập hồ sơ tất toán (PRD 6.2 & FR-024: MANAGER lập, OWNER phê duyệt Four-eyes)
  */
-router.post('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/settlement', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { outstanding_debt = 0, items = [], refund_method = 'BANK_TRANSFER', bank_info = {} } = req.body;
 
   const { client, release } = await getUserClient(req);
   try {
+    const depCheck = await adminPool.query(
+      `SELECT d.id, c.building_id
+       FROM deposit d JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (depCheck.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (!mgrIds.includes(depCheck.rows[0].building_id)) {
+      await logAccessDenied(req, 'deposit', id, 'MANAGER attempted settlement submit on unassigned building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền lập tất toán cho tòa nhà này.' });
+    }
+
     await client.query('BEGIN');
 
     const depRes = await client.query(
@@ -225,7 +301,6 @@ router.post('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER
 
     const dep = depRes.rows[0];
 
-    // Guard: deposit status phải ở HELD hoặc SETTLEMENT_DRAFT
     if (!['HELD', 'SETTLEMENT_DRAFT'].includes(dep.status)) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -234,7 +309,6 @@ router.post('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER
       });
     }
 
-    // 🚨 Lỗi 2 Fix: Hợp đồng phải ở TERMINATED hoặc EXPIRED
     if (!['TERMINATED', 'EXPIRED'].includes(dep.contract_status)) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -265,7 +339,6 @@ router.post('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER
       }
     }
 
-    // Tính refund bằng computeRefund (AC-017)
     const { refund, shortfall } = computeRefund({
       depositAmount: dep.amount_held,
       outstandingDebt: debtNum,
@@ -310,12 +383,28 @@ router.post('/:id/settlement', authenticateToken, requireRole(['OWNER', 'MANAGER
 
 /**
  * POST /api/v1/deposits/:id/settlement/approve
- * OWNER phê duyệt hồ sơ tất toán (Four-eyes)
+ * OWNER phê duyệt hồ sơ tất toán trên tòa mình sở hữu (Four-eyes)
  */
 router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER']), async (req, res) => {
   const { id } = req.params;
   const { client, release } = await getUserClient(req);
   try {
+    const depCheck = await adminPool.query(
+      `SELECT d.id, c.building_id
+       FROM deposit d JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (depCheck.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (!ownedIds.includes(depCheck.rows[0].building_id)) {
+      await logAccessDenied(req, 'deposit', id, 'OWNER attempted settlement approve on unowned building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của sổ cọc này.' });
+    }
+
     await client.query('BEGIN');
 
     const depRes = await client.query(
@@ -355,7 +444,6 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
       return res.status(400).json({ code: 'NO_SETTLEMENT_DATA', message: 'Không có dữ liệu tất toán.' });
     }
 
-    // Four-eyes check: AC-017.3
     if (settlement.created_by && settlement.created_by === req.user.sub) {
       await client.query('ROLLBACK');
       return res.status(403).json({
@@ -364,7 +452,6 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
       });
     }
 
-    // Ghi nhận từng khoản khấu trừ vào deposit_transaction
     const items = settlement.items || [];
     for (const item of items) {
       await client.query(
@@ -385,7 +472,6 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
       );
     }
 
-    // Ghi nhận hoàn cọc nếu có refund_amount > 0
     if (settlement.refund_amount > 0) {
       await client.query(
         `INSERT INTO deposit_transaction (
@@ -403,20 +489,17 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
       );
     }
 
-    // 🚨 Lỗi 3 Fix: Đưa dứt điểm số dư cọc về 0 khi tất toán thành công (AC-017.1)
     await client.query(
       `UPDATE deposit SET amount_held = 0, status = 'REFUNDED', updated_at = NOW() WHERE id = $1`,
       [id]
     );
 
-    // Audit log
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
        VALUES ($1, 'SETTLEMENT_APPROVE', 'deposit', $2, $3)`,
       [req.user.sub, id, JSON.stringify(settlement)]
     );
 
-    // Notification cho cư dân
     try {
       const uRes = await client.query(
         `SELECT u.id as user_id 
@@ -427,9 +510,9 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
       );
       if (uRes.rows.length > 0) {
         await client.query(
-          `INSERT INTO notification (user_id, title, content, type, payload)
-           VALUES ($1, 'Hồ sơ tất toán cọc đã được phê duyệt', 'Chủ nhà đã phê duyệt tất toán cọc cho hợp đồng của bạn.', 'SETTLEMENT_APPROVED', $2)`,
-          [uRes.rows[0].user_id, JSON.stringify({ deposit_id: id, settlement })]
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, 'Hồ sơ tất toán cọc đã được phê duyệt', 'Chủ nhà đã phê duyệt tất toán cọc cho hợp đồng của bạn.', 'SETTLEMENT_APPROVED', $3)`,
+          [req.user.org_id, uRes.rows[0].user_id, JSON.stringify({ deposit_id: id, settlement })]
         );
       }
     } catch (nErr) {
@@ -449,7 +532,7 @@ router.post('/:id/settlement/approve', authenticateToken, requireRole(['OWNER'])
 
 /**
  * POST /api/v1/deposits/:id/settlement/reject
- * OWNER từ chối hồ sơ tất toán (chuyển về SETTLEMENT_DRAFT)
+ * OWNER từ chối hồ sơ tất toán trên tòa mình sở hữu
  */
 router.post('/:id/settlement/reject', authenticateToken, requireRole(['OWNER']), async (req, res) => {
   const { id } = req.params;
@@ -461,6 +544,22 @@ router.post('/:id/settlement/reject', authenticateToken, requireRole(['OWNER']),
 
   const { client, release } = await getUserClient(req);
   try {
+    const depCheck = await adminPool.query(
+      `SELECT d.id, c.building_id
+       FROM deposit d JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (depCheck.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (!ownedIds.includes(depCheck.rows[0].building_id)) {
+      await logAccessDenied(req, 'deposit', id, 'OWNER attempted settlement reject on unowned building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của sổ cọc này.' });
+    }
+
     await client.query('BEGIN');
 
     const depRes = await client.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
@@ -488,9 +587,9 @@ router.post('/:id/settlement/reject', authenticateToken, requireRole(['OWNER']),
     );
 
     await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, note, after)
-       VALUES ($1, 'SETTLEMENT_REJECT', 'deposit', $2, $3, $4)`,
-      [req.user.sub, id, reason.trim(), JSON.stringify(updatedSettlement)]
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'SETTLEMENT_REJECT', 'deposit', $2, $3)`,
+      [req.user.sub, id, JSON.stringify(updatedSettlement)]
     );
 
     await client.query('COMMIT');
@@ -506,9 +605,9 @@ router.post('/:id/settlement/reject', authenticateToken, requireRole(['OWNER']),
 
 /**
  * POST /api/v1/deposits/:id/dispute
- * Chuyển hồ sơ sang tranh chấp (DISPUTED)
+ * Chuyển hồ sơ sang tranh chấp (DISPUTED) — MANAGER của tòa nhà
  */
-router.post('/:id/dispute', authenticateToken, requireRole(['OWNER', 'MANAGER']), async (req, res) => {
+router.post('/:id/dispute', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
 
@@ -518,6 +617,22 @@ router.post('/:id/dispute', authenticateToken, requireRole(['OWNER', 'MANAGER'])
 
   const { client, release } = await getUserClient(req);
   try {
+    const depCheck = await adminPool.query(
+      `SELECT d.id, c.building_id
+       FROM deposit d JOIN contract c ON c.id = d.contract_id
+       JOIN building b ON b.id = c.building_id
+       WHERE d.id = $1 AND b.org_id = $2`,
+      [id, req.user.org_id]
+    );
+    if (depCheck.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+    }
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (!mgrIds.includes(depCheck.rows[0].building_id)) {
+      await logAccessDenied(req, 'deposit', id, 'MANAGER attempted dispute on unassigned building');
+      return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc của tòa nhà này.' });
+    }
+
     await client.query('BEGIN');
 
     const depRes = await client.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
@@ -545,9 +660,9 @@ router.post('/:id/dispute', authenticateToken, requireRole(['OWNER', 'MANAGER'])
     );
 
     await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, note, after)
-       VALUES ($1, 'SETTLEMENT_DISPUTE', 'deposit', $2, $3, $4)`,
-      [req.user.sub, id, reason.trim(), JSON.stringify(updatedSettlement)]
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'SETTLEMENT_DISPUTE', 'deposit', $2, $3)`,
+      [req.user.sub, id, JSON.stringify(updatedSettlement)]
     );
 
     await client.query('COMMIT');

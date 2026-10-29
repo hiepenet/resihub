@@ -13,14 +13,15 @@ export default function TenantsPage() {
   const { getCurrentRole } = useAuthStore();
   const currentRole = getCurrentRole();
 
-  // Phân quyền Cư dân: MANAGER (CRU - được tạo), OWNER (R - chỉ xem), RESIDENT (chặn truy cập)
-  const canCreateTenant = currentRole === 'MANAGER';
+  // Phân quyền Cư dân theo PRD v2.0 Mục 6.2:
+  // SYS_ADMIN: CRUD, MANAGER: CRU (tòa được phân công), OWNER: R (tòa sở hữu), RESIDENT: chặn
+  const canCreateTenant = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
 
   if (currentRole === 'RESIDENT') {
     return (
       <AccessDenied
         currentRole={currentRole}
-        allowedRoles={['OWNER', 'MANAGER']}
+        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
       />
     );
   }

@@ -19,6 +19,7 @@ export const useAuthStore = create((set, get) => ({
     localStorage.setItem('refreshToken', refreshToken);
     localStorage.setItem('user', JSON.stringify(user));
     localStorage.removeItem('activeRole');
+    localStorage.removeItem('resihub_selected_building_id');
 
     set({
       accessToken,

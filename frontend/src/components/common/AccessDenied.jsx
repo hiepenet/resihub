@@ -5,6 +5,7 @@ import { useAuthStore } from '../../stores/authStore';
 import Button from '../ui/Button';
 
 const ROLE_NAMES = {
+  SYS_ADMIN: 'Quản trị hệ thống (SYS_ADMIN)',
   OWNER: 'Chủ đầu tư / Chủ nhà (OWNER)',
   MANAGER: 'Quản lý tòa nhà (MANAGER)',
   RESIDENT: 'Cư dân (RESIDENT)',

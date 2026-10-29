@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 
@@ -120,7 +120,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
     const pendingApplication = pendingAppRes.rows[0] || null;
 
     // 5. Danh sách căn hộ trống khả dụng (AVAILABLE) để khách khám phá
-    const availableAptsRes = await pool.query(
+    const availableAptsRes = await adminPool.query(
       `SELECT 
          a.id, a.code, a.area_m2, a.type, a.bedrooms, a.base_rent, a.amenities,
          b.id as building_id, b.name as building_name, b.address as building_address,
@@ -128,16 +128,17 @@ router.get('/overview', authenticateToken, async (req, res) => {
        FROM apartment a
        JOIN building b ON b.id = a.building_id
        LEFT JOIN floor f ON f.id = a.floor_id
-       WHERE a.status = 'AVAILABLE' AND b.status = 'ACTIVE'
+       WHERE a.status = 'AVAILABLE' AND b.status = 'ACTIVE' AND b.org_id = $1
        ORDER BY b.name ASC, a.code ASC
-       LIMIT 8`
+       LIMIT 8`,
+      [orgId]
     );
 
     // 6. Thông tin liên hệ BQL tòa nhà
     const targetBuildingId = contract?.building_id || reservation?.building_id || null;
     let managerContactRes;
     if (targetBuildingId) {
-      managerContactRes = await pool.query(
+      managerContactRes = await adminPool.query(
         `SELECT p.full_name, p.phone, p.email, b.name as building_name
          FROM user_role ur
          JOIN role r ON r.id = ur.role_id
@@ -150,15 +151,16 @@ router.get('/overview', authenticateToken, async (req, res) => {
       );
     }
     if (!managerContactRes || managerContactRes.rows.length === 0) {
-      managerContactRes = await pool.query(
+      managerContactRes = await adminPool.query(
         `SELECT p.full_name, p.phone, p.email, b.name as building_name
          FROM user_role ur
          JOIN role r ON r.id = ur.role_id
          JOIN app_user au ON au.id = ur.user_id
          JOIN person p ON p.id = au.person_id
          LEFT JOIN building b ON b.id = ur.building_id
-         WHERE r.code = 'MANAGER'
-         LIMIT 1`
+         WHERE r.code = 'MANAGER' AND p.org_id = $1
+         LIMIT 1`,
+        [orgId]
       );
     }
     const managerContact = managerContactRes.rows[0] || {
@@ -340,10 +342,11 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
 
     // Tìm hợp đồng ACTIVE của cư dân
     const contractRes = await pool.query(
-      `SELECT c.id, c.building_id, c.org_id, c.end_date, a.code as apartment_code
+      `SELECT c.id, c.building_id, b.org_id, c.end_date, a.code as apartment_code
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = c.building_id
        WHERE t.person_id = $1 AND c.status = 'ACTIVE'
        ORDER BY c.created_at DESC
        LIMIT 1`,
@@ -429,7 +432,7 @@ router.get('/deposit-transactions', authenticateToken, async (req, res) => {
 
     if (contractInfo.deposit_id) {
       const txRes = await pool.query(
-        `SELECT id, type, amount, category, method, note, status, created_at
+        `SELECT id, type, amount, category, method, description AS note, description, status, created_at
          FROM deposit_transaction
          WHERE deposit_id = $1 AND status = 'APPROVED'
          ORDER BY created_at ASC`,

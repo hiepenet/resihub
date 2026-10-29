@@ -89,7 +89,7 @@ export default function AppRouter() {
         <Route
           path="dashboard"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
+            <RoleRoute allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}>
               <DashboardPage />
             </RoleRoute>
           }
@@ -98,7 +98,7 @@ export default function AppRouter() {
         <Route
           path="buildings"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
+            <RoleRoute allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}>
               <BuildingsPage />
             </RoleRoute>
           }
@@ -107,7 +107,7 @@ export default function AppRouter() {
         <Route
           path="tenants"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
+            <RoleRoute allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}>
               <TenantsPage />
             </RoleRoute>
           }
@@ -116,7 +116,7 @@ export default function AppRouter() {
         <Route
           path="contracts"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
+            <RoleRoute allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}>
               <ContractsPage />
             </RoleRoute>
           }
@@ -125,7 +125,7 @@ export default function AppRouter() {
         <Route
           path="deposits"
           element={
-            <RoleRoute allowedRoles={['OWNER', 'MANAGER']}>
+            <RoleRoute allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}>
               <DepositsPage />
             </RoleRoute>
           }

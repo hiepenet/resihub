@@ -1,5 +1,7 @@
+import { logAccessDenied } from '../services/ownerScope.js';
+
 export function requireRole(allowedRoles) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (!req.user || !req.user.roles) {
       return res.status(401).json({
         code: 'UNAUTHORIZED',
@@ -11,6 +13,13 @@ export function requireRole(allowedRoles) {
     const userRoleCodes = req.user.roles.map((r) => (typeof r === 'string' ? r : r.code));
     const hasRole = userRoleCodes.some((code) => roles.includes(code));
     if (!hasRole) {
+      const targetId = req.params?.id || req.body?.building_id || req.query?.building_id || null;
+      await logAccessDenied(
+        req,
+        'rbac',
+        targetId,
+        `Role [${userRoleCodes.join(',')}] not in allowed roles [${roles.join(',')}]`
+      );
       return res.status(403).json({
         code: 'FORBIDDEN',
         message: 'Bạn không có quyền thực hiện thao tác này.',
