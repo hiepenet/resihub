@@ -15,6 +15,14 @@ import depositsRoute from './routes/deposits.js';
 import reservationsRoute from './routes/reservations.js';
 import notificationsRoute from './routes/notifications.js';
 import residentRoute from './routes/resident.js';
+import serviceRequestsRoute from './routes/service-requests.js';
+import metersRoute from './routes/meters.js';
+import servicesRoute, { serviceCatalogRouter, serviceSubscriptionsRouter } from './routes/services.js';
+import invoicesRoute from './routes/invoices.js';
+import paymentsRoute, { receivablesRouter } from './routes/payments.js';
+import adminUsersRoute from './routes/admin/users.js';
+import settingsRoute from './routes/settings.js';
+import reportsRoute from './routes/reports.js';
 import { startDailyJobs } from './jobs/daily.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
@@ -33,8 +41,8 @@ app.use(cors({
 // Request Logger
 app.use(morgan('dev'));
 
-// Body parser
-app.use(express.json());
+// Body parser (hỗ trợ upload ảnh base64 tối đa 5MB/ảnh x 3 ảnh)
+app.use(express.json({ limit: '15mb' }));
 
 // General Rate Limiter
 app.use('/api/', generalLimiter);
@@ -51,6 +59,17 @@ app.use('/api/v1/deposits', depositsRoute);
 app.use('/api/v1/reservations', reservationsRoute);
 app.use('/api/v1/notifications', notificationsRoute);
 app.use('/api/v1/resident', residentRoute);
+app.use('/api/v1/service-requests', serviceRequestsRoute);
+app.use('/api/v1/meters', metersRoute);
+app.use('/api/v1/services', servicesRoute);
+app.use('/api/v1/service-catalog', serviceCatalogRouter);
+app.use('/api/v1/service-subscriptions', serviceSubscriptionsRouter);
+app.use('/api/v1/invoices', invoicesRoute);
+app.use('/api/v1/payments', paymentsRoute);
+app.use('/api/v1/receivables', receivablesRouter);
+app.use('/api/v1/admin/users', adminUsersRoute);
+app.use('/api/v1/settings', settingsRoute);
+app.use('/api/v1/reports', reportsRoute);
 
 // 404 Handler
 app.use((req, res) => {
