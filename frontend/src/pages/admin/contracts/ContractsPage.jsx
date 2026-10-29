@@ -1,1355 +1,1344 @@
-import React, { useState, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { FileText, Plus, Calendar, Home, User, DollarSign, X, Printer, Bell, Check, AlertCircle } from 'lucide-react';
-import Button from '../../../components/ui/Button';
-import Input from '../../../components/ui/Input';
-import FormField from '../../../components/ui/FormField';
-import DataTable from '../../../components/ui/DataTable';
-import StatusBadge from '../../../components/ui/StatusBadge';
-import Money from '../../../components/ui/Money';
-import AccessDenied from '../../../components/common/AccessDenied';
-import api from '../../../services/api';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  FileText,
+  Plus,
+  Download,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
+  Eye,
+  Inbox,
+  FileSignature,
+  Calendar,
+  Users,
+  UserPlus,
+  ShieldCheck,
+  Search,
+} from 'lucide-react';
+import { Button } from '../../../components/ui/Button';
+import { Input } from '../../../components/ui/Input';
+import { Select } from '../../../components/ui/Select';
+import { Modal } from '../../../components/ui/Modal';
+import { Badge } from '../../../components/ui/Badge';
+import { Card } from '../../../components/ui/Card';
+import { Tabs } from '../../../components/ui/Tabs';
+import { PageHeader } from '../../../components/common/PageHeader';
+import { StatsCard } from '../../../components/common/StatsCard';
+import { StatusBadge } from '../../../components/common/StatusBadge';
+import { DataTable } from '../../../components/common/DataTable';
+import { SearchBar } from '../../../components/common/SearchBar';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
+import { contractsService } from '../../../services/contracts.service';
+import { buildingsService } from '../../../services/buildings.service';
+import { tenantsService } from '../../../services/tenants.service';
+import { usePermission } from '../../../hooks/usePermission';
+import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
+import { formatMoney, formatDate, exportToCsv } from '../../../utils/format';
+import {
+  extractErrorMessage,
+  isValidPhone,
+  normalizePhone,
+  isValidEmail,
+  isValidIdNumber,
+} from '../../../utils/validation';
 
-export default function ContractsPage() {
+const CONTRACT_STATUS_OPTIONS = [
+  { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
+  { value: 'PENDING_APPROVAL', label: 'Chờ phê duyệt giá (PENDING_APPROVAL)' },
+  { value: 'ACTIVE', label: 'Đang hiệu lực (ACTIVE)' },
+  { value: 'RENEWAL_PENDING', label: 'Chờ duyệt gia hạn (RENEWAL_PENDING)' },
+  { value: 'TERMINATION_PENDING', label: 'Chờ duyệt chấm dứt (TERMINATION_PENDING)' },
+  { value: 'EXPIRED', label: 'Đã hết hạn (EXPIRED)' },
+  { value: 'TERMINATED', label: 'Đã thanh lý (TERMINATED)' },
+];
+
+const REQUEST_STATUS_OPTIONS = [
+  { value: 'SUBMITTED', label: 'Chờ xử lý (SUBMITTED)' },
+  { value: 'APPROVED', label: 'Đã phê duyệt (APPROVED)' },
+  { value: 'REJECTED', label: 'Đã từ chối (REJECTED)' },
+];
+
+const REQUEST_TYPE_MAP = {
+  RENEWAL: { label: 'Gia hạn hợp đồng', variant: 'sky' },
+  TERMINATION: { label: 'Chấm dứt hợp đồng', variant: 'amber' },
+  REGISTRATION: { label: 'Đăng ký thuê mới', variant: 'emerald' },
+  REGISTER: { label: 'Đăng ký thuê mới', variant: 'emerald' },
+};
+
+const REQUEST_STATUS_BADGE = {
+  SUBMITTED: { label: 'Chờ duyệt', variant: 'amber' },
+  APPROVED: { label: 'Đã duyệt', variant: 'emerald' },
+  REJECTED: { label: 'Đã từ chối', variant: 'red' },
+};
+
+function addMonthsStr(dateStr, months) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return '';
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
+const INITIAL_NEW_TENANT = {
+  full_name: '',
+  phone: '',
+  id_number: '',
+  email: '',
+  dob: '',
+  nationality: 'Việt Nam',
+  address: '',
+  password: '',
+};
+
+export function ContractsPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { getCurrentRole } = useAuthStore();
-  const currentRole = getCurrentRole();
-  const [contracts, setContracts] = useState([]);
+  const toast = useToast();
+  const { canCreateContracts, canApproveContracts } = usePermission();
+  const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
+  const [activeTab, setActiveTab] = useState('list');
+  const [contracts, setContracts] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [reqStatusFilter, setReqStatusFilter] = useState('');
+
+  // Create Draft Modal state
+  const [createOpen, setCreateOpen] = useState(false);
   const [buildings, setBuildings] = useState([]);
   const [apartments, setApartments] = useState([]);
   const [tenants, setTenants] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [formError, setFormError] = useState('');
-  const [reservationId, setReservationId] = useState(null);
+  const [loadingRefData, setLoadingRefData] = useState(false);
+  const [submittingCreate, setSubmittingCreate] = useState(false);
+  const [createErrors, setCreateErrors] = useState({});
 
-  // Tabs: 'contracts' | 'requests'
-  const [activeTab, setActiveTab] = useState('contracts');
-  const [requests, setRequests] = useState([]);
-  const [isRequestsLoading, setIsRequestsLoading] = useState(false);
+  // Chế độ chọn khách thuê: 'existing' (cư dân đã có) | 'new' (cư dân mới chưa nằm trong hệ thống)
+  const [tenantMode, setTenantMode] = useState('existing');
+  const [tenantQuickSearch, setTenantQuickSearch] = useState('');
+  const [newTenantForm, setNewTenantForm] = useState(INITIAL_NEW_TENANT);
+  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, duplicates: [] });
+  const [dupChecking, setDupChecking] = useState(false);
 
-  // Phân quyền Hợp đồng: MANAGER (CRU+A - được tạo), OWNER (R + Duyệt PENDING_APPROVAL), RESIDENT (chặn)
-  const canCreateContract = currentRole === 'MANAGER';
-
-  // Form
-  const [formData, setFormData] = useState({
+  const [todayStr] = useState(() => new Date().toISOString().slice(0, 10));
+  const [createForm, setCreateForm] = useState({
     building_id: '',
     apartment_id: '',
     primary_tenant_id: '',
-    start_date: new Date().toISOString().split('T')[0],
-    end_date: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // +6 months
-    rent_amount: 8000000,
-    deposit_amount: 8000000, // 1 month deposit standard (PRD v2.0)
-    billing_day: 1,
+    start_date: todayStr,
+    end_date: addMonthsStr(todayStr, 12),
+    rent_amount: '',
+    deposit_amount: '',
     billing_cycle: 'monthly',
+    billing_day: '1',
     note: '',
   });
 
-  // Phân quyền truy cập trang: chặn RESIDENT
-  if (currentRole === 'RESIDENT') {
-    return (
-      <AccessDenied
-        currentRole={currentRole}
-        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
-      />
-    );
-  }
+  // Approve / Reject Resident Request state
+  const [approveReqTarget, setApproveReqTarget] = useState(null);
+  const [rejectReqTarget, setRejectReqTarget] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [processingReq, setProcessingReq] = useState(false);
 
-  const loadRequests = async () => {
-    setIsRequestsLoading(true);
+  const fetchData = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await api.get('/api/v1/contracts/requests');
-      setRequests(res.data?.data || []);
-    } catch (err) {
-      console.error('Error loading contract requests:', err);
-    } finally {
-      setIsRequestsLoading(false);
-    }
-  };
+      const queryParams = {};
+      if (selectedBuildingId) queryParams.building_id = selectedBuildingId;
 
-  const handleApproveRequest = async (requestId) => {
-    if (!window.confirm('Xác nhận phê duyệt đề nghị này của cư dân?')) return;
-    try {
-      await api.post(`/api/v1/contracts/requests/${requestId}/approve`);
-      alert('Đã phê duyệt đề nghị của cư dân thành công.');
-      loadRequests();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi phê duyệt đề nghị.');
-    }
-  };
-
-  const handleRejectRequest = async (requestId) => {
-    const reason = window.prompt('Nhập lý do từ chối đề nghị của cư dân:');
-    if (reason === null) return;
-    try {
-      await api.post(`/api/v1/contracts/requests/${requestId}/reject`, { reason });
-      alert('Đã từ chối đề nghị của cư dân.');
-      loadRequests();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi từ chối đề nghị.');
-    }
-  };
-
-  const loadInitialData = async () => {
-    setIsLoading(true);
-    try {
-      const [cRes, bRes, tRes] = await Promise.all([
-        api.get('/api/v1/contracts'),
-        api.get('/api/v1/buildings'),
-        api.get('/api/v1/tenants'),
+      const [cRes, rRes] = await Promise.all([
+        contractsService.list(queryParams),
+        contractsService.listRequests(queryParams).catch(() => ({ data: [] })),
       ]);
-
-      setContracts(cRes.data?.data || []);
-      const bList = bRes.data?.data || [];
-      setBuildings(bList);
-      setTenants(tRes.data?.data || []);
-
-      if (bList.length > 0) {
-        // ERR-4: bám Building Switcher — localStorage set trước khi fetch xong thì dùng nó, bList[0] chỉ là fallback
-        const saved = localStorage.getItem('resihub_selected_building_id');
-        const target = saved && saved !== 'ALL' && bList.some((b) => b.id === saved) ? saved : bList[0].id;
-        setFormData((prev) => ({ ...prev, building_id: target }));
-        loadApartments(target);
-      }
-      loadRequests();
+      setContracts(Array.isArray(cRes?.data) ? cRes.data : []);
+      setRequests(Array.isArray(rRes?.data) ? rRes.data : []);
     } catch (err) {
-      console.error('Error loading contracts:', err);
+      toast.error(extractErrorMessage(err, 'Không thể tải danh sách hợp đồng.'));
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  };
+  }, [selectedBuildingId, toast]);
 
-  const loadApartments = async (buildingId) => {
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  // Load tòa nhà + cư dân khi mở modal tạo HĐ nháp (hỗ trợ preselectApartmentId từ Sơ đồ tầng)
+  const handleOpenCreate = useCallback(async (preselectAptId = '') => {
+    const cleanAptId = typeof preselectAptId === 'string' ? preselectAptId : '';
+    const defaultBld = selectedBuildingId || '';
+    setCreateForm({
+      building_id: defaultBld,
+      apartment_id: cleanAptId,
+      primary_tenant_id: '',
+      start_date: todayStr,
+      end_date: addMonthsStr(todayStr, 12),
+      rent_amount: '',
+      deposit_amount: '',
+      billing_cycle: 'monthly',
+      billing_day: '1',
+      note: '',
+    });
+    setTenantMode('existing');
+    setTenantQuickSearch('');
+    setNewTenantForm(INITIAL_NEW_TENANT);
+    setDupInfo({ isDuplicate: false, duplicates: [] });
+    setCreateErrors({});
+    setCreateOpen(true);
+
+    setLoadingRefData(true);
     try {
-      const res = await api.get(`/api/v1/apartments?building_id=${buildingId}&status=AVAILABLE,RESERVED`);
-      const apts = res.data?.data || [];
-      setApartments(apts);
-      if (apts.length > 0) {
-        setFormData((prev) => ({
-          ...prev,
-          apartment_id: apts[0].id,
-          rent_amount: apts[0].base_rent || 8000000,
-          deposit_amount: (apts[0].base_rent || 8000000) * 1,
-        }));
+      const [bRes, tRes, aRes] = await Promise.all([
+        buildingsService.list(),
+        tenantsService.list(),
+        buildingsService.listApartments(
+          !cleanAptId && defaultBld ? { building_id: defaultBld } : {}
+        ),
+      ]);
+      const bList = Array.isArray(bRes?.data) ? bRes.data : [];
+      const tList = (Array.isArray(tRes?.data) ? tRes.data : []).filter(
+        (t) => t.status !== 'MERGED' && t.status !== 'REJECTED'
+      );
+      const aList = Array.isArray(aRes?.data) ? aRes.data : [];
+      setBuildings(bList);
+      setTenants(tList);
+      setApartments(aList);
+
+      if (cleanAptId) {
+        const matchedApt = aList.find((a) => String(a.id) === String(cleanAptId));
+        if (matchedApt) {
+          const base = matchedApt.base_rent ? String(Math.round(Number(matchedApt.base_rent))) : '';
+          setCreateForm((p) => ({
+            ...p,
+            building_id: matchedApt.building_id || p.building_id,
+            apartment_id: matchedApt.id,
+            rent_amount: base || p.rent_amount,
+            deposit_amount: base || p.deposit_amount,
+          }));
+        }
       }
     } catch (err) {
-      console.error('Error loading apartments:', err);
+      toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu căn hộ / cư dân.'));
+    } finally {
+      setLoadingRefData(false);
+    }
+  }, [selectedBuildingId, todayStr, toast]);
+
+  // Tự mở modal khi chuyển từ Sơ đồ tầng sang (/admin/contracts?apartment_id=...)
+  useEffect(() => {
+    const aptFromQuery = searchParams.get('apartment_id');
+    if (aptFromQuery && canCreateContracts) {
+      handleOpenCreate(aptFromQuery);
+      const next = new URLSearchParams(searchParams);
+      next.delete('apartment_id');
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams, canCreateContracts, handleOpenCreate]);
+
+  // Kiểm tra trùng SĐT / CCCD theo thời gian thực khi nhập cư dân mới ngay trong modal Hợp đồng
+  useEffect(() => {
+    if (!createOpen || tenantMode !== 'new') return undefined;
+    const cleanPhone = normalizePhone(newTenantForm.phone);
+    const cleanId = newTenantForm.id_number.trim();
+    const shouldCheckPhone = cleanPhone.length >= 9;
+    const shouldCheckId = cleanId.length >= 8;
+
+    if (!shouldCheckPhone && !shouldCheckId) {
+      setDupInfo({ isDuplicate: false, duplicates: [] });
+      return undefined;
+    }
+
+    const timer = setTimeout(async () => {
+      setDupChecking(true);
+      try {
+        const params = {};
+        if (shouldCheckPhone) params.phone = cleanPhone;
+        if (shouldCheckId) params.id_number = cleanId;
+        const res = await tenantsService.checkDup(params);
+        setDupInfo({
+          isDuplicate: Boolean(res?.isDuplicate),
+          duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
+        });
+      } catch {
+        // ignore network hiccup on check-dup
+      } finally {
+        setDupChecking(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [createOpen, tenantMode, newTenantForm.phone, newTenantForm.id_number]);
+
+  const handleBuildingChangeInModal = async (buildingId) => {
+    setCreateForm((p) => ({
+      ...p,
+      building_id: buildingId,
+      apartment_id: '',
+      rent_amount: '',
+      deposit_amount: '',
+    }));
+    try {
+      const aRes = await buildingsService.listApartments(
+        buildingId ? { building_id: buildingId } : {}
+      );
+      setApartments(Array.isArray(aRes?.data) ? aRes.data : []);
+    } catch {
+      setApartments([]);
     }
   };
 
-  useEffect(() => {
-    loadInitialData();
-  }, []);
+  const selectableApartments = useMemo(
+    () => apartments.filter((a) => ['AVAILABLE', 'RESERVED'].includes(a.status)),
+    [apartments]
+  );
 
-  // B3: đồng bộ với Building Switcher trên TopBar
-  useEffect(() => {
-    const applySelectedBuilding = (val) => {
-      if (val && val !== 'ALL') {
-        setFormData((prev) => ({ ...prev, building_id: val }));
-        loadApartments(val);
-      }
-    };
-    const onBuildingChanged = (e) => applySelectedBuilding(e.detail);
-    applySelectedBuilding(localStorage.getItem('resihub_selected_building_id'));
-    window.addEventListener('buildingChanged', onBuildingChanged);
-    return () => window.removeEventListener('buildingChanged', onBuildingChanged);
-  }, []);
+  const selectedApartment = useMemo(
+    () => selectableApartments.find((a) => String(a.id) === String(createForm.apartment_id)) || null,
+    [selectableApartments, createForm.apartment_id]
+  );
 
-  // Đồng bộ query params khi chuyển từ Giữ chỗ (Reservation) sang Ký hợp đồng (FR-067 / NV-06)
-  useEffect(() => {
-    const action = searchParams.get('action');
-    if (action === 'new') {
-      const bId = searchParams.get('building_id');
-      const aId = searchParams.get('apartment_id');
-      const rId = searchParams.get('reservation_id');
-      const hAmount = searchParams.get('hold_amount');
+  const selectedTenant = useMemo(
+    () => tenants.find((t) => String(t.id) === String(createForm.primary_tenant_id)) || null,
+    [tenants, createForm.primary_tenant_id]
+  );
 
-      if (rId) setReservationId(rId);
+  const isDiscountedWarning = useMemo(() => {
+    if (!selectedApartment) return false;
+    const baseRent = Number(selectedApartment.base_rent || 0);
+    const proposed = Number(createForm.rent_amount || 0);
+    if (baseRent <= 0 || proposed <= 0) return false;
+    return proposed < baseRent * 0.9;
+  }, [selectedApartment, createForm.rent_amount]);
 
-      if (bId) {
-        setFormData((prev) => ({ ...prev, building_id: bId }));
-        loadApartments(bId);
-      }
-      if (aId) {
-        setFormData((prev) => ({ ...prev, apartment_id: aId }));
-      }
-      if (hAmount) {
-        setFormData((prev) => ({ ...prev, deposit_amount: Number(hAmount) }));
-      }
-      setIsModalOpen(true);
-    }
-  }, [searchParams]);
-
-  // Tự động chọn người thuê nếu SĐT từ giữ chỗ khớp với hồ sơ cư dân có sẵn
-  useEffect(() => {
-    const phone = searchParams.get('phone');
-    if (phone && tenants.length > 0) {
-      const matched = tenants.find((t) => t.phone === phone);
-      if (matched) {
-        setFormData((prev) => ({ ...prev, primary_tenant_id: matched.id }));
-      }
-    }
-  }, [tenants, searchParams]);
-
-  const handleBuildingChange = (bId) => {
-    setFormData((prev) => ({ ...prev, building_id: bId }));
-    loadApartments(bId);
-  };
-
-  const handleApartmentChange = (aptId) => {
-    const apt = apartments.find((a) => a.id === aptId);
-    setFormData((prev) => ({
-      ...prev,
+  const handleSelectApartment = (aptId) => {
+    const apt = selectableApartments.find((a) => String(a.id) === String(aptId));
+    setCreateForm((p) => ({
+      ...p,
       apartment_id: aptId,
-      rent_amount: apt?.base_rent || prev.rent_amount,
-      deposit_amount: apt ? apt.base_rent * 1 : prev.deposit_amount,
+      building_id: apt?.building_id || p.building_id,
+      rent_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.rent_amount,
+      deposit_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.deposit_amount,
     }));
   };
 
-  const handleCreateContract = async (e) => {
-    e.preventDefault();
-    setFormError('');
+  const filteredModalTenants = useMemo(() => {
+    const q = tenantQuickSearch.trim().toLowerCase();
+    if (!q) return tenants;
+    return tenants.filter((t) =>
+      [t.full_name, t.phone, t.id_number, t.email]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [tenants, tenantQuickSearch]);
 
-    if (!formData.building_id || !formData.apartment_id || !formData.primary_tenant_id) {
-      setFormError('Vui lòng chọn đầy đủ tòa nhà, căn hộ và người thuê.');
-      return;
-    }
-
-    try {
-      await api.post('/api/v1/contracts', formData);
-
-      // Nếu tạo hợp đồng từ giữ chỗ: Tự động chuyển đổi giữ chỗ sang CONVERTED (NV-06)
-      if (reservationId) {
-        try {
-          await api.patch(`/api/v1/reservations/${reservationId}/convert`);
-        } catch (rErr) {
-          console.warn('Could not auto-convert reservation:', rErr);
-        }
-        setReservationId(null);
-      }
-      setSearchParams({});
-      setIsModalOpen(false);
-      loadInitialData();
-    } catch (err) {
-      setFormError(err.response?.data?.message || 'Lỗi khi tạo hợp đồng.');
+  const handleUseDuplicateTenant = (dup) => {
+    const matched = tenants.find(
+      (t) =>
+        (dup.tenant_id && String(t.id) === String(dup.tenant_id)) ||
+        String(t.person_id) === String(dup.id) ||
+        (dup.phone && t.phone === dup.phone)
+    );
+    if (matched) {
+      setTenantMode('existing');
+      setTenantQuickSearch('');
+      setCreateForm((p) => ({ ...p, primary_tenant_id: matched.id }));
+      setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
+      toast.info(`Đã chọn hồ sơ cư dân "${matched.full_name}" có sẵn trong hệ thống.`);
+    } else {
+      toast.info('Hồ sơ trùng SĐT sẽ được hệ thống tự động liên kết khi lưu hợp đồng.');
     }
   };
 
-  const columns = [
-    {
-      title: 'Căn hộ & Tòa',
-      key: 'apartment_code',
-      sortable: true,
-      render: (val, row) => (
-        <div>
-          <span className="font-bold text-slate-900 block">Căn {val}</span>
-          <span className="text-xs text-slate-400">{row.building_name}</span>
-        </div>
-      ),
-    },
-    {
-      title: 'Khách thuê',
-      key: 'tenant_name',
-      sortable: true,
-      render: (val, row) => (
-        <div>
-          <span className="font-semibold text-slate-900 block">{val}</span>
-          <span className="text-xs text-slate-400">{row.tenant_phone}</span>
-        </div>
-      ),
-    },
-    {
-      title: 'Thời hạn thuê',
-      key: 'start_date',
-      render: (val, row) => (
-        <span className="text-xs text-slate-600 font-medium">
-          {new Date(val).toLocaleDateString('vi-VN')} → {new Date(row.end_date).toLocaleDateString('vi-VN')}
-        </span>
-      ),
-    },
-    {
-      title: 'Giá thuê / tháng',
-      key: 'rent_amount',
-      sortable: true,
-      render: (val) => <Money amount={val} className="font-semibold text-slate-900" />,
-    },
-    {
-      title: 'Tiền cọc giữ',
-      key: 'deposit_amount',
-      render: (val) => <Money amount={val} className="text-indigo-600 font-semibold" />,
-    },
-    {
-      title: 'Trạng thái',
-      key: 'status',
-      render: (val) => <StatusBadge status={val} />,
-    },
-    ...(['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(currentRole) ? [{
-      title: 'Thao tác',
-      key: 'actions',
-      render: (val, row) => <ContractActions row={row} currentRole={currentRole} onChanged={loadInitialData} />,
-    }] : []),
-  ];
+  const handleCreateSubmit = async (e) => {
+    e?.preventDefault();
+    const errs = {};
+    if (!createForm.apartment_id) errs.apartment_id = 'Vui lòng chọn căn hộ trống hoặc đã giữ chỗ.';
 
-  const requestColumns = [
-    {
-      title: 'Căn hộ & Tòa nhà',
-      key: 'apartment_code',
-      sortable: true,
-      render: (val, row) => (
-        <div>
-          <span className="font-bold text-slate-900 block">{val}</span>
-          <span className="text-xs text-slate-500">{row.building_name}</span>
-        </div>
-      ),
-    },
-    {
-      title: 'Khách thuê / Cư dân',
-      key: 'resident_name',
-      render: (val, row) => (
-        <div>
-          <span className="font-semibold text-slate-800 block">{val}</span>
-          <span className="text-xs text-slate-500 font-mono">{row.resident_phone || '—'}</span>
-        </div>
-      ),
-    },
-    {
-      title: 'Loại đề nghị',
-      key: 'type',
-      render: (val) =>
-        val === 'TERMINATION' ? (
-          <span className="px-2 py-1 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">
-            Chấm dứt & Trả phòng
-          </span>
-        ) : (
-          <span className="px-2 py-1 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
-            Gia hạn hợp đồng
+    if (tenantMode === 'existing') {
+      if (!createForm.primary_tenant_id) {
+        errs.primary_tenant_id = 'Vui lòng chọn khách thuê đại diện hoặc chuyển sang "+ Tạo mới cư dân".';
+      }
+    } else {
+      if (!newTenantForm.full_name.trim()) {
+        errs.new_full_name = 'Vui lòng nhập họ và tên khách thuê mới.';
+      }
+      if (!newTenantForm.phone.trim()) {
+        errs.new_phone = 'Vui lòng nhập số điện thoại khách thuê.';
+      } else if (!isValidPhone(newTenantForm.phone)) {
+        errs.new_phone = 'Số điện thoại không đúng định dạng 10 chữ số Việt Nam.';
+      }
+      if (newTenantForm.email.trim() && !isValidEmail(newTenantForm.email.trim())) {
+        errs.new_email = 'Địa chỉ email không hợp lệ.';
+      }
+      if (newTenantForm.id_number.trim() && !isValidIdNumber(newTenantForm.id_number.trim())) {
+        errs.new_id_number = 'Số CCCD (9/12 số) hoặc Hộ chiếu không hợp lệ.';
+      }
+      if (newTenantForm.password && newTenantForm.password.length < 8) {
+        errs.new_password = 'Mật khẩu đăng nhập ban đầu phải từ 8 ký tự trở lên.';
+      }
+    }
+
+    if (!createForm.start_date) errs.start_date = 'Chọn ngày bắt đầu.';
+    if (!createForm.end_date) errs.end_date = 'Chọn ngày kết thúc.';
+    if (createForm.start_date && createForm.end_date && createForm.end_date <= createForm.start_date) {
+      errs.end_date = 'Ngày kết thúc phải sau ngày bắt đầu hợp đồng.';
+    }
+    if (!createForm.rent_amount || Number(createForm.rent_amount) <= 0) {
+      errs.rent_amount = 'Giá thuê phải lớn hơn 0.';
+    }
+    if (createForm.deposit_amount !== '' && Number(createForm.deposit_amount) < 0) {
+      errs.deposit_amount = 'Tiền cọc không được âm.';
+    }
+
+    setCreateErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setSubmittingCreate(true);
+    try {
+      const payload = {
+        apartment_id: createForm.apartment_id,
+        building_id: selectedApartment?.building_id || createForm.building_id || undefined,
+        ...(tenantMode === 'existing'
+          ? { primary_tenant_id: createForm.primary_tenant_id }
+          : {
+              new_tenant: {
+                full_name: newTenantForm.full_name.trim(),
+                phone: normalizePhone(newTenantForm.phone),
+                id_number: newTenantForm.id_number.trim() || null,
+                email: newTenantForm.email.trim() || null,
+                dob: newTenantForm.dob || null,
+                nationality: newTenantForm.nationality.trim() || 'Việt Nam',
+                address: newTenantForm.address.trim() || null,
+                ...(newTenantForm.password ? { password: newTenantForm.password } : {}),
+              },
+            }),
+        start_date: createForm.start_date,
+        end_date: createForm.end_date,
+        rent_amount: Math.round(Number(createForm.rent_amount)),
+        deposit_amount: Math.round(Number(createForm.deposit_amount || 0)),
+        billing_day: Math.min(28, Math.max(1, Number(createForm.billing_day || 1))),
+        note: createForm.note.trim(),
+      };
+      const res = await contractsService.create(payload);
+      const created = res?.data;
+
+      if (created?.id && createForm.billing_cycle && createForm.billing_cycle !== 'monthly') {
+        await contractsService.update(created.id, {
+          billing_cycle: createForm.billing_cycle,
+        }).catch(() => {});
+      }
+
+      toast.success(res?.message || 'Đã tạo hợp đồng nháp thành công.');
+      setCreateOpen(false);
+      if (created?.id) {
+        navigate(`/admin/contracts/${created.id}`);
+      } else {
+        fetchData();
+      }
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể tạo hợp đồng nháp.'));
+    } finally {
+      setSubmittingCreate(false);
+    }
+  };
+
+  const handleConfirmApproveRequest = async () => {
+    if (!approveReqTarget) return;
+    setProcessingReq(true);
+    try {
+      const res = await contractsService.approveRequest(approveReqTarget.id);
+      toast.success(res?.message || 'Đã phê duyệt yêu cầu của cư dân.');
+      setApproveReqTarget(null);
+      fetchData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể phê duyệt yêu cầu.'));
+    } finally {
+      setProcessingReq(false);
+    }
+  };
+
+  const handleConfirmRejectRequest = async (e) => {
+    e?.preventDefault();
+    if (!rejectReqTarget) return;
+    setProcessingReq(true);
+    try {
+      const res = await contractsService.rejectRequest(rejectReqTarget.id, {
+        reason: rejectReason.trim(),
+      });
+      toast.success(res?.message || 'Đã từ chối yêu cầu của cư dân.');
+      setRejectReqTarget(null);
+      setRejectReason('');
+      fetchData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể từ chối yêu cầu.'));
+    } finally {
+      setProcessingReq(false);
+    }
+  };
+
+  const stats = useMemo(() => {
+    const active = contracts.filter((c) => c.status === 'ACTIVE').length;
+    const pending = contracts.filter((c) =>
+      ['PENDING_APPROVAL', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].includes(c.status)
+    ).length;
+    const drafts = contracts.filter((c) => c.status === 'DRAFT').length;
+    const pendingReqs = requests.filter((r) => r.status === 'SUBMITTED').length;
+    return { active, pending, drafts, pendingReqs };
+  }, [contracts, requests]);
+
+  const filteredContracts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return contracts.filter((c) => {
+      if (statusFilter && c.status !== statusFilter) return false;
+      if (q) {
+        const code = `hđ-${String(c.id || '').slice(0, 8)}`.toLowerCase();
+        const haystacks = [
+          code,
+          c.id,
+          c.apartment_code,
+          c.building_name,
+          c.tenant_name,
+          c.tenant_phone,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!haystacks.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [contracts, statusFilter, search]);
+
+  const filteredRequests = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return requests.filter((r) => {
+      if (reqStatusFilter && r.status !== reqStatusFilter) return false;
+      if (q) {
+        const haystacks = [
+          r.apartment_code,
+          r.building_name,
+          r.resident_name,
+          r.resident_phone,
+          r.note,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!haystacks.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [requests, reqStatusFilter, search]);
+
+  const handleExportCsv = () => {
+    if (filteredContracts.length === 0) {
+      toast.warning('Không có dữ liệu hợp đồng để xuất CSV.');
+      return;
+    }
+    exportToCsv(
+      `danh-sach-hop-dong-${new Date().toISOString().slice(0, 10)}.csv`,
+      [
+        { label: 'Mã HĐ', accessor: (r) => `HĐ-${String(r.id).slice(0, 8).toUpperCase()}` },
+        { label: 'Căn hộ', key: 'apartment_code' },
+        { label: 'Tòa nhà', key: 'building_name' },
+        { label: 'Khách thuê đại diện', key: 'tenant_name' },
+        { label: 'Số điện thoại', key: 'tenant_phone' },
+        { label: 'Ngày bắt đầu', accessor: (r) => formatDate(r.start_date) },
+        { label: 'Ngày kết thúc', accessor: (r) => formatDate(r.end_date) },
+        { label: 'Giá thuê (VND)', accessor: (r) => Number(r.rent_amount || 0) },
+        { label: 'Tiền đặt cọc (VND)', accessor: (r) => Number(r.deposit_amount || 0) },
+        { label: 'Trạng thái', key: 'status' },
+      ],
+      filteredContracts
+    );
+    toast.success(`Đã xuất ${filteredContracts.length} hợp đồng ra tệp CSV.`);
+  };
+
+  const contractColumns = useMemo(
+    () => [
+      {
+        key: 'code',
+        label: 'Mã HĐ',
+        render: (row) => (
+          <div>
+            <span className="font-mono text-xs font-semibold text-primary-600">
+              HĐ-{String(row.id).slice(0, 8).toUpperCase()}
+            </span>
+            {row.parent_contract_id ? (
+              <p className="text-[10px] text-slate-400 mt-0.5">HĐ nối tiếp</p>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        key: 'apartment_code',
+        label: 'Căn hộ / Tòa nhà',
+        sortable: true,
+        render: (row) => (
+          <div>
+            <p className="font-semibold text-slate-900">{row.apartment_code}</p>
+            <p className="text-xs text-slate-500 truncate max-w-[180px]">{row.building_name}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'tenant_name',
+        label: 'Khách thuê chính',
+        sortable: true,
+        render: (row) => (
+          <div>
+            <p className="font-medium text-slate-800">{row.tenant_name}</p>
+            <p className="text-xs text-slate-500">{row.tenant_phone || '—'}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'start_date',
+        label: 'Kỳ hạn hợp đồng',
+        align: 'center',
+        sortable: true,
+        className: 'whitespace-nowrap',
+        render: (row) => (
+          <div className="text-xs text-slate-700">
+            <p>{formatDate(row.start_date)}</p>
+            <p className="text-slate-500">→ {formatDate(row.end_date)}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'rent_amount',
+        label: 'Giá thuê / Cọc',
+        align: 'right',
+        sortable: true,
+        sortValue: (row) => Number(row.rent_amount || 0),
+        className: 'font-mono tabular-nums whitespace-nowrap',
+        render: (row) => (
+          <div>
+            <p className="font-semibold text-slate-900">{formatMoney(row.rent_amount)}</p>
+            <p className="text-xs font-sans text-slate-500">Cọc: {formatMoney(row.deposit_amount)}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'status',
+        label: 'Trạng thái',
+        align: 'center',
+        sortable: true,
+        render: (row) => <StatusBadge status={row.status} domain="contract" />,
+      },
+      {
+        key: 'actions',
+        label: 'Thao tác',
+        align: 'center',
+        render: (row) => (
+          <Button
+            variant="ghost"
+            size="xs"
+            icon={Eye}
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/admin/contracts/${row.id}`);
+            }}
+          >
+            Chi tiết
+          </Button>
+        ),
+      },
+    ],
+    [navigate]
+  );
+
+  const requestColumns = useMemo(
+    () => [
+      {
+        key: 'type',
+        label: 'Loại đề nghị',
+        align: 'center',
+        render: (row) => {
+          const meta = REQUEST_TYPE_MAP[row.type] || { label: row.type, variant: 'slate' };
+          return (
+            <Badge variant={meta.variant} dot>
+              {meta.label}
+            </Badge>
+          );
+        },
+      },
+      {
+        key: 'apartment_code',
+        label: 'Căn hộ / Tòa nhà',
+        sortable: true,
+        render: (row) => (
+          <div>
+            <p className="font-semibold text-slate-900">{row.apartment_code}</p>
+            <p className="text-xs text-slate-500">{row.building_name}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'resident_name',
+        label: 'Cư dân gửi yêu cầu',
+        render: (row) => (
+          <div>
+            <p className="font-medium text-slate-800">{row.resident_name}</p>
+            <p className="text-xs text-slate-500">{row.resident_phone || '—'}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'desired_date',
+        label: 'Ngày mong muốn',
+        align: 'center',
+        className: 'whitespace-nowrap',
+        render: (row) => (
+          <span className="text-xs font-medium text-slate-700">
+            {formatDate(row.desired_date)}
           </span>
         ),
-    },
-    {
-      title: 'Ngày mong muốn',
-      key: 'desired_date',
-      render: (val) => (
-        <span className="text-xs font-mono font-medium text-slate-700">
-          {val ? new Date(val).toLocaleDateString('vi-VN') : '—'}
-        </span>
-      ),
-    },
-    {
-      title: 'Ghi chú',
-      key: 'note',
-      render: (val) => (
-        <span className="text-xs text-slate-600 max-w-xs block truncate" title={val}>
-          {val || '—'}
-        </span>
-      ),
-    },
-    {
-      title: 'Trạng thái',
-      key: 'status',
-      render: (val) => {
-        if (val === 'SUBMITTED') {
-          return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">Chờ duyệt</span>;
-        }
-        if (val === 'APPROVED') {
-          return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">✓ Đã duyệt</span>;
-        }
-        return <span className="px-2 py-1 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200">✕ Từ chối</span>;
       },
-    },
-    {
-      title: 'Thao tác',
-      key: 'actions',
-      render: (val, row) => (
-        <div className="flex items-center gap-1.5">
-          {row.status === 'SUBMITTED' ? (
-            ['OWNER', 'MANAGER'].includes(currentRole) ? (
+      {
+        key: 'note',
+        label: 'Nội dung / Lý do',
+        render: (row) => (
+          <p className="text-xs text-slate-600 max-w-[260px] whitespace-pre-line line-clamp-2">
+            {row.note || '—'}
+          </p>
+        ),
+      },
+      {
+        key: 'status',
+        label: 'Trạng thái xử lý',
+        align: 'center',
+        render: (row) => {
+          const st = REQUEST_STATUS_BADGE[row.status] || { label: row.status, variant: 'slate' };
+          return (
+            <Badge variant={st.variant} dot>
+              {st.label}
+            </Badge>
+          );
+        },
+      },
+      {
+        key: 'actions',
+        label: 'Thao tác',
+        align: 'center',
+        render: (row) => (
+          <div className="inline-flex items-center justify-center gap-1.5">
+            {canApproveContracts && row.status === 'SUBMITTED' ? (
               <>
-                <button
-                  type="button"
-                  onClick={() => handleApproveRequest(row.id)}
-                  className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold shadow-sm"
+                <Button
+                  variant="success"
+                  size="xs"
+                  icon={CheckCircle2}
+                  onClick={() => setApproveReqTarget(row)}
                 >
                   Duyệt
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleRejectRequest(row.id)}
-                  className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-semibold"
+                </Button>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  icon={XCircle}
+                  onClick={() => {
+                    setRejectReqTarget(row);
+                    setRejectReason('');
+                  }}
                 >
                   Từ chối
-                </button>
+                </Button>
               </>
-            ) : (
-              <span className="text-xs text-slate-400 italic">Chỉ xem</span>
-            )
-          ) : (
-            <span className="text-xs text-slate-400 italic">Đã xử lý</span>
-          )}
-        </div>
-      ),
+            ) : null}
+            {row.contract_id ? (
+              <Button
+                variant="ghost"
+                size="xs"
+                icon={Eye}
+                onClick={() => navigate(`/admin/contracts/${row.contract_id}`)}
+              >
+                Mở HĐ
+              </Button>
+            ) : null}
+          </div>
+        ),
+      },
+    ],
+    [canApproveContracts, navigate]
+  );
+
+  const tabs = [
+    {
+      id: 'list',
+      label: 'Danh sách hợp đồng',
+      icon: FileText,
+      count: contracts.length,
+    },
+    {
+      id: 'requests',
+      label: 'Yêu cầu từ cư dân',
+      icon: Inbox,
+      count: stats.pendingReqs > 0 ? stats.pendingReqs : requests.length,
     },
   ];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Quản lý Hợp đồng Thuê
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Thiết lập điều khoản thuê, chu kỳ thu tiền, ràng buộc cọc và trạng thái hiệu lực
-          </p>
-        </div>
+      <PageHeader
+        title="Quản lý Hợp đồng thuê"
+        subtitle={
+          selectedBuildingId
+            ? 'Đang lọc theo tòa nhà đã chọn trên thanh điều hướng'
+            : 'Quản lý vòng đời hợp đồng thuê, phụ lục điều chỉnh và đề nghị gia hạn / chấm dứt từ cư dân'
+        }
+        actions={
+          <>
+            <Button variant="outline" size="md" icon={RefreshCw} onClick={fetchData}>
+              Làm mới
+            </Button>
+            <Button variant="outline" size="md" icon={Download} onClick={handleExportCsv}>
+              Xuất CSV
+            </Button>
+            {canCreateContracts ? (
+              <Button variant="primary" size="md" icon={Plus} onClick={() => handleOpenCreate()}>
+                Tạo hợp đồng nháp
+              </Button>
+            ) : null}
+          </>
+        }
+      />
 
-        {canCreateContract && (
-          <Button
-            variant="primary"
-            size="md"
-            onClick={() => setIsModalOpen(true)}
-            leftIcon={Plus}
-          >
-            Lập hợp đồng mới
-          </Button>
-        )}
-      </div>
-
-      {/* Tab Switcher */}
-      <div className="flex border-b border-slate-200 gap-6">
-        <button
-          type="button"
-          onClick={() => setActiveTab('contracts')}
-          className={`pb-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2 ${
-            activeTab === 'contracts'
-              ? 'border-indigo-600 text-indigo-600'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <FileText className="w-4 h-4" />
-          <span>Danh sách Hợp đồng</span>
-          <span className="px-1.5 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600 font-medium">
-            {contracts.length}
-          </span>
-        </button>
-
-        <button
-          type="button"
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatsCard
+          title="Đang hiệu lực"
+          value={stats.active}
+          subtext="Hợp đồng đang khai thác"
+          icon={CheckCircle2}
+          color="emerald"
           onClick={() => {
-            setActiveTab('requests');
-            loadRequests();
+            setActiveTab('list');
+            setStatusFilter('ACTIVE');
           }}
-          className={`pb-3 text-sm font-semibold border-b-2 transition-all flex items-center gap-2 ${
-            activeTab === 'requests'
-              ? 'border-indigo-600 text-indigo-600'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Bell className="w-4 h-4" />
-          <span>Đề nghị từ cư dân</span>
-          {requests.filter((r) => r.status === 'SUBMITTED').length > 0 ? (
-            <span className="px-2 py-0.5 text-xs rounded-full bg-amber-500 text-white font-bold animate-pulse">
-              {requests.filter((r) => r.status === 'SUBMITTED').length} mới
-            </span>
-          ) : (
-            <span className="px-1.5 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600 font-medium">
-              {requests.length}
-            </span>
-          )}
-        </button>
+        />
+        <StatsCard
+          title="Chờ phê duyệt"
+          value={stats.pending}
+          subtext="Giá ưu đãi / Gia hạn / Chấm dứt"
+          icon={Clock}
+          color="amber"
+          onClick={() => {
+            setActiveTab('list');
+            setStatusFilter('PENDING_APPROVAL');
+          }}
+        />
+        <StatsCard
+          title="Hợp đồng nháp"
+          value={stats.drafts}
+          subtext="Chờ tải bản scan ký kết"
+          icon={FileSignature}
+          color="sky"
+          onClick={() => {
+            setActiveTab('list');
+            setStatusFilter('DRAFT');
+          }}
+        />
+        <StatsCard
+          title="Yêu cầu từ cư dân"
+          value={stats.pendingReqs}
+          subtext="Đề nghị chờ BQL / CĐT xử lý"
+          icon={Inbox}
+          color="indigo"
+          onClick={() => setActiveTab('requests')}
+        />
       </div>
 
-      {activeTab === 'contracts' ? (
+      {/* Tabs */}
+      <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+
+      {/* Filter Toolbar */}
+      <Card className="p-4">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+          <div className="md:col-span-7">
+            <SearchBar
+              value={search}
+              onChange={setSearch}
+              placeholder={
+                activeTab === 'list'
+                  ? 'Tìm theo mã HĐ, mã căn hộ, tòa nhà, họ tên hoặc SĐT khách thuê...'
+                  : 'Tìm theo căn hộ, họ tên cư dân, SĐT hoặc ghi chú đề nghị...'
+              }
+            />
+          </div>
+          <div className="md:col-span-5">
+            {activeTab === 'list' ? (
+              <Select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                placeholder="Tất cả trạng thái hợp đồng"
+                options={CONTRACT_STATUS_OPTIONS}
+              />
+            ) : (
+              <Select
+                value={reqStatusFilter}
+                onChange={(e) => setReqStatusFilter(e.target.value)}
+                placeholder="Tất cả trạng thái yêu cầu"
+                options={REQUEST_STATUS_OPTIONS}
+              />
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {/* Bảng hiển thị theo Tab */}
+      {activeTab === 'list' ? (
         <DataTable
-          columns={columns}
-          data={contracts}
-          isLoading={isLoading}
-          searchKeys={['apartment_code', 'tenant_name', 'building_name', 'tenant_phone']}
-          emptyTitle="Chưa có hợp đồng nào"
-          emptyDescription="Nhấn 'Lập hợp đồng mới' để tạo hợp đồng cho căn hộ có sẵn."
+          columns={contractColumns}
+          data={filteredContracts}
+          loading={loading}
+          onRowClick={(row) => navigate(`/admin/contracts/${row.id}`)}
+          emptyTitle="Không tìm thấy hợp đồng nào"
+          emptyDescription="Chưa có hợp đồng khớp với điều kiện lọc hiện tại."
+          emptyAction={
+            canCreateContracts ? (
+              <Button variant="primary" size="sm" icon={Plus} onClick={() => handleOpenCreate()}>
+                Tạo hợp đồng nháp mới
+              </Button>
+            ) : null
+          }
         />
       ) : (
         <DataTable
           columns={requestColumns}
-          data={requests}
-          isLoading={isRequestsLoading}
-          searchKeys={['apartment_code', 'resident_name', 'building_name', 'resident_phone']}
-          emptyTitle="Chưa có đề nghị nào từ cư dân"
-          emptyDescription="Cư dân có thể gửi đề nghị gia hạn hoặc chấm dứt hợp đồng từ Cổng cư dân."
+          data={filteredRequests}
+          loading={loading}
+          emptyTitle="Chưa có yêu cầu nào từ cư dân"
+          emptyDescription="Các đề nghị đăng ký thuê, gia hạn hoặc chấm dứt hợp đồng từ Cổng cư dân sẽ hiển thị tại đây."
         />
       )}
 
-      {/* Modal Lập Hợp Đồng */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">Lập Hợp đồng Thuê Nhà</h3>
-              <button onClick={() => setIsModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateContract} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Tòa nhà" required>
-                  <select
-                    value={formData.building_id}
-                    onChange={(e) => handleBuildingChange(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                  >
-                    {buildings.map((b) => (
-                      <option key={b.id} value={b.id}>{b.name}</option>
-                    ))}
-                  </select>
-                </FormField>
-
-                <FormField label="Căn hộ trống" required>
-                  <select
-                    value={formData.apartment_id}
-                    onChange={(e) => handleApartmentChange(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                  >
-                    {apartments.length === 0 ? (
-                      <option value="">Không có căn trống</option>
-                    ) : (
-                      apartments.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          Căn {a.code} ({a.area_m2}m²){a.status === 'RESERVED' ? ' — Đã cọc giữ chỗ' : ''}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </FormField>
-              </div>
-
-              <FormField label="Khách thuê đại diện (Chủ hộ)" required error={formError}>
-                <select
-                  value={formData.primary_tenant_id}
-                  onChange={(e) => setFormData({ ...formData, primary_tenant_id: e.target.value })}
-                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                >
-                  <option value="">-- Chọn khách thuê --</option>
-                  {tenants.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name} ({t.phone})
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Ngày bắt đầu thuê" required>
-                  <Input
-                    type="date"
-                    value={formData.start_date}
-                    onChange={(e) => setFormData({ ...formData, start_date: e.target.value })}
-                  />
-                </FormField>
-
-                <FormField label="Ngày kết thúc hợp đồng" required>
-                  <Input
-                    type="date"
-                    value={formData.end_date}
-                    onChange={(e) => setFormData({ ...formData, end_date: e.target.value })}
-                  />
-                </FormField>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Giá thuê / tháng (VND)" required>
-                  <Input
-                    type="number"
-                    value={formData.rent_amount}
-                    onChange={(e) => setFormData({ ...formData, rent_amount: e.target.value })}
-                  />
-                </FormField>
-
-                <FormField label="Tiền đặt cọc (VND)" required hint="Quy tắc: 1 tháng tiền thuê. Sau ký, thu bù chênh lệch qua Sổ cọc">
-                  <Input
-                    type="number"
-                    value={formData.deposit_amount}
-                    onChange={(e) => setFormData({ ...formData, deposit_amount: e.target.value })}
-                  />
-                </FormField>
-              </div>
-
-              <FormField label="Ghi chú điều khoản bổ sung">
-                <Input
-                  placeholder="Ghi chú về nội thất, chu kỳ thanh toán..."
-                  value={formData.note}
-                  onChange={(e) => setFormData({ ...formData, note: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  Xác nhận ký hợp đồng
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Hành động theo trạng thái hợp đồng (A3: DRAFT → bản ký → ACTIVE; PENDING_APPROVAL → OWNER duyệt)
-function ContractActions({ row, currentRole, onChanged }) {
-  const fileRef = React.useRef(null);
-  const [isOccupantsOpen, setIsOccupantsOpen] = useState(false);
-  const [isServicesOpen, setIsServicesOpen] = useState(false);
-  const [isAmendmentsOpen, setIsAmendmentsOpen] = useState(false);
-
-  const handleActivate = async () => {
-    if (!window.confirm('Kích hoạt hợp đồng này? Hệ thống kiểm tra bản scan, giấy tờ, căn hộ và kỳ hạn.')) return;
-    try {
-      const res = await api.post(`/api/v1/contracts/${row.id}/activate`);
-      if (res.data?.remaining_collect > 0) {
-        alert(res.data.message || `Kích hoạt thành công. Cần thu bổ sung ${res.data.remaining_collect.toLocaleString('vi-VN')} ₫ vào Sổ cọc.`);
-      }
-      onChanged();
-    } catch (err) {
-      // PRICE_NEEDS_APPROVAL: 409 hợp lệ — DB đã chuyển PENDING_APPROVAL, phải refresh row;
-      // các 409 khác không đổi state, refresh vô hại
-      alert(err.response?.data?.message || 'Lỗi khi kích hoạt hợp đồng.');
-      if (err.response?.status === 409) onChanged();
-    }
-  };
-
-  const handleCancel = async () => {
-    const reason = window.prompt('Lý do hủy hợp đồng nháp:');
-    if (reason === null) return;
-    try {
-      await api.post(`/api/v1/contracts/${row.id}/cancel`, { reason });
-      onChanged();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi hủy hợp đồng.');
-    }
-  };
-
-  const handleApprove = async () => {
-    if (!window.confirm('Phê duyệt và kích hoạt hợp đồng (giá lệch khung đã được xem xét)?')) return;
-    try {
-      const res = await api.post(`/api/v1/contracts/${row.id}/approve`);
-      if (res.data?.remaining_collect > 0) {
-        alert(res.data.message || `Phê duyệt thành công. Cần thu bổ sung ${res.data.remaining_collect.toLocaleString('vi-VN')} ₫ vào Sổ cọc.`);
-      }
-      onChanged();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi phê duyệt hợp đồng.');
-    }
-  };
-
-  const handleScanFile = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Ảnh vượt quá 5MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        await api.post(`/api/v1/contracts/${row.id}/scan`, { image_base64: reader.result });
-        alert('Đã đính kèm bản scan hợp đồng.');
-        onChanged();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi đính kèm bản scan.');
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handlePrintTemplate = async () => {
-    try {
-      const res = await api.get(`/api/v1/contracts/${row.id}/template`, { responseType: 'text' });
-      const blob = new Blob([res.data], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi tải mẫu hợp đồng in.');
-    }
-  };
-
-  const renderNavButtons = () => (
-    <>
-      <div className="flex flex-wrap gap-1">
-        <OccupantsButton onClick={() => setIsOccupantsOpen(true)} />
-        <ServicesButton onClick={() => setIsServicesOpen(true)} />
-        {['ACTIVE', 'RENEWAL_PENDING'].includes(row.status) && (
-          <AmendmentsButton onClick={() => setIsAmendmentsOpen(true)} />
-        )}
-        <PrintButton onClick={handlePrintTemplate} />
-      </div>
-      {isOccupantsOpen && <OccupantsModal contractId={row.id} currentRole={currentRole} onClose={() => { setIsOccupantsOpen(false); onChanged(); }} />}
-      {isServicesOpen && <ServicePricesModal contractId={row.id} startDate={row.start_date} currentRole={currentRole} onClose={() => { setIsServicesOpen(false); onChanged(); }} />}
-      {isAmendmentsOpen && <AmendmentsModal contract={row} currentRole={currentRole} onClose={() => { setIsAmendmentsOpen(false); onChanged(); }} />}
-    </>
-  );
-
-  if (row.status === 'DRAFT') {
-    return (
-      <div className="flex flex-col gap-1.5 min-w-[150px]">
-        {renderNavButtons()}
-        {currentRole === 'MANAGER' ? (
+      {/* Modal Tạo hợp đồng nháp mới */}
+      <Modal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        title="Tạo hợp đồng thuê mới (Bản nháp)"
+        subtitle="Lưu nháp hợp đồng → In mẫu A4 ký kết → Đính kèm bản scan → Kích hoạt (NV-08)"
+        size="lg"
+        footer={
           <>
-            <button
-              className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
-              onClick={handleActivate}
-            >
-              Kích hoạt
-            </button>
-            <div className="flex gap-1.5">
-              <button
-                className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
-                onClick={() => fileRef.current?.click()}
-              >
-                Đính bản ký
-              </button>
-              <button
-                className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
-                onClick={handleCancel}
-              >
-                Hủy
-              </button>
-            </div>
-            <input ref={fileRef} type="file" accept="image/jpeg,image/png" className="hidden" onChange={handleScanFile} />
+            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={submittingCreate}>
+              Hủy bỏ
+            </Button>
+            <Button variant="primary" onClick={handleCreateSubmit} loading={submittingCreate} icon={Plus}>
+              Lưu hợp đồng nháp
+            </Button>
           </>
-        ) : (
-          <span className="text-xs text-slate-400 italic">Bản nháp (Chỉ xem)</span>
-        )}
-      </div>
-    );
-  }
-
-  if (row.status === 'PENDING_APPROVAL' && currentRole === 'OWNER') {
-    return (
-      <div className="flex flex-col gap-1.5">
-        {renderNavButtons()}
-        <button
-          className="px-2 py-1 text-xs rounded-lg bg-amber-500 text-white hover:bg-amber-600 font-medium"
-          onClick={handleApprove}
-        >
-          Duyệt
-        </button>
-      </div>
-    );
-  }
-
-  if (row.status === 'TERMINATION_PENDING') {
-    if (currentRole === 'OWNER') {
-      return (
-        <div className="flex flex-col gap-1.5">
-          {renderNavButtons()}
-          <button
-            className="px-2 py-1 text-xs rounded-lg bg-rose-600 text-white hover:bg-rose-700 font-medium"
-            onClick={async () => {
-              if (!window.confirm('Xác nhận duyệt chấm dứt hợp đồng? Căn hộ sẽ chuyển sang bảo trì.')) return;
-              try {
-                await api.post(`/api/v1/contracts/${row.id}/terminate/approve`);
-                onChanged();
-              } catch (err) {
-                alert(err.response?.data?.message || 'Lỗi khi duyệt chấm dứt.');
-              }
-            }}
-          >
-            Duyệt chấm dứt
-          </button>
-          <button
-            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
-            onClick={async () => {
-              const reason = window.prompt('Lý do từ chối yêu cầu chấm dứt:');
-              if (reason === null) return;
-              if (!reason.trim()) {
-                alert('Vui lòng nhập lý do từ chối');
-                return;
-              }
-              try {
-                await api.post(`/api/v1/contracts/${row.id}/terminate/reject`, { reason: reason.trim() });
-                onChanged();
-              } catch (err) {
-                alert(err.response?.data?.message || 'Lỗi khi từ chối chấm dứt.');
-              }
-            }}
-          >
-            Từ chối
-          </button>
-        </div>
-      );
-    }
-    return (
-      <div className="flex flex-col gap-1.5">
-        {renderNavButtons()}
-        <span className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium text-center">
-          Chờ OWNER duyệt chấm dứt
-        </span>
-      </div>
-    );
-  }
-
-  if (row.status === 'ACTIVE') {
-    return (
-      <div className="flex flex-col gap-1.5">
-        {renderNavButtons()}
-        {currentRole === 'MANAGER' && (
-          <button
-            className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 font-medium"
-            onClick={async () => {
-              const todayStr = new Date().toISOString().split('T')[0];
-              const termDate = window.prompt(`Ngày chấm dứt hợp đồng (YYYY-MM-DD):`, todayStr);
-              if (!termDate) return;
-              const reason = window.prompt('Lý do chấm dứt hợp đồng:');
-              if (reason === null) return;
-              if (!reason.trim()) {
-                alert('Vui lòng nhập lý do chấm dứt');
-                return;
-              }
-              try {
-                await api.post(`/api/v1/contracts/${row.id}/terminate`, {
-                  terminated_date: termDate.trim(),
-                  reason: reason.trim(),
-                  note: `Chấm dứt sớm: ${reason.trim()}`,
-                });
-                onChanged();
-              } catch (err) {
-                alert(err.response?.data?.message || 'Lỗi khi chấm dứt hợp đồng.');
-              }
-            }}
-          >
-            Chấm dứt
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      {renderNavButtons()}
-      <span className="text-xs text-slate-400">—</span>
-    </div>
-  );
-
-  function OccupantsButton({ onClick }) {
-    return (
-      <button
-        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
-        onClick={onClick}
+        }
       >
-        Thành viên
-      </button>
-    );
-  }
+        <form onSubmit={handleCreateSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Select
+              label="Tòa nhà"
+              placeholder={loadingRefData ? 'Đang tải tòa nhà...' : '-- Tất cả tòa quản lý --'}
+              value={createForm.building_id}
+              onChange={(e) => handleBuildingChangeInModal(e.target.value)}
+              options={buildings.map((b) => ({
+                value: b.id,
+                label: `${b.name} (${b.code})`,
+              }))}
+            />
 
-  function ServicesButton({ onClick }) {
-    return (
-      <button
-        className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
-        onClick={onClick}
-      >
-        Dịch vụ
-      </button>
-    );
-  }
+            <Select
+              label="Căn hộ (Trống / Đã giữ chỗ)"
+              required
+              placeholder={
+                loadingRefData
+                  ? 'Đang tải căn hộ...'
+                  : selectableApartments.length === 0
+                  ? 'Không có căn AVAILABLE / RESERVED'
+                  : '-- Chọn căn hộ --'
+              }
+              value={createForm.apartment_id}
+              onChange={(e) => handleSelectApartment(e.target.value)}
+              error={createErrors.apartment_id}
+              options={selectableApartments.map((a) => ({
+                value: a.id,
+                label: `${a.code} — ${a.status === 'RESERVED' ? 'Đã giữ chỗ' : 'Còn trống'} — Niêm yết: ${formatMoney(a.base_rent)}`,
+              }))}
+            />
+          </div>
 
-  function PrintButton({ onClick }) {
-    return (
-      <button
-        type="button"
-        className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium flex items-center gap-1 shadow-sm"
-        onClick={onClick}
-        title="In mẫu hợp đồng A4"
-      >
-        <Printer className="w-3.5 h-3.5" />
-        <span>In mẫu</span>
-      </button>
-    );
-  }
-
-  function ServicePricesModal({ contractId, startDate, currentRole, onClose }) {
-    const [prices, setPrices] = useState([]);
-    const [form, setForm] = useState({
-      service_code: 'INTERNET',
-      unit_price: 100000,
-      effective_from: startDate ? new Date(startDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]
-    });
-
-    const SERVICE_LABELS = {
-      INTERNET: 'Mạng Internet',
-      MOTORBIKE_PARKING: 'Gửi xe máy (xăng)',
-      ELECTRICBIKE_PARKING: 'Gửi xe máy điện',
-      TRASH: 'Vệ sinh rác',
-      COMMON_SERVICE: 'Phí dịch vụ chung'
-    };
-
-    const loadPrices = () => {
-      api.get(`/api/v1/contracts/${contractId}/service-prices`)
-        .then((res) => setPrices(res.data?.data || []))
-        .catch((err) => console.error(err));
-    };
-
-    useEffect(loadPrices, [contractId]);
-
-    const handleAdd = async (e) => {
-      e.preventDefault();
-      try {
-        await api.post(`/api/v1/contracts/${contractId}/service-prices`, form);
-        loadPrices();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi lưu đơn giá dịch vụ.');
-      }
-    };
-
-    const handleDelete = async (priceId) => {
-      if (!window.confirm('Xóa đơn giá dịch vụ này? Hệ thống sẽ dùng giá tòa/mặc định.')) return;
-      try {
-        await api.delete(`/api/v1/contracts/${contractId}/service-prices/${priceId}`);
-        loadPrices();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi xóa đơn giá.');
-      }
-    };
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
-        <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">Đơn giá Dịch vụ theo Hợp đồng (FR-065)</h3>
-              <p className="text-xs text-slate-500">Ưu tiên áp dụng: Giá hợp đồng → Giá tòa → Giá mặc định</p>
+          {/* Chọn cư dân có sẵn HOẶC Tạo mới cư dân chưa có trong hệ thống */}
+          <div className="space-y-3 rounded-2xl border border-slate-200/90 bg-slate-50/60 p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold text-slate-800">
+                  Khách thuê đại diện đứng tên hợp đồng <span className="text-rose-500">*</span>
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  Chọn cư dân đã có hồ sơ hoặc tạo trực tiếp khách thuê mới chưa nằm trong hệ thống
+                </p>
+              </div>
+              <div className="inline-grid grid-cols-2 p-1 rounded-xl bg-slate-200/80 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setTenantMode('existing')}
+                  className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    tenantMode === 'existing'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  Cư dân có sẵn
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTenantMode('new')}
+                  className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    tenantMode === 'new'
+                      ? 'bg-primary-600 text-white shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  + Tạo cư dân mới
+                </button>
+              </div>
             </div>
-            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
-          </div>
 
-          <div className="space-y-2 mb-4">
-            {prices.length === 0 && (
-              <p className="text-xs text-slate-400 text-center py-3 border border-dashed rounded-lg">
-                Chưa có đơn giá riêng cho hợp đồng này (sử dụng biểu phí chuẩn của tòa nhà).
-              </p>
-            )}
-            {prices.map((p) => (
-              <div key={p.id} className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/50">
-                <div>
-                  <span className="text-sm font-semibold text-slate-900">
-                    {SERVICE_LABELS[p.service_code] || p.service_code}
-                  </span>
-                  <span className="text-xs text-slate-400 block">
-                    Áp dụng từ: {new Date(p.effective_from).toLocaleDateString('vi-VN')}
-                  </span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Money amount={p.unit_price} className="font-bold text-indigo-600 text-sm" />
-                  {currentRole === 'MANAGER' && (
-                    <button
-                      className="text-xs text-rose-600 hover:text-rose-700 font-medium"
-                      onClick={() => handleDelete(p.id)}
-                    >
-                      Xóa
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
+            {tenantMode === 'existing' ? (
+              <div className="space-y-2.5">
+                <Input
+                  icon={Search}
+                  placeholder="Lọc nhanh cư dân theo tên, SĐT, CCCD..."
+                  value={tenantQuickSearch}
+                  onChange={(e) => setTenantQuickSearch(e.target.value)}
+                />
+                <Select
+                  placeholder={
+                    filteredModalTenants.length === 0
+                      ? 'Không tìm thấy cư dân phù hợp — bấm "+ Tạo cư dân mới" ở góc phải'
+                      : '-- Chọn hồ sơ cư dân --'
+                  }
+                  value={createForm.primary_tenant_id}
+                  onChange={(e) => setCreateForm((p) => ({ ...p, primary_tenant_id: e.target.value }))}
+                  error={createErrors.primary_tenant_id}
+                  options={filteredModalTenants.map((t) => ({
+                    value: t.id,
+                    label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${
+                      t.id_number ? `CCCD: ${t.id_number}` : 'Chưa có CCCD - PENDING'
+                    })`,
+                  }))}
+                />
 
-          {currentRole === 'MANAGER' && (
-            <form onSubmit={handleAdd} className="space-y-3 pt-3 border-t border-slate-100">
-              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm / Cập nhật đơn giá</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="col-span-2 sm:col-span-1">
-                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Mã dịch vụ *</label>
-                  <select
-                    value={form.service_code}
-                    onChange={(e) => setForm({ ...form, service_code: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 py-1.5 px-2.5 text-xs bg-white"
-                  >
-                    {Object.entries(SERVICE_LABELS).map(([code, label]) => (
-                      <option key={code} value={code}>{label} ({code})</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="col-span-2 sm:col-span-1">
-                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Đơn giá riêng (VND) *</label>
-                  <Input
-                    type="number"
-                    min="0"
-                    value={form.unit_price}
-                    onChange={(e) => setForm({ ...form, unit_price: e.target.value })}
-                  />
-                </div>
-
-                <div className="col-span-2">
-                  <label className="text-[11px] text-slate-500 font-medium block mb-1">Ngày hiệu lực *</label>
-                  <Input
-                    type="date"
-                    value={form.effective_from}
-                    onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end pt-2">
-                <Button type="submit" variant="primary" size="sm">
-                  Lưu đơn giá
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  function AmendmentsButton({ onClick }) {
-    return (
-      <button
-        className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium"
-        onClick={onClick}
-      >
-        Phụ lục
-      </button>
-    );
-  }
-
-  function AmendmentsModal({ contract, currentRole, onClose }) {
-    const [versions, setVersions] = useState([]);
-    const [type, setType] = useState('RENEWAL'); // RENEWAL | RENT | DEPOSIT | NOTE
-    const [form, setForm] = useState({
-      end_date: contract.end_date ? new Date(new Date(contract.end_date).getTime() + 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] : '',
-      rent_amount: contract.rent_amount || '',
-      deposit_amount: contract.deposit_amount || '',
-      note: '',
-      reason: '',
-      effective_from: new Date().toISOString().split('T')[0],
-    });
-
-    const loadVersions = () => {
-      api.get(`/api/v1/contracts/${contract.id}/amendments`)
-        .then((res) => setVersions(res.data?.data || []))
-        .catch((err) => console.error(err));
-    };
-
-    useEffect(loadVersions, [contract.id]);
-
-    const handleCreate = async (e) => {
-      e.preventDefault();
-      if (!form.reason.trim()) {
-        alert('Vui lòng nhập lý do lập phụ lục.');
-        return;
-      }
-
-      const changes = {};
-      if (type === 'RENEWAL') changes.end_date = form.end_date;
-      if (type === 'RENT') changes.rent_amount = Number(form.rent_amount);
-      if (type === 'DEPOSIT') changes.deposit_amount = Number(form.deposit_amount);
-      if (type === 'NOTE') changes.note = form.note;
-
-      try {
-        await api.post(`/api/v1/contracts/${contract.id}/amendments`, {
-          changes,
-          reason: form.reason.trim(),
-          effective_from: form.effective_from,
-        });
-        alert('Đã gửi đề xuất phụ lục hợp đồng, chờ OWNER phê duyệt.');
-        setForm((prev) => ({ ...prev, reason: '' }));
-        loadVersions();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi đề xuất phụ lục.');
-      }
-    };
-
-    const handleApprove = async (versionId) => {
-      if (!window.confirm('Phê duyệt và áp dụng phụ lục này vào hợp đồng?')) return;
-      try {
-        await api.post(`/api/v1/contracts/${contract.id}/amendments/${versionId}/approve`);
-        alert('Phê duyệt phụ lục thành công.');
-        loadVersions();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi phê duyệt phụ lục.');
-      }
-    };
-
-    const handleReject = async (versionId) => {
-      const reason = window.prompt('Lý do từ chối phụ lục:');
-      if (reason === null) return;
-      if (!reason.trim()) {
-        alert('Vui lòng nhập lý do từ chối.');
-        return;
-      }
-      try {
-        await api.post(`/api/v1/contracts/${contract.id}/amendments/${versionId}/reject`, { reason: reason.trim() });
-        alert('Đã từ chối phụ lục.');
-        loadVersions();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi từ chối phụ lục.');
-      }
-    };
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
-        <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">Phụ lục Hợp đồng (FR-016 / FR-015)</h3>
-              <p className="text-xs text-slate-500">Căn {contract.apartment_code} · Khách {contract.tenant_name}</p>
-            </div>
-            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
-          </div>
-
-          {/* Lịch sử phiên bản phụ lục */}
-          <div className="space-y-3 mb-6">
-            <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lịch sử phụ lục hợp đồng</p>
-            {versions.length === 0 && (
-              <p className="text-xs text-slate-400 text-center py-3 border border-dashed rounded-lg">
-                Chưa có phụ lục hợp đồng nào.
-              </p>
-            )}
-            {versions.map((v) => {
-              const diff = v.diff || {};
-              const isPending = !v.approved_by && diff.status !== 'REJECTED';
-              const isApproved = !!v.approved_by || diff.status === 'APPROVED';
-              const isRejected = diff.status === 'REJECTED';
-
-              return (
-                <div key={v.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-900">Phụ lục #{v.version_no} · {v.reason}</span>
-                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-                      isApproved ? 'bg-emerald-100 text-emerald-800' :
-                      isRejected ? 'bg-rose-100 text-rose-800' :
-                      'bg-amber-100 text-amber-800'
-                    }`}>
-                      {isApproved ? 'Đã duyệt' : isRejected ? 'Từ chối' : 'Chờ duyệt'}
+                {selectedTenant && (!selectedTenant.id_number || selectedTenant.status === 'PENDING') ? (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <span>
+                      Hồ sơ khách thuê <strong>{selectedTenant.full_name}</strong> hiện chưa đủ CCCD hoặc đang ở trạng thái{' '}
+                      <strong>PENDING</strong>. Bạn vẫn lưu nháp hợp đồng được, nhưng cần bổ sung & duyệt hồ sơ cư dân trước khi kích hoạt.
                     </span>
                   </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="space-y-3 bg-white rounded-xl border border-sky-200/80 p-3.5">
+                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-100 text-xs text-sky-900">
+                  <ShieldCheck className="w-4 h-4 text-primary-600 shrink-0 mt-0.5" />
+                  <span>
+                    Khi lưu hợp đồng, hệ thống sẽ <strong>tự động tạo hồ sơ cư dân</strong> và{' '}
+                    <strong>cấp ngay tài khoản Cổng cư dân</strong> (khách thuê đăng nhập bằng{' '}
+                    <strong>SĐT + OTP</strong> hoặc Email & Mật khẩu).
+                  </span>
+                </div>
 
-                  <div className="text-xs text-slate-600 space-y-1">
-                    {diff.end_date && (
-                      <p>Gia hạn thời hạn: <strong>{diff.end_date.old} → {diff.end_date.new}</strong></p>
-                    )}
-                    {diff.rent_amount && (
-                      <p>Điều chỉnh giá thuê: <strong>{Number(diff.rent_amount.old).toLocaleString('vi-VN')} ₫ → {Number(diff.rent_amount.new).toLocaleString('vi-VN')} ₫</strong></p>
-                    )}
-                    {diff.deposit_amount && (
-                      <p>Điều chỉnh tiền cọc: <strong>{Number(diff.deposit_amount.old).toLocaleString('vi-VN')} ₫ → {Number(diff.deposit_amount.new).toLocaleString('vi-VN')} ₫</strong></p>
-                    )}
-                    {diff.note && (
-                      <p>Cập nhật điều khoản: <em>{diff.note.new}</em></p>
-                    )}
-                    <p className="text-[11px] text-slate-400">
-                      Hiệu lực: {new Date(v.effective_from).toLocaleDateString('vi-VN')}
-                      {v.approved_by_name && ` · Người duyệt: ${v.approved_by_name}`}
-                      {diff.rejection_reason && ` · Lý do từ chối: ${diff.rejection_reason}`}
-                    </p>
-                  </div>
-
-                  {isPending && currentRole === 'OWNER' && (
-                    <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
-                      <Button size="sm" variant="outline" onClick={() => handleReject(v.id)} className="text-rose-600 border-rose-200 hover:bg-rose-50 text-xs">
-                        Từ chối
-                      </Button>
-                      <Button size="sm" variant="primary" onClick={() => handleApprove(v.id)} className="bg-emerald-600 hover:bg-emerald-700 text-xs">
-                        Duyệt phụ lục
-                      </Button>
+                {dupInfo.isDuplicate && dupInfo.duplicates.length > 0 ? (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold">
+                          Phát hiện SĐT / CCCD đã tồn tại trong hệ thống:
+                        </p>
+                        {dupInfo.duplicates.map((d) => (
+                          <div key={d.id} className="mt-1 flex items-center justify-between gap-2 flex-wrap">
+                            <span>
+                              • <strong>{d.full_name}</strong> — SĐT: {d.phone || '—'}
+                              {d.id_number ? ` — CCCD: ${d.id_number}` : ''}
+                            </span>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleUseDuplicateTenant(d)}
+                            >
+                              Dùng hồ sơ này
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                  </div>
+                ) : null}
 
-          {/* Form lập đề xuất phụ lục mới (chỉ MANAGER được đề xuất theo PRD 6.2) */}
-          {['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) && currentRole === 'MANAGER' && (
-            <form onSubmit={handleCreate} className="space-y-3 pt-3 border-t border-slate-100">
-              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Đề xuất phụ lục mới (MANAGER)</p>
-
-              <div>
-                <label className="text-xs text-slate-600 font-medium block mb-1">Nội dung thay đổi</label>
-                <select
-                  value={type}
-                  onChange={(e) => setType(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 py-1.5 px-3 text-xs bg-white"
-                >
-                  <option value="RENEWAL">Gia hạn thời hạn hợp đồng (end_date)</option>
-                  <option value="RENT">Điều chỉnh giá thuê (rent_amount)</option>
-                  <option value="DEPOSIT">Điều chỉnh tiền cọc (deposit_amount)</option>
-                  <option value="NOTE">Bổ sung điều khoản ghi chú (note)</option>
-                </select>
-              </div>
-
-              {type === 'RENEWAL' && (
-                <div>
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Ngày kết thúc mới (Gia hạn) *</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <Input
+                    label="Họ và tên khách thuê mới"
+                    required
+                    placeholder="VD: Nguyễn Văn Minh"
+                    value={newTenantForm.full_name}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, full_name: e.target.value }))}
+                    error={createErrors.new_full_name}
+                  />
+                  <Input
+                    label="Số điện thoại (nhận mã OTP)"
+                    required
+                    placeholder="VD: 0912345678"
+                    hint={dupChecking ? 'Đang kiểm tra trùng SĐT...' : undefined}
+                    value={newTenantForm.phone}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, phone: e.target.value }))}
+                    error={createErrors.new_phone}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Input
+                    label="Số CCCD / Hộ chiếu"
+                    placeholder="12 chữ số CCCD (khuyến nghị nhập đủ)"
+                    hint={
+                      newTenantForm.id_number.trim()
+                        ? 'Có CCCD → Hồ sơ tự động đạt trạng thái APPROVED'
+                        : 'Nếu để trống → Lưu nháp được, cần bổ sung trước khi Kích hoạt'
+                    }
+                    value={newTenantForm.id_number}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, id_number: e.target.value }))}
+                    error={createErrors.new_id_number}
+                  />
+                  <Input
+                    label="Email (tùy chọn)"
+                    type="email"
+                    placeholder="khachthue@gmail.com"
+                    value={newTenantForm.email}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, email: e.target.value }))}
+                    error={createErrors.new_email}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Input
+                    label="Ngày sinh"
                     type="date"
-                    required
-                    value={form.end_date}
-                    onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                    value={newTenantForm.dob}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, dob: e.target.value }))}
                   />
-                  <span className="text-[11px] text-slate-400">Hạn hiện tại: {contract.end_date}</span>
-                </div>
-              )}
-
-              {type === 'RENT' && (
-                <div>
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Giá thuê mới / tháng (VND) *</label>
                   <Input
-                    type="number"
-                    required
-                    min="0"
-                    value={form.rent_amount}
-                    onChange={(e) => setForm({ ...form, rent_amount: e.target.value })}
-                  />
-                  <span className="text-[11px] text-slate-400">Giá hiện tại: {Number(contract.rent_amount).toLocaleString('vi-VN')} ₫</span>
-                </div>
-              )}
-
-              {type === 'DEPOSIT' && (
-                <div>
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Tiền cọc mới (VND) *</label>
-                  <Input
-                    type="number"
-                    required
-                    min="0"
-                    value={form.deposit_amount}
-                    onChange={(e) => setForm({ ...form, deposit_amount: e.target.value })}
-                  />
-                  <span className="text-[11px] text-slate-400">Cọc hiện tại: {Number(contract.deposit_amount).toLocaleString('vi-VN')} ₫</span>
-                </div>
-              )}
-
-              {type === 'NOTE' && (
-                <div>
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Nội dung điều khoản mới *</label>
-                  <Input
-                    required
-                    value={form.note}
-                    placeholder="vd: Cho phép nuôi thú cưng nhỏ, thêm 1 chỗ gửi xe..."
-                    onChange={(e) => setForm({ ...form, note: e.target.value })}
-                  />
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="col-span-2">
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Lý do lập phụ lục *</label>
-                  <Input
-                    required
-                    placeholder="vd: Khách thỏa thuận thuê thêm 6 tháng, gia hạn hợp đồng..."
-                    value={form.reason}
-                    onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                    label="Mật khẩu đăng nhập ban đầu (tùy chọn)"
+                    type="password"
+                    placeholder="Tối thiểu 8 ký tự (nếu dùng Email)"
+                    hint="Để trống nếu cư dân chỉ đăng nhập bằng SĐT + OTP"
+                    value={newTenantForm.password}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, password: e.target.value }))}
+                    error={createErrors.new_password}
                   />
                 </div>
 
-                <div className="col-span-2">
-                  <label className="text-xs text-slate-600 font-medium block mb-1">Ngày hiệu lực *</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <Input
-                    type="date"
-                    required
-                    value={form.effective_from}
-                    onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
+                    label="Địa chỉ thường trú"
+                    placeholder="Số nhà, phường/xã, quận/huyện, tỉnh/TP"
+                    value={newTenantForm.address}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, address: e.target.value }))}
+                  />
+                  <Input
+                    label="Quốc tịch"
+                    placeholder="Việt Nam"
+                    value={newTenantForm.nationality}
+                    onChange={(e) => setNewTenantForm((p) => ({ ...p, nationality: e.target.value }))}
                   />
                 </div>
               </div>
-
-              <div className="flex justify-end pt-2">
-                <Button type="submit" variant="primary" size="sm">
-                  Gửi đề xuất phụ lục
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  function OccupantsModal({ contractId, currentRole, onClose }) {
-    const [list, setList] = useState([]);
-    const [form, setForm] = useState({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
-
-    const load = () => {
-      api.get(`/api/v1/contracts/${contractId}/occupants`)
-        .then((res) => setList(res.data?.data || []))
-        .catch(() => {});
-    };
-    useEffect(load, [contractId]);
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
-        <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-          <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-            <h3 className="text-base font-bold text-slate-900">Thành viên cùng ở</h3>
-            <button onClick={onClose}><X className="w-5 h-5 text-slate-400" /></button>
-          </div>
-
-          <div className="space-y-2 mb-4">
-            {list.length === 0 && (
-              <p className="text-xs text-slate-400 text-center py-2">Chưa có thành viên cùng ở nào.</p>
             )}
-            {list.map((m) => (
-              <div key={m.tenant_id} className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 bg-slate-50/50">
-                <div>
-                  <span className="text-sm font-medium text-slate-900">{m.full_name}</span>
-                  <span className="text-xs text-slate-400 block">{m.phone} · {m.relationship || '—'}</span>
-                </div>
-                {currentRole === 'MANAGER' && (
-                  <button
-                    className="text-xs text-rose-600 hover:text-rose-700 font-medium"
-                    onClick={async () => {
-                      if (!window.confirm(`Gỡ ${m.full_name} khỏi hợp đồng? Hồ sơ cư dân sẽ được giữ nguyên.`)) return;
-                      try {
-                        await api.delete(`/api/v1/contracts/${contractId}/occupants/${m.tenant_id}`);
-                        load();
-                      } catch (err) {
-                        alert(err.response?.data?.message || 'Lỗi khi gỡ thành viên.');
-                      }
-                    }}
-                  >
-                    Gỡ
-                  </button>
-                )}
-              </div>
-            ))}
           </div>
 
-          {currentRole === 'MANAGER' && (
-            <form
-              className="space-y-3 pt-3 border-t border-slate-100"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                try {
-                  await api.post(`/api/v1/contracts/${contractId}/occupants`, form);
-                  setForm({ full_name: '', phone: '', relationship: '', email: '', id_number: '' });
-                  load();
-                } catch (err) {
-                  alert(err.response?.data?.message || 'Lỗi khi thêm thành viên.');
-                }
-              }}
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input
+                label="Ngày bắt đầu thuê"
+                type="date"
+                required
+                value={createForm.start_date}
+                onChange={(e) => setCreateForm((p) => ({ ...p, start_date: e.target.value }))}
+                error={createErrors.start_date}
+              />
+              <Input
+                label="Ngày kết thúc thuê"
+                type="date"
+                required
+                value={createForm.end_date}
+                onChange={(e) => setCreateForm((p) => ({ ...p, end_date: e.target.value }))}
+                error={createErrors.end_date}
+              />
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-slate-500 flex items-center gap-1">
+                <Calendar className="w-3 h-3" /> Chọn nhanh kỳ hạn:
+              </span>
+              {[6, 12, 24].map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() =>
+                    setCreateForm((p) => ({
+                      ...p,
+                      end_date: addMonthsStr(p.start_date || todayStr, m),
+                    }))
+                  }
+                  className="px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-primary-50 text-slate-700 hover:text-primary-700 border border-slate-200 transition-colors"
+                >
+                  {m} tháng
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Giá thuê hàng tháng (VND)"
+              type="number"
+              min="0"
+              required
+              placeholder="VD: 8500000"
+              hint={
+                selectedApartment
+                  ? `Giá niêm yết của căn ${selectedApartment.code}: ${formatMoney(selectedApartment.base_rent)}`
+                  : undefined
+              }
+              value={createForm.rent_amount}
+              onChange={(e) => setCreateForm((p) => ({ ...p, rent_amount: e.target.value }))}
+              error={createErrors.rent_amount}
+            />
+            <Input
+              label="Tiền đặt cọc bảo đảm (VND)"
+              type="number"
+              min="0"
+              placeholder="VD: 8500000"
+              hint="Mặc định gợi ý bằng 1 tháng tiền thuê"
+              value={createForm.deposit_amount}
+              onChange={(e) => setCreateForm((p) => ({ ...p, deposit_amount: e.target.value }))}
+              error={createErrors.deposit_amount}
+            />
+          </div>
+
+          {isDiscountedWarning ? (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 flex items-start gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="leading-relaxed">
+                <p className="font-semibold">
+                  Cảnh báo khung giá ưu đãi (&lt; 90% giá niêm yết {formatMoney(selectedApartment?.base_rent)})
+                </p>
+                <p className="text-amber-800 mt-0.5">
+                  Theo quy định kiểm soát nội bộ (FR-014), mức giá thuê đề xuất giảm trên 10% so với giá niêm yết. Khi bấm Kích hoạt sau khi đính kèm bản ký, hợp đồng sẽ tự động chuyển sang trạng thái{' '}
+                  <strong>PENDING_APPROVAL</strong> để chờ Chủ đầu tư (<strong>OWNER</strong>) phê duyệt.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Select
+              label="Chu kỳ thanh toán"
+              value={createForm.billing_cycle}
+              onChange={(e) => setCreateForm((p) => ({ ...p, billing_cycle: e.target.value }))}
+              options={[
+                { value: 'monthly', label: 'Hàng tháng (Monthly)' },
+                { value: 'quarterly', label: '3 tháng / lần (Quarterly)' },
+              ]}
+            />
+            <Input
+              label="Ngày phát hành hóa đơn định kỳ"
+              type="number"
+              min="1"
+              max="28"
+              value={createForm.billing_day}
+              onChange={(e) => setCreateForm((p) => ({ ...p, billing_day: e.target.value }))}
+              hint="Ngày chốt hóa đơn hàng tháng (1 – 28)"
+            />
+          </div>
+
+          <Input
+            label="Ghi chú hợp đồng"
+            multiline
+            rows={2}
+            placeholder="Thỏa thuận thêm về nội thất bàn giao, điều kiện ưu đãi..."
+            value={createForm.note}
+            onChange={(e) => setCreateForm((p) => ({ ...p, note: e.target.value }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Xác nhận Phê duyệt yêu cầu từ cư dân */}
+      <ConfirmDialog
+        open={Boolean(approveReqTarget)}
+        onClose={() => setApproveReqTarget(null)}
+        onConfirm={handleConfirmApproveRequest}
+        loading={processingReq}
+        variant="success"
+        title="Phê duyệt yêu cầu của cư dân"
+        confirmLabel="Phê duyệt ngay"
+        message={
+          approveReqTarget
+            ? `Xác nhận phê duyệt đề nghị "${
+                REQUEST_TYPE_MAP[approveReqTarget.type]?.label || approveReqTarget.type
+              }" cho căn hộ ${approveReqTarget.apartment_code} của cư dân ${approveReqTarget.resident_name}? Hệ thống sẽ tự động gửi thông báo đến cư dân.`
+            : ''
+        }
+      />
+
+      {/* Modal Từ chối yêu cầu từ cư dân */}
+      <Modal
+        open={Boolean(rejectReqTarget)}
+        onClose={() => setRejectReqTarget(null)}
+        title="Từ chối đề nghị của cư dân"
+        subtitle={
+          rejectReqTarget
+            ? `Căn hộ ${rejectReqTarget.apartment_code} — Cư dân: ${rejectReqTarget.resident_name}`
+            : ''
+        }
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setRejectReqTarget(null)} disabled={processingReq}>
+              Hủy bỏ
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleConfirmRejectRequest}
+              loading={processingReq}
+              icon={XCircle}
             >
-              <p className="text-xs font-bold text-slate-800 uppercase tracking-wider">Thêm thành viên</p>
-              <div className="grid grid-cols-2 gap-3">
-                <input required placeholder="Họ tên *" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-                <input required placeholder="SĐT *" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-                <input required placeholder="Quan hệ * (vd: vợ, con)" value={form.relationship} onChange={(e) => setForm({ ...form, relationship: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-                <input placeholder="Số CCCD" value={form.id_number} onChange={(e) => setForm({ ...form, id_number: e.target.value })} className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-                <input placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="col-span-2 w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500" />
-              </div>
-              <div className="flex justify-end">
-                <Button type="submit" variant="primary" size="sm">Thêm</Button>
-              </div>
-            </form>
-          )}
-        </div>
-      </div>
-    );
-  }
+              Xác nhận từ chối
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleConfirmRejectRequest} className="space-y-3">
+          <Input
+            label="Lý do từ chối gửi tới cư dân"
+            multiline
+            rows={3}
+            placeholder="Nhập lý do từ chối để cư dân nắm rõ..."
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+          />
+        </form>
+      </Modal>
+    </div>
+  );
 }
+
+export default ContractsPage;
