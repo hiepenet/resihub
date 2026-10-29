@@ -65,6 +65,20 @@ export function getCurrentPeriod() {
   return new Date().toISOString().slice(0, 7);
 }
 
+export function maskIdNumber(idNumber) {
+  const clean = String(idNumber || '').trim();
+  if (!clean) return '—';
+  if (clean.length <= 4) return `****${clean}`;
+  return `${'*'.repeat(Math.max(4, clean.length - 4))}${clean.slice(-4)}`;
+}
+
+export function maskPhone(phone) {
+  const clean = String(phone || '').trim();
+  if (!clean) return '—';
+  if (clean.length <= 6) return `${clean.slice(0, 2)}***`;
+  return `${clean.slice(0, 3)}****${clean.slice(-3)}`;
+}
+
 export function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

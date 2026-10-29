@@ -11,6 +11,10 @@ import {
   ArrowRight,
   CheckCircle2,
   XCircle,
+  ShieldCheck,
+  Search,
+  AlertTriangle,
+  Lock,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
@@ -21,20 +25,23 @@ import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
-import { Select } from '../../../components/ui/Select';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
-import { extractErrorMessage } from '../../../utils/validation';
+import {
+  extractErrorMessage,
+  isValidEmail,
+  isValidPhone,
+  normalizePhone,
+} from '../../../utils/validation';
 
 export function BuildingsPage() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { canManageBuildings, canEditRealEstate } = usePermission();
+  const { canCreateBuildings, canManageBuildings, canEditRealEstate } = usePermission();
 
   const [buildings, setBuildings] = useState([]);
-  const [owners, setOwners] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
@@ -42,6 +49,14 @@ export function BuildingsPage() {
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [codeCheck, setCodeCheck] = useState(null);
+
+  // Bảo mật danh tính Chủ đầu tư (Know-Before-You-Link): tra cứu chính xác theo Email / SĐT
+  const [ownerIdentifier, setOwnerIdentifier] = useState('');
+  const [ownerLookupLoading, setOwnerLookupLoading] = useState(false);
+  const [ownerPreview, setOwnerPreview] = useState(null);
+  const [ownerLookupError, setOwnerLookupError] = useState('');
+  const [ownerChanged, setOwnerChanged] = useState(false);
+
   const [form, setForm] = useState({
     name: '',
     code: '',
@@ -55,12 +70,8 @@ export function BuildingsPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [bRes, oRes] = await Promise.all([
-        buildingsService.list(),
-        buildingsService.listOwners().catch(() => ({ data: [] })),
-      ]);
+      const bRes = await buildingsService.list();
       setBuildings(bRes.data || []);
-      setOwners(oRes.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err));
     } finally {
@@ -75,11 +86,15 @@ export function BuildingsPage() {
   const openCreate = () => {
     setEditing(null);
     setCodeCheck(null);
+    setOwnerIdentifier('');
+    setOwnerPreview(null);
+    setOwnerLookupError('');
+    setOwnerChanged(false);
     setForm({
       name: '',
       code: '',
       address: '',
-      owner_id: owners[0]?.id || '',
+      owner_id: '',
       bank_name: 'Vietcombank',
       account_number: '',
       account_holder: '',
@@ -91,7 +106,11 @@ export function BuildingsPage() {
     e?.stopPropagation();
     setEditing(b);
     setCodeCheck(null);
-    const pa = b.payment_account || {};
+    setOwnerIdentifier('');
+    setOwnerPreview(b.owner_preview || null);
+    setOwnerLookupError('');
+    setOwnerChanged(false);
+    const pa = b.payment_account || b.lease_terms?.payment_account || {};
     setForm({
       name: b.name || '',
       code: b.code || '',
@@ -114,15 +133,104 @@ export function BuildingsPage() {
     }
   };
 
+  const handleClearOwner = () => {
+    setOwnerPreview(null);
+    setOwnerIdentifier('');
+    setOwnerLookupError('');
+    setOwnerChanged(true);
+    setForm((prev) => ({ ...prev, owner_id: '' }));
+  };
+
+  const verifyOwnerIdentifier = async (rawValue = ownerIdentifier) => {
+    const raw = String(rawValue || '').trim();
+    if (!raw) {
+      setOwnerLookupError('');
+      return null;
+    }
+
+    const isEmailInput = raw.includes('@');
+    if (isEmailInput) {
+      if (!isValidEmail(raw)) {
+        const msg = 'Định dạng Email không hợp lệ (ví dụ: chudautu@congty.vn).';
+        setOwnerLookupError(msg);
+        setOwnerPreview(null);
+        setForm((prev) => ({ ...prev, owner_id: '' }));
+        return null;
+      }
+    } else {
+      const cleanPhone = normalizePhone(raw);
+      if (!isValidPhone(cleanPhone)) {
+        const msg = 'Số điện thoại không đúng định dạng 10 chữ số Việt Nam (ví dụ: 0912345678).';
+        setOwnerLookupError(msg);
+        setOwnerPreview(null);
+        setForm((prev) => ({ ...prev, owner_id: '' }));
+        return null;
+      }
+    }
+
+    setOwnerLookupLoading(true);
+    setOwnerLookupError('');
+    try {
+      const res = await buildingsService.lookupOwner(isEmailInput ? raw.toLowerCase() : normalizePhone(raw));
+      if (res?.found && res?.owner?.id) {
+        setOwnerPreview(res.owner);
+        setOwnerLookupError('');
+        setOwnerChanged(true);
+        setForm((prev) => ({ ...prev, owner_id: res.owner.id }));
+        return res.owner;
+      }
+      setOwnerPreview(null);
+      setForm((prev) => ({ ...prev, owner_id: '' }));
+      setOwnerLookupError(
+        res?.message ||
+          'Không tìm thấy hồ sơ Chủ đầu tư khớp với Email/SĐT này. Vui lòng kiểm tra lại hoặc xóa trống để gán sau.'
+      );
+      return null;
+    } catch (err) {
+      setOwnerPreview(null);
+      setForm((prev) => ({ ...prev, owner_id: '' }));
+      setOwnerLookupError(extractErrorMessage(err, 'Không thể kiểm tra thông tin Chủ đầu tư.'));
+      return null;
+    } finally {
+      setOwnerLookupLoading(false);
+    }
+  };
+
+  const isOwnerReadOnly = Boolean(editing && editing.owner_id && !canManageBuildings);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    let resolvedOwnerId = form.owner_id;
+    if (!isOwnerReadOnly && !ownerPreview && ownerIdentifier.trim()) {
+      const verified = await verifyOwnerIdentifier(ownerIdentifier);
+      if (!verified) {
+        toast.warning(
+          'Email/SĐT Chủ đầu tư chưa hợp lệ hoặc không tìm thấy trong hệ thống. Vui lòng kiểm tra lại hoặc xóa trống ô này nếu chưa gắn Chủ đầu tư.'
+        );
+        return;
+      }
+      resolvedOwnerId = verified.id;
+    }
+
     setSaving(true);
     try {
+      const ownerPayload = {};
+      if (!editing) {
+        if (resolvedOwnerId) ownerPayload.owner_id = resolvedOwnerId;
+      } else if (canManageBuildings) {
+        if (ownerChanged) {
+          ownerPayload.owner_id = resolvedOwnerId || null;
+        }
+      } else if (!editing.owner_id && resolvedOwnerId) {
+        ownerPayload.owner_id = resolvedOwnerId;
+      }
+
       const payload = {
         name: form.name.trim(),
         code: form.code.trim().toUpperCase(),
         address: form.address.trim(),
-        owner_id: form.owner_id || undefined,
+        ...ownerPayload,
         payment_account: {
           bank_name: form.bank_name.trim(),
           account_number: form.account_number.trim(),
@@ -137,6 +245,7 @@ export function BuildingsPage() {
         await buildingsService.create(payload);
         toast.success('Đã tạo tòa nhà mới thành công.');
       }
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
       setModalOpen(false);
       loadData();
     } catch (err) {
@@ -175,7 +284,7 @@ export function BuildingsPage() {
         title="Quản lý Bất động sản"
         subtitle="Danh mục các tòa nhà, khu phân khu, tầng và sơ đồ căn hộ trong phạm vi quản lý"
         actions={
-          canManageBuildings ? (
+          canCreateBuildings ? (
             <Button icon={Plus} onClick={openCreate}>
               Thêm tòa nhà mới
             </Button>
@@ -387,18 +496,97 @@ export function BuildingsPage() {
             onChange={(e) => setForm({ ...form, address: e.target.value })}
           />
 
-          {canManageBuildings && owners.length > 0 ? (
-            <Select
-              label="Chủ đầu tư sở hữu (OWNER)"
-              placeholder="-- Chọn chủ đầu tư --"
-              value={form.owner_id}
-              onChange={(e) => setForm({ ...form, owner_id: e.target.value })}
-              options={owners.map((o) => ({
-                value: o.id,
-                label: `${o.full_name || o.name}${o.email ? ` (${o.email})` : ''}`,
-              }))}
-            />
-          ) : null}
+          {/* Liên kết Chủ đầu tư bảo mật (Know-Before-You-Link — không lộ danh sách OWNER) */}
+          <div className="rounded-xl border border-slate-200/90 bg-slate-50/70 p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-primary-600 shrink-0" />
+                <span className="text-xs font-semibold text-slate-800">
+                  Chủ đầu tư sở hữu (OWNER — Tùy chọn)
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-500">Bảo mật danh tính PII</span>
+            </div>
+
+            {isOwnerReadOnly ? (
+              <div className="rounded-lg bg-white border border-slate-200 px-3.5 py-2.5 flex items-start justify-between gap-3">
+                <div className="space-y-0.5 text-xs">
+                  <p className="font-semibold text-slate-800 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-slate-400" />
+                    {ownerPreview?.masked_name || 'Đã gắn Chủ đầu tư'}
+                  </p>
+                  <p className="text-slate-500">
+                    Email: <span className="font-mono">{ownerPreview?.masked_email || '—'}</span> · SĐT:{' '}
+                    <span className="font-mono">{ownerPreview?.masked_phone || '—'}</span>
+                  </p>
+                  <p className="text-[11px] text-amber-700 pt-0.5">
+                    Tòa nhà đã gắn Chủ đầu tư. Theo phân quyền PRD (FR-070), chỉ Quản trị hệ thống (SYS_ADMIN) mới được chuyển nhượng Chủ sở hữu.
+                  </p>
+                </div>
+              </div>
+            ) : ownerPreview ? (
+              <div className="rounded-lg bg-emerald-50/80 border border-emerald-200 px-3.5 py-2.5 flex items-center justify-between gap-3">
+                <div className="space-y-0.5 text-xs">
+                  <p className="font-semibold text-emerald-900 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    Đã xác thực: {ownerPreview.masked_name}
+                  </p>
+                  <p className="text-emerald-800">
+                    Email: <span className="font-mono">{ownerPreview.masked_email || '—'}</span> · SĐT:{' '}
+                    <span className="font-mono">{ownerPreview.masked_phone || '—'}</span>
+                  </p>
+                </div>
+                <Button type="button" variant="outline" size="xs" onClick={handleClearOwner}>
+                  Đổi / Xóa
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex-1">
+                    <Input
+                      placeholder="Nhập chính xác Email hoặc SĐT 10 số của Chủ đầu tư..."
+                      value={ownerIdentifier}
+                      onChange={(e) => {
+                        setOwnerIdentifier(e.target.value);
+                        if (ownerLookupError) setOwnerLookupError('');
+                      }}
+                      onBlur={() => {
+                        if (ownerIdentifier.trim() && !ownerLookupLoading) {
+                          verifyOwnerIdentifier(ownerIdentifier);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          verifyOwnerIdentifier(ownerIdentifier);
+                        }
+                      }}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="soft"
+                    icon={Search}
+                    loading={ownerLookupLoading}
+                    onClick={() => verifyOwnerIdentifier(ownerIdentifier)}
+                  >
+                    Kiểm tra
+                  </Button>
+                </div>
+                {ownerLookupError ? (
+                  <p className="text-xs text-rose-600 flex items-start gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{ownerLookupError}</span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-slate-500">
+                    Hệ thống không hiển thị danh sách công khai Chủ đầu tư. Nhập Email hoặc SĐT để xác thực một phần thông tin, hoặc để trống nếu chưa gán.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="pt-2 border-t border-slate-100">
             <p className="text-xs font-semibold text-slate-700 mb-2.5">
