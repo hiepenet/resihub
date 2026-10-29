@@ -615,7 +615,11 @@ router.get('/:id/floor-map', authenticateToken, async (req, res) => {
     );
 
     const apartmentsRes = await pool.query(
-      'SELECT * FROM apartment WHERE building_id = $1 ORDER BY code ASC',
+      `SELECT a.*, z.code AS zone_code, z.name AS zone_name
+       FROM apartment a
+       LEFT JOIN zone z ON z.id = a.zone_id
+       WHERE a.building_id = $1
+       ORDER BY a.code ASC`,
       [id]
     );
 
@@ -881,6 +885,72 @@ router.patch('/:id/zones/:zone_id', authenticateToken, requireRole(['SYS_ADMIN',
   } catch (err) {
     console.error('[Update Zone Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật khu.' });
+  }
+});
+
+/**
+ * DELETE /api/v1/buildings/:id/zones/:zone_id
+ * Quyền theo PRD 6.2: Chỉ SYS_ADMIN có quyền D (xóa khu rỗng). MANAGER chỉ có CRU, OWNER chỉ có R.
+ */
+router.delete('/:id/zones/:zone_id', authenticateToken, async (req, res) => {
+  try {
+    const { id, zone_id } = req.params;
+    const roleCodes = getUserRoleCodes(req);
+
+    if (!roleCodes.includes('SYS_ADMIN')) {
+      const checkRead = await checkBuildingAccess(req, id, 'update');
+      if (!checkRead.allowed) {
+        return res.status(checkRead.status).json({ code: 'FORBIDDEN', message: checkRead.message });
+      }
+
+      const aptCountRes = await pool.query('SELECT COUNT(*) FROM apartment WHERE zone_id = $1', [zone_id]);
+      const count = parseInt(aptCountRes.rows[0]?.count || 0, 10);
+      if (count > 0) {
+        return res.status(400).json({
+          code: 'ZONE_HAS_APARTMENTS',
+          message: `Không thể xóa phân khu này vì đang chứa ${count} căn hộ. Vui lòng gỡ phân khu khỏi các căn hộ trước.`,
+        });
+      }
+
+      await logAccessDenied(req, 'zone', zone_id, 'MANAGER attempted to delete zone (CRU only)');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa phân khu.',
+      });
+    }
+
+    const access = await checkBuildingAccess(req, id, 'delete');
+    if (!access.allowed) {
+      return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
+    }
+
+    const aptCountRes = await pool.query('SELECT COUNT(*) FROM apartment WHERE zone_id = $1', [zone_id]);
+    const count = parseInt(aptCountRes.rows[0]?.count || 0, 10);
+    if (count > 0) {
+      return res.status(400).json({
+        code: 'ZONE_HAS_APARTMENTS',
+        message: `Không thể xóa phân khu này vì đang chứa ${count} căn hộ. Vui lòng gỡ phân khu khỏi các căn hộ trước.`,
+      });
+    }
+
+    const delRes = await pool.query(
+      'DELETE FROM zone WHERE id = $1 AND building_id = $2 RETURNING *',
+      [zone_id, id]
+    );
+    if (delRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy phân khu trong tòa này.' });
+    }
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'zone', $2, $3)`,
+      [req.user.sub, zone_id, JSON.stringify(delRes.rows[0])]
+    );
+
+    return res.json({ message: 'Đã xóa phân khu trống thành công.', data: delRes.rows[0] });
+  } catch (err) {
+    console.error('[Delete Zone Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa phân khu.' });
   }
 });
 

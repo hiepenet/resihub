@@ -105,6 +105,124 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 /**
+ * GET /api/v1/apartments/:id
+ * Chi tiết căn hộ kèm hợp đồng hiện tại, giữ chỗ, đồng hồ điện/nước và lịch sử yêu cầu kỹ thuật
+ */
+router.get('/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const orgId = req.user.org_id;
+  const roleCodes = getUserRoleCodes(req);
+  const isSysAdmin = roleCodes.includes('SYS_ADMIN');
+  const isOwner = roleCodes.includes('OWNER');
+  const isManager = roleCodes.includes('MANAGER');
+  const isResident = roleCodes.includes('RESIDENT');
+
+  try {
+    const existRes = await adminPool.query(
+      `SELECT a.id, a.building_id
+       FROM apartment a
+       JOIN building b ON b.id = a.building_id
+       WHERE a.id = $1 AND b.org_id = $2`,
+      [id, orgId]
+    );
+    if (existRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
+    const { building_id: buildingId } = existRes.rows[0];
+
+    if (!isSysAdmin) {
+      if (isOwner) {
+        const ownedIds = await getOwnerBuildingIds(req.user.sub, orgId);
+        if (!ownedIds.includes(buildingId)) {
+          await logAccessDenied(req, 'apartment', id, 'OWNER viewed apartment of unowned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà của căn hộ này.' });
+        }
+      } else if (isManager) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
+        if (!mgrIds.includes(buildingId)) {
+          await logAccessDenied(req, 'apartment', id, 'MANAGER viewed apartment of unassigned building');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của căn hộ này.' });
+        }
+      } else if (isResident) {
+        const resCheck = await adminPool.query(
+          `SELECT 1 FROM contract c
+           JOIN tenant t ON t.id = c.primary_tenant_id
+           WHERE c.apartment_id = $1 AND t.person_id = $2 LIMIT 1`,
+          [id, req.user.person_id]
+        );
+        if (resCheck.rows.length === 0) {
+          await logAccessDenied(req, 'apartment', id, 'RESIDENT viewed another apartment');
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem căn hộ này.' });
+        }
+      }
+    }
+
+    const aptRes = await pool.query(
+      `SELECT a.*,
+              b.name AS building_name, b.code AS building_code, b.address AS building_address,
+              f.name AS floor_name, f.level AS floor_level,
+              z.name AS zone_name, z.code AS zone_code
+       FROM apartment a
+       JOIN building b ON b.id = a.building_id
+       LEFT JOIN floor f ON f.id = a.floor_id
+       LEFT JOIN zone z ON z.id = a.zone_id
+       WHERE a.id = $1`,
+      [id]
+    );
+    if (aptRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
+    const apartment = aptRes.rows[0];
+
+    const [contractsRes, reservationsRes, metersRes, requestsRes] = await Promise.all([
+      pool.query(
+        `SELECT c.*, p.full_name AS tenant_name, p.phone AS tenant_phone
+         FROM contract c
+         LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+         LEFT JOIN person p ON p.id = t.person_id
+         WHERE c.apartment_id = $1
+         ORDER BY c.created_at DESC LIMIT 10`,
+        [id]
+      ),
+      pool.query(
+        `SELECT * FROM reservation WHERE apartment_id = $1 ORDER BY created_at DESC LIMIT 5`,
+        [id]
+      ),
+      pool.query(
+        `SELECT m.*,
+                (SELECT mr.current_reading FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC LIMIT 1) AS latest_reading,
+                (SELECT mr.period FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC LIMIT 1) AS latest_period
+         FROM meter m
+         WHERE m.apartment_id = $1
+         ORDER BY m.meter_type ASC`,
+        [id]
+      ),
+      pool.query(
+        `SELECT id, tracking_code, title, category, priority, status, created_at, rating
+         FROM service_request
+         WHERE apartment_id = $1
+         ORDER BY created_at DESC LIMIT 10`,
+        [id]
+      ),
+    ]);
+
+    res.json({
+      data: {
+        ...apartment,
+        allowed_transitions: APARTMENT_TRANSITIONS[apartment.status] || [],
+        contracts: contractsRes.rows,
+        reservations: reservationsRes.rows,
+        meters: metersRes.rows,
+        service_requests: requestsRes.rows,
+      },
+    });
+  } catch (err) {
+    console.error('[Apartment Detail Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải chi tiết căn hộ.' });
+  }
+});
+
+/**
  * POST /api/v1/apartments
  * Quyền theo PRD 6.2: SYS_ADMIN (CRUD toàn org) hoặc MANAGER (CRU trên tòa được gán). OWNER chỉ có R.
  */
@@ -284,10 +402,13 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       });
     }
 
-    if (zone_id) {
+    const hasZoneUpdate = zone_id !== undefined;
+    const nextZoneId = zone_id ? zone_id : null;
+
+    if (nextZoneId) {
       const zoneCheck = await pool.query(
         `SELECT 1 FROM zone WHERE id = $1 AND building_id = $2`,
-        [zone_id, before.building_id]
+        [nextZoneId, before.building_id]
       );
       if (zoneCheck.rows.length === 0) {
         return res.status(400).json({ code: 'ZONE_MISMATCH', message: 'Khu không thuộc tòa nhà này.' });
@@ -301,9 +422,9 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
            area_m2 = COALESCE($3, area_m2),
            amenities = COALESCE($4, amenities),
            note = COALESCE($5, note),
-           zone_id = COALESCE($6, zone_id),
+           zone_id = CASE WHEN $6::boolean THEN $7::uuid ELSE zone_id END,
            updated_at = NOW()
-       WHERE id = $7
+       WHERE id = $8
        RETURNING *`,
       [
         status || null,
@@ -311,7 +432,8 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
         area_m2 !== undefined ? area_m2 : null,
         amenities ? JSON.stringify(amenities) : null,
         note !== undefined ? note : null,
-        zone_id || null,
+        hasZoneUpdate,
+        nextZoneId,
         id,
       ]
     );
