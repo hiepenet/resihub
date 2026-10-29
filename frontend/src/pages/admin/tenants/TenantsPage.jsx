@@ -1,529 +1,971 @@
-import React, { useState, useEffect } from 'react';
-import { Users, Plus, AlertTriangle, CheckCircle, Search, X } from 'lucide-react';
-import Button from '../../../components/ui/Button';
-import Input from '../../../components/ui/Input';
-import FormField from '../../../components/ui/FormField';
-import DataTable from '../../../components/ui/DataTable';
-import StatusBadge from '../../../components/ui/StatusBadge';
-import AccessDenied from '../../../components/common/AccessDenied';
-import api from '../../../services/api';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+import {
+  Users,
+  UserPlus,
+  UserCheck,
+  Clock,
+  UserMinus,
+  Eye,
+  Edit3,
+  GitMerge,
+  Phone,
+  Mail,
+  CreditCard,
+  Globe,
+  Building2,
+  AlertTriangle,
+  CheckCircle2,
+  RefreshCw,
+} from 'lucide-react';
+import { Button } from '../../../components/ui/Button';
+import { Input } from '../../../components/ui/Input';
+import { Select } from '../../../components/ui/Select';
+import { Modal } from '../../../components/ui/Modal';
+import { Badge } from '../../../components/ui/Badge';
+import { Card } from '../../../components/ui/Card';
+import { PageHeader } from '../../../components/common/PageHeader';
+import { StatsCard } from '../../../components/common/StatsCard';
+import { StatusBadge } from '../../../components/common/StatusBadge';
+import { DataTable } from '../../../components/common/DataTable';
+import { SearchBar } from '../../../components/common/SearchBar';
+import { tenantsService } from '../../../services/tenants.service';
+import { usePermission } from '../../../hooks/usePermission';
+import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
+import { toInputDate } from '../../../utils/format';
+import {
+  isValidPhone,
+  normalizePhone,
+  isValidEmail,
+  isValidIdNumber,
+  extractErrorMessage,
+} from '../../../utils/validation';
 
-export default function TenantsPage() {
-  const { getCurrentRole } = useAuthStore();
-  const currentRole = getCurrentRole();
+function getAvatarLetters(fullName) {
+  if (!fullName) return 'CD';
+  const parts = String(fullName).trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'CD';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
 
-  // Phân quyền Cư dân theo PRD v2.0 Mục 6.2:
-  // SYS_ADMIN: CRUD, MANAGER: CRU (tòa được phân công), OWNER: R (tòa sở hữu), RESIDENT: chặn
-  const canCreateTenant = ['SYS_ADMIN', 'MANAGER'].includes(currentRole);
-
-  if (currentRole === 'RESIDENT') {
-    return (
-      <AccessDenied
-        currentRole={currentRole}
-        allowedRoles={['SYS_ADMIN', 'OWNER', 'MANAGER']}
-      />
-    );
+function getTenantDisplayStatus(tenant) {
+  if (!tenant) return 'INACTIVE';
+  if (tenant.status === 'MERGED' || tenant.status === 'REJECTED' || tenant.status === 'INACTIVE' || tenant.status === 'MOVED_OUT') {
+    return 'INACTIVE';
   }
+  if (tenant.active_contract || tenant.status === 'ACTIVE') {
+    return 'ACTIVE';
+  }
+  if (tenant.status === 'PENDING') {
+    return 'PENDING';
+  }
+  return 'INACTIVE';
+}
+
+const INITIAL_FORM = {
+  full_name: '',
+  phone: '',
+  email: '',
+  id_number: '',
+  dob: '',
+  nationality: 'Việt Nam',
+  address: '',
+  password: '',
+};
+
+const STATUS_FILTER_OPTIONS = [
+  { value: 'ACTIVE', label: 'Đang thuê (ACTIVE)' },
+  { value: 'PENDING', label: 'Chờ nhận phòng / Duyệt hồ sơ (PENDING)' },
+  { value: 'INACTIVE', label: 'Đã trả phòng / Chưa thuê (INACTIVE)' },
+];
+
+const TYPE_FILTER_OPTIONS = [
+  { value: 'primary', label: 'Khách đứng tên HĐ' },
+  { value: 'occupant', label: 'Thành viên ở cùng' },
+];
+
+export function TenantsPage() {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const { canManageTenants } = usePermission();
+  const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
   const [tenants, setTenants] = useState([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [showMerged, setShowMerged] = useState(false);
 
+  // Create Modal state
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createForm, setCreateForm] = useState(INITIAL_FORM);
+  const [createErrors, setCreateErrors] = useState({});
+  const [submittingCreate, setSubmittingCreate] = useState(false);
+  const [dupChecking, setDupChecking] = useState(false);
+  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, duplicates: [] });
 
-  // Form State
-  const [formData, setFormData] = useState({
-    full_name: '',
-    phone: '',
-    email: '',
-    id_number: '',
-    type: 'primary',
+  // Edit Modal state
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingTenant, setEditingTenant] = useState(null);
+  const [editForm, setEditForm] = useState(INITIAL_FORM);
+  const [editErrors, setEditErrors] = useState({});
+  const [submittingEdit, setSubmittingEdit] = useState(false);
+
+  // Merge Modal state
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeForm, setMergeForm] = useState({
+    source_tenant_id: '',
+    target_tenant_id: '',
+    reason: 'Gộp hồ sơ cư dân trùng thông tin liên hệ / CCCD',
   });
-  const [editingTenant, setEditingTenant] = useState(null); // A8: sửa hồ sơ tái dùng modal
-  const [formError, setFormError] = useState('');
-  const [duplicateWarning, setDuplicateWarning] = useState(null);
+  const [submittingMerge, setSubmittingMerge] = useState(false);
 
-  const loadTenants = async () => {
-    setIsLoading(true);
+  const fetchTenants = useCallback(async () => {
+    setLoading(true);
     try {
-      const res = await api.get('/api/v1/tenants');
-      setTenants(res.data?.data || []);
+      const res = await tenantsService.list();
+      setTenants(Array.isArray(res?.data) ? res.data : []);
     } catch (err) {
-      console.error('Error loading tenants:', err);
+      toast.error(extractErrorMessage(err, 'Không thể tải danh sách cư dân.'));
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
-    loadTenants();
-  }, []);
+    fetchTenants();
+  }, [fetchTenants]);
 
-  // Real-time Duplicate Check (FR-021)
+  // Realtime check-dup trong Modal Tạo cư dân mới
   useEffect(() => {
-    let timeout;
-    if (formData.phone && formData.phone.length >= 10) {
-      timeout = setTimeout(async () => {
-        try {
-          const res = await api.get(`/api/v1/tenants/check-dup?phone=${formData.phone}`);
-          if (res.data?.isDuplicate) {
-            setDuplicateWarning(res.data.duplicates[0]);
-          } else {
-            setDuplicateWarning(null);
-          }
-        } catch (e) {
-          // ignore
-        }
-      }, 400);
-    } else {
-      setDuplicateWarning(null);
+    if (!createOpen) {
+      setDupInfo({ isDuplicate: false, duplicates: [] });
+      return undefined;
     }
 
-    return () => clearTimeout(timeout);
-  }, [formData.phone]);
+    const cleanPhone = normalizePhone(createForm.phone);
+    const cleanId = String(createForm.id_number || '').trim();
+    const shouldCheckPhone = cleanPhone.length >= 9;
+    const shouldCheckId = cleanId.length >= 8;
 
-  const handleCreateTenant = async (e) => {
-    e.preventDefault();
-    setFormError('');
-
-    if (!formData.full_name || !formData.phone) {
-      setFormError('Họ tên và số điện thoại là bắt buộc.');
-      return;
+    if (!shouldCheckPhone && !shouldCheckId) {
+      setDupInfo({ isDuplicate: false, duplicates: [] });
+      return undefined;
     }
 
-    try {
-      if (editingTenant) {
-        // A8: sửa hồ sơ — PATCH, giữ trạng thái
-        await api.patch(`/api/v1/tenants/${editingTenant.id}`, {
-          full_name: formData.full_name,
-          phone: formData.phone,
-          email: formData.email,
-          id_number: formData.id_number,
+    const timer = setTimeout(async () => {
+      setDupChecking(true);
+      try {
+        const params = {};
+        if (shouldCheckPhone) params.phone = cleanPhone;
+        if (shouldCheckId) params.id_number = cleanId;
+        const res = await tenantsService.checkDup(params);
+        setDupInfo({
+          isDuplicate: Boolean(res?.isDuplicate),
+          duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
         });
-      } else {
-        await api.post('/api/v1/tenants', formData);
+      } catch {
+        // Không chặn thao tác nếu check-dup tạm thời lỗi mạng
+      } finally {
+        setDupChecking(false);
       }
-      setIsModalOpen(false);
-      setEditingTenant(null);
-      setFormData({ full_name: '', phone: '', email: '', id_number: '', type: 'primary' });
-      setDuplicateWarning(null);
-      loadTenants();
-    } catch (err) {
-      setFormError(err.response?.data?.message || 'Lỗi khi lưu hồ sơ cư dân.');
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [createOpen, createForm.phone, createForm.id_number]);
+
+  const scopedTenants = useMemo(() => {
+    return tenants.filter((t) => {
+      if (!showMerged && t.status === 'MERGED') return false;
+      if (selectedBuildingId && t.active_contract?.building_id) {
+        if (String(t.active_contract.building_id) !== String(selectedBuildingId)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [tenants, showMerged, selectedBuildingId]);
+
+  const stats = useMemo(() => {
+    const activeTenants = tenants.filter((t) => t.status !== 'MERGED');
+    let activeCount = 0;
+    let pendingCount = 0;
+    let inactiveCount = 0;
+
+    activeTenants.forEach((t) => {
+      const st = getTenantDisplayStatus(t);
+      if (st === 'ACTIVE') activeCount += 1;
+      else if (st === 'PENDING') pendingCount += 1;
+      else inactiveCount += 1;
+    });
+
+    return {
+      total: activeTenants.length,
+      activeCount,
+      pendingCount,
+      inactiveCount,
+    };
+  }, [tenants]);
+
+  const filteredTenants = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return scopedTenants.filter((t) => {
+      const displayStatus = getTenantDisplayStatus(t);
+      if (statusFilter && displayStatus !== statusFilter) return false;
+      if (typeFilter && t.type !== typeFilter) return false;
+
+      if (q) {
+        const haystacks = [
+          t.full_name,
+          t.phone,
+          t.id_number,
+          t.email,
+          t.nationality,
+          t.active_contract?.apartment_code,
+          t.active_contract?.building_name,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!haystacks.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [scopedTenants, statusFilter, typeFilter, search]);
+
+  const mergeableTenants = useMemo(
+    () => tenants.filter((t) => t.status !== 'MERGED'),
+    [tenants]
+  );
+
+  const validatePersonForm = (form) => {
+    const errs = {};
+    if (!String(form.full_name || '').trim()) {
+      errs.full_name = 'Vui lòng nhập họ và tên cư dân.';
     }
-  };
-
-  // A6: duyệt / từ chối hồ sơ PENDING
-  const handleApproveTenant = async (row, action) => {
-    if (action === 'approve' && !row.id_number && !window.confirm('Hồ sơ chưa có CCCD — hệ thống sẽ chặn duyệt. Tiếp tục?')) return;
-    try {
-      await api.patch(`/api/v1/tenants/${row.id}`, { action });
-      loadTenants();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Lỗi khi duyệt hồ sơ.');
+    if (!String(form.phone || '').trim()) {
+      errs.phone = 'Vui lòng nhập số điện thoại.';
+    } else if (!isValidPhone(form.phone)) {
+      errs.phone = 'Số điện thoại không đúng định dạng Việt Nam (10 số).';
     }
+    if (form.email && !isValidEmail(form.email)) {
+      errs.email = 'Địa chỉ email không hợp lệ.';
+    }
+    if (form.id_number && !isValidIdNumber(form.id_number)) {
+      errs.id_number = 'CCCD/CMND (9 hoặc 12 số) hoặc Hộ chiếu không hợp lệ.';
+    }
+    if (form.password && form.password.length < 8) {
+      errs.password = 'Mật khẩu đăng nhập ban đầu phải từ 8 ký tự trở lên.';
+    }
+    return errs;
   };
 
-  // Merge Modal State (FR-021)
-  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
-  const [mergeSource, setMergeSource] = useState(null);
-  const [mergeTargetId, setMergeTargetId] = useState('');
-  const [mergeReason, setMergeReason] = useState('');
-  const [mergeError, setMergeError] = useState('');
-  const [isMerging, setIsMerging] = useState(false);
-
-  const handleOpenMergeModal = (row) => {
-    setMergeSource(row);
-    // Chọn mặc định target khác source
-    const other = tenants.find((t) => t.id !== row.id && t.status !== 'MERGED');
-    setMergeTargetId(other ? other.id : '');
-    setMergeReason('Gộp hồ sơ trùng lặp thông tin CCCD/SĐT');
-    setMergeError('');
-    setIsMergeModalOpen(true);
+  const handleOpenCreate = () => {
+    setCreateForm(INITIAL_FORM);
+    setCreateErrors({});
+    setDupInfo({ isDuplicate: false, duplicates: [] });
+    setCreateOpen(true);
   };
 
-  const handleExecuteMerge = async (e) => {
-    e.preventDefault();
-    if (!mergeSource || !mergeTargetId) {
-      setMergeError('Vui lòng chọn hồ sơ đích để gộp.');
+  const handleCreateSubmit = async (e) => {
+    e?.preventDefault();
+    if (dupInfo.isDuplicate) {
+      toast.warning(
+        'Phát hiện trùng SĐT hoặc CCCD (FR-021) — hệ thống chặn tạo mới bản ghi trùng. Vui lòng xem hồ sơ hiện có hoặc thực hiện Gộp hồ sơ.'
+      );
       return;
     }
-    setIsMerging(true);
-    setMergeError('');
+    const errs = validatePersonForm(createForm);
+    setCreateErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setSubmittingCreate(true);
     try {
-      const res = await api.post('/api/v1/tenants/merge', {
-        source_tenant_id: mergeSource.id,
-        target_tenant_id: mergeTargetId,
-        reason: mergeReason,
-      });
-      alert(res.data?.message || 'Đã gộp hồ sơ thành công.');
-      setIsMergeModalOpen(false);
-      setMergeSource(null);
-      loadTenants();
+      const payload = {
+        full_name: createForm.full_name.trim(),
+        phone: normalizePhone(createForm.phone),
+        email: createForm.email.trim() || null,
+        id_number: createForm.id_number.trim() || null,
+        dob: createForm.dob || null,
+        address: createForm.address.trim() || null,
+        nationality: createForm.nationality.trim() || 'Việt Nam',
+        ...(createForm.password ? { password: createForm.password } : {}),
+      };
+      const res = await tenantsService.create(payload);
+      toast.success(res?.message || 'Tạo hồ sơ cư dân thành công.');
+      setCreateOpen(false);
+      fetchTenants();
     } catch (err) {
-      setMergeError(err.response?.data?.message || 'Lỗi khi gộp hồ sơ cư dân.');
+      toast.error(extractErrorMessage(err, 'Không thể tạo hồ sơ cư dân.'));
     } finally {
-      setIsMerging(false);
+      setSubmittingCreate(false);
     }
   };
 
-  const openEditTenant = (row) => {
-    setEditingTenant(row);
-    setFormData({
-      full_name: row.full_name || '',
-      phone: row.phone || '',
-      email: row.email || '',
-      id_number: row.id_number || '',
-      type: row.type || 'primary',
+  const handleOpenEdit = (tenant, e) => {
+    e?.stopPropagation();
+    setEditingTenant(tenant);
+    setEditForm({
+      full_name: tenant.full_name || '',
+      phone: tenant.phone || '',
+      email: tenant.email || '',
+      id_number: tenant.id_number || '',
+      dob: toInputDate(tenant.dob),
+      nationality: tenant.nationality || 'Việt Nam',
+      address: tenant.address || '',
     });
-    setDuplicateWarning(null);
-    setIsModalOpen(true);
+    setEditErrors({});
+    setEditOpen(true);
   };
 
-  const columns = [
-    {
-      title: 'Họ và tên',
-      key: 'full_name',
-      sortable: true,
-      render: (val, row) => (
-        <div>
-          <span className="font-semibold text-slate-900 block">{val}</span>
-          <span className="text-xs text-slate-400">{row.email || 'Chưa cập nhật email'}</span>
-        </div>
-      ),
-    },
-    { title: 'Số điện thoại', key: 'phone', sortable: true },
-    { 
-      title: 'Số CCCD/CMND', 
-      key: 'id_number', 
-      render: (val) => currentRole === 'STAFF' ? (
-        <span className="text-slate-400 italic font-mono text-xs">•••••••••••• (Ẩn PII)</span>
-      ) : (val || '---') 
-    },
-    {
-      title: 'Vai trò thuê',
-      key: 'type',
-      render: (val) => (
-        <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
-          val === 'primary' ? 'bg-primary-50 text-primary-700' : 'bg-slate-100 text-slate-700'
-        }`}>
-          {val === 'primary' ? 'Chủ hộ thuê' : 'Thành viên cùng ở'}
-        </span>
-      ),
-    },
-    {
-      title: 'Trạng thái',
-      key: 'status',
-      render: (val) => <StatusBadge status={val} />,
-    },
-    ...(canCreateTenant ? [{
-      title: 'Thao tác',
-      key: 'actions',
-      render: (val, row) => (
-        <div className="flex gap-1.5">
-          {row.status === 'PENDING' && (
-            <>
-              <button
-                className="px-2 py-1 text-xs rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium"
-                onClick={() => handleApproveTenant(row, 'approve')}
+  const handleEditSubmit = async (e) => {
+    e?.preventDefault();
+    if (!editingTenant) return;
+    const errs = validatePersonForm(editForm);
+    setEditErrors(errs);
+    if (Object.keys(errs).length > 0) return;
+
+    setSubmittingEdit(true);
+    try {
+      const payload = {
+        full_name: editForm.full_name.trim(),
+        phone: normalizePhone(editForm.phone),
+        email: editForm.email.trim() || null,
+        id_number: editForm.id_number.trim() || null,
+        dob: editForm.dob || null,
+        address: editForm.address.trim() || null,
+        nationality: editForm.nationality.trim() || 'Việt Nam',
+      };
+      const res = await tenantsService.update(editingTenant.id, payload);
+      toast.success(res?.message || 'Cập nhật hồ sơ cư dân thành công.');
+      setEditOpen(false);
+      fetchTenants();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể cập nhật thông tin cư dân.'));
+    } finally {
+      setSubmittingEdit(false);
+    }
+  };
+
+  const handleOpenMerge = (sourceTenant = null, e = null, targetTenantId = '') => {
+    e?.stopPropagation();
+    setMergeForm({
+      source_tenant_id: sourceTenant?.id || '',
+      target_tenant_id: targetTenantId || '',
+      reason: 'Gộp hồ sơ cư dân bị trùng thông tin SĐT / CCCD',
+    });
+    setMergeOpen(true);
+  };
+
+  const handleMergeSubmit = async (e) => {
+    e?.preventDefault();
+    if (!mergeForm.source_tenant_id || !mergeForm.target_tenant_id) {
+      toast.warning('Vui lòng chọn đầy đủ hồ sơ cần gộp (nguồn) và hồ sơ chính giữ lại (đích).');
+      return;
+    }
+    if (mergeForm.source_tenant_id === mergeForm.target_tenant_id) {
+      toast.warning('Hồ sơ nguồn và hồ sơ đích không được trùng nhau.');
+      return;
+    }
+    if (!mergeForm.reason || !mergeForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do gộp hồ sơ để lưu vết kiểm toán (FR-021).');
+      return;
+    }
+
+    setSubmittingMerge(true);
+    try {
+      const res = await tenantsService.merge({
+        source_tenant_id: mergeForm.source_tenant_id,
+        target_tenant_id: mergeForm.target_tenant_id,
+        reason: mergeForm.reason.trim(),
+      });
+      toast.success(res?.message || 'Đã gộp hồ sơ cư dân thành công.');
+      setMergeOpen(false);
+      fetchTenants();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể gộp hồ sơ cư dân.'));
+    } finally {
+      setSubmittingMerge(false);
+    }
+  };
+
+  const columns = useMemo(
+    () => [
+      {
+        key: 'full_name',
+        label: 'Cư dân',
+        sortable: true,
+        render: (row) => (
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-full bg-primary-50 text-primary-700 border border-primary-200 flex items-center justify-center text-xs font-bold shrink-0">
+              {getAvatarLetters(row.full_name)}
+            </div>
+            <div className="min-w-0 max-w-[180px]">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-semibold text-slate-900 truncate">{row.full_name}</span>
+                {row.type === 'occupant' ? (
+                  <Badge variant="indigo" className="text-[10px] px-1.5 py-0">
+                    Ở cùng
+                  </Badge>
+                ) : null}
+                {row.status === 'MERGED' ? (
+                  <Badge variant="slate" className="text-[10px] px-1.5 py-0">
+                    Đã gộp
+                  </Badge>
+                ) : null}
+              </div>
+              <p className="text-xs text-slate-500 truncate mt-0.5">{row.email || 'Chưa có email'}</p>
+            </div>
+          </div>
+        ),
+      },
+      {
+        key: 'phone',
+        label: 'Số điện thoại',
+        sortable: true,
+        className: 'whitespace-nowrap',
+        render: (row) => (
+          <span className="inline-flex items-center gap-1.5 font-medium text-slate-700 whitespace-nowrap">
+            <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            {row.phone || '—'}
+          </span>
+        ),
+      },
+      {
+        key: 'id_number',
+        label: 'CCCD / Hộ chiếu',
+        align: 'center',
+        sortable: true,
+        className: 'whitespace-nowrap',
+        render: (row) =>
+          row.id_number ? (
+            <span className="font-mono text-xs bg-slate-100 text-slate-800 px-2 py-1 rounded-md border border-slate-200 whitespace-nowrap">
+              {row.id_number}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium whitespace-nowrap">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              Thiếu giấy tờ
+            </span>
+          ),
+      },
+      {
+        key: 'nationality',
+        label: 'Quốc tịch',
+        align: 'center',
+        sortable: true,
+        className: 'whitespace-nowrap',
+        render: (row) => (
+          <span className="text-sm text-slate-700">{row.nationality || 'Việt Nam'}</span>
+        ),
+      },
+      {
+        key: 'active_contract',
+        label: 'Căn / Tòa hiện tại',
+        align: 'center',
+        render: (row) => {
+          const ac = row.active_contract;
+          if (!ac) {
+            return <span className="text-xs text-slate-400 italic whitespace-nowrap">Chưa có HĐ hiệu lực</span>;
+          }
+          return (
+            <div onClick={(e) => e.stopPropagation()}>
+              <Link
+                to={`/admin/contracts/${ac.contract_id}`}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50/70 hover:bg-primary-50 px-2 py-1 rounded-lg border border-primary-100 transition-colors whitespace-nowrap"
               >
-                Duyệt
-              </button>
-              <button
-                className="px-2 py-1 text-xs rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"
-                onClick={() => handleApproveTenant(row, 'reject')}
-              >
-                Từ chối
-              </button>
-            </>
-          )}
-          <button
-            className="px-2 py-1 text-xs rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
-            onClick={() => openEditTenant(row)}
+                <Building2 className="w-3.5 h-3.5 shrink-0" />
+                <span>{ac.apartment_code}</span>
+                <span className="text-slate-400">•</span>
+                <span className="truncate max-w-[95px] text-slate-700">{ac.building_name}</span>
+              </Link>
+            </div>
+          );
+        },
+      },
+      {
+        key: 'status',
+        label: 'Trạng thái',
+        align: 'center',
+        sortable: true,
+        sortValue: (row) => getTenantDisplayStatus(row),
+        render: (row) => (
+          <div className="inline-flex flex-col items-center gap-1">
+            <StatusBadge status={getTenantDisplayStatus(row)} domain="tenant" />
+            {row.status === 'PENDING' ? (
+              <span className="text-[11px] text-amber-600 font-medium whitespace-nowrap">Chờ duyệt CCCD</span>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        key: 'actions',
+        label: 'Thao tác',
+        align: 'center',
+        render: (row) => (
+          <div
+            className="inline-flex items-center justify-center gap-1"
+            onClick={(e) => e.stopPropagation()}
           >
-            Sửa
-          </button>
-          {row.status !== 'MERGED' && (
-            <button
-              className="px-2 py-1 text-xs rounded-lg border border-indigo-200 text-indigo-700 hover:bg-indigo-50 font-medium"
-              onClick={() => handleOpenMergeModal(row)}
-              title="Gộp hồ sơ trùng lặp (FR-021)"
+            <Button
+              variant="ghost"
+              size="xs"
+              icon={Eye}
+              onClick={() => navigate(`/admin/tenants/${row.id}`)}
+              title="Xem chi tiết hồ sơ"
             >
-              Gộp
-            </button>
-          )}
-        </div>
-      ),
-    }] : []),
-  ];
+              Chi tiết
+            </Button>
+            {canManageTenants && row.status !== 'MERGED' ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  icon={Edit3}
+                  onClick={(e) => handleOpenEdit(row, e)}
+                  title="Chỉnh sửa thông tin"
+                >
+                  Sửa
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  icon={GitMerge}
+                  onClick={(e) => handleOpenMerge(row, e)}
+                  title="Gộp hồ sơ trùng lặp"
+                >
+                  Gộp
+                </Button>
+              </>
+            ) : null}
+          </div>
+        ),
+      },
+    ],
+    [canManageTenants, navigate]
+  );
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Quản lý Cư dân & Khách thuê
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1">
-            Hồ sơ khách hàng, phân loại chủ hộ / thành viên, kiểm tra trùng lặp CCCD/SĐT
-          </p>
-        </div>
-
-        {canCreateTenant && (
-          <Button
-            variant="primary"
-            size="md"
-            onClick={() => {
-              setEditingTenant(null);
-              setFormData({ full_name: '', phone: '', email: '', id_number: '', type: 'primary' });
-              setDuplicateWarning(null);
-              setIsModalOpen(true);
-            }}
-            leftIcon={Plus}
-          >
-            Thêm cư dân mới
-          </Button>
-        )}
-      </div>
-
-
-      <DataTable
-        columns={columns}
-        data={tenants}
-        isLoading={isLoading}
-        searchKeys={['full_name', 'phone', 'id_number']}
-        emptyTitle="Chưa có hồ sơ cư dân"
-        emptyDescription="Nhấn 'Thêm cư dân mới' để đăng ký hồ sơ khách thuê đầu tiên."
+      <PageHeader
+        title="Quản lý Cư dân"
+        subtitle="Theo dõi hồ sơ khách thuê, định danh CCCD/Hộ chiếu và căn hộ đang lưu trú"
+        actions={
+          <>
+            <Button variant="outline" size="md" icon={RefreshCw} onClick={fetchTenants}>
+              Làm mới
+            </Button>
+            {canManageTenants ? (
+              <>
+                <Button variant="outline" size="md" icon={GitMerge} onClick={() => handleOpenMerge()}>
+                  Gộp trùng lặp
+                </Button>
+                <Button variant="primary" size="md" icon={UserPlus} onClick={handleOpenCreate}>
+                  Thêm cư dân mới
+                </Button>
+              </>
+            ) : null}
+          </>
+        }
       />
 
-      {/* Modal Thêm Cư Dân với FR-021 Duplicate Check */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">{editingTenant ? 'Cập nhật hồ sơ cư dân' : 'Tạo hồ sơ Cư dân'}</h3>
-              <button onClick={() => setIsModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateTenant} className="space-y-4">
-              <FormField label="Họ và tên" required error={formError}>
-                <Input
-                  placeholder="Ví dụ: Trần Văn Nam"
-                  value={formData.full_name}
-                  onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-                />
-              </FormField>
-
-              <FormField label="Số điện thoại" required hint="Hệ thống tự động kiểm tra trùng lặp hồ sơ">
-                <Input
-                  type="tel"
-                  placeholder="090 123 4567"
-                  value={formData.phone}
-                  onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                />
-              </FormField>
-
-              {/* FR-021 Duplicate Alert Banner */}
-              {duplicateWarning && (
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="block">Cảnh báo trùng số điện thoại (FR-021)!</strong>
-                    Số này đã thuộc hồ sơ: <strong>{duplicateWarning.full_name}</strong>. Hệ thống sẽ liên kết hồ sơ hiện tại thay vì tạo trùng lặp.
-                  </div>
-                </div>
-              )}
-
-              {editingTenant && <IdImagesSection tenantId={editingTenant.id} />}
-
-              <div className="grid grid-cols-2 gap-3">
-                <FormField label="Số CCCD / Hộ chiếu">
-                  <Input
-                    placeholder="079090..."
-                    value={formData.id_number}
-                    onChange={(e) => setFormData({ ...formData, id_number: e.target.value })}
-                  />
-                </FormField>
-
-                <FormField label="Vai trò">
-                  <select
-                    value={formData.type}
-                    onChange={(e) => setFormData({ ...formData, type: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                  >
-                    <option value="primary">Chủ hộ (Đại diện HĐ)</option>
-                    <option value="occupant">Thành viên ở cùng</option>
-                  </select>
-                </FormField>
-              </div>
-
-              <FormField label="Email">
-                <Input
-                  type="email"
-                  placeholder="nam.tran@example.com"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary">
-                  Lưu hồ sơ cư dân
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Gộp Hồ Sơ Cư Dân Trùng Lặp (FR-021) */}
-      {isMergeModalOpen && mergeSource && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 border border-slate-100">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
-              <h3 className="text-base font-bold text-slate-900">Gộp hồ sơ cư dân trùng lặp (FR-021)</h3>
-              <button onClick={() => setIsMergeModalOpen(false)}>
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-
-            {mergeError && (
-              <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700">
-                {mergeError}
-              </div>
-            )}
-
-            <form onSubmit={handleExecuteMerge} className="space-y-4">
-              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-1">
-                <p className="font-bold">⚠️ Hồ sơ cần gộp (sẽ bị vô hiệu hóa):</p>
-                <p>• Họ tên: <strong>{mergeSource.full_name}</strong></p>
-                <p>• SĐT: {mergeSource.phone} · CCCD: {mergeSource.id_number || 'Chưa có'}</p>
-                <p className="text-[11px] text-amber-700 pt-1">Toàn bộ hợp đồng, thành viên và yêu cầu của người này sẽ được chuyển sang hồ sơ đích được chọn bên dưới.</p>
-              </div>
-
-              <FormField label="Chọn hồ sơ chính (Hồ sơ đích giữ lại)" required>
-                <select
-                  value={mergeTargetId}
-                  onChange={(e) => setMergeTargetId(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                >
-                  <option value="">-- Chọn hồ sơ đích --</option>
-                  {tenants
-                    .filter((t) => t.id !== mergeSource.id && t.status !== 'MERGED')
-                    .map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.full_name} ({t.phone} - CCCD: {t.id_number || '---'})
-                      </option>
-                    ))}
-                </select>
-              </FormField>
-
-              <FormField label="Lý do gộp hồ sơ" required>
-                <Input
-                  value={mergeReason}
-                  onChange={(e) => setMergeReason(e.target.value)}
-                  placeholder="Ví dụ: Cùng một khách hàng đổi số điện thoại mới"
-                />
-              </FormField>
-
-              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
-                <Button variant="secondary" onClick={() => setIsMergeModalOpen(false)}>
-                  Hủy
-                </Button>
-                <Button type="submit" variant="primary" isLoading={isMerging}>
-                  Xác nhận gộp hồ sơ
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// B7: ảnh CCCD (mặt trước/sau) trong modal sửa hồ sơ — fetch blob gắn Bearer rồi objectURL
-// (ERR-2: <img src> trần không mang Authorization, API yêu cầu Bearer)
-function IdImagesSection({ tenantId }) {
-  const [images, setImages] = useState([]);
-  const [urls, setUrls] = useState({});
-
-  const load = () => {
-    api.get(`/api/v1/tenants/${tenantId}/id-images`)
-      .then(async (res) => {
-        const list = res.data?.data || [];
-        setImages(list);
-        const next = {};
-        for (const im of list) {
-          if (!urls[im.attachment_id]) {
-            try {
-              const blobRes = await api.get(`/api/v1/attachments/${im.attachment_id}/view`, { responseType: 'blob' });
-              next[im.attachment_id] = URL.createObjectURL(blobRes.data);
-            } catch {
-              next[im.attachment_id] = null;
-            }
-          } else {
-            next[im.attachment_id] = urls[im.attachment_id];
-          }
-        }
-        setUrls(next);
-      })
-      .catch(() => {});
-  };
-  useEffect(load, [tenantId]);
-
-  const upload = (side) => (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Ảnh vượt quá 5MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        await api.post(`/api/v1/tenants/${tenantId}/id-images`, { image_base64: reader.result, side });
-        load();
-      } catch (err) {
-        alert(err.response?.data?.message || 'Lỗi khi lưu ảnh.');
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  return (
-    <div className="pt-2 border-t border-slate-100">
-      <p className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">Ảnh CCCD (PII — xem có kiểm soát)</p>
-      <div className="grid grid-cols-2 gap-3">
-        {['front', 'back'].map((side) => {
-          const img = [...images].filter((im) => im.side === side).pop(); // ảnh mới nhất của side (upload lại thay ảnh cũ)
-          return (
-            <div key={side} className="text-center">
-              <div className="aspect-[3/2] rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center overflow-hidden mb-1">
-                {img ? (
-                  <img
-                    src={urls[img.attachment_id] || ''}
-                    alt={`CCCD ${side === 'front' ? 'mặt trước' : 'mặt sau'}`}
-                    className="w-full h-full object-cover cursor-zoom-in"
-                    onClick={() => urls[img.attachment_id] && window.open(urls[img.attachment_id], '_blank')}
-                  />
-                ) : (
-                  <span className="text-xs text-slate-400">{side === 'front' ? 'Mặt trước' : 'Mặt sau'}</span>
-                )}
-              </div>
-              <label className="text-xs text-primary-600 font-medium cursor-pointer hover:underline">
-                {img ? 'Thay ảnh' : 'Tải ảnh lên'}
-                <input type="file" accept="image/jpeg,image/png" className="hidden" onChange={upload(side)} />
-              </label>
-            </div>
-          );
-        })}
+      {/* KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatsCard
+          title="Tổng hồ sơ cư dân"
+          value={stats.total}
+          subtext="Hồ sơ hoạt động trong hệ thống"
+          icon={Users}
+          color="sky"
+          onClick={() => setStatusFilter('')}
+        />
+        <StatsCard
+          title="Đang lưu trú"
+          value={stats.activeCount}
+          subtext="Có hợp đồng đang hiệu lực"
+          icon={UserCheck}
+          color="emerald"
+          onClick={() => setStatusFilter('ACTIVE')}
+        />
+        <StatsCard
+          title="Chờ nhận phòng / CCCD"
+          value={stats.pendingCount}
+          subtext="Cần bổ sung hoặc duyệt giấy tờ"
+          icon={Clock}
+          color="amber"
+          onClick={() => setStatusFilter('PENDING')}
+        />
+        <StatsCard
+          title="Đã trả phòng / Chưa thuê"
+          value={stats.inactiveCount}
+          subtext="Chưa gắn hợp đồng hiệu lực"
+          icon={UserMinus}
+          color="indigo"
+          onClick={() => setStatusFilter('INACTIVE')}
+        />
       </div>
+
+      {/* Bộ lọc tìm kiếm */}
+      <Card className="p-4">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+          <div className="md:col-span-5">
+            <SearchBar
+              value={search}
+              onChange={setSearch}
+              placeholder="Tìm theo họ tên, SĐT, số CCCD, email, mã căn hộ..."
+            />
+          </div>
+          <div className="md:col-span-3">
+            <Select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              placeholder="Tất cả trạng thái"
+              options={STATUS_FILTER_OPTIONS}
+            />
+          </div>
+          <div className="md:col-span-2">
+            <Select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              placeholder="Mọi vai trò cư trú"
+              options={TYPE_FILTER_OPTIONS}
+            />
+          </div>
+          <div className="md:col-span-2 flex items-center justify-between md:justify-end gap-2">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showMerged}
+                onChange={(e) => setShowMerged(e.target.checked)}
+                className="rounded border-slate-300 text-primary-500 focus:ring-primary-500"
+              />
+              Hiện hồ sơ đã gộp
+            </label>
+          </div>
+        </div>
+      </Card>
+
+      {/* Bảng dữ liệu */}
+      <DataTable
+        columns={columns}
+        data={filteredTenants}
+        loading={loading}
+        onRowClick={(row) => navigate(`/admin/tenants/${row.id}`)}
+        emptyTitle="Chưa tìm thấy hồ sơ cư dân"
+        emptyDescription="Thử thay đổi bộ lọc tìm kiếm hoặc tạo mới hồ sơ cư dân đầu tiên."
+        emptyAction={
+          canManageTenants ? (
+            <Button variant="primary" size="sm" icon={UserPlus} onClick={handleOpenCreate}>
+              Thêm cư dân mới
+            </Button>
+          ) : null
+        }
+      />
+
+      {/* Modal Tạo cư dân mới (kiểm tra trùng SĐT / CCCD realtime) */}
+      <Modal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        title="Tạo hồ sơ cư dân mới"
+        subtitle="Hệ thống tự động kiểm tra trùng lặp SĐT và CCCD theo thời gian thực (FR-021)"
+        size="lg"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={submittingCreate}>
+              Hủy bỏ
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleCreateSubmit}
+              loading={submittingCreate}
+              disabled={dupInfo.isDuplicate}
+              icon={UserPlus}
+            >
+              Lưu hồ sơ cư dân
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleCreateSubmit} className="space-y-4">
+          {dupInfo.isDuplicate ? (
+            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 space-y-2">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                <div className="text-xs leading-relaxed">
+                  <p className="font-semibold text-rose-900">
+                    Chặn tạo mới: Phát hiện hồ sơ trùng SĐT hoặc số CCCD (FR-021)!
+                  </p>
+                  <p className="text-rose-700 mt-0.5">
+                    Theo quy định nghiệp vụ (Mục 7.5), hệ thống chặn tạo mới bản ghi trùng định danh. Vui lòng xem hồ sơ hiện có hoặc thực hiện gộp hồ sơ có lưu vết kiểm toán:
+                  </p>
+                </div>
+              </div>
+              <div className="pl-7 space-y-1.5">
+                {dupInfo.duplicates.map((d) => (
+                  <div
+                    key={d.id}
+                    className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-rose-200/80 text-xs"
+                  >
+                    <div className="text-slate-800">
+                      <span className="font-semibold">{d.full_name}</span>
+                      <span className="text-slate-500"> · SĐT: {d.phone || '—'}</span>
+                      {d.id_number ? (
+                        <span className="text-slate-500 font-mono"> · CCCD: {d.id_number}</span>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {d.tenant_id ? (
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          icon={Eye}
+                          onClick={() => {
+                            setCreateOpen(false);
+                            navigate(`/admin/tenants/${d.tenant_id}`);
+                          }}
+                        >
+                          Xem hồ sơ
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="soft"
+                        size="xs"
+                        icon={GitMerge}
+                        onClick={() => {
+                          setCreateOpen(false);
+                          handleOpenMerge(null, null, d.tenant_id || '');
+                        }}
+                      >
+                        Mở gộp hồ sơ
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : dupChecking ? (
+            <div className="text-xs text-slate-500 flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-primary-500" />
+              Đang kiểm tra trùng lặp SĐT / CCCD...
+            </div>
+          ) : (createForm.phone || createForm.id_number) && !createErrors.phone && !createErrors.id_number ? (
+            <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Chưa phát hiện trùng lặp thông tin định danh.
+            </div>
+          ) : null}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Họ và tên"
+              required
+              placeholder="VD: Nguyễn Văn Minh"
+              value={createForm.full_name}
+              onChange={(e) => setCreateForm((p) => ({ ...p, full_name: e.target.value }))}
+              error={createErrors.full_name}
+            />
+            <Input
+              label="Số điện thoại"
+              required
+              icon={Phone}
+              placeholder="VD: 0901234567"
+              value={createForm.phone}
+              onChange={(e) => setCreateForm((p) => ({ ...p, phone: e.target.value }))}
+              error={createErrors.phone}
+            />
+            <Input
+              label="Số CCCD / Hộ chiếu"
+              icon={CreditCard}
+              placeholder="12 số CCCD hoặc mã Hộ chiếu"
+              hint="Nếu để trống, hồ sơ sẽ ở trạng thái PENDING chờ bổ sung trước khi kích hoạt HĐ"
+              value={createForm.id_number}
+              onChange={(e) => setCreateForm((p) => ({ ...p, id_number: e.target.value }))}
+              error={createErrors.id_number}
+            />
+            <Input
+              label="Email liên hệ"
+              type="email"
+              icon={Mail}
+              placeholder="name@example.com"
+              value={createForm.email}
+              onChange={(e) => setCreateForm((p) => ({ ...p, email: e.target.value }))}
+              error={createErrors.email}
+            />
+            <Input
+              label="Ngày sinh"
+              type="date"
+              value={createForm.dob}
+              onChange={(e) => setCreateForm((p) => ({ ...p, dob: e.target.value }))}
+            />
+            <Input
+              label="Quốc tịch"
+              icon={Globe}
+              placeholder="Việt Nam"
+              value={createForm.nationality}
+              onChange={(e) => setCreateForm((p) => ({ ...p, nationality: e.target.value }))}
+            />
+            <Input
+              label="Mật khẩu đăng nhập ban đầu (tùy chọn)"
+              type="password"
+              placeholder="Tối thiểu 8 ký tự (nếu dùng Email)"
+              hint="Hệ thống tự cấp tài khoản Cổng cư dân (SĐT + OTP hoạt động ngay)"
+              value={createForm.password}
+              onChange={(e) => setCreateForm((p) => ({ ...p, password: e.target.value }))}
+              error={createErrors.password}
+            />
+          </div>
+
+          <Input
+            label="Địa chỉ thường trú / Quê quán"
+            multiline
+            rows={2}
+            placeholder="Số nhà, đường, phường/xã, tỉnh/thành phố..."
+            value={createForm.address}
+            onChange={(e) => setCreateForm((p) => ({ ...p, address: e.target.value }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Chỉnh sửa nhanh cư dân */}
+      <Modal
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        title="Chỉnh sửa thông tin cư dân"
+        subtitle={editingTenant ? `Hồ sơ: ${editingTenant.full_name}` : ''}
+        size="lg"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setEditOpen(false)} disabled={submittingEdit}>
+              Đóng
+            </Button>
+            <Button variant="primary" onClick={handleEditSubmit} loading={submittingEdit}>
+              Lưu thay đổi
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleEditSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Họ và tên"
+              required
+              value={editForm.full_name}
+              onChange={(e) => setEditForm((p) => ({ ...p, full_name: e.target.value }))}
+              error={editErrors.full_name}
+            />
+            <Input
+              label="Số điện thoại"
+              required
+              icon={Phone}
+              value={editForm.phone}
+              onChange={(e) => setEditForm((p) => ({ ...p, phone: e.target.value }))}
+              error={editErrors.phone}
+            />
+            <Input
+              label="Số CCCD / Hộ chiếu"
+              icon={CreditCard}
+              value={editForm.id_number}
+              onChange={(e) => setEditForm((p) => ({ ...p, id_number: e.target.value }))}
+              error={editErrors.id_number}
+            />
+            <Input
+              label="Email liên hệ"
+              type="email"
+              icon={Mail}
+              value={editForm.email}
+              onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))}
+              error={editErrors.email}
+            />
+            <Input
+              label="Ngày sinh"
+              type="date"
+              value={editForm.dob}
+              onChange={(e) => setEditForm((p) => ({ ...p, dob: e.target.value }))}
+            />
+            <Input
+              label="Quốc tịch"
+              icon={Globe}
+              value={editForm.nationality}
+              onChange={(e) => setEditForm((p) => ({ ...p, nationality: e.target.value }))}
+            />
+          </div>
+          <Input
+            label="Địa chỉ thường trú"
+            multiline
+            rows={2}
+            value={editForm.address}
+            onChange={(e) => setEditForm((p) => ({ ...p, address: e.target.value }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Gộp hồ sơ cư dân trùng lặp */}
+      <Modal
+        open={mergeOpen}
+        onClose={() => setMergeOpen(false)}
+        title="Gộp hồ sơ cư dân trùng lặp"
+        subtitle="Chuyển toàn bộ hợp đồng và lịch sử ở cùng từ hồ sơ trùng sang hồ sơ chính (FR-021)"
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setMergeOpen(false)} disabled={submittingMerge}>
+              Hủy bỏ
+            </Button>
+            <Button variant="primary" onClick={handleMergeSubmit} loading={submittingMerge} icon={GitMerge}>
+              Xác nhận gộp hồ sơ
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleMergeSubmit} className="space-y-4">
+          <div className="p-3.5 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 leading-relaxed">
+            <strong>Cơ chế an toàn dữ liệu:</strong> Hồ sơ nguồn sau khi gộp sẽ được đánh dấu{' '}
+            <code className="px-1 py-0.5 bg-white rounded border border-sky-200">[ĐÃ GỘP]</code> (không xóa cứng),
+            toàn bộ hợp đồng đứng tên và thông tin thành viên ở cùng sẽ được chuyển sang hồ sơ đích.
+          </div>
+
+          <Select
+            label="Hồ sơ bị trùng (Nguồn — sẽ đóng sau khi gộp)"
+            required
+            placeholder="-- Chọn hồ sơ cần gộp đi --"
+            value={mergeForm.source_tenant_id}
+            onChange={(e) => setMergeForm((p) => ({ ...p, source_tenant_id: e.target.value }))}
+            options={mergeableTenants.map((t) => ({
+              value: t.id,
+              label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${t.id_number || 'Chưa CCCD'})`,
+            }))}
+          />
+
+          <Select
+            label="Hồ sơ chính muốn giữ lại (Đích)"
+            required
+            placeholder="-- Chọn hồ sơ đích nhận dữ liệu --"
+            value={mergeForm.target_tenant_id}
+            onChange={(e) => setMergeForm((p) => ({ ...p, target_tenant_id: e.target.value }))}
+            options={mergeableTenants
+              .filter((t) => t.id !== mergeForm.source_tenant_id)
+              .map((t) => ({
+                value: t.id,
+                label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${t.id_number || 'Chưa CCCD'})`,
+              }))}
+          />
+
+          <Input
+            label="Lý do gộp hồ sơ"
+            required
+            multiline
+            rows={2}
+            value={mergeForm.reason}
+            onChange={(e) => setMergeForm((p) => ({ ...p, reason: e.target.value }))}
+            placeholder="Nhập lý do bắt buộc để lưu vết kiểm toán (Audit Log — FR-021)..."
+          />
+        </form>
+      </Modal>
     </div>
   );
 }
+
+export default TenantsPage;
