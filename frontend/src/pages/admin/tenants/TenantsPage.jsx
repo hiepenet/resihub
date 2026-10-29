@@ -33,7 +33,7 @@ import { tenantsService } from '../../../services/tenants.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
-import { toInputDate } from '../../../utils/format';
+import { toInputDate, maskIdNumber } from '../../../utils/format';
 import {
   isValidPhone,
   normalizePhone,
@@ -105,7 +105,7 @@ export function TenantsPage() {
   const [createErrors, setCreateErrors] = useState({});
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [dupChecking, setDupChecking] = useState(false);
-  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, duplicates: [] });
+  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
 
   // Edit Modal state
   const [editOpen, setEditOpen] = useState(false);
@@ -142,17 +142,17 @@ export function TenantsPage() {
   // Realtime check-dup trong Modal Tạo cư dân mới
   useEffect(() => {
     if (!createOpen) {
-      setDupInfo({ isDuplicate: false, duplicates: [] });
+      setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
       return undefined;
     }
 
     const cleanPhone = normalizePhone(createForm.phone);
     const cleanId = String(createForm.id_number || '').trim();
-    const shouldCheckPhone = cleanPhone.length >= 9;
-    const shouldCheckId = cleanId.length >= 8;
+    const shouldCheckPhone = cleanPhone.length === 10;
+    const shouldCheckId = cleanId.length >= 9;
 
     if (!shouldCheckPhone && !shouldCheckId) {
-      setDupInfo({ isDuplicate: false, duplicates: [] });
+      setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
       return undefined;
     }
 
@@ -165,7 +165,9 @@ export function TenantsPage() {
         const res = await tenantsService.checkDup(params);
         setDupInfo({
           isDuplicate: Boolean(res?.isDuplicate),
+          inScope: res?.inScope !== false,
           duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
+          message: res?.message || '',
         });
       } catch {
         // Không chặn thao tác nếu check-dup tạm thời lỗi mạng
@@ -266,7 +268,7 @@ export function TenantsPage() {
   const handleOpenCreate = () => {
     setCreateForm(INITIAL_FORM);
     setCreateErrors({});
-    setDupInfo({ isDuplicate: false, duplicates: [] });
+    setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
     setCreateOpen(true);
   };
 
@@ -442,8 +444,11 @@ export function TenantsPage() {
         className: 'whitespace-nowrap',
         render: (row) =>
           row.id_number ? (
-            <span className="font-mono text-xs bg-slate-100 text-slate-800 px-2 py-1 rounded-md border border-slate-200 whitespace-nowrap">
-              {row.id_number}
+            <span
+              className="font-mono text-xs bg-slate-100 text-slate-800 px-2 py-1 rounded-md border border-slate-200 whitespace-nowrap"
+              title="Dữ liệu nhạy cảm PII được che một phần trên danh sách (PRD 13.5)"
+            >
+              {maskIdNumber(row.id_number)}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium whitespace-nowrap">
@@ -696,55 +701,63 @@ export function TenantsPage() {
                 <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
                 <div className="text-xs leading-relaxed">
                   <p className="font-semibold text-rose-900">
-                    Chặn tạo mới: Phát hiện hồ sơ trùng SĐT hoặc số CCCD (FR-021)!
+                    Chặn tạo mới: Phát hiện định danh SĐT hoặc số CCCD đã tồn tại (FR-021)!
                   </p>
                   <p className="text-rose-700 mt-0.5">
-                    Theo quy định nghiệp vụ (Mục 7.5), hệ thống chặn tạo mới bản ghi trùng định danh. Vui lòng xem hồ sơ hiện có hoặc thực hiện gộp hồ sơ có lưu vết kiểm toán:
+                    {dupInfo.inScope === false
+                      ? dupInfo.message ||
+                        'Định danh (SĐT/CCCD) này đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý. Hệ thống bảo mật không tiết lộ thông tin hồ sơ liên tòa.'
+                      : 'Theo quy định nghiệp vụ (Mục 7.5), hệ thống chặn tạo mới bản ghi trùng định danh. Vui lòng xem hồ sơ hiện có hoặc thực hiện gộp hồ sơ có lưu vết kiểm toán:'}
                   </p>
                 </div>
               </div>
-              <div className="pl-7 space-y-1.5">
-                {dupInfo.duplicates.map((d) => (
-                  <div
-                    key={d.id}
-                    className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-rose-200/80 text-xs"
-                  >
-                    <div className="text-slate-800">
-                      <span className="font-semibold">{d.full_name}</span>
-                      <span className="text-slate-500"> · SĐT: {d.phone || '—'}</span>
-                      {d.id_number ? (
-                        <span className="text-slate-500 font-mono"> · CCCD: {d.id_number}</span>
-                      ) : null}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {d.tenant_id ? (
+              {dupInfo.inScope !== false && dupInfo.duplicates.length > 0 ? (
+                <div className="pl-7 space-y-1.5">
+                  {dupInfo.duplicates.map((d) => (
+                    <div
+                      key={d.id}
+                      className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-rose-200/80 text-xs"
+                    >
+                      <div className="text-slate-800">
+                        <span className="font-semibold">{d.masked_name || d.full_name}</span>
+                        <span className="text-slate-500"> · SĐT: {d.masked_phone || d.phone || '—'}</span>
+                        {d.masked_id_number || d.id_number ? (
+                          <span className="text-slate-500 font-mono">
+                            {' '}
+                            · CCCD: {d.masked_id_number || d.id_number}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {d.tenant_id ? (
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            icon={Eye}
+                            onClick={() => {
+                              setCreateOpen(false);
+                              navigate(`/admin/tenants/${d.tenant_id}`);
+                            }}
+                          >
+                            Xem hồ sơ
+                          </Button>
+                        ) : null}
                         <Button
-                          variant="outline"
+                          variant="soft"
                           size="xs"
-                          icon={Eye}
+                          icon={GitMerge}
                           onClick={() => {
                             setCreateOpen(false);
-                            navigate(`/admin/tenants/${d.tenant_id}`);
+                            handleOpenMerge(null, null, d.tenant_id || '');
                           }}
                         >
-                          Xem hồ sơ
+                          Mở gộp hồ sơ
                         </Button>
-                      ) : null}
-                      <Button
-                        variant="soft"
-                        size="xs"
-                        icon={GitMerge}
-                        onClick={() => {
-                          setCreateOpen(false);
-                          handleOpenMerge(null, null, d.tenant_id || '');
-                        }}
-                      >
-                        Mở gộp hồ sơ
-                      </Button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : dupChecking ? (
             <div className="text-xs text-slate-500 flex items-center gap-2">
@@ -935,7 +948,9 @@ export function TenantsPage() {
             onChange={(e) => setMergeForm((p) => ({ ...p, source_tenant_id: e.target.value }))}
             options={mergeableTenants.map((t) => ({
               value: t.id,
-              label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${t.id_number || 'Chưa CCCD'})`,
+              label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${
+                t.id_number ? maskIdNumber(t.id_number) : 'Chưa CCCD'
+              })`,
             }))}
           />
 
@@ -949,7 +964,9 @@ export function TenantsPage() {
               .filter((t) => t.id !== mergeForm.source_tenant_id)
               .map((t) => ({
                 value: t.id,
-                label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${t.id_number || 'Chưa CCCD'})`,
+                label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${
+                  t.id_number ? maskIdNumber(t.id_number) : 'Chưa CCCD'
+                })`,
               }))}
           />
 

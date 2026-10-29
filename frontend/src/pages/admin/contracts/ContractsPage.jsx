@@ -114,16 +114,18 @@ export function ContractsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [buildings, setBuildings] = useState([]);
   const [apartments, setApartments] = useState([]);
-  const [tenants, setTenants] = useState([]);
   const [loadingRefData, setLoadingRefData] = useState(false);
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [createErrors, setCreateErrors] = useState({});
 
-  // Chế độ chọn khách thuê: 'existing' (cư dân đã có) | 'new' (cư dân mới chưa nằm trong hệ thống)
+  // Chế độ chọn khách thuê: 'existing' (tra cứu SĐT/CCCD bảo mật) | 'new' (cư dân mới chưa nằm trong hệ thống)
   const [tenantMode, setTenantMode] = useState('existing');
-  const [tenantQuickSearch, setTenantQuickSearch] = useState('');
+  const [tenantIdentifier, setTenantIdentifier] = useState('');
+  const [tenantLookupLoading, setTenantLookupLoading] = useState(false);
+  const [lookedUpTenant, setLookedUpTenant] = useState(null);
+  const [tenantLookupState, setTenantLookupState] = useState(null);
   const [newTenantForm, setNewTenantForm] = useState(INITIAL_NEW_TENANT);
-  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, duplicates: [] });
+  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
   const [dupChecking, setDupChecking] = useState(false);
 
   const [todayStr] = useState(() => new Date().toISOString().slice(0, 10));
@@ -169,7 +171,7 @@ export function ContractsPage() {
     fetchData();
   }, [fetchData]);
 
-  // Load tòa nhà + cư dân khi mở modal tạo HĐ nháp (hỗ trợ preselectApartmentId từ Sơ đồ tầng)
+  // Load tòa nhà + căn hộ khi mở modal tạo HĐ nháp (KHÔNG tải danh sách cư dân công khai để bảo mật PII)
   const handleOpenCreate = useCallback(async (preselectAptId = '') => {
     const cleanAptId = typeof preselectAptId === 'string' ? preselectAptId : '';
     const defaultBld = selectedBuildingId || '';
@@ -186,28 +188,25 @@ export function ContractsPage() {
       note: '',
     });
     setTenantMode('existing');
-    setTenantQuickSearch('');
+    setTenantIdentifier('');
+    setLookedUpTenant(null);
+    setTenantLookupState(null);
     setNewTenantForm(INITIAL_NEW_TENANT);
-    setDupInfo({ isDuplicate: false, duplicates: [] });
+    setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
     setCreateErrors({});
     setCreateOpen(true);
 
     setLoadingRefData(true);
     try {
-      const [bRes, tRes, aRes] = await Promise.all([
+      const [bRes, aRes] = await Promise.all([
         buildingsService.list(),
-        tenantsService.list(),
         buildingsService.listApartments(
           !cleanAptId && defaultBld ? { building_id: defaultBld } : {}
         ),
       ]);
       const bList = Array.isArray(bRes?.data) ? bRes.data : [];
-      const tList = (Array.isArray(tRes?.data) ? tRes.data : []).filter(
-        (t) => t.status !== 'MERGED' && t.status !== 'REJECTED'
-      );
       const aList = Array.isArray(aRes?.data) ? aRes.data : [];
       setBuildings(bList);
-      setTenants(tList);
       setApartments(aList);
 
       if (cleanAptId) {
@@ -224,7 +223,7 @@ export function ContractsPage() {
         }
       }
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu căn hộ / cư dân.'));
+      toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu tòa nhà / căn hộ.'));
     } finally {
       setLoadingRefData(false);
     }
@@ -246,11 +245,11 @@ export function ContractsPage() {
     if (!createOpen || tenantMode !== 'new') return undefined;
     const cleanPhone = normalizePhone(newTenantForm.phone);
     const cleanId = newTenantForm.id_number.trim();
-    const shouldCheckPhone = cleanPhone.length >= 9;
-    const shouldCheckId = cleanId.length >= 8;
+    const shouldCheckPhone = cleanPhone.length === 10;
+    const shouldCheckId = cleanId.length >= 9;
 
     if (!shouldCheckPhone && !shouldCheckId) {
-      setDupInfo({ isDuplicate: false, duplicates: [] });
+      setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
       return undefined;
     }
 
@@ -263,7 +262,9 @@ export function ContractsPage() {
         const res = await tenantsService.checkDup(params);
         setDupInfo({
           isDuplicate: Boolean(res?.isDuplicate),
+          inScope: res?.inScope !== false,
           duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
+          message: res?.message || '',
         });
       } catch {
         // ignore network hiccup on check-dup
@@ -303,10 +304,7 @@ export function ContractsPage() {
     [selectableApartments, createForm.apartment_id]
   );
 
-  const selectedTenant = useMemo(
-    () => tenants.find((t) => String(t.id) === String(createForm.primary_tenant_id)) || null,
-    [tenants, createForm.primary_tenant_id]
-  );
+  const selectedTenant = lookedUpTenant;
 
   const isDiscountedWarning = useMemo(() => {
     if (!selectedApartment) return false;
@@ -327,44 +325,137 @@ export function ContractsPage() {
     }));
   };
 
-  const filteredModalTenants = useMemo(() => {
-    const q = tenantQuickSearch.trim().toLowerCase();
-    if (!q) return tenants;
-    return tenants.filter((t) =>
-      [t.full_name, t.phone, t.id_number, t.email]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-        .includes(q)
-    );
-  }, [tenants, tenantQuickSearch]);
+  const handleClearLookedUpTenant = () => {
+    setLookedUpTenant(null);
+    setTenantLookupState(null);
+    setTenantIdentifier('');
+    setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+  };
+
+  const handleLookupTenant = async (rawValue = tenantIdentifier) => {
+    const raw = String(rawValue || '').trim();
+    if (!raw) {
+      setTenantLookupState(null);
+      setLookedUpTenant(null);
+      setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+      return null;
+    }
+
+    const normPhone = normalizePhone(raw);
+    const okPhone = isValidPhone(normPhone);
+    const okId = !okPhone && isValidIdNumber(raw);
+
+    if (!okPhone && !okId) {
+      setLookedUpTenant(null);
+      setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+      setTenantLookupState({
+        found: false,
+        invalidFormat: true,
+        outOfScopeConflict: false,
+        message:
+          'Định dạng không hợp lệ. Vui lòng nhập đúng SĐT 10 chữ số (VD: 0912345678) hoặc Số CCCD/Hộ chiếu (9–12 ký tự).',
+      });
+      return null;
+    }
+
+    setTenantLookupLoading(true);
+    setTenantLookupState(null);
+    try {
+      const res = await tenantsService.lookup(okPhone ? normPhone : raw.replace(/\s+/g, ''));
+      if (res?.found && res?.tenant?.id) {
+        setLookedUpTenant(res.tenant);
+        setTenantLookupState(null);
+        setCreateForm((p) => ({ ...p, primary_tenant_id: res.tenant.id }));
+        setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
+        return res.tenant;
+      }
+
+      setLookedUpTenant(null);
+      setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+      setTenantLookupState({
+        found: false,
+        invalidFormat: false,
+        outOfScopeConflict: Boolean(res?.outOfScopeConflict),
+        normalizedPhone: res?.normalizedPhone || (okPhone ? normPhone : ''),
+        normalizedIdNumber: res?.normalizedIdNumber || (okId ? raw.replace(/\s+/g, '') : ''),
+        message:
+          res?.message ||
+          'Chưa tìm thấy hồ sơ cư dân khớp với SĐT / CCCD này.',
+      });
+      return null;
+    } catch (err) {
+      setLookedUpTenant(null);
+      setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+      setTenantLookupState({
+        found: false,
+        invalidFormat: false,
+        outOfScopeConflict: false,
+        message: extractErrorMessage(err, 'Không thể tra cứu hồ sơ cư dân.'),
+      });
+      return null;
+    } finally {
+      setTenantLookupLoading(false);
+    }
+  };
+
+  const handleSwitchToNewWithPrefill = () => {
+    setNewTenantForm((prev) => ({
+      ...prev,
+      phone: tenantLookupState?.normalizedPhone || prev.phone,
+      id_number: tenantLookupState?.normalizedIdNumber || prev.id_number,
+    }));
+    setTenantLookupState(null);
+    setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
+    setTenantMode('new');
+  };
 
   const handleUseDuplicateTenant = (dup) => {
-    const matched = tenants.find(
-      (t) =>
-        (dup.tenant_id && String(t.id) === String(dup.tenant_id)) ||
-        String(t.person_id) === String(dup.id) ||
-        (dup.phone && t.phone === dup.phone)
-    );
-    if (matched) {
+    if (dup?.tenant_id) {
       setTenantMode('existing');
-      setTenantQuickSearch('');
-      setCreateForm((p) => ({ ...p, primary_tenant_id: matched.id }));
+      setLookedUpTenant({
+        id: dup.tenant_id,
+        person_id: dup.id,
+        full_name: dup.full_name,
+        masked_name: dup.masked_name || dup.full_name,
+        masked_phone: dup.masked_phone || dup.phone,
+        masked_id_number: dup.masked_id_number || dup.id_number,
+        has_id_number: Boolean(dup.id_number || dup.masked_id_number),
+        status: dup.id_number || dup.masked_id_number ? 'APPROVED' : 'PENDING',
+      });
+      setTenantLookupState(null);
+      setCreateForm((p) => ({ ...p, primary_tenant_id: dup.tenant_id }));
       setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
-      toast.info(`Đã chọn hồ sơ cư dân "${matched.full_name}" có sẵn trong hệ thống.`);
+      toast.info(`Đã chọn hồ sơ cư dân "${dup.masked_name || dup.full_name}" có sẵn trong phạm vi quản lý.`);
     } else {
-      toast.info('Hồ sơ trùng SĐT sẽ được hệ thống tự động liên kết khi lưu hợp đồng.');
+      toast.warning('Không thể liên kết tự động hồ sơ này.');
     }
   };
 
   const handleCreateSubmit = async (e) => {
     e?.preventDefault();
+
+    let resolvedPrimaryTenantId = createForm.primary_tenant_id;
+    if (tenantMode === 'existing' && !resolvedPrimaryTenantId && tenantIdentifier.trim()) {
+      const verifiedTenant = await handleLookupTenant(tenantIdentifier);
+      if (verifiedTenant?.id) {
+        resolvedPrimaryTenantId = verifiedTenant.id;
+      }
+    }
+
+    if (tenantMode === 'new' && dupInfo.isDuplicate && dupInfo.inScope === false) {
+      toast.warning(
+        dupInfo.message ||
+          'SĐT hoặc CCCD này đã đăng ký ngoài phạm vi tòa nhà bạn quản lý — không thể tạo trùng hồ sơ định danh.'
+      );
+      return;
+    }
+
     const errs = {};
     if (!createForm.apartment_id) errs.apartment_id = 'Vui lòng chọn căn hộ trống hoặc đã giữ chỗ.';
 
     if (tenantMode === 'existing') {
-      if (!createForm.primary_tenant_id) {
-        errs.primary_tenant_id = 'Vui lòng chọn khách thuê đại diện hoặc chuyển sang "+ Tạo mới cư dân".';
+      if (!resolvedPrimaryTenantId) {
+        errs.primary_tenant_id = 'Vui lòng nhập SĐT / CCCD để xác thực khách thuê hoặc chuyển sang "+ Tạo cư dân mới".';
       }
     } else {
       if (!newTenantForm.full_name.trim()) {
@@ -407,7 +498,7 @@ export function ContractsPage() {
         apartment_id: createForm.apartment_id,
         building_id: selectedApartment?.building_id || createForm.building_id || undefined,
         ...(tenantMode === 'existing'
-          ? { primary_tenant_id: createForm.primary_tenant_id }
+          ? { primary_tenant_id: resolvedPrimaryTenantId }
           : {
               new_tenant: {
                 full_name: newTenantForm.full_name.trim(),
@@ -972,15 +1063,18 @@ export function ContractsPage() {
             />
           </div>
 
-          {/* Chọn cư dân có sẵn HOẶC Tạo mới cư dân chưa có trong hệ thống */}
+          {/* Tra cứu cư dân bảo mật (Know-Before-You-Link) HOẶC Tạo mới cư dân chưa có trong hệ thống */}
           <div className="space-y-3 rounded-2xl border border-slate-200/90 bg-slate-50/60 p-4">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
               <div>
-                <p className="text-xs font-semibold text-slate-800">
-                  Khách thuê đại diện đứng tên hợp đồng <span className="text-rose-500">*</span>
+                <p className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-primary-600 shrink-0" />
+                  <span>
+                    Khách thuê đại diện đứng tên hợp đồng <span className="text-rose-500">*</span>
+                  </span>
                 </p>
                 <p className="text-[11px] text-slate-500">
-                  Chọn cư dân đã có hồ sơ hoặc tạo trực tiếp khách thuê mới chưa nằm trong hệ thống
+                  Bảo mật dữ liệu PII: tra cứu chính xác bằng SĐT / CCCD hoặc khởi tạo hồ sơ cư dân mới
                 </p>
               </div>
               <div className="inline-grid grid-cols-2 p-1 rounded-xl bg-slate-200/80 shrink-0">
@@ -994,7 +1088,7 @@ export function ContractsPage() {
                   }`}
                 >
                   <Users className="w-3.5 h-3.5" />
-                  Cư dân có sẵn
+                  Tra cứu cư dân
                 </button>
                 <button
                   type="button"
@@ -1013,34 +1107,101 @@ export function ContractsPage() {
 
             {tenantMode === 'existing' ? (
               <div className="space-y-2.5">
-                <Input
-                  icon={Search}
-                  placeholder="Lọc nhanh cư dân theo tên, SĐT, CCCD..."
-                  value={tenantQuickSearch}
-                  onChange={(e) => setTenantQuickSearch(e.target.value)}
-                />
-                <Select
-                  placeholder={
-                    filteredModalTenants.length === 0
-                      ? 'Không tìm thấy cư dân phù hợp — bấm "+ Tạo cư dân mới" ở góc phải'
-                      : '-- Chọn hồ sơ cư dân --'
-                  }
-                  value={createForm.primary_tenant_id}
-                  onChange={(e) => setCreateForm((p) => ({ ...p, primary_tenant_id: e.target.value }))}
-                  error={createErrors.primary_tenant_id}
-                  options={filteredModalTenants.map((t) => ({
-                    value: t.id,
-                    label: `${t.full_name} — ${t.phone || 'Không SĐT'} (${
-                      t.id_number ? `CCCD: ${t.id_number}` : 'Chưa có CCCD - PENDING'
-                    })`,
-                  }))}
-                />
+                {selectedTenant ? (
+                  <div className="rounded-xl bg-emerald-50/90 border border-emerald-200 px-3.5 py-3 flex items-center justify-between gap-3">
+                    <div className="space-y-0.5 text-xs">
+                      <p className="font-semibold text-emerald-900 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        Đã xác thực cư dân: {selectedTenant.masked_name || selectedTenant.full_name}
+                      </p>
+                      <p className="text-emerald-800">
+                        SĐT: <span className="font-mono">{selectedTenant.masked_phone || '—'}</span> · CCCD:{' '}
+                        <span className="font-mono">
+                          {selectedTenant.masked_id_number || 'Chưa bổ sung (PENDING)'}
+                        </span>
+                      </p>
+                    </div>
+                    <Button type="button" variant="outline" size="xs" onClick={handleClearLookedUpTenant}>
+                      Đổi / Nhập lại
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="flex-1">
+                        <Input
+                          icon={Search}
+                          placeholder="Nhập chính xác SĐT 10 số hoặc số CCCD/Hộ chiếu của cư dân..."
+                          value={tenantIdentifier}
+                          error={createErrors.primary_tenant_id}
+                          onChange={(e) => {
+                            setTenantIdentifier(e.target.value);
+                            if (tenantLookupState) setTenantLookupState(null);
+                            if (createErrors.primary_tenant_id) {
+                              setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
+                            }
+                          }}
+                          onBlur={() => {
+                            if (tenantIdentifier.trim() && !tenantLookupLoading) {
+                              handleLookupTenant(tenantIdentifier);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleLookupTenant(tenantIdentifier);
+                            }
+                          }}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="soft"
+                        icon={Search}
+                        loading={tenantLookupLoading}
+                        onClick={() => handleLookupTenant(tenantIdentifier)}
+                      >
+                        Tra cứu
+                      </Button>
+                    </div>
 
-                {selectedTenant && (!selectedTenant.id_number || selectedTenant.status === 'PENDING') ? (
+                    {tenantLookupState ? (
+                      <div
+                        className={`p-3 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 ${
+                          tenantLookupState.invalidFormat || tenantLookupState.outOfScopeConflict
+                            ? 'bg-rose-50 border-rose-200 text-rose-800'
+                            : 'bg-amber-50 border-amber-200 text-amber-900'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                          <span>{tenantLookupState.message}</span>
+                        </div>
+                        {!tenantLookupState.invalidFormat && !tenantLookupState.outOfScopeConflict ? (
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="primary"
+                            icon={UserPlus}
+                            onClick={handleSwitchToNewWithPrefill}
+                          >
+                            + Tạo cư dân mới
+                          </Button>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-slate-500">
+                        Hệ thống không công khai danh sách cư dân khi lập hợp đồng. Nhập SĐT (10 số) hoặc CCCD của khách để tra cứu, hoặc bấm <strong>+ Tạo cư dân mới</strong>.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {selectedTenant && (!selectedTenant.has_id_number || selectedTenant.status === 'PENDING') ? (
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                     <span>
-                      Hồ sơ khách thuê <strong>{selectedTenant.full_name}</strong> hiện chưa đủ CCCD hoặc đang ở trạng thái{' '}
+                      Hồ sơ khách thuê <strong>{selectedTenant.masked_name || selectedTenant.full_name}</strong> hiện chưa đủ CCCD hoặc đang ở trạng thái{' '}
                       <strong>PENDING</strong>. Bạn vẫn lưu nháp hợp đồng được, nhưng cần bổ sung & duyệt hồ sơ cư dân trước khi kích hoạt.
                     </span>
                   </div>
@@ -1057,19 +1218,27 @@ export function ContractsPage() {
                   </span>
                 </div>
 
-                {dupInfo.isDuplicate && dupInfo.duplicates.length > 0 ? (
+                {dupInfo.isDuplicate && dupInfo.inScope === false ? (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>
+                      {dupInfo.message ||
+                        'Định danh (SĐT/CCCD) này đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý. Không thể tạo trùng hồ sơ.'}
+                    </span>
+                  </div>
+                ) : dupInfo.isDuplicate && dupInfo.duplicates.length > 0 ? (
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                      <div>
+                      <div className="w-full">
                         <p className="font-semibold">
-                          Phát hiện SĐT / CCCD đã tồn tại trong hệ thống:
+                          Phát hiện SĐT / CCCD đã tồn tại trong phạm vi quản lý:
                         </p>
                         {dupInfo.duplicates.map((d) => (
                           <div key={d.id} className="mt-1 flex items-center justify-between gap-2 flex-wrap">
                             <span>
-                              • <strong>{d.full_name}</strong> — SĐT: {d.phone || '—'}
-                              {d.id_number ? ` — CCCD: ${d.id_number}` : ''}
+                              • <strong>{d.masked_name || d.full_name}</strong> — SĐT: {d.masked_phone || d.phone || '—'}
+                              {d.masked_id_number || d.id_number ? ` — CCCD: ${d.masked_id_number || d.id_number}` : ''}
                             </span>
                             <Button
                               type="button"
