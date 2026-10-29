@@ -15,6 +15,11 @@ import {
   managerBuildingFilter,
   logAccessDenied,
 } from '../services/ownerScope.js';
+import {
+  normalizeVnPhone,
+  upsertPersonAndTenantInTx,
+  ensureResidentAccount,
+} from '../services/residentAccount.js';
 
 const router = express.Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -561,7 +566,44 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
       }
 
-      res.json({ data: result.rows[0] });
+      const chainRes = await client.query(
+        `WITH RECURSIVE chain AS (
+           SELECT id, parent_contract_id, start_date, end_date, rent_amount, status, apartment_id, 0 AS depth
+           FROM contract WHERE id = $1
+           UNION ALL
+           SELECT c.id, c.parent_contract_id, c.start_date, c.end_date, c.rent_amount, c.status, c.apartment_id, ch.depth - 1
+           FROM contract c JOIN chain ch ON c.id = ch.parent_contract_id
+           WHERE ch.depth > -10
+         ),
+         children AS (
+           SELECT id, parent_contract_id, start_date, end_date, rent_amount, status, apartment_id
+           FROM contract WHERE parent_contract_id = $1
+         )
+         SELECT ch.*, a.code as apartment_code FROM (
+           SELECT id, parent_contract_id, start_date, end_date, rent_amount, status, apartment_id FROM chain WHERE id <> $1
+           UNION
+           SELECT id, parent_contract_id, start_date, end_date, rent_amount, status, apartment_id FROM children
+         ) ch
+         JOIN apartment a ON a.id = ch.apartment_id
+         ORDER BY ch.start_date DESC`,
+        [id]
+      );
+
+      const attRes = await client.query(
+        `SELECT id, storage_path, mime, size_bytes, created_at
+         FROM attachment
+         WHERE owner_entity = 'contract' AND owner_id = $1
+         ORDER BY created_at DESC`,
+        [id]
+      );
+
+      res.json({
+        data: {
+          ...result.rows[0],
+          related_contracts: chainRes.rows,
+          attachments: attRes.rows,
+        },
+      });
     } finally {
       await release();
     }
@@ -580,6 +622,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     apartment_id,
     building_id,
     primary_tenant_id,
+    new_tenant,
     start_date,
     end_date,
     rent_amount,
@@ -589,10 +632,22 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     note,
   } = req.body;
 
-  if (!apartment_id || !primary_tenant_id || !start_date || !end_date || !rent_amount) {
+  const hasExistingTenant = Boolean(primary_tenant_id);
+  const hasNewTenant = Boolean(
+    new_tenant && typeof new_tenant === 'object' && new_tenant.full_name && new_tenant.phone
+  );
+
+  if (!apartment_id || (!hasExistingTenant && !hasNewTenant) || !start_date || !end_date || !rent_amount) {
     return res.status(422).json({
       code: 'VALIDATION_ERROR',
-      message: 'Thiếu thông tin bắt buộc: Căn hộ, Khách thuê, Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
+      message: 'Thiếu thông tin bắt buộc: Căn hộ, Khách thuê (có sẵn hoặc tạo mới), Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
+    });
+  }
+
+  if (hasNewTenant && new_tenant.password && String(new_tenant.password).length < 8) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Mật khẩu đăng nhập ban đầu của cư dân phải từ 8 ký tự trở lên.',
     });
   }
 
@@ -689,6 +744,25 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       });
     }
 
+    // Khởi tạo hồ sơ cư dân mới ngay trong cùng transaction nếu người dùng chọn "+ Tạo mới cư dân"
+    let effectiveTenantId = primary_tenant_id;
+    let inlineTenantResult = null;
+    if (!effectiveTenantId && hasNewTenant) {
+      inlineTenantResult = await upsertPersonAndTenantInTx(client, {
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        fullName: new_tenant.full_name,
+        phone: new_tenant.phone,
+        email: new_tenant.email,
+        dob: new_tenant.dob,
+        idNumber: new_tenant.id_number,
+        address: new_tenant.address,
+        nationality: new_tenant.nationality,
+        type: 'primary',
+      });
+      effectiveTenantId = inlineTenantResult.tenant.id;
+    }
+
     // Tính toán tiền cọc
     let finalDeposit = 0;
     if (deposit_amount !== undefined && deposit_amount !== null) {
@@ -707,7 +781,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       [
         apartment_id,
         effectiveBuildingId,
-        primary_tenant_id,
+        effectiveTenantId,
         start_date,
         end_date,
         rent_amount,
@@ -731,9 +805,49 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     );
 
     await client.query('COMMIT');
-    res.status(201).json({ message: 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.', data: contract });
+
+    // Tự động đảm bảo khách thuê đại diện có tài khoản app_user (ACTIVE) + role RESIDENT
+    try {
+      if (inlineTenantResult) {
+        await ensureResidentAccount(inlineTenantResult.personId, {
+          email: inlineTenantResult.cleanEmail,
+          phone: inlineTenantResult.cleanPhone,
+          password: new_tenant?.password,
+        });
+      } else if (effectiveTenantId) {
+        const tpRes = await adminPool.query(
+          `SELECT p.id AS person_id, p.email, p.phone
+           FROM tenant t JOIN person p ON p.id = t.person_id
+           WHERE t.id = $1 LIMIT 1`,
+          [effectiveTenantId]
+        );
+        if (tpRes.rows.length > 0) {
+          await ensureResidentAccount(tpRes.rows[0].person_id, {
+            email: tpRes.rows[0].email,
+            phone: tpRes.rows[0].phone,
+          });
+        }
+      }
+    } catch (acctErr) {
+      console.error('[Contract Ensure Resident Account Warning]:', acctErr);
+    }
+
+    res.status(201).json({
+      message: inlineTenantResult
+        ? 'Đã tạo hồ sơ cư dân mới (kèm tài khoản Cổng cư dân) và lưu nháp hợp đồng thành công.'
+        : 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.',
+      data: contract,
+      ...(inlineTenantResult ? { created_tenant: inlineTenantResult.tenant } : {}),
+    });
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({
+        code: err.code || 'VALIDATION_ERROR',
+        message: err.message,
+        ...(err.existing_person ? { existing_person: err.existing_person } : {}),
+      });
+    }
     const mapped = mapPgError(err);
     if (mapped) {
       return res.status(mapped.status).json({ code: mapped.code, message: mapped.message });
@@ -795,17 +909,18 @@ router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async
   try {
     await client.query('BEGIN');
 
+    const cleanPhone = normalizeVnPhone(phone);
     // Tái dùng person trùng SĐT trong org, không thì tạo mới
     let personRes = await client.query(
       'SELECT * FROM person WHERE org_id = $1 AND phone = $2',
-      [req.user.org_id, phone]
+      [req.user.org_id, cleanPhone]
     );
     let personId;
     if (personRes.rows.length === 0) {
       personId = (await client.query(
         `INSERT INTO person (org_id, full_name, phone, email, dob, id_number)
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [req.user.org_id, full_name, phone, email || null, dob || null, id_number || null]
+        [req.user.org_id, full_name, cleanPhone, email || null, dob || null, id_number || null]
       )).rows[0].id;
     } else {
       personId = personRes.rows[0].id;
@@ -859,6 +974,11 @@ router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async
     );
 
     await client.query('COMMIT');
+    try {
+      await ensureResidentAccount(personId, { email, phone: cleanPhone });
+    } catch (acctErr) {
+      console.error('[Add Occupant Ensure Account Warning]:', acctErr);
+    }
     res.status(201).json({ message: 'Đã thêm thành viên cùng ở.', data: { contract_id: id, tenant_id: tenantId, relationship: relationship || 'family' } });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1786,7 +1906,7 @@ router.get('/:id/amendments', authenticateToken, requireRole(['SYS_ADMIN', 'OWNE
   try {
     const versionsRes = await client.query(
       `SELECT cv.*, 
-              u.email as approved_by_email,
+              p.email as approved_by_email,
               p.full_name as approved_by_name
        FROM contract_version cv
        LEFT JOIN app_user u ON u.id = cv.approved_by
@@ -2552,6 +2672,363 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
   } catch (err) {
     console.error('[Contract Template Error]:', err);
     res.status(500).send('<h1>500 Lỗi máy chủ khi tạo mẫu in hợp đồng</h1>');
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/renew (FR-015)
+ * Gia hạn bằng cách tạo hợp đồng nối tiếp mới có parent_contract_id trỏ về hợp đồng hiện tại
+ */
+router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { new_end_date, rent_amount, deposit_amount, note } = req.body;
+
+  if (!new_end_date) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng cung cấp ngày kết thúc mới (new_end_date).' });
+  }
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+
+    const curRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
+    if (curRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const cur = curRes.rows[0];
+    if (!['ACTIVE', 'EXPIRED', 'RENEWAL_PENDING'].includes(cur.status)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Chỉ hợp đồng ACTIVE, RENEWAL_PENDING hoặc EXPIRED mới có thể tạo bản gia hạn nối tiếp.`,
+      });
+    }
+
+    const oldEndStr = cur.end_date.toISOString ? cur.end_date.toISOString().split('T')[0] : String(cur.end_date);
+    if (new_end_date <= oldEndStr) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_DATE_RANGE',
+        message: 'Ngày kết thúc gia hạn phải sau ngày kết thúc của hợp đồng hiện tại.',
+      });
+    }
+
+    const overlapRes = await client.query(
+      `SELECT id FROM contract
+       WHERE apartment_id = $1 AND id <> $2
+         AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+         AND (start_date < $4 AND end_date > $3)`,
+      [cur.apartment_id, id, oldEndStr, new_end_date]
+    );
+    if (overlapRes.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'OVERLAP_CONTRACT',
+        message: 'Kỳ hạn gia hạn bị trùng với một hợp đồng khác trên cùng căn hộ.',
+      });
+    }
+
+    const nextRent = rent_amount !== undefined && rent_amount !== null ? Number(rent_amount) : Number(cur.rent_amount);
+    const nextDeposit = deposit_amount !== undefined && deposit_amount !== null ? Number(deposit_amount) : Number(cur.deposit_amount);
+
+    const newContractRes = await client.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
+         deposit_amount, status, parent_contract_id, note, created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'DRAFT', $11, $12, $13)
+       RETURNING *`,
+      [
+        cur.apartment_id,
+        cur.building_id,
+        cur.primary_tenant_id,
+        oldEndStr,
+        new_end_date,
+        nextRent,
+        cur.billing_cycle || 'monthly',
+        cur.billing_day || 1,
+        cur.payment_due_days || 5,
+        nextDeposit,
+        cur.id,
+        note || `Gia hạn nối tiếp từ hợp đồng ${cur.id.slice(0, 8).toUpperCase()}`,
+        req.user.sub,
+      ]
+    );
+
+    const newContract = newContractRes.rows[0];
+
+    await client.query(
+      `INSERT INTO contract_occupant (contract_id, tenant_id, relationship)
+       SELECT $1, tenant_id, relationship FROM contract_occupant WHERE contract_id = $2`,
+      [newContract.id, cur.id]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'RENEW_CONTRACT', 'contract', $2, $3, $4)`,
+      [req.user.sub, newContract.id, JSON.stringify({ parent_contract_id: cur.id }), JSON.stringify(newContract)]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: 'Đã tạo hợp đồng gia hạn nối tiếp (gắn kết lịch sử parent_contract_id). Vui lòng tải bản ký để kích hoạt.',
+      data: newContract,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Renew Contract Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tạo hợp đồng gia hạn nối tiếp.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/transfer-room (FR-013)
+ * Chuyển phòng atomic trong một transaction:
+ * - Đóng hợp đồng cũ (TERMINATED) & chuyển căn cũ sang MAINTENANCE
+ * - Mở hợp đồng mới ACTIVE trên căn mới (gán parent_contract_id = id) & chuyển căn mới sang OCCUPIED
+ * - Tùy chọn chuyển sổ cọc sang hợp đồng mới (transfer_deposit = true)
+ */
+router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const {
+    new_apartment_id,
+    new_start_date,
+    new_end_date,
+    new_rent_amount,
+    transfer_deposit = true,
+    note,
+  } = req.body;
+
+  if (!new_apartment_id) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng chọn căn hộ mới cần chuyển tới (new_apartment_id).' });
+  }
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
+  const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+
+  const { client, release } = await getUserClient(req);
+  try {
+    const targetAptMeta = await adminPool.query(
+      `SELECT a.*, b.org_id FROM apartment a JOIN building b ON b.id = a.building_id WHERE a.id = $1`,
+      [new_apartment_id]
+    );
+    if (targetAptMeta.rows.length === 0 || targetAptMeta.rows[0].org_id !== req.user.org_id) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ đích.' });
+    }
+    const targetApt = targetAptMeta.rows[0];
+
+    if (!mgrIds.includes(targetApt.building_id)) {
+      await logAccessDenied(req, 'apartment', new_apartment_id, 'MANAGER attempted transfer-room to unassigned building');
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không có quyền chuyển phòng sang tòa nhà ngoài phạm vi quản lý.',
+      });
+    }
+
+    await client.query('BEGIN');
+
+    const oldRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
+    if (oldRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng hiện tại.' });
+    }
+    const oldContract = oldRes.rows[0];
+
+    if (oldContract.status !== 'ACTIVE') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'CONTRACT_NOT_ACTIVE',
+        message: 'Chỉ hợp đồng đang hiệu lực (ACTIVE) mới có thể thực hiện chuyển phòng.',
+      });
+    }
+
+    if (oldContract.apartment_id === new_apartment_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        code: 'SAME_APARTMENT',
+        message: 'Căn hộ mới phải khác căn hộ đang ở hiện tại.',
+      });
+    }
+
+    const newAptLock = await client.query('SELECT * FROM apartment WHERE id = $1 FOR UPDATE', [new_apartment_id]);
+    if (newAptLock.rows.length === 0 || newAptLock.rows[0].status !== 'AVAILABLE') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'APARTMENT_NOT_AVAILABLE',
+        message: `Căn hộ đích đang ở trạng thái ${newAptLock.rows[0]?.status || 'UNKNOWN'}, chỉ căn AVAILABLE mới có thể chuyển đến.`,
+      });
+    }
+
+    const transferDate = new_start_date || new Date().toISOString().slice(0, 10);
+    const oldEndStr = oldContract.end_date.toISOString
+      ? oldContract.end_date.toISOString().split('T')[0]
+      : String(oldContract.end_date);
+    const finalEndDate = new_end_date || oldEndStr;
+
+    if (finalEndDate <= transferDate) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_DATE_RANGE',
+        message: 'Ngày kết thúc hợp đồng mới phải sau ngày chuyển phòng.',
+      });
+    }
+
+    // Kiểm tra chống chồng lấn trên căn mới
+    const overlapRes = await client.query(
+      `SELECT id FROM contract
+       WHERE apartment_id = $1
+         AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
+         AND (start_date < $3 AND end_date > $2)`,
+      [new_apartment_id, transferDate, finalEndDate]
+    );
+    if (overlapRes.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'OVERLAP_CONTRACT',
+        message: 'Căn hộ đích đã có lịch hợp đồng trùng với khoảng thời gian chuyển đến.',
+      });
+    }
+
+    // 1. Đóng hợp đồng cũ & đặt căn cũ sang MAINTENANCE
+    await client.query(
+      `UPDATE contract
+       SET status = 'TERMINATED',
+           terminated_at = $1,
+           note = COALESCE(note || ' ', '') || $2,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [transferDate, `[Chuyển sang căn ${newAptLock.rows[0].code}]`, oldContract.id]
+    );
+
+    await client.query(
+      `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
+      [oldContract.apartment_id]
+    );
+
+    // 2. Tạo hợp đồng mới ACTIVE trên căn mới, liên kết parent_contract_id
+    const finalRent = new_rent_amount !== undefined && new_rent_amount !== null
+      ? Number(new_rent_amount)
+      : Number(newAptLock.rows[0].base_rent || oldContract.rent_amount);
+
+    const newContractRes = await client.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
+         deposit_amount, status, parent_contract_id, note, created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ACTIVE', $11, $12, $13)
+       RETURNING *`,
+      [
+        new_apartment_id,
+        newAptLock.rows[0].building_id,
+        oldContract.primary_tenant_id,
+        transferDate,
+        finalEndDate,
+        finalRent,
+        oldContract.billing_cycle || 'monthly',
+        oldContract.billing_day || 1,
+        oldContract.payment_due_days || 5,
+        oldContract.deposit_amount,
+        oldContract.id,
+        note || `Chuyển phòng từ hợp đồng ${oldContract.id.slice(0, 8).toUpperCase()}`,
+        req.user.sub,
+      ]
+    );
+    const newContract = newContractRes.rows[0];
+
+    await client.query(
+      `UPDATE apartment
+       SET status = CASE WHEN $2::date <= CURRENT_DATE THEN 'OCCUPIED' ELSE 'RESERVED' END,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [new_apartment_id, transferDate]
+    );
+
+    // Sao chép người ở cùng
+    await client.query(
+      `INSERT INTO contract_occupant (contract_id, tenant_id, relationship)
+       SELECT $1, tenant_id, relationship FROM contract_occupant WHERE contract_id = $2`,
+      [newContract.id, oldContract.id]
+    );
+
+    // 3. Chuyển sổ cọc (nếu chọn transfer_deposit)
+    let transferredDeposit = null;
+    if (transfer_deposit) {
+      const oldDepRes = await client.query(
+        `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' FOR UPDATE`,
+        [oldContract.id]
+      );
+      if (oldDepRes.rows.length > 0) {
+        const oldDep = oldDepRes.rows[0];
+        const heldAmt = oldDep.amount_held;
+
+        await client.query(
+          `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
+          [oldDep.id]
+        );
+
+        const newDepRes = await client.query(
+          `INSERT INTO deposit (contract_id, amount_held, status)
+           VALUES ($1, $2, 'HELD')
+           RETURNING *`,
+          [newContract.id, heldAmt]
+        );
+        transferredDeposit = newDepRes.rows[0];
+
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+          [
+            transferredDeposit.id,
+            heldAmt,
+            `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
+            req.user.sub,
+          ]
+        );
+      }
+    }
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'TRANSFER_ROOM', 'contract', $2, $3, $4)`,
+      [
+        req.user.sub,
+        newContract.id,
+        JSON.stringify({ old_contract_id: oldContract.id, old_apartment_id: oldContract.apartment_id }),
+        JSON.stringify({ new_contract: newContract, transfer_deposit, transferred_deposit_id: transferredDeposit?.id || null }),
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: `Chuyển phòng sang căn ${newAptLock.rows[0].code} thành công!`,
+      data: {
+        old_contract_id: oldContract.id,
+        new_contract: newContract,
+        transferred_deposit: transferredDeposit,
+      },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Transfer Room Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi thực hiện chuyển phòng.' });
   } finally {
     await release();
   }

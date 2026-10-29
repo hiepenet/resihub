@@ -83,3 +83,21 @@ export function splitDepositOpening({ depositAmount, holdAmount }) {
   const remainingCollect = dep > openHeld ? dep - openHeld : 0n;
   return { openHeld, remainingCollect };
 }
+
+/**
+ * Determine deposit status after settlement approval (FR-024):
+ * - PARTIALLY_REFUNDED when refund > 0 AND (deductions/debt > 0 OR shortfall > 0)
+ * - REFUNDED when full deposit is refunded (deductions == 0) or deposit is fully settled (refund == 0)
+ */
+export function resolvePostSettlementStatus({ refundAmount = 0, outstandingDebt = 0, items = [], shortfall = 0 }) {
+  const refund = BigInt(refundAmount ?? 0);
+  const debt = BigInt(outstandingDebt ?? 0);
+  const sumItems = (items || []).reduce((acc, item) => acc + BigInt(item.amount ?? 0), 0n);
+  const sf = BigInt(shortfall ?? 0);
+  const totalDeductions = debt + sumItems;
+
+  if (refund > 0n && (totalDeductions > 0n || sf > 0n)) {
+    return 'PARTIALLY_REFUNDED';
+  }
+  return 'REFUNDED';
+}
