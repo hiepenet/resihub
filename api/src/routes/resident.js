@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
@@ -54,13 +55,14 @@ router.get('/overview', authenticateToken, async (req, res) => {
     const userPhone = user.phone || '';
     const cleanPhone = userPhone.startsWith('+84') ? '0' + userPhone.slice(3) : userPhone;
 
-    // 2. Hợp đồng đang hiệu lực (hoặc RENEWAL_PENDING / TERMINATION_PENDING)
+    // 2. Danh sách toàn bộ hợp đồng đang mở (ACTIVE / RENEWAL_PENDING / TERMINATION_PENDING) hỗ trợ đa căn hộ (Điểm 3)
     const contractRes = await pool.query(
       `SELECT 
          c.id as contract_id,
          c.parent_contract_id,
          c.start_date,
          c.end_date,
+         c.terminated_at,
          c.rent_amount,
          c.billing_cycle,
          c.billing_day,
@@ -69,6 +71,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
          c.status as contract_status,
          c.note as contract_note,
          c.created_at as contract_created_at,
+         (c.start_date > CURRENT_DATE) as is_future_contract,
          a.id as apartment_id,
          a.code as apartment_code,
          a.area_m2,
@@ -90,12 +93,20 @@ router.get('/overview', authenticateToken, async (req, res) => {
        LEFT JOIN floor f ON f.id = a.floor_id
        LEFT JOIN deposit d ON d.contract_id = c.id
        WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-       ORDER BY c.created_at DESC
-       LIMIT 1`,
+       ORDER BY (CASE WHEN c.start_date <= CURRENT_DATE AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE THEN 0 ELSE 1 END),
+                c.start_date ASC,
+                c.created_at DESC`,
       [personId]
     );
 
-    const contract = contractRes.rows[0] || null;
+    const activeContracts = contractRes.rows;
+    const requestedContractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
+    const contract =
+      (requestedContractId
+        ? activeContracts.find((item) => item.contract_id === requestedContractId)
+        : null) ||
+      activeContracts[0] ||
+      null;
     const hasContract = !!contract;
 
     // 2b. Lịch sử toàn bộ hợp đồng (bao gồm HĐ cũ đã gia hạn / kết thúc) & phụ lục
@@ -123,8 +134,8 @@ router.get('/overview', authenticateToken, async (req, res) => {
       amendments = amendRes.rows;
     }
 
-    // 2c. AC-002.1: Số tiền phải trả hiện tại (tổng dư nợ hóa đơn đã phát hành + công nợ sau trả phòng)
-    const debtRes = await pool.query(
+    // 2c. AC-002.1: Số tiền phải trả hiện tại (tách theo căn đang chọn + tổng dư nợ toàn bộ căn hộ)
+    const totalDebtAllRes = await pool.query(
       `SELECT COALESCE(SUM(i.total_amount - i.paid_amount), 0)::bigint AS invoice_due
        FROM invoice i
        JOIN tenant t ON t.id = i.tenant_id
@@ -132,16 +143,44 @@ router.get('/overview', authenticateToken, async (req, res) => {
          AND i.status IN ('ISSUED', 'OVERDUE', 'PARTIALLY_PAID')`,
       [personId]
     );
+    const totalAmountDueAll = Number(totalDebtAllRes.rows[0]?.invoice_due || 0);
 
-    const latestInvRes = await pool.query(
-      `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
-       FROM invoice i
-       JOIN tenant t ON t.id = i.tenant_id
-       WHERE t.person_id = $1 AND i.status <> 'DRAFT'
-       ORDER BY i.period DESC, i.created_at DESC
-       LIMIT 1`,
-      [personId]
-    );
+    let currentAmountDue = totalAmountDueAll;
+    let latestInvoice = null;
+    if (contract) {
+      const contractDebtRes = await pool.query(
+        `SELECT COALESCE(SUM(i.total_amount - i.paid_amount), 0)::bigint AS invoice_due
+         FROM invoice i
+         JOIN tenant t ON t.id = i.tenant_id
+         WHERE t.person_id = $1
+           AND i.contract_id = $2
+           AND i.status IN ('ISSUED', 'OVERDUE', 'PARTIALLY_PAID')`,
+        [personId, contract.contract_id]
+      );
+      currentAmountDue = Number(contractDebtRes.rows[0]?.invoice_due || 0);
+
+      const latestInvRes = await pool.query(
+        `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
+         FROM invoice i
+         JOIN tenant t ON t.id = i.tenant_id
+         WHERE t.person_id = $1 AND i.contract_id = $2 AND i.status <> 'DRAFT'
+         ORDER BY i.period DESC, i.created_at DESC
+         LIMIT 1`,
+        [personId, contract.contract_id]
+      );
+      latestInvoice = latestInvRes.rows[0] || null;
+    } else {
+      const latestInvRes = await pool.query(
+        `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
+         FROM invoice i
+         JOIN tenant t ON t.id = i.tenant_id
+         WHERE t.person_id = $1 AND i.status <> 'DRAFT'
+         ORDER BY i.period DESC, i.created_at DESC
+         LIMIT 1`,
+        [personId]
+      );
+      latestInvoice = latestInvRes.rows[0] || null;
+    }
 
     // 3. Đặt cọc giữ chỗ
     let reservation = null;
@@ -253,11 +292,15 @@ router.get('/overview', authenticateToken, async (req, res) => {
       data: {
         user,
         has_contract: hasContract,
+        selected_contract_id: contract?.contract_id || null,
+        active_contracts: activeContracts,
+        active_contract: contract,
         contract,
         contract_history: contractHistoryRes.rows,
         amendments,
-        current_amount_due: Number(debtRes.rows[0]?.invoice_due || 0),
-        latest_invoice: latestInvRes.rows[0] || null,
+        current_amount_due: currentAmountDue,
+        total_amount_due_all: totalAmountDueAll,
+        latest_invoice: latestInvoice,
         reservation,
         pending_application: pendingApplication,
         available_apartments: availableAptsRes.rows,
@@ -343,6 +386,21 @@ router.get('/service-requests', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.sub;
     const personId = req.user.person_id;
+    const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
+
+    const params = [userId, personId];
+    let contractScopeSql = '';
+    if (contractId) {
+      params.push(contractId);
+      contractScopeSql = `
+        AND sr.apartment_id IN (
+          SELECT c2.apartment_id
+          FROM contract c2
+          JOIN tenant t2 ON t2.id = c2.primary_tenant_id
+          WHERE c2.id = $3 AND t2.person_id = $2
+        )
+      `;
+    }
 
     const result = await pool.query(
       `SELECT sr.*,
@@ -354,14 +412,17 @@ router.get('/service-requests', authenticateToken, async (req, res) => {
        JOIN building b ON b.id = sr.building_id
        LEFT JOIN app_user u_assigned ON u_assigned.id = sr.assigned_to
        LEFT JOIN person p_assigned ON p_assigned.id = u_assigned.person_id
-       WHERE sr.created_by = $1
-          OR sr.apartment_id IN (
-            SELECT c.apartment_id FROM contract c
-            JOIN tenant t ON t.id = c.primary_tenant_id
-            WHERE t.person_id = $2 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-          )
+       WHERE (
+         sr.created_by = $1
+         OR sr.apartment_id IN (
+           SELECT c.apartment_id FROM contract c
+           JOIN tenant t ON t.id = c.primary_tenant_id
+           WHERE t.person_id = $2 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         )
+       )
+       ${contractScopeSql}
        ORDER BY sr.created_at DESC`,
-      [userId, personId]
+      params
     );
 
     res.json({ data: result.rows });
@@ -383,6 +444,7 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
     priority,
     urgency,
     apartment_id,
+    contract_id,
     images = [],
     confirm_duplicate = false,
   } = req.body;
@@ -407,9 +469,9 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
 
   const { client, release } = await getUserClient(req);
   try {
-    // Xác định căn hộ đang thuê của cư dân
+    // Xác định căn hộ đang thuê của cư dân (hỗ trợ contract_id hoặc apartment_id khi cư dân thuê nhiều căn)
     let targetAptQuery = `
-      SELECT c.apartment_id, c.building_id, b.org_id, a.code as apartment_code
+      SELECT c.id as contract_id, c.apartment_id, c.building_id, b.org_id, a.code as apartment_code
       FROM contract c
       JOIN tenant t ON t.id = c.primary_tenant_id
       JOIN apartment a ON a.id = c.apartment_id
@@ -417,11 +479,15 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
       WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
     `;
     const aptParams = [req.user.person_id];
+    if (contract_id) {
+      aptParams.push(contract_id);
+      targetAptQuery += ` AND c.id = $${aptParams.length}`;
+    }
     if (apartment_id) {
       aptParams.push(apartment_id);
-      targetAptQuery += ` AND c.apartment_id = $2`;
+      targetAptQuery += ` AND c.apartment_id = $${aptParams.length}`;
     }
-    targetAptQuery += ` ORDER BY c.created_at DESC LIMIT 1`;
+    targetAptQuery += ` ORDER BY (CASE WHEN c.start_date <= CURRENT_DATE THEN 0 ELSE 1 END), c.created_at DESC LIMIT 1`;
 
     const aptRes = await client.query(targetAptQuery, aptParams);
     if (aptRes.rows.length === 0) {
@@ -577,6 +643,14 @@ router.post('/service-requests/:id/rating', authenticateToken, async (req, res) 
 router.get('/invoices', authenticateToken, async (req, res) => {
   try {
     const personId = req.user.person_id;
+    const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
+    const params = [personId];
+    let contractFilter = '';
+    if (contractId) {
+      params.push(contractId);
+      contractFilter = ' AND i.contract_id = $2';
+    }
+
     const invRes = await pool.query(
       `SELECT i.*,
               a.code as apartment_code,
@@ -585,9 +659,9 @@ router.get('/invoices', authenticateToken, async (req, res) => {
        JOIN apartment a ON a.id = i.apartment_id
        JOIN building b ON b.id = i.building_id
        JOIN tenant t ON t.id = i.tenant_id
-       WHERE t.person_id = $1 AND i.status <> 'DRAFT'
+       WHERE t.person_id = $1 AND i.status <> 'DRAFT'${contractFilter}
        ORDER BY i.period DESC, i.created_at DESC`,
-      [personId]
+      params
     );
 
     const invoiceIds = invRes.rows.map((r) => r.id);
@@ -658,31 +732,7 @@ router.post('/payments/report', authenticateToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    const payCode = `PAY-R-${Date.now().toString().slice(-7)}-${Math.floor(100 + Math.random() * 900)}`;
-    const insPay = await client.query(
-      `INSERT INTO payment (
-         org_id, building_id, invoice_id, contract_id, tenant_id,
-         payment_code, amount, method, reference_code, status, paid_at, note, reported_by
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_CONFIRMATION', COALESCE($10::timestamptz, NOW()), $11, $12)
-       RETURNING *`,
-      [
-        inv.org_id,
-        inv.building_id,
-        inv.id,
-        inv.contract_id,
-        inv.tenant_id,
-        payCode,
-        Math.round(numAmount),
-        method,
-        reference_code?.trim() || null,
-        paid_at || null,
-        note?.trim() || null,
-        req.user.sub,
-      ]
-    );
-    const payRow = insPay.rows[0];
-
+    const paymentId = crypto.randomUUID();
     const savedProofs = [];
     if (Array.isArray(proof_images)) {
       for (const img of proof_images.slice(0, 3)) {
@@ -690,9 +740,9 @@ router.post('/payments/report', authenticateToken, async (req, res) => {
           const saved = await saveBase64Image({
             imageBase64: img,
             folder: 'payment',
-            entityId: payRow.id,
+            entityId: paymentId,
             entity: 'payment',
-            ownerId: payRow.id,
+            ownerId: paymentId,
             req,
             query: (sql, params) => client.query(sql, params),
           });
@@ -707,11 +757,32 @@ router.post('/payments/report', authenticateToken, async (req, res) => {
       }
     }
 
-    let finalPay = payRow;
-    if (savedProofs.length > 0) {
-      const upd = await client.query(`UPDATE payment SET proof_images = $1 WHERE id = $2 RETURNING *`, [savedProofs, payRow.id]);
-      finalPay = upd.rows[0];
-    }
+    const payCode = `PAY-R-${Date.now().toString().slice(-7)}-${Math.floor(100 + Math.random() * 900)}`;
+    const insPay = await client.query(
+      `INSERT INTO payment (
+         id, org_id, building_id, invoice_id, contract_id, tenant_id,
+         payment_code, amount, method, reference_code, status, paid_at, note, proof_images, reported_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING_CONFIRMATION', COALESCE($11::timestamptz, NOW()), $12, $13, $14)
+       RETURNING *`,
+      [
+        paymentId,
+        inv.org_id,
+        inv.building_id,
+        inv.id,
+        inv.contract_id,
+        inv.tenant_id,
+        payCode,
+        Math.round(numAmount),
+        method,
+        reference_code?.trim() || null,
+        paid_at || null,
+        note?.trim() || null,
+        savedProofs,
+        req.user.sub,
+      ]
+    );
+    const finalPay = insPay.rows[0];
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
@@ -741,23 +812,32 @@ router.get('/services', authenticateToken, async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const personId = req.user.person_id;
+    const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
 
     const catalogRes = await pool.query(
       `SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE ORDER BY category, name`,
       [orgId]
     );
 
+    const subParams = [personId];
+    let subFilter = '';
+    if (contractId) {
+      subParams.push(contractId);
+      subFilter = ' AND ss.contract_id = $2';
+    }
+
     const subsRes = await pool.query(
       `SELECT ss.*, sc.code as service_code, sc.name as service_name, sc.unit, sc.category,
-              a.code as apartment_code
+              a.code as apartment_code, b.name as building_name
        FROM service_subscription ss
        JOIN service_catalog sc ON sc.id = ss.service_id
        JOIN apartment a ON a.id = ss.apartment_id
        JOIN contract c ON c.id = ss.contract_id
+       JOIN building b ON b.id = c.building_id
        JOIN tenant t ON t.id = c.primary_tenant_id
-       WHERE t.person_id = $1
+       WHERE t.person_id = $1${subFilter}
        ORDER BY ss.created_at DESC`,
-      [personId]
+      subParams
     );
 
     res.json({
@@ -774,23 +854,30 @@ router.get('/services', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/v1/resident/services (FR-027, FR-029)
- * Cư dân đăng ký dịch vụ mới (kèm tính phí pro-rata kỳ đầu)
+ * Cư dân đăng ký dịch vụ mới (kèm tính phí pro-rata kỳ đầu, hỗ trợ chọn contract_id)
  */
 router.post('/services', authenticateToken, async (req, res) => {
-  const { service_id, quantity = 1, start_date, note } = req.body;
+  const { service_id, quantity = 1, start_date, note, contract_id } = req.body;
   if (!service_id) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng chọn dịch vụ cần đăng ký.' });
   }
 
   try {
+    const cParams = [req.user.person_id];
+    let cFilter = '';
+    if (contract_id) {
+      cParams.push(contract_id);
+      cFilter = ' AND c.id = $2';
+    }
+
     const contractRes = await pool.query(
       `SELECT c.id as contract_id, c.apartment_id, c.building_id, b.org_id
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN building b ON b.id = c.building_id
-       WHERE t.person_id = $1 AND c.status = 'ACTIVE'
-       ORDER BY c.created_at DESC LIMIT 1`,
-      [req.user.person_id]
+       WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING')${cFilter}
+       ORDER BY (CASE WHEN c.start_date <= CURRENT_DATE THEN 0 ELSE 1 END), c.created_at DESC LIMIT 1`,
+      cParams
     );
     if (contractRes.rows.length === 0) {
       return res.status(409).json({ code: 'NO_ACTIVE_CONTRACT', message: 'Bạn cần có hợp đồng đang hiệu lực để đăng ký dịch vụ.' });
@@ -970,6 +1057,14 @@ router.get('/contract-requests', authenticateToken, async (req, res) => {
   try {
     const personId = req.user.person_id;
     const userId = req.user.sub;
+    const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
+
+    const params = [userId, personId];
+    let contractFilter = '';
+    if (contractId) {
+      params.push(contractId);
+      contractFilter = ' AND cr.contract_id = $3';
+    }
 
     const query = `
       SELECT cr.id, cr.type, cr.desired_date, cr.note, cr.status, cr.created_at, cr.updated_at,
@@ -980,11 +1075,14 @@ router.get('/contract-requests', authenticateToken, async (req, res) => {
       JOIN contract c ON c.id = cr.contract_id
       JOIN apartment a ON a.id = c.apartment_id
       JOIN building b ON b.id = cr.building_id
-      WHERE cr.created_by = $1
-         OR c.primary_tenant_id IN (SELECT id FROM tenant WHERE person_id = $2)
+      WHERE (
+        cr.created_by = $1
+        OR c.primary_tenant_id IN (SELECT id FROM tenant WHERE person_id = $2)
+      )
+      ${contractFilter}
       ORDER BY cr.created_at DESC
     `;
-    const result = await pool.query(query, [userId, personId]);
+    const result = await pool.query(query, params);
     res.json({ data: result.rows });
   } catch (err) {
     console.error('Lỗi lấy danh sách đề nghị:', err);
@@ -996,7 +1094,7 @@ router.get('/contract-requests', authenticateToken, async (req, res) => {
  * POST /api/v1/resident/contract-requests (FR-019, AC-006.1)
  */
 router.post('/contract-requests', authenticateToken, async (req, res) => {
-  const { type, desired_date, note } = req.body;
+  const { type, desired_date, note, contract_id } = req.body;
   if (!['RENEWAL', 'TERMINATION'].includes(type)) {
     return res.status(400).json({ code: 'INVALID_TYPE', message: 'Loại đề nghị phải là RENEWAL hoặc TERMINATION.' });
   }
@@ -1005,16 +1103,23 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
     const personId = req.user.person_id;
     const userId = req.user.sub;
 
+    const cParams = [personId];
+    let cFilter = '';
+    if (contract_id) {
+      cParams.push(contract_id);
+      cFilter = ' AND c.id = $2';
+    }
+
     const contractRes = await pool.query(
       `SELECT c.id, c.building_id, b.org_id, c.end_date, a.code as apartment_code
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN apartment a ON a.id = c.apartment_id
        JOIN building b ON b.id = c.building_id
-       WHERE t.person_id = $1 AND c.status = 'ACTIVE'
-       ORDER BY c.created_at DESC
+       WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING')${cFilter}
+       ORDER BY (CASE WHEN c.start_date <= CURRENT_DATE THEN 0 ELSE 1 END), c.created_at DESC
        LIMIT 1`,
-      [personId]
+      cParams
     );
 
     if (contractRes.rows.length === 0) {
@@ -1069,6 +1174,14 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
 router.get('/deposit-transactions', authenticateToken, async (req, res) => {
   try {
     const personId = req.user.person_id;
+    const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
+
+    const params = [personId];
+    let contractFilter = '';
+    if (contractId) {
+      params.push(contractId);
+      contractFilter = ' AND c.id = $2';
+    }
 
     const contractRes = await pool.query(
       `SELECT c.id as contract_id, c.status as contract_status, c.deposit_amount, c.start_date, c.end_date,
@@ -1079,10 +1192,12 @@ router.get('/deposit-transactions', authenticateToken, async (req, res) => {
        JOIN apartment a ON a.id = c.apartment_id
        JOIN building b ON b.id = c.building_id
        LEFT JOIN deposit d ON d.contract_id = c.id
-       WHERE t.person_id = $1
-       ORDER BY (CASE WHEN c.status = 'ACTIVE' THEN 0 ELSE 1 END), c.created_at DESC
+       WHERE t.person_id = $1${contractFilter}
+       ORDER BY (CASE WHEN c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING') THEN 0 ELSE 1 END),
+                (CASE WHEN c.start_date <= CURRENT_DATE THEN 0 ELSE 1 END),
+                c.created_at DESC
        LIMIT 1`,
-      [personId]
+      params
     );
 
     if (contractRes.rows.length === 0) {
