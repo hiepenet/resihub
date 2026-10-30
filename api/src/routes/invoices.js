@@ -118,18 +118,44 @@ router.post(
       try {
         await client.query('BEGIN');
 
+        // Đếm số HĐ tương lai chưa tới kỳ để phản hồi minh bạch trên UI (Điểm 4)
+        const futureParams = [orgId, targetPeriod];
+        const { sql: futureScopeSql } = await scopedBuildingFilter(req, 'c.building_id', futureParams);
+        let futureSql = `
+          SELECT COUNT(*)::int AS cnt
+          FROM contract c
+          JOIN building b ON b.id = c.building_id
+          WHERE b.org_id = $1
+            AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+            AND c.start_date >= (($2 || '-01')::date + INTERVAL '1 month')::date
+            ${futureScopeSql}
+        `;
+        if (building_id) {
+          futureParams.push(building_id);
+          futureSql += ` AND c.building_id = $${futureParams.length}`;
+        }
+        const futureCountRes = await client.query(futureSql, futureParams);
+        const skippedFutureCount = futureCountRes.rows[0]?.cnt || 0;
+
+        // Lọc HĐ có giao thoa thực sự với kỳ nửa mở [periodStart, periodEndExclusive) (Điểm 4 & AC-015.3)
         const params = [orgId, targetPeriod];
         const { sql: scopeSql } = await scopedBuildingFilter(req, 'c.building_id', params);
         let contractSql = `
           SELECT c.*, a.code AS apartment_code, b.code AS building_code,
-                 au.id AS resident_user_id
+                 au.id AS resident_user_id,
+                 ((($2 || '-01')::date + INTERVAL '1 month')::date - ($2 || '-01')::date)::int AS days_in_month,
+                 (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
+                  - GREATEST(c.start_date, ($2 || '-01')::date))::int AS active_days
           FROM contract c
           JOIN apartment a ON a.id = c.apartment_id
           JOIN building b ON b.id = c.building_id
           LEFT JOIN tenant t ON t.id = c.primary_tenant_id
           LEFT JOIN app_user au ON au.person_id = t.person_id
           WHERE b.org_id = $1
-            AND c.status = 'ACTIVE'
+            AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+            AND c.start_date < (($2 || '-01')::date + INTERVAL '1 month')::date
+            AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+            AND COALESCE(c.terminated_at, c.end_date) > c.start_date
             AND NOT EXISTS (
               SELECT 1 FROM invoice inv
               WHERE inv.contract_id = c.id
@@ -142,23 +168,34 @@ router.post(
           params.push(building_id);
           contractSql += ` AND c.building_id = $${params.length}`;
         }
+        contractSql += ' ORDER BY c.start_date ASC, c.created_at ASC';
 
         const contractsRes = await client.query(contractSql, params);
         const createdInvoices = [];
 
         for (const c of contractsRes.rows) {
           const lines = [];
-          const rentAmt = Number(c.rent_amount || 0);
+          const fullRent = Number(c.rent_amount || 0);
+          const daysInMonth = Math.max(1, Number(c.days_in_month || 30));
+          const activeDays = Math.max(0, Math.min(daysInMonth, Number(c.active_days || daysInMonth)));
+          if (activeDays <= 0) continue;
+
+          const isProrataRent = activeDays < daysInMonth;
+          const rentAmt = isProrataRent ? Math.round((fullRent * activeDays) / daysInMonth) : fullRent;
+          const rentDesc = isProrataRent
+            ? `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod} (Pro-rata ${activeDays}/${daysInMonth} ngày)`
+            : `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod}`;
+
           lines.push({
             item_type: 'RENT',
-            description: `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod}`,
-            quantity: 1,
+            description: rentDesc,
+            quantity: isProrataRent ? Number((activeDays / daysInMonth).toFixed(4)) : 1,
             unit: 'tháng',
-            unit_price: rentAmt,
+            unit_price: fullRent,
             amount: rentAmt,
           });
 
-          // Điện / Nước từ meter_reading kỳ này
+          // Điện / Nước từ meter_reading kỳ này (chống thu trùng nếu căn hộ có 2 HĐ nối tiếp trong cùng tháng)
           const mrRes = await client.query(
             `SELECT mr.consumption, mr.previous_reading, mr.current_reading, m.meter_type, m.unit, m.unit_price
              FROM meter_reading mr
@@ -167,13 +204,27 @@ router.post(
             [c.apartment_id, targetPeriod]
           );
           for (const mr of mrRes.rows) {
+            const itemType = mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER';
+            const alreadyBilledRes = await client.query(
+              `SELECT 1
+               FROM invoice i2
+               JOIN invoice_line il2 ON il2.invoice_id = i2.id
+               WHERE i2.apartment_id = $1
+                 AND i2.period = $2
+                 AND i2.status != 'CANCELLED'
+                 AND il2.item_type = $3
+               LIMIT 1`,
+              [c.apartment_id, targetPeriod, itemType]
+            );
+            if (alreadyBilledRes.rows.length > 0) continue;
+
             const cons = Number(mr.consumption || 0);
             const price = Number(mr.unit_price || 0);
             const lineAmt = Math.round(cons * price);
             if (lineAmt > 0) {
               lines.push({
-                item_type: mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER',
-                description: `${mr.meter_type === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${mr.previous_reading} → ${mr.current_reading} ${mr.unit})`,
+                item_type: itemType,
+                description: `${itemType === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${mr.previous_reading} → ${mr.current_reading} ${mr.unit})`,
                 quantity: cons,
                 unit: mr.unit,
                 unit_price: price,
@@ -182,9 +233,26 @@ router.post(
             }
           }
 
+          // FR-065: Bảng giá dịch vụ ghi đè theo hợp đồng (ưu tiên: giá hợp đồng -> giá đăng ký/tòa -> giá danh mục)
+          const cspRes = await client.query(
+            `SELECT service_code, unit_price
+             FROM contract_service_price
+             WHERE contract_id = $1
+               AND effective_from <= (($2 || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
+             ORDER BY effective_from DESC`,
+            [c.id, targetPeriod]
+          );
+          const cspMap = new Map();
+          for (const row of cspRes.rows) {
+            const key = String(row.service_code || '').toUpperCase();
+            if (key && !cspMap.has(key)) {
+              cspMap.set(key, Number(row.unit_price));
+            }
+          }
+
           // Dịch vụ tiện ích đang ACTIVE
           const subRes = await client.query(
-            `SELECT ss.*, sc.name AS service_name, sc.unit, sc.billing_type
+            `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
              FROM service_subscription ss
              JOIN service_catalog sc ON sc.id = ss.service_id
              WHERE ss.contract_id = $1
@@ -193,18 +261,39 @@ router.post(
             [c.id]
           );
           for (const sub of subRes.rows) {
+            const codeKey = String(sub.service_code || '').toUpperCase();
+            const catKey = String(sub.service_category || '').toUpperCase();
+            let overrideUnitPrice = cspMap.has(codeKey) ? cspMap.get(codeKey) : undefined;
+            if (overrideUnitPrice === undefined) {
+              if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
+                overrideUnitPrice = cspMap.get('INTERNET');
+              } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
+                overrideUnitPrice = cspMap.get('COMMON_SERVICE');
+              }
+            }
+
+            const effectiveUnitPrice =
+              overrideUnitPrice !== undefined ? Number(overrideUnitPrice) : Number(sub.unit_price || 0);
+            const qty = Number(sub.quantity || 1);
             const subStartPeriod = sub.start_date ? new Date(sub.start_date).toISOString().slice(0, 7) : '';
             const useProrata = subStartPeriod === targetPeriod && Number(sub.prorata_amount) > 0;
-            const amt = useProrata
-              ? Number(sub.prorata_amount)
-              : Math.round(Number(sub.unit_price || 0) * Number(sub.quantity || 1));
+            let amt = Math.round(effectiveUnitPrice * qty);
+            if (useProrata) {
+              if (overrideUnitPrice !== undefined && sub.start_date) {
+                const startDay = new Date(sub.start_date).getDate();
+                const subActiveDays = Math.max(1, daysInMonth - startDay + 1);
+                amt = Math.round((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
+              } else {
+                amt = Number(sub.prorata_amount);
+              }
+            }
             if (amt > 0) {
               lines.push({
                 item_type: 'SERVICE',
-                description: `${sub.service_name}${useProrata ? ' (Pro-rata)' : ''}`,
-                quantity: Number(sub.quantity || 1),
+                description: `${sub.service_name}${useProrata ? ' (Pro-rata)' : ''}${overrideUnitPrice !== undefined ? ' (Giá HĐ)' : ''}`,
+                quantity: qty,
                 unit: sub.unit || 'tháng',
-                unit_price: Number(sub.unit_price || 0),
+                unit_price: effectiveUnitPrice,
                 amount: amt,
               });
             }
@@ -290,11 +379,14 @@ router.post(
         }
 
         await client.query('COMMIT');
+        const skippedNote = skippedFutureCount > 0 ? ` (Đã bỏ qua ${skippedFutureCount} hợp đồng tương lai chưa tới kỳ).` : '';
         res.status(201).json({
-          message: createdInvoices.length > 0
-            ? `Đã sinh thành công ${createdInvoices.length} hóa đơn kỳ ${targetPeriod}.`
-            : `Tất cả hợp đồng đang hiệu lực trong kỳ ${targetPeriod} đều đã có hóa đơn.`,
+          message:
+            createdInvoices.length > 0
+              ? `Đã sinh thành công ${createdInvoices.length} hóa đơn kỳ ${targetPeriod}.${skippedNote}`
+              : `Tất cả hợp đồng đang hiệu lực trong kỳ ${targetPeriod} đều đã có hóa đơn.${skippedNote}`,
           created_count: createdInvoices.length,
+          skipped_future_count: skippedFutureCount,
           data: createdInvoices,
         });
       } catch (innerErr) {

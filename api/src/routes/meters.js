@@ -103,7 +103,7 @@ router.get(
 router.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
   async (req, res) => {
     const { apartment_id, meter_type, meter_code, unit_price, initial_reading = 0 } = req.body;
     const orgId = req.user.org_id;
@@ -356,7 +356,7 @@ async function upsertSingleReading(client, req, meterId, { period, current_readi
 router.post(
   '/readings/batch',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
   async (req, res) => {
     const { period, readings } = req.body;
     if (!Array.isArray(readings) || readings.length === 0) {
@@ -444,7 +444,7 @@ router.get(
 router.post(
   '/:id/readings',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
   async (req, res) => {
     const { id } = req.params;
     const { client, release } = await getUserClient(req);

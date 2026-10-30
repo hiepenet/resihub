@@ -55,7 +55,7 @@ serviceCatalogRouter.get('/', authenticateToken, async (req, res) => {
 serviceCatalogRouter.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
   async (req, res) => {
     const { code, name, category = 'UTILITY', billing_type = 'FIXED', unit = 'tháng', unit_price = 0, description, building_id } = req.body;
     const orgId = req.user.org_id;
@@ -104,7 +104,7 @@ serviceCatalogRouter.post(
 serviceCatalogRouter.patch(
   '/:id',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
   async (req, res) => {
     const { id } = req.params;
     const { name, category, billing_type, unit, unit_price, description, is_active } = req.body;
