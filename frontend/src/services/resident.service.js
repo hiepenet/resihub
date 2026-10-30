@@ -29,5 +29,11 @@ export const residentService = {
   createContractRequest: (payload) => api.post('/api/v1/resident/contract-requests', payload).then((r) => r.data),
   listDepositTransactions: (contractId) =>
     api.get('/api/v1/resident/deposit-transactions', withContractParam(contractId)).then((r) => r.data),
+  disputeDeposit: (depositId, payload) =>
+    api.post(`/api/v1/deposits/${depositId}/dispute`, payload).then((r) => r.data),
+  getDepositSettlementPdfHtml: (depositId) =>
+    api
+      .get(`/api/v1/deposits/${depositId}/settlement/pdf`, { responseType: 'text' })
+      .then((r) => r.data),
 };
 

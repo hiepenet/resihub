@@ -17,6 +17,8 @@ import {
   ExternalLink,
   XCircle,
   FileCheck2,
+  Printer,
+  MessageSquareWarning,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -35,6 +37,7 @@ import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { depositsService } from '../../../services/deposits.service';
+import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
@@ -136,11 +139,27 @@ export function DepositsPage() {
   const [disputeReason, setDisputeReason] = useState('');
   const [submittingDispute, setSubmittingDispute] = useState(false);
 
+  // Resolve Dispute Modal state (R-07) + Four-eyes config (R-23) + Print A4 state (R-24)
+  const [allowSelfApproval, setAllowSelfApproval] = useState(false);
+  const [printingDepositId, setPrintingDepositId] = useState(null);
+  const [resolveModalOpen, setResolveModalOpen] = useState(false);
+  const [resolveTarget, setResolveTarget] = useState(null);
+  const [resolveSettlementData, setResolveSettlementData] = useState(null);
+  const [loadingResolveDetail, setLoadingResolveDetail] = useState(false);
+  const [resolveReason, setResolveReason] = useState('');
+  const [resolvingAction, setResolvingAction] = useState('');
+
   const fetchDeposits = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await depositsService.list();
+      const [res, settingsRes] = await Promise.all([
+        depositsService.list(),
+        usersService.getSettings().catch(() => null),
+      ]);
       setDeposits(Array.isArray(res?.data) ? res.data : []);
+      if (settingsRes?.data) {
+        setAllowSelfApproval(Boolean(settingsRes.data?.approval_config?.allow_self_approval));
+      }
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách sổ cọc.'));
     } finally {
@@ -281,8 +300,14 @@ export function DepositsPage() {
       setSettlementDetail(data);
 
       const existing = data.settlement || dep.settlement || null;
+      const calcServiceDebt = Math.max(
+        0,
+        Math.round(
+          Number(data.calculated_service_debt ?? existing?.outstanding_debt ?? 0)
+        )
+      );
+      setOutstandingDebt(String(calcServiceDebt));
       if (existing) {
-        setOutstandingDebt(String(Math.round(Number(existing.outstanding_debt || 0))));
         setDeductionItems(
           Array.isArray(existing.items)
             ? existing.items.map((it) => ({
@@ -300,7 +325,6 @@ export function DepositsPage() {
           account_holder: existing.bank_info?.account_holder || dep.tenant_name || '',
         });
       } else {
-        setOutstandingDebt('0');
         setDeductionItems([]);
         setRefundMethod('BANK_TRANSFER');
         setBankInfo({
@@ -316,23 +340,44 @@ export function DepositsPage() {
     }
   }, [toast]);
 
-  // Tính toán tự động số tiền hoàn & công nợ thiếu hụt (khớp computeRefund backend)
+  // Tính toán tự động số tiền hoàn & công nợ từ DB (R-06: Cọc chỉ trừ nợ dịch vụ, KHÔNG trừ nợ tiền thuê)
   const liveCalc = useMemo(() => {
     const held = Math.round(
       Number(settlementDetail?.amount_held ?? settlementDeposit?.amount_held ?? 0)
     );
-    const debt = Math.max(0, Math.round(Number(outstandingDebt || 0)));
+    const serviceDebt = Math.max(
+      0,
+      Math.round(
+        Number(
+          settlementDetail?.calculated_service_debt ??
+            outstandingDebt ??
+            0
+        )
+      )
+    );
+    const rentDebt = Math.max(
+      0,
+      Math.round(
+        Number(
+          settlementDetail?.calculated_rent_debt ??
+            settlementDetail?.settlement?.rent_debt ??
+            0
+        )
+      )
+    );
     const itemsTotal = deductionItems.reduce(
       (sum, it) => sum + Math.max(0, Math.round(Number(it.amount || 0))),
       0
     );
-    const totalDeductions = debt + itemsTotal;
-    const refundAmount = Math.max(0, held - totalDeductions);
+    const totalDeductions = serviceDebt + itemsTotal;
+    const refundAmount = Math.max(0, held - serviceDebt - itemsTotal);
     const shortfall = Math.max(0, totalDeductions - held);
 
     return {
       held,
-      debt,
+      debt: serviceDebt,
+      serviceDebt,
+      rentDebt,
       itemsTotal,
       totalDeductions,
       refundAmount,
@@ -379,7 +424,7 @@ export function DepositsPage() {
     setSubmittingSettlement(true);
     try {
       const payload = {
-        outstanding_debt: Math.max(0, Math.round(Number(outstandingDebt || 0))),
+        outstanding_debt: liveCalc.serviceDebt,
         items: deductionItems.map((it) => ({
           category: it.category,
           amount: Math.round(Number(it.amount)),
@@ -487,6 +532,93 @@ export function DepositsPage() {
     }
   };
 
+  // Giải quyết khiếu nại cọc (R-07: ADJUST -> SETTLEMENT_DRAFT | CONFIRM -> giữ kết quả)
+  const handleOpenResolveDispute = useCallback(
+    async (dep) => {
+      setResolveTarget(dep);
+      setResolveSettlementData(dep?.settlement || null);
+      setResolveReason('');
+      setResolveModalOpen(true);
+      setLoadingResolveDetail(true);
+      try {
+        const res = await depositsService.getSettlement(dep.id);
+        const detail = res?.data || {};
+        setResolveTarget((prev) => ({ ...(prev || dep), ...detail }));
+        setResolveSettlementData(detail.settlement || dep?.settlement || null);
+      } catch {
+        // Fallback to row's settlement data if already loaded
+      } finally {
+        setLoadingResolveDetail(false);
+      }
+    },
+    []
+  );
+
+  const handleSubmitResolveDispute = async (resolution) => {
+    if (!resolveTarget) return;
+    if (!resolveReason.trim()) {
+      toast.warning('Vui lòng nhập nội dung / lý do giải quyết khiếu nại.');
+      return;
+    }
+    if (resolution === 'ADJUST' && Number(resolveTarget.amount_held || 0) === 0) {
+      toast.warning('Không thể mở lại sửa bảng kê vì tiền cọc đã được chi hoàn hết (số dư = 0).');
+      return;
+    }
+    setResolvingAction(resolution);
+    try {
+      const res = await depositsService.resolveDispute(resolveTarget.id, {
+        resolution,
+        reason: resolveReason.trim(),
+      });
+      toast.success(
+        res?.message ||
+          (resolution === 'ADJUST'
+            ? 'Đã mở lại bảng kê tất toán về trạng thái nháp (SETTLEMENT_DRAFT) để chỉnh sửa.'
+            : 'Đã xác nhận kết quả tất toán và đóng khiếu nại.')
+      );
+      setResolveModalOpen(false);
+      setSettlementOpen(false);
+      setResolveTarget(null);
+      setResolveReason('');
+      setActiveTab(resolution === 'ADJUST' ? 'held' : 'refunded');
+      await fetchDeposits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể giải quyết khiếu nại sổ cọc.'));
+    } finally {
+      setResolvingAction('');
+    }
+  };
+
+  // In bảng kê tất toán chuẩn A4 (R-24)
+  const handlePrintSettlementPdf = useCallback(
+    async (dep) => {
+      if (!dep?.id) return;
+      const printWin = window.open('', '_blank');
+      if (!printWin) {
+        toast.warning(
+          'Trình duyệt đang chặn cửa sổ bật lên (Pop-up). Vui lòng cho phép mở tab mới để in bảng kê A4.'
+        );
+        return;
+      }
+      printWin.document.write(
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Đang tải bảng kê tất toán A4...</title></head><body style="font-family:sans-serif;padding:40px;text-align:center;color:#334155;">Đang chuẩn bị bản in Bảng kê tất toán tiền cọc chuẩn A4...</body></html>'
+      );
+      setPrintingDepositId(dep.id);
+      try {
+        const html = await depositsService.getSettlementPdfHtml(dep.id);
+        printWin.document.open();
+        printWin.document.write(html);
+        printWin.document.close();
+      } catch (err) {
+        printWin.close();
+        toast.error(extractErrorMessage(err, 'Không thể tải bản in A4 bảng kê tất toán.'));
+      } finally {
+        setPrintingDepositId(null);
+      }
+    },
+    [toast]
+  );
+
   const columns = useMemo(
     () => [
       {
@@ -534,6 +666,11 @@ export function DepositsPage() {
         render: (row) => (
           <div>
             <p className="font-bold text-slate-900">{formatMoney(row.amount_held)}</p>
+            {row.deposit_amount !== undefined && row.deposit_amount !== null ? (
+              <p className="text-[11px] font-sans text-slate-500">
+                Cọc HĐ: {formatMoney(row.deposit_amount)}
+              </p>
+            ) : null}
             {row.settlement?.refund_amount !== undefined ? (
               <p className="text-[11px] font-sans text-emerald-600 font-medium">
                 Dự kiến hoàn: {formatMoney(row.settlement.refund_amount)}
@@ -592,7 +729,7 @@ export function DepositsPage() {
               Sổ giao dịch
             </Button>
 
-            {canSettleDeposits && ['HELD', 'DISPUTED'].includes(row.status) ? (
+            {canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) ? (
               <Button
                 variant="outline"
                 size="xs"
@@ -648,11 +785,46 @@ export function DepositsPage() {
                 Biên bản tất toán
               </Button>
             ) : null}
+
+            {row.status === 'DISPUTED' && (isSysAdmin || isManager) ? (
+              <Button
+                variant="primary"
+                size="xs"
+                icon={MessageSquareWarning}
+                onClick={() => handleOpenResolveDispute(row)}
+              >
+                Giải quyết khiếu nại
+              </Button>
+            ) : null}
+
+            {['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DISPUTED', 'SETTLEMENT_DRAFT'].includes(
+              row.status
+            ) ? (
+              <Button
+                variant="outline"
+                size="xs"
+                icon={Printer}
+                loading={printingDepositId === row.id}
+                onClick={() => handlePrintSettlementPdf(row)}
+              >
+                In bảng kê A4
+              </Button>
+            ) : null}
           </div>
         ),
       },
     ],
-    [isSysAdmin, isManager, canSettleDeposits, canApproveDepositRefund, handleOpenTransactions, handleOpenSettlement]
+    [
+      isSysAdmin,
+      isManager,
+      canSettleDeposits,
+      canApproveDepositRefund,
+      printingDepositId,
+      handleOpenTransactions,
+      handleOpenSettlement,
+      handleOpenResolveDispute,
+      handlePrintSettlementPdf,
+    ]
   );
 
   const tabs = [
@@ -668,14 +840,23 @@ export function DepositsPage() {
   ];
 
   // Xác định chế độ hiển thị trong Settlement Modal:
-  // ACCOUNTANT / MANAGER / SYS_ADMIN có thể lập/sửa khi status thuộc ['HELD', 'SETTLEMENT_DRAFT']
+  // MANAGER / SYS_ADMIN có thể lập/sửa khi status thuộc ['HELD', 'SETTLEMENT_DRAFT']
   const effectiveDepositStatus = settlementDetail?.status || settlementDeposit?.status;
   const effectiveContractStatus =
     settlementDetail?.contract_status || settlementDeposit?.contract_status;
   const isManagerEditableSettlement =
     canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(effectiveDepositStatus);
   const isContractReadyForSettlement = ['TERMINATED', 'EXPIRED'].includes(effectiveContractStatus);
+  const settlementPreconditions = settlementDetail?.preconditions || null;
+  const isPreconditionsReady = settlementPreconditions
+    ? Boolean(settlementPreconditions.ready)
+    : isContractReadyForSettlement;
   const readonlySettlementData = settlementDetail?.settlement || settlementDeposit?.settlement || null;
+  const settlementDisputeThread = Array.isArray(readonlySettlementData?.dispute_thread)
+    ? readonlySettlementData.dispute_thread
+    : Array.isArray(readonlySettlementData?.thread)
+    ? readonlySettlementData.thread
+    : [];
   const isSettlementCreator = Boolean(
     readonlySettlementData?.created_by &&
       currentUserId &&
@@ -784,11 +965,18 @@ export function DepositsPage() {
                 <p className="text-xl font-bold text-slate-900 mt-0.5">
                   {formatMoney(selectedDepositForTxn.amount_held)}
                 </p>
+                {selectedDepositForTxn.deposit_amount !== undefined &&
+                selectedDepositForTxn.deposit_amount !== null ? (
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Cọc yêu cầu theo HĐ:{' '}
+                    <strong>{formatMoney(selectedDepositForTxn.deposit_amount)}</strong>
+                  </p>
+                ) : null}
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={selectedDepositForTxn.status} domain="deposit" />
                 {canSettleDeposits &&
-                ['HELD', 'DISPUTED'].includes(selectedDepositForTxn.status) ? (
+                ['HELD', 'SETTLEMENT_DRAFT'].includes(selectedDepositForTxn.status) ? (
                   <Button
                     variant={showCollectForm ? 'outline' : 'primary'}
                     size="sm"
@@ -949,11 +1137,25 @@ export function DepositsPage() {
             ? `Biên bản Tất toán & Hoàn cọc — Căn ${settlementDeposit.apartment_code}`
             : 'Hồ sơ tất toán tiền cọc'
         }
-        subtitle="Quy trình kiểm soát chéo nội bộ Four-Eyes: Kế toán / Quản lý lập biên bản & bằng chứng → SYS_ADMIN / Quản lý khác phê duyệt (FR-024)"
+        subtitle="Quy trình kiểm soát chéo nội bộ Four-Eyes: Quản lý tòa nhà lập biên bản & bằng chứng → SYS_ADMIN / Quản lý khác phê duyệt (FR-024)"
         size="xl"
         footer={
           <div className="flex items-center justify-between w-full flex-wrap gap-2">
-            <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {settlementDeposit &&
+              ['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DISPUTED', 'SETTLEMENT_DRAFT'].includes(
+                effectiveDepositStatus
+              ) ? (
+                <Button
+                  variant="outline"
+                  icon={Printer}
+                  loading={printingDepositId === settlementDeposit.id}
+                  onClick={() => handlePrintSettlementPdf(settlementDeposit)}
+                >
+                  In bảng kê A4
+                </Button>
+              ) : null}
+
               {(isSysAdmin || isManager) &&
               effectiveDepositStatus === 'PENDING_APPROVAL' &&
               settlementDeposit ? (
@@ -964,6 +1166,18 @@ export function DepositsPage() {
                   onClick={() => handleOpenDispute(settlementDeposit)}
                 >
                   Chuyển Tranh chấp (DISPUTED)
+                </Button>
+              ) : null}
+
+              {(isSysAdmin || isManager) &&
+              effectiveDepositStatus === 'DISPUTED' &&
+              settlementDeposit ? (
+                <Button
+                  variant="primary"
+                  icon={MessageSquareWarning}
+                  onClick={() => handleOpenResolveDispute(settlementDeposit)}
+                >
+                  Giải quyết khiếu nại
                 </Button>
               ) : null}
             </div>
@@ -978,7 +1192,7 @@ export function DepositsPage() {
                   variant="primary"
                   icon={FileCheck2}
                   loading={submittingSettlement}
-                  disabled={!isContractReadyForSettlement}
+                  disabled={!isPreconditionsReady}
                   onClick={handleSubmitSettlement}
                 >
                   Gửi phê duyệt tất toán (Four-Eyes)
@@ -986,7 +1200,7 @@ export function DepositsPage() {
               ) : null}
 
               {canApproveDepositRefund &&
-              !isSettlementCreator &&
+              (!isSettlementCreator || allowSelfApproval) &&
               effectiveDepositStatus === 'PENDING_APPROVAL' ? (
                 <>
                   <Button
@@ -1009,6 +1223,7 @@ export function DepositsPage() {
                 </>
               ) : canApproveDepositRefund &&
                 isSettlementCreator &&
+                !allowSelfApproval &&
                 effectiveDepositStatus === 'PENDING_APPROVAL' ? (
                 <span className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg">
                   Chờ Quản lý khác / SYS_ADMIN duyệt (Four-Eyes)
@@ -1023,33 +1238,89 @@ export function DepositsPage() {
         ) : isManagerEditableSettlement ? (
           /* CHẾ ĐỘ LẬP BIÊN BẢN TẤT TOÁN DÀNH CHO MANAGER */
           <form onSubmit={handleSubmitSettlement} className="space-y-5">
-            {/* Kiểm tra điều kiện hợp đồng đã TERMINATED / EXPIRED chưa */}
-            {!isContractReadyForSettlement ? (
-              <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 flex items-start justify-between gap-3">
+            {/* Kiểm tra các điều kiện tiên quyết (R-06 Pre-conditions) */}
+            {!isPreconditionsReady ? (
+              <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 space-y-2.5">
                 <div className="flex items-start gap-2.5 text-xs text-amber-900">
                   <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-semibold">
-                      Hợp đồng hiện đang ở trạng thái {effectiveContractStatus}
+                  <div className="space-y-1.5 flex-1">
+                    <p className="font-semibold text-sm">
+                      Chưa đủ điều kiện tiên quyết để trình phê duyệt tất toán cọc:
                     </p>
-                    <p className="text-amber-800 mt-0.5">
-                      Theo quy định hệ thống, hợp đồng phải ở trạng thái <strong>Đã thanh lý (TERMINATED)</strong> hoặc <strong>Đã hết hạn (EXPIRED)</strong> trước khi mở hồ sơ tất toán hoàn cọc.
-                    </p>
+                    <ul className="list-disc pl-4 space-y-1 text-amber-800">
+                      {(settlementPreconditions
+                        ? !settlementPreconditions.contract_ended
+                        : !isContractReadyForSettlement) ? (
+                        <li>
+                          Hợp đồng đang ở trạng thái <strong>{effectiveContractStatus}</strong> — bắt buộc phải ở trạng thái <strong>Đã thanh lý (TERMINATED)</strong> hoặc <strong>Đã hết hạn (EXPIRED)</strong>.
+                        </li>
+                      ) : null}
+                      {settlementPreconditions &&
+                      settlementPreconditions.final_meters_recorded === false ? (
+                        <li>
+                          Chưa ghi đủ chỉ số công tơ điện/nước cuối kỳ
+                          {Array.isArray(settlementPreconditions.missing_meter_types) &&
+                          settlementPreconditions.missing_meter_types.length > 0
+                            ? ` (thiếu: ${settlementPreconditions.missing_meter_types.join(', ')})`
+                            : ''}
+                          . Vui lòng cập nhật chỉ số điện/nước trước khi lập tất toán.
+                        </li>
+                      ) : null}
+                      {settlementPreconditions &&
+                      settlementPreconditions.no_draft_invoices === false ? (
+                        <li>
+                          Còn hóa đơn bản nháp (<strong>DRAFT</strong>) chưa phát hành hoặc chưa hủy. Vui lòng phát hành hoặc hủy hóa đơn nháp trước khi tất toán.
+                        </li>
+                      ) : null}
+                    </ul>
                   </div>
                 </div>
-                {settlementDeposit?.contract_id ? (
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    rightIcon={ExternalLink}
-                    onClick={() => {
-                      setSettlementOpen(false);
-                      navigate(`/admin/contracts/${settlementDeposit.contract_id}`);
-                    }}
-                  >
-                    Đi tới Hợp đồng
-                  </Button>
-                ) : null}
+                <div className="flex flex-wrap gap-2 pl-7">
+                  {settlementDeposit?.contract_id &&
+                  (settlementPreconditions
+                    ? !settlementPreconditions.contract_ended
+                    : !isContractReadyForSettlement) ? (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      rightIcon={ExternalLink}
+                      onClick={() => {
+                        setSettlementOpen(false);
+                        navigate(`/admin/contracts/${settlementDeposit.contract_id}`);
+                      }}
+                    >
+                      Đi tới Hợp đồng
+                    </Button>
+                  ) : null}
+                  {settlementPreconditions &&
+                  settlementPreconditions.final_meters_recorded === false ? (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      rightIcon={ExternalLink}
+                      onClick={() => {
+                        setSettlementOpen(false);
+                        navigate('/admin/meters');
+                      }}
+                    >
+                      Ghi chỉ số Điện / Nước
+                    </Button>
+                  ) : null}
+                  {settlementPreconditions &&
+                  settlementPreconditions.no_draft_invoices === false ? (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      rightIcon={ExternalLink}
+                      onClick={() => {
+                        setSettlementOpen(false);
+                        navigate('/admin/invoices');
+                      }}
+                    >
+                      Kiểm tra Hóa đơn nháp
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
@@ -1156,20 +1427,33 @@ export function DepositsPage() {
               )}
             </div>
 
-            {/* Công nợ tồn đọng & Thông tin hoàn trả */}
+            {/* Công nợ tồn đọng tự động (chỉ đọc) & Thông tin hoàn trả */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
               <div className="space-y-3">
                 <h4 className="text-sm font-semibold text-slate-900">
-                  2. Công nợ dịch vụ &amp; Phương thức hoàn
+                  2. Công nợ tự động từ hệ thống &amp; Phương thức hoàn
                 </h4>
-                <Input
-                  label="Công nợ hóa đơn tồn đọng chưa thanh toán (outstanding_debt - VND)"
-                  type="number"
-                  min="0"
-                  value={outstandingDebt}
-                  onChange={(e) => setOutstandingDebt(e.target.value)}
-                  hint="Tổng công nợ hóa đơn dịch vụ còn thiếu tính đến ngày trả phòng"
-                />
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-700 font-medium">
+                      Nợ dịch vụ / điện nước (sẽ trừ vào cọc):
+                    </span>
+                    <strong className="font-mono text-amber-700 text-sm">
+                      {formatMoney(liveCalc.serviceDebt)}
+                    </strong>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-200/80">
+                    <span className="text-slate-600">
+                      Nợ tiền thuê (KHÔNG trừ vào cọc — cư dân thanh toán riêng):
+                    </span>
+                    <strong className="font-mono text-slate-800">
+                      {formatMoney(liveCalc.rentDebt)}
+                    </strong>
+                  </div>
+                  <p className="text-[11px] text-slate-500 pt-0.5">
+                    Công nợ được tổng hợp tự động (chỉ đọc) từ các hóa đơn đã phát hành chưa thanh toán.
+                  </p>
+                </div>
                 <Select
                   label="Phương thức hoàn trả tiền cọc"
                   value={refundMethod}
@@ -1219,19 +1503,27 @@ export function DepositsPage() {
                     </span>
                   </div>
                   <div className="flex justify-between text-slate-600">
+                    <span>Nợ dịch vụ / điện nước (sẽ trừ vào cọc):</span>
+                    <span className="font-semibold text-amber-700">
+                      - {formatMoney(liveCalc.serviceDebt)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
                     <span>Tổng khấu trừ biên bản ({deductionItems.length} mục):</span>
                     <span className="font-semibold text-amber-700">
                       - {formatMoney(liveCalc.itemsTotal)}
                     </span>
                   </div>
-                  <div className="flex justify-between text-slate-600">
-                    <span>Công nợ tồn đọng (outstanding_debt):</span>
-                    <span className="font-semibold text-amber-700">
-                      - {formatMoney(liveCalc.debt)}
-                    </span>
-                  </div>
+                  {liveCalc.rentDebt > 0 ? (
+                    <div className="flex justify-between text-slate-500 italic">
+                      <span>Nợ tiền thuê (KHÔNG trừ vào cọc):</span>
+                      <span className="font-semibold text-rose-600">
+                        {formatMoney(liveCalc.rentDebt)}
+                      </span>
+                    </div>
+                  ) : null}
                   <div className="border-t border-slate-200 pt-2.5 flex justify-between items-center text-sm">
-                    <span className="font-bold text-slate-800">Số tiền hoàn trả khách thuê:</span>
+                    <span className="font-bold text-slate-800">Dự kiến hoàn trả khách thuê:</span>
                     <span className="text-lg font-bold text-emerald-600">
                       {formatMoney(liveCalc.refundAmount)}
                     </span>
@@ -1266,14 +1558,39 @@ export function DepositsPage() {
               <StatusBadge status={effectiveDepositStatus} domain="deposit" />
             </div>
 
-            {effectiveDepositStatus === 'DISPUTED' && readonlySettlementData?.dispute_reason ? (
-              <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">
-                <p className="font-bold flex items-center gap-1.5">
-                  <ShieldAlert className="w-4 h-4" /> Hồ sơ đang trong tình trạng Tranh chấp (DISPUTED)
+            {(effectiveDepositStatus === 'DISPUTED' ||
+              readonlySettlementData?.dispute_reason ||
+              settlementDisputeThread.length > 0) ? (
+              <div className="p-4 rounded-xl bg-rose-50/80 border border-rose-200 text-xs text-rose-900 space-y-2.5">
+                <p className="font-bold flex items-center gap-1.5 text-rose-800">
+                  <ShieldAlert className="w-4 h-4" />{' '}
+                  {effectiveDepositStatus === 'DISPUTED'
+                    ? 'Hồ sơ đang trong tình trạng Tranh chấp / Khiếu nại (DISPUTED)'
+                    : 'Lịch sử trao đổi khiếu nại tiền cọc'}
                 </p>
-                <p className="mt-1">
-                  <strong>Lý do tranh chấp:</strong> {readonlySettlementData.dispute_reason}
-                </p>
+                {readonlySettlementData?.dispute_reason ? (
+                  <p>
+                    <strong>Lý do khiếu nại gần nhất:</strong> {readonlySettlementData.dispute_reason}
+                  </p>
+                ) : null}
+                {settlementDisputeThread.length > 0 ? (
+                  <div className="space-y-1.5 pt-1">
+                    {settlementDisputeThread.map((msg, mIdx) => (
+                      <div
+                        key={mIdx}
+                        className="p-2.5 rounded-lg bg-white border border-rose-200/70 space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                          <Badge variant={msg.role === 'RESIDENT' ? 'amber' : 'indigo'}>
+                            {msg.role === 'RESIDENT' ? 'Cư dân khiếu nại' : `BQL (${msg.role || 'ADMIN'})`}
+                          </Badge>
+                          <span>{formatDateTime(msg.at)}</span>
+                        </div>
+                        <p className="text-xs text-slate-800 pt-0.5">{msg.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -1492,6 +1809,128 @@ export function DepositsPage() {
           value={disputeReason}
           onChange={(e) => setDisputeReason(e.target.value)}
         />
+      </Modal>
+
+      {/* Modal Giải quyết khiếu nại cọc (R-07: ADJUST / CONFIRM) */}
+      <Modal
+        open={resolveModalOpen}
+        onClose={() => {
+          if (!resolvingAction) setResolveModalOpen(false);
+        }}
+        title={
+          resolveTarget
+            ? `Giải quyết khiếu nại tất toán — Căn ${resolveTarget.apartment_code}`
+            : 'Giải quyết khiếu nại tất toán cọc'
+        }
+        subtitle="Xem xét nội dung khiếu nại của cư dân và lựa chọn mở lại sửa bảng kê hoặc xác nhận giữ nguyên kết quả"
+        size="md"
+        footer={
+          <div className="flex flex-wrap items-center justify-between gap-2 w-full">
+            <Button
+              variant="outline"
+              onClick={() => setResolveModalOpen(false)}
+              disabled={Boolean(resolvingAction)}
+            >
+              Đóng
+            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                title={
+                  Number(resolveTarget?.amount_held || 0) === 0
+                    ? 'Không thể mở lại sửa bảng kê vì tiền cọc đã được chi hoàn hết (số dư cọc = 0)'
+                    : 'Đưa sổ cọc về trạng thái SETTLEMENT_DRAFT để chỉnh sửa lại bảng kê khấu trừ'
+                }
+              >
+                <Button
+                  variant="outline"
+                  loading={resolvingAction === 'ADJUST'}
+                  disabled={
+                    Number(resolveTarget?.amount_held || 0) === 0 || Boolean(resolvingAction)
+                  }
+                  onClick={() => handleSubmitResolveDispute('ADJUST')}
+                >
+                  Mở lại sửa bảng kê
+                </Button>
+              </span>
+              <Button
+                variant="success"
+                icon={CheckCircle2}
+                loading={resolvingAction === 'CONFIRM'}
+                disabled={Boolean(resolvingAction)}
+                onClick={() => handleSubmitResolveDispute('CONFIRM')}
+              >
+                Xác nhận kết quả
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        {loadingResolveDetail && !resolveSettlementData ? (
+          <LoadingSpinner label="Đang tải nội dung khiếu nại..." />
+        ) : (
+          <div className="space-y-4">
+            {resolveSettlementData?.dispute_reason ? (
+              <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-900">
+                <p className="font-semibold text-rose-800">Lý do khiếu nại hiện tại:</p>
+                <p className="mt-1">{resolveSettlementData.dispute_reason}</p>
+              </div>
+            ) : null}
+
+            {(() => {
+              const thread = Array.isArray(resolveSettlementData?.dispute_thread)
+                ? resolveSettlementData.dispute_thread
+                : Array.isArray(resolveSettlementData?.thread)
+                ? resolveSettlementData.thread
+                : [];
+              if (thread.length === 0) return null;
+              return (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-slate-700">
+                    Lịch sử trao đổi khiếu nại ({thread.length})
+                  </p>
+                  <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                    {thread.map((entry, idx) => (
+                      <div
+                        key={idx}
+                        className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 space-y-1 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <Badge variant={entry.role === 'RESIDENT' ? 'amber' : 'indigo'}>
+                            {entry.role === 'RESIDENT'
+                              ? 'Cư dân'
+                              : `Ban quản lý (${entry.role || 'ADMIN'})`}
+                          </Badge>
+                          <span className="text-[11px] text-slate-400">
+                            {formatDateTime(entry.at)}
+                          </span>
+                        </div>
+                        <p className="text-slate-800 leading-relaxed">{entry.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {Number(resolveTarget?.amount_held || 0) === 0 ? (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                Lưu ý: Sổ cọc này đã được chi hoàn hết (<strong>số dư đang giữ = 0 ₫</strong>), nên nút{' '}
+                <strong>Mở lại sửa bảng kê</strong> bị vô hiệu hóa. Bạn chỉ có thể ghi nhận giải trình và{' '}
+                <strong>Xác nhận kết quả</strong>.
+              </div>
+            ) : null}
+
+            <Input
+              label="Nội dung phản hồi / Quyết định giải quyết khiếu nại"
+              required
+              multiline
+              rows={3}
+              placeholder="Nhập phản hồi giải quyết khiếu nại gửi tới cư dân và lưu lịch sử..."
+              value={resolveReason}
+              onChange={(e) => setResolveReason(e.target.value)}
+            />
+          </div>
+        )}
       </Modal>
     </div>
   );

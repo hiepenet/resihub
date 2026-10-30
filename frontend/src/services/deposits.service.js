@@ -9,5 +9,9 @@ export const depositsService = {
   approveSettlement: (id, payload) => api.post(`/api/v1/deposits/${id}/settlement/approve`, payload).then((r) => r.data),
   rejectSettlement: (id, payload) => api.post(`/api/v1/deposits/${id}/settlement/reject`, payload).then((r) => r.data),
   dispute: (id, payload) => api.post(`/api/v1/deposits/${id}/dispute`, payload).then((r) => r.data),
+  resolveDispute: (id, payload) =>
+    api.post(`/api/v1/deposits/${id}/resolve-dispute`, payload).then((r) => r.data),
+  getSettlementPdfHtml: (id) =>
+    api.get(`/api/v1/deposits/${id}/settlement/pdf`, { responseType: 'text' }).then((r) => r.data),
 };
 

@@ -3,6 +3,7 @@ import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { saveBase64Image } from '../services/imageUpload.js';
+import { roundVND } from '../services/pricing.js';
 
 const router = express.Router();
 
@@ -16,7 +17,7 @@ function computeProrata(unitPrice, quantity, targetDateStr, mode = 'subscribe') 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const day = dt.getDate();
   const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  return Math.round((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
+  return roundVND((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
 }
 
 async function generateTrackingCode(queryFn) {
@@ -85,7 +86,9 @@ router.get('/overview', authenticateToken, async (req, res) => {
          f.name as floor_name,
          d.id as deposit_id,
          d.amount_held as deposit_held_amount,
-         d.status as deposit_status
+         d.status as deposit_status,
+         d.settlement as deposit_settlement,
+         d.refund_due_date as deposit_refund_due_date
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN apartment a ON a.id = c.apartment_id
@@ -109,18 +112,34 @@ router.get('/overview', authenticateToken, async (req, res) => {
       null;
     const hasContract = !!contract;
 
-    // 2b. Lịch sử toàn bộ hợp đồng (bao gồm HĐ cũ đã gia hạn / kết thúc) & phụ lục
+    // 2b. Lịch sử toàn bộ hợp đồng (bao gồm HĐ cũ đã gia hạn / kết thúc) & phụ lục & hồ sơ tất toán cọc
     const contractHistoryRes = await pool.query(
-      `SELECT c.id, c.parent_contract_id, c.start_date, c.end_date, c.rent_amount, c.deposit_amount, c.status,
-              a.code as apartment_code, b.name as building_name, c.created_at
+      `SELECT c.id, c.parent_contract_id, c.start_date, c.end_date, c.terminated_at, c.rent_amount, c.deposit_amount, c.status,
+              a.code as apartment_code, b.name as building_name, c.created_at,
+              d.id as deposit_id, d.amount_held as deposit_held_amount, d.status as deposit_status,
+              d.settlement as deposit_settlement, d.refund_due_date as deposit_refund_due_date
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN apartment a ON a.id = c.apartment_id
        JOIN building b ON b.id = c.building_id
+       LEFT JOIN deposit d ON d.contract_id = c.id
        WHERE t.person_id = $1
        ORDER BY c.start_date DESC`,
       [personId]
     );
+    const depositSettlements = contractHistoryRes.rows
+      .filter((r) => r.deposit_id && (r.deposit_settlement || ['SETTLEMENT_DRAFT', 'PENDING_APPROVAL', 'DISPUTED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(r.deposit_status)))
+      .map((r) => ({
+        deposit_id: r.deposit_id,
+        contract_id: r.id,
+        contract_status: r.status,
+        apartment_code: r.apartment_code,
+        building_name: r.building_name,
+        amount_held: r.deposit_held_amount,
+        deposit_status: r.deposit_status,
+        refund_due_date: r.deposit_refund_due_date,
+        settlement: r.deposit_settlement,
+      }));
 
     let amendments = [];
     if (contract) {
@@ -297,6 +316,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
         active_contract: contract,
         contract,
         contract_history: contractHistoryRes.rows,
+        deposit_settlements: depositSettlements,
         amendments,
         current_amount_due: currentAmountDue,
         total_amount_due_all: totalAmountDueAll,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   FileText,
   Printer,
@@ -6,6 +6,7 @@ import {
   RefreshCw,
   LogOut,
   ShieldCheck,
+  ShieldAlert,
   History,
   FileDiff,
   CheckCircle2,
@@ -24,6 +25,7 @@ import { Input } from '../../../components/ui/Input';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Skeleton } from '../../../components/ui/Skeleton';
+import { AuthImage } from '../../../components/ui/FileUpload';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
@@ -57,10 +59,29 @@ const REQUEST_STATUS_MAP = {
   CANCELLED: { label: 'Đã hủy', variant: 'slate' },
 };
 
+const AMENDMENT_META_KEYS = [
+  'status',
+  'created_by',
+  'approved_at',
+  'approved_by',
+  'created_at',
+  'rejected_by',
+  'rejected_at',
+  'rejection_reason',
+];
+
+const DEDUCT_CATEGORY_LABELS = {
+  DAMAGE: 'Hư hỏng tài sản',
+  CLEANING: 'Vệ sinh mặt bằng',
+  UTILITY_DEBT: 'Điện / nước / tiện ích',
+  OTHER: 'Khấu trừ khác',
+};
+
 function formatDiffValue(key, val) {
-  if (val === null || val === undefined) return '—';
+  if (val === null || val === undefined || val === '') return '—';
   if (key.includes('amount')) return formatMoney(val);
   if (key.includes('date')) return formatDate(val);
+  if (typeof val === 'object') return JSON.stringify(val);
   return String(val);
 }
 
@@ -90,6 +111,14 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     desired_date: '',
     note: '',
   });
+
+  // Deposit Settlement Dispute & Print states (R-07, R-24)
+  const [disputeModalOpen, setDisputeModalOpen] = useState(false);
+  const [disputeDepositTarget, setDisputeDepositTarget] = useState(null);
+  const [disputeReason, setDisputeReason] = useState('');
+  const [submittingDispute, setSubmittingDispute] = useState(false);
+  const [printingSettlementId, setPrintingSettlementId] = useState(null);
+  const [previewEvidenceSrc, setPreviewEvidenceSrc] = useState(null);
 
   const loadContractDetails = useCallback(async () => {
     setLoadingExtra(true);
@@ -206,7 +235,145 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     }
   };
 
-  if (!contract && contractHistory.length === 0) {
+  const handleOpenDisputeModal = (depEntry) => {
+    setDisputeDepositTarget(depEntry);
+    setDisputeReason('');
+    setDisputeModalOpen(true);
+  };
+
+  const handleSubmitDispute = async (e) => {
+    e?.preventDefault();
+    if (!disputeDepositTarget?.deposit_id) return;
+    if (!disputeReason.trim()) {
+      toast.warning('Vui lòng nhập lý do không đồng ý / khiếu nại bảng kê tất toán cọc.');
+      return;
+    }
+    setSubmittingDispute(true);
+    try {
+      const res = await residentService.disputeDeposit(disputeDepositTarget.deposit_id, {
+        reason: disputeReason.trim(),
+      });
+      toast.success(res?.message || 'Đã gửi khiếu nại bảng kê tất toán tiền cọc tới Ban Quản Lý.');
+      setDisputeModalOpen(false);
+      setDisputeDepositTarget(null);
+      setDisputeReason('');
+      await Promise.allSettled([loadContractDetails(), onRefreshOverview?.()]);
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể gửi khiếu nại tất toán tiền cọc.'));
+    } finally {
+      setSubmittingDispute(false);
+    }
+  };
+
+  const handlePrintSettlementPdf = async (depositId) => {
+    if (!depositId) return;
+    const printWin = window.open('', '_blank');
+    if (!printWin) {
+      toast.warning(
+        'Trình duyệt đang chặn cửa sổ bật lên (Pop-up). Vui lòng cho phép mở tab mới để xem / in bảng kê.'
+      );
+      return;
+    }
+    printWin.document.write(
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Đang tải bảng kê tất toán...</title></head><body style="font-family:sans-serif;padding:40px;text-align:center;color:#334155;">Đang chuẩn bị bản in Bảng kê tất toán tiền cọc...</body></html>'
+    );
+    setPrintingSettlementId(depositId);
+    try {
+      const html = await residentService.getDepositSettlementPdfHtml(depositId);
+      printWin.document.open();
+      printWin.document.write(html);
+      printWin.document.close();
+    } catch (err) {
+      printWin.close();
+      toast.error(extractErrorMessage(err, 'Không thể tải bản in bảng kê tất toán tiền cọc.'));
+    } finally {
+      setPrintingSettlementId(null);
+    }
+  };
+
+  // Tổng hợp danh sách sổ cọc có bảng kê tất toán (từ overview.deposit_settlements, contract hiện tại, depositData và lịch sử HĐ)
+  const settlementDeposits = useMemo(() => {
+    const map = new Map();
+    const putEntry = (entry) => {
+      if (!entry?.deposit_id) return;
+      const hasSettlement =
+        entry.settlement &&
+        typeof entry.settlement === 'object' &&
+        Object.keys(entry.settlement).length > 0;
+      const inSettlementStatus = [
+        'SETTLEMENT_DRAFT',
+        'PENDING_APPROVAL',
+        'PARTIALLY_REFUNDED',
+        'REFUNDED',
+        'DISPUTED',
+      ].includes(entry.deposit_status);
+      if (!hasSettlement && !inSettlementStatus) return;
+
+      const key = String(entry.deposit_id);
+      const prev = map.get(key) || {};
+      map.set(key, {
+        ...prev,
+        ...entry,
+        settlement: hasSettlement ? entry.settlement : prev.settlement || null,
+      });
+    };
+
+    if (contract?.deposit_id) {
+      putEntry({
+        deposit_id: contract.deposit_id,
+        apartment_code: contract.apartment_code,
+        building_name: contract.building_name,
+        amount_held: contract.deposit_held_amount,
+        deposit_status: contract.deposit_status,
+        refund_due_date: contract.refund_due_date,
+        settlement: contract.deposit_settlement,
+      });
+    }
+
+    contractHistory.forEach((ch) => {
+      if (ch?.deposit_id) {
+        putEntry({
+          deposit_id: ch.deposit_id,
+          apartment_code: ch.apartment_code,
+          building_name: ch.building_name,
+          amount_held: ch.deposit_held_amount ?? ch.amount_held,
+          deposit_status: ch.deposit_status,
+          refund_due_date: ch.refund_due_date,
+          settlement: ch.deposit_settlement,
+        });
+      }
+    });
+
+    if (depositData?.deposit?.id) {
+      putEntry({
+        deposit_id: depositData.deposit.id,
+        apartment_code: contract?.apartment_code,
+        building_name: contract?.building_name,
+        amount_held: depositData.deposit.amount_held,
+        deposit_status: depositData.deposit.status,
+        refund_due_date: depositData.deposit.refund_due_date,
+        settlement: depositData.deposit.settlement,
+      });
+    }
+
+    if (Array.isArray(overview?.deposit_settlements)) {
+      overview.deposit_settlements.forEach((ds) => {
+        putEntry({
+          deposit_id: ds.deposit_id || ds.id,
+          apartment_code: ds.apartment_code,
+          building_name: ds.building_name,
+          amount_held: ds.amount_held,
+          deposit_status: ds.deposit_status || ds.status,
+          refund_due_date: ds.refund_due_date,
+          settlement: ds.settlement,
+        });
+      });
+    }
+
+    return Array.from(map.values()).filter((item) => item.settlement);
+  }, [overview?.deposit_settlements, contract, contractHistory, depositData?.deposit]);
+
+  if (!contract && contractHistory.length === 0 && settlementDeposits.length === 0) {
     return (
       <Card>
         <EmptyState
@@ -470,6 +637,192 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
         </Card>
       ) : null}
 
+      {/* Bảng kê tất toán tiền cọc (R-07, R-24) */}
+      {settlementDeposits.length > 0 ? (
+        <Card>
+          <CardHeader
+            title="Bảng kê tất toán tiền cọc"
+            subtitle="Chi tiết đối trừ công nợ dịch vụ, khấu trừ bàn giao và số tiền hoàn trả dự kiến / thực tế"
+          />
+          <div className="space-y-4">
+            {settlementDeposits.map((sd) => {
+              const stObj = sd.settlement || {};
+              const items = Array.isArray(stObj.items) ? stObj.items : [];
+              const itemsTotal = items.reduce(
+                (sum, it) => sum + Math.max(0, Number(it.amount || 0)),
+                0
+              );
+              const serviceDebt = Math.max(0, Number(stObj.outstanding_debt || 0));
+              const expectedRefund =
+                stObj.refund_amount !== undefined && stObj.refund_amount !== null
+                  ? Number(stObj.refund_amount)
+                  : Math.max(0, Number(sd.amount_held || 0) - serviceDebt - itemsTotal);
+              const thread = Array.isArray(stObj.dispute_thread)
+                ? stObj.dispute_thread
+                : Array.isArray(stObj.thread)
+                ? stObj.thread
+                : [];
+              const canDispute = [
+                'PENDING_APPROVAL',
+                'PARTIALLY_REFUNDED',
+                'REFUNDED',
+              ].includes(sd.deposit_status);
+
+              return (
+                <div
+                  key={sd.deposit_id}
+                  className="p-4 rounded-2xl border border-slate-200 bg-slate-50/40 space-y-4"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200/80">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-bold text-slate-900">
+                          Căn {sd.apartment_code || '—'}
+                          {sd.building_name ? ` — ${sd.building_name}` : ''}
+                        </span>
+                        <StatusBadge status={sd.deposit_status} domain="deposit" />
+                      </div>
+                      {sd.refund_due_date ? (
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Hạn hoàn cọc theo quy định: <strong>{formatDate(sd.refund_due_date)}</strong>
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        icon={Printer}
+                        loading={printingSettlementId === sd.deposit_id}
+                        onClick={() => handlePrintSettlementPdf(sd.deposit_id)}
+                      >
+                        Xem / In bảng kê
+                      </Button>
+                      {canDispute ? (
+                        <Button
+                          variant="danger"
+                          size="xs"
+                          icon={ShieldAlert}
+                          onClick={() => handleOpenDisputeModal(sd)}
+                        >
+                          Không đồng ý / Khiếu nại
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {/* Danh sách khoản khấu trừ biên bản bàn giao */}
+                  {items.length === 0 ? (
+                    <div className="p-3 rounded-xl bg-emerald-50/60 border border-emerald-200/80 text-xs text-emerald-800">
+                      Không phát sinh khấu trừ hư hỏng hay vệ sinh mặt bằng khi bàn giao.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-slate-700">
+                        Các khoản khấu trừ bàn giao ({items.length})
+                      </p>
+                      {items.map((it, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 rounded-xl bg-white border border-slate-200/80 space-y-1.5 text-xs"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <Badge variant="amber">
+                              {DEDUCT_CATEGORY_LABELS[it.category] || it.category}
+                            </Badge>
+                            <span className="font-bold text-rose-600">
+                              - {formatMoney(it.amount)}
+                            </span>
+                          </div>
+                          {it.description ? (
+                            <p className="text-slate-700">{it.description}</p>
+                          ) : null}
+                          {Array.isArray(it.evidence) && it.evidence.length > 0 ? (
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              {it.evidence.map((ev, eIdx) => (
+                                <div
+                                  key={eIdx}
+                                  onClick={() => setPreviewEvidenceSrc(ev)}
+                                  className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden cursor-pointer hover:border-primary-400"
+                                >
+                                  <AuthImage
+                                    src={ev}
+                                    alt="Bằng chứng khấu trừ"
+                                    className="w-full h-full object-cover"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Tổng hợp công nợ đối trừ & số tiền hoàn */}
+                  <div className="p-3.5 rounded-xl bg-white border border-indigo-100 space-y-2 text-xs">
+                    {sd.amount_held !== undefined && sd.amount_held !== null ? (
+                      <div className="flex justify-between text-slate-600">
+                        <span>Số dư cọc hiện tại trên sổ:</span>
+                        <strong className="text-slate-900">{formatMoney(sd.amount_held)}</strong>
+                      </div>
+                    ) : null}
+                    <div className="flex justify-between text-slate-600">
+                      <span>Đối trừ nợ dịch vụ / điện nước:</span>
+                      <strong className="text-amber-700">- {formatMoney(serviceDebt)}</strong>
+                    </div>
+                    <div className="flex justify-between text-slate-600">
+                      <span>Tổng khấu trừ hư hỏng / vệ sinh:</span>
+                      <strong className="text-amber-700">- {formatMoney(itemsTotal)}</strong>
+                    </div>
+                    <div className="border-t border-slate-100 pt-2 flex justify-between items-center text-sm">
+                      <span className="font-bold text-slate-900">Số tiền hoàn trả dự kiến:</span>
+                      <span className="text-base font-bold text-emerald-600">
+                        {formatMoney(expectedRefund)}
+                      </span>
+                    </div>
+                    {Number(stObj.shortfall || 0) > 0 ? (
+                      <div className="flex justify-between text-rose-700 font-semibold pt-1">
+                        <span>Khoản phải thu bổ sung sau trả phòng:</span>
+                        <span>{formatMoney(stObj.shortfall)}</span>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Lịch sử trao đổi khiếu nại */}
+                  {stObj.dispute_reason || thread.length > 0 ? (
+                    <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200 space-y-2 text-xs">
+                      <p className="font-semibold text-rose-800 flex items-center gap-1.5">
+                        <ShieldAlert className="w-4 h-4" />
+                        Lịch sử khiếu nại &amp; phản hồi giải quyết
+                      </p>
+                      {stObj.dispute_reason && thread.length === 0 ? (
+                        <p className="text-rose-900">{stObj.dispute_reason}</p>
+                      ) : null}
+                      {thread.map((msg, mIdx) => (
+                        <div
+                          key={mIdx}
+                          className="p-2.5 rounded-lg bg-white border border-rose-100 space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                            <Badge variant={msg.role === 'RESIDENT' ? 'amber' : 'indigo'}>
+                              {msg.role === 'RESIDENT' ? 'Bạn (Cư dân)' : 'Ban Quản Lý'}
+                            </Badge>
+                            <span>{formatDateTime(msg.at)}</span>
+                          </div>
+                          <p className="text-slate-800">{msg.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      ) : null}
+
       {/* Deposit Ledger & Transactions */}
       <Card>
         <CardHeader
@@ -605,25 +958,46 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                     {am.reason ? (
                       <p className="text-xs text-slate-700 font-medium">{am.reason}</p>
                     ) : null}
-                    {Object.keys(diffObj).length > 0 ? (
-                      <div className="space-y-1 pt-1 border-t border-slate-200/60 text-xs text-slate-600">
-                        {Object.entries(diffObj).map(([k, v]) => {
-                          const fromVal = v && typeof v === 'object' && 'from' in v ? v.from : null;
-                          const toVal = v && typeof v === 'object' && 'to' in v ? v.to : v;
-                          return (
-                            <div key={k} className="flex items-center justify-between gap-2">
-                              <span className="text-slate-500">
-                                {DIFF_FIELD_LABELS[k] || k}:
-                              </span>
-                              <span className="font-semibold text-slate-800">
-                                {fromVal !== null ? `${formatDiffValue(k, fromVal)} → ` : ''}
-                                {formatDiffValue(k, toVal)}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : null}
+                    {(() => {
+                      const diffEntries = Object.entries(diffObj).filter(
+                        ([k]) => !AMENDMENT_META_KEYS.includes(k)
+                      );
+                      if (diffEntries.length === 0) return null;
+                      return (
+                        <div className="space-y-1 pt-1 border-t border-slate-200/60 text-xs text-slate-600">
+                          {diffEntries.map(([k, v]) => {
+                            const isObj = v && typeof v === 'object' && !Array.isArray(v);
+                            const fromVal = isObj
+                              ? 'old' in v
+                                ? v.old
+                                : 'from' in v
+                                ? v.from
+                                : null
+                              : null;
+                            const toVal = isObj
+                              ? 'new' in v
+                                ? v.new
+                                : 'to' in v
+                                ? v.to
+                                : null
+                              : v;
+                            return (
+                              <div key={k} className="flex items-center justify-between gap-2">
+                                <span className="text-slate-500">
+                                  {DIFF_FIELD_LABELS[k] || k}:
+                                </span>
+                                <span className="font-semibold text-slate-800">
+                                  {fromVal !== null && fromVal !== undefined
+                                    ? `${formatDiffValue(k, fromVal)} → `
+                                    : ''}
+                                  {formatDiffValue(k, toVal)}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -825,6 +1199,78 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
             onChange={(e) => setReqForm((s) => ({ ...s, note: e.target.value }))}
           />
         </form>
+      </Modal>
+
+      {/* Modal Khiếu nại bảng kê tất toán tiền cọc (R-07) */}
+      <Modal
+        open={disputeModalOpen}
+        onClose={() => setDisputeModalOpen(false)}
+        title="Không đồng ý / Khiếu nại bảng kê tất toán cọc"
+        subtitle={
+          disputeDepositTarget
+            ? `Căn hộ ${disputeDepositTarget.apartment_code || ''}${
+                disputeDepositTarget.building_name ? ` — ${disputeDepositTarget.building_name}` : ''
+              }`
+            : ''
+        }
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setDisputeModalOpen(false)}
+              disabled={submittingDispute}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="danger"
+              icon={ShieldAlert}
+              loading={submittingDispute}
+              onClick={handleSubmitDispute}
+            >
+              Gửi khiếu nại tới BQL
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmitDispute} className="space-y-3">
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 leading-relaxed">
+            Vui lòng nêu rõ khoản mục khấu trừ hoặc công nợ bạn chưa đồng ý. Hồ sơ cọc sẽ chuyển sang trạng thái <strong>Tranh chấp (DISPUTED)</strong> để Ban Quản Lý rà soát và phản hồi trực tiếp trên bảng kê.
+          </div>
+          <Input
+            label="Lý do khiếu nại / Không đồng ý"
+            required
+            multiline
+            rows={4}
+            placeholder="Ví dụ: Tôi không đồng ý khoản khấu trừ vệ sinh 500.000 ₫ vì đã dọn dẹp sạch sẽ trước khi bàn giao..."
+            value={disputeReason}
+            onChange={(e) => setDisputeReason(e.target.value)}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Phóng to ảnh bằng chứng khấu trừ */}
+      <Modal
+        open={Boolean(previewEvidenceSrc)}
+        onClose={() => setPreviewEvidenceSrc(null)}
+        title="Ảnh bằng chứng khấu trừ"
+        size="lg"
+        footer={
+          <Button variant="outline" onClick={() => setPreviewEvidenceSrc(null)}>
+            Đóng
+          </Button>
+        }
+      >
+        <div className="flex items-center justify-center bg-slate-900/5 rounded-xl p-2 min-h-[280px]">
+          {previewEvidenceSrc ? (
+            <AuthImage
+              src={previewEvidenceSrc}
+              alt="Bằng chứng khấu trừ"
+              className="max-h-[70vh] w-auto rounded-lg object-contain"
+            />
+          ) : null}
+        </div>
       </Modal>
     </div>
   );
