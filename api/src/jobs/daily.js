@@ -1,41 +1,58 @@
-// Job hằng ngày (B5): hết hạn hợp đồng → EXPIRED; flip căn RESERVED → OCCUPIED khi HĐ ACTIVE tới hạn;
-// hết hạn giữ chỗ → EXPIRED + mở căn lại. Chạy bằng adminPool vì job không có user context —
-// RLS default-deny sẽ chặn im lặng nếu đi qua appPool.
-// ponytail: trong-process interval; tách worker container + distributed lock khi chạy đa instance (PRD 12.4).
+// Job hằng ngày (B5): hết hạn hợp đồng -> EXPIRED; đồng bộ trạng thái căn hộ (back-to-back RESERVED -> OCCUPIED / AVAILABLE);
+// hết hạn giữ chỗ -> EXPIRED + mở căn lại; cảnh báo sắp hết hạn HĐ & hạn hoàn cọc 5 ngày (FR-068).
+// Chạy bằng adminPool vì job không có user context — RLS default-deny sẽ chặn im lặng nếu đi qua appPool.
 import { adminPool } from '../db/client.js';
+import { syncApartmentStatus } from '../services/apartmentStatus.js';
 
 export async function runDailyJobs() {
-  // 1. Hợp đồng quá hạn
+  const affectedAptIds = new Set();
+
+  // 1. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= CURRENT_DATE là đã kết thúc)
   const expired = await adminPool.query(
-    `UPDATE contract SET status='EXPIRED', updated_at=NOW()
-     WHERE status IN ('ACTIVE','RENEWAL_PENDING') AND end_date < CURRENT_DATE`
+    `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
+     WHERE status IN ('ACTIVE', 'RENEWAL_PENDING') AND end_date <= CURRENT_DATE
+     RETURNING apartment_id`
   );
+  expired.rows.forEach((r) => affectedAptIds.add(r.apartment_id));
   console.log(`[DailyJob] contract expired: ${expired.rowCount}`);
 
-  // 2. Căn RESERVED có HĐ ACTIVE vừa tới hạn → OCCUPIED
-  const flipped = await adminPool.query(
-    `UPDATE apartment SET status='OCCUPIED', updated_at=NOW()
-     WHERE status='RESERVED'
-       AND id IN (SELECT apartment_id FROM contract WHERE status='ACTIVE' AND start_date <= CURRENT_DATE)`
+  // 2. Các căn hộ đang RESERVED nhưng HĐ ACTIVE đã tới ngày bắt đầu (start_date <= CURRENT_DATE)
+  const dueStartApts = await adminPool.query(
+    `SELECT DISTINCT a.id AS apartment_id
+     FROM apartment a
+     JOIN contract c ON c.apartment_id = a.id
+     WHERE a.status IN ('RESERVED', 'AVAILABLE')
+       AND c.status IN ('ACTIVE', 'RENEWAL_PENDING')
+       AND c.start_date <= CURRENT_DATE
+       AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE`
   );
-  console.log(`[DailyJob] apartment RESERVED -> OCCUPIED: ${flipped.rowCount}`);
+  dueStartApts.rows.forEach((r) => affectedAptIds.add(r.apartment_id));
 
   // 3. Giữ chỗ quá hạn
   const rsvExpired = await adminPool.query(
-    `UPDATE reservation SET status='EXPIRED', updated_at=NOW()
-     WHERE status='HELD' AND hold_until IS NOT NULL AND hold_until < CURRENT_DATE`
+    `UPDATE reservation SET status = 'EXPIRED', updated_at = NOW()
+     WHERE status = 'HELD' AND hold_until IS NOT NULL AND hold_until < CURRENT_DATE
+     RETURNING apartment_id`
   );
+  rsvExpired.rows.forEach((r) => affectedAptIds.add(r.apartment_id));
   console.log(`[DailyJob] reservation expired: ${rsvExpired.rowCount}`);
 
-  // 4. Mở lại căn của giữ chỗ hết hạn — bắt buộc NOT EXISTS: không flip nhầm căn
-  //    đang có giữ chỗ HELD mới hoặc hợp đồng hiệu lực ghim ở RESERVED.
-  const reOpened = await adminPool.query(
-    `UPDATE apartment a SET status='AVAILABLE', updated_at=NOW()
-     WHERE a.status='RESERVED'
-       AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD')
-       AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE','RENEWAL_PENDING'))`
+  // 4. Các căn đang RESERVED mồ côi (không còn giữ chỗ HELD hay HĐ mở)
+  const orphanReserved = await adminPool.query(
+    `SELECT a.id AS apartment_id
+     FROM apartment a
+     WHERE a.status = 'RESERVED'
+       AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD' AND (r.hold_until IS NULL OR r.hold_until >= CURRENT_DATE))
+       AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING') AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE)`
   );
-  console.log(`[DailyJob] apartment RESERVED -> AVAILABLE: ${reOpened.rowCount}`);
+  orphanReserved.rows.forEach((r) => affectedAptIds.add(r.apartment_id));
+
+  for (const aptId of affectedAptIds) {
+    if (aptId) {
+      await syncApartmentStatus(adminPool, aptId);
+    }
+  }
+  console.log(`[DailyJob] synced apartment statuses: ${affectedAptIds.size}`);
 
   // 5. FR-018: Cảnh báo hợp đồng sắp hết hạn (60/30/15 ngày)
   const expiringContracts = await adminPool.query(
@@ -72,7 +89,6 @@ export async function runDailyJobs() {
 
     const endDateStr = c.end_date.toISOString ? c.end_date.toISOString().split('T')[0] : String(c.end_date);
     for (const userId of targetUserIds) {
-      // Lưu ý 3: Anti-duplicate check trong cùng ngày
       await adminPool.query(
         `INSERT INTO notification (org_id, user_id, title, content, type, payload)
          SELECT $1, $2, $3, $4, 'CONTRACT_EXPIRY', $5
@@ -97,7 +113,8 @@ export async function runDailyJobs() {
     }
   }
 
-  // 6. FR-068: Cảnh báo thời hạn hoàn cọc (ngày chấm dứt +3 cảnh báo, +5 báo Giám đốc)
+  // 6. FR-068: Cảnh báo thời hạn hoàn cọc (ngày chấm dứt +3 cảnh báo nội bộ, +5 báo khẩn SYS_ADMIN & MANAGER)
+  // Phương án 2: OWNER 100% Read-Only nên cảnh báo vận hành gửi tới SYS_ADMIN + MANAGER + ACCOUNTANT.
   const depositAlerts = await adminPool.query(
     `SELECT d.id AS deposit_id, d.contract_id, d.amount_held,
             c.terminated_at, c.building_id,
@@ -120,24 +137,33 @@ export async function runDailyJobs() {
       ? `[QUÁ HẠN] Hoàn cọc căn ${dep.apartment_code} đã quá 5 ngày`
       : `[CẢNH BÁO] Đến hạn hoàn cọc căn ${dep.apartment_code} (3 ngày)`;
     const content = isOverdue
-      ? `Hợp đồng căn ${dep.apartment_code} đã chấm dứt được 5 ngày nhưng chưa hoàn tất thủ tục hoàn cọc (số tiền đang giữ: ${dep.amount_held} VND). Báo cáo khẩn gửi Giám đốc (FR-068).`
+      ? `Hợp đồng căn ${dep.apartment_code} đã chấm dứt được 5 ngày nhưng chưa hoàn tất thủ tục hoàn cọc (số tiền đang giữ: ${dep.amount_held} VND). Báo cáo khẩn gửi Quản trị hệ thống & Ban Quản Lý (FR-068).`
       : `Hợp đồng căn ${dep.apartment_code} đã chấm dứt 3 ngày. Vui lòng mở hồ sơ tất toán và hoàn cọc cho cư dân đúng hạn.`;
 
     const notifyUsers = isOverdue
       ? await adminPool.query(
-          `SELECT ur.user_id FROM user_role ur
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
            JOIN role r ON r.id = ur.role_id
-           WHERE r.code = 'OWNER'`
+           JOIN app_user au ON au.id = ur.user_id
+           JOIN person p ON p.id = au.person_id
+           WHERE p.org_id = $1
+             AND (r.code = 'SYS_ADMIN' OR (r.code = 'MANAGER' AND ur.building_id = $2))`,
+          [dep.org_id, dep.building_id]
         )
       : await adminPool.query(
-          `SELECT ur.user_id FROM user_role ur
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
            JOIN role r ON r.id = ur.role_id
-           WHERE (ur.building_id = $1 AND r.code = 'MANAGER') OR r.code = 'OWNER'`,
-          [dep.building_id]
+           JOIN app_user au ON au.id = ur.user_id
+           JOIN person p ON p.id = au.person_id
+           WHERE p.org_id = $1
+             AND r.code IN ('MANAGER', 'ACCOUNTANT')
+             AND (ur.building_id = $2 OR (r.code = 'ACCOUNTANT' AND ur.building_id IS NULL))`,
+          [dep.org_id, dep.building_id]
         );
 
     for (const u of notifyUsers.rows) {
-      // Lưu ý 3: Anti-duplicate check
       await adminPool.query(
         `INSERT INTO notification (org_id, user_id, title, content, type, payload)
          SELECT $1, $2, $3, $4, $5, $6

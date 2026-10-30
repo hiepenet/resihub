@@ -2,7 +2,7 @@ import express from 'express';
 import { pool, adminPool } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
-import { isTransitionAllowed, APARTMENT_TRANSITIONS } from '../services/apartmentStatus.js';
+import { isTransitionAllowed, APARTMENT_TRANSITIONS, syncApartmentStatus } from '../services/apartmentStatus.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -377,22 +377,33 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       });
     }
 
-    const activeContract = await pool.query(
-      `SELECT 1 FROM contract WHERE apartment_id = $1 AND status = 'ACTIVE'`,
+    const currentActiveContract = await pool.query(
+      `SELECT 1 FROM contract
+       WHERE apartment_id = $1
+         AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         AND start_date <= CURRENT_DATE
+         AND COALESCE(terminated_at, end_date) > CURRENT_DATE
+       LIMIT 1`,
       [id]
     );
-    const hasActiveContract = activeContract.rows.length > 0;
+    const hasCurrentActiveContract = currentActiveContract.rows.length > 0;
 
-    if (status && hasActiveContract) {
+    if (status && hasCurrentActiveContract) {
       return res.status(409).json({
         code: 'INVALID_STATUS_TRANSITION',
-        message: 'Căn đang có hợp đồng hiệu lực, phải chấm dứt hợp đồng trước.',
+        message: 'Căn đang có hợp đồng hiệu lực hiện tại, phải chấm dứt hợp đồng trước.',
       });
     }
 
+    const anyOpenContract = await pool.query(
+      `SELECT 1 FROM contract WHERE apartment_id = $1 AND status IN ('ACTIVE', 'RENEWAL_PENDING') LIMIT 1`,
+      [id]
+    );
+    const hasAnyOpenContract = anyOpenContract.rows.length > 0;
+
     if (
       area_m2 !== undefined &&
-      hasActiveContract &&
+      hasAnyOpenContract &&
       Number(area_m2) !== Number(before.area_m2) &&
       req.body.confirm_recalculate_fees !== true
     ) {
@@ -438,13 +449,23 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       ]
     );
 
+    let updatedRow = result.rows[0];
+    // Điểm 6: Nếu căn rời MAINTENANCE -> AVAILABLE mà đã có HĐ tương lai / giữ chỗ HELD, tự động đồng bộ về RESERVED/OCCUPIED
+    if (before.status === 'MAINTENANCE' && status === 'AVAILABLE') {
+      const syncedStatus = await syncApartmentStatus(pool, id, { leaveMaintenance: true });
+      if (syncedStatus && syncedStatus !== updatedRow.status) {
+        const refreshed = await pool.query('SELECT * FROM apartment WHERE id = $1', [id]);
+        if (refreshed.rows[0]) updatedRow = refreshed.rows[0];
+      }
+    }
+
     await pool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'UPDATE', 'apartment', $2, $3, $4)`,
-      [req.user.sub, id, JSON.stringify(before), JSON.stringify(result.rows[0])]
+      [req.user.sub, id, JSON.stringify(before), JSON.stringify(updatedRow)]
     );
 
-    res.json({ message: 'Cập nhật căn hộ thành công.', data: result.rows[0] });
+    res.json({ message: 'Cập nhật căn hộ thành công.', data: updatedRow });
   } catch (err) {
     console.error('[Update Apartment Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi cập nhật căn hộ.' });
