@@ -27,6 +27,8 @@ import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 
+const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
+
 export function ApartmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -40,6 +42,8 @@ export function ApartmentDetailPage() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     zone_id: '',
+    type: '1PN',
+    bedrooms: 1,
     area_m2: 0,
     base_rent: 0,
     note: '',
@@ -64,6 +68,8 @@ export function ApartmentDetailPage() {
           : '';
       setForm({
         zone_id: d.zone_id || '',
+        type: d.type || '1PN',
+        bedrooms: d.bedrooms ?? 1,
         area_m2: d.area_m2 || 0,
         base_rent: d.base_rent || 0,
         note: d.note || '',
@@ -93,16 +99,42 @@ export function ApartmentDetailPage() {
           amenitiesObj[k] = true;
         });
 
-      await buildingsService.updateApartment(id, {
+      const payload = {
         zone_id: form.zone_id || null,
+        type: form.type || '1PN',
+        bedrooms: Number(form.bedrooms ?? 1),
         area_m2: Number(form.area_m2),
         base_rent: Number(form.base_rent),
         note: form.note,
         amenities: amenitiesObj,
-      });
-      toast.success('Đã cập nhật thông tin căn hộ.');
-      setEditOpen(false);
-      loadApartment();
+      };
+
+      try {
+        await buildingsService.updateApartment(id, payload);
+        toast.success('Đã cập nhật thông tin căn hộ.');
+        setEditOpen(false);
+        loadApartment();
+      } catch (err) {
+        if (
+          err?.response?.status === 409 &&
+          err?.response?.data?.code === 'AREA_CHANGE_REQUIRES_CONFIRM'
+        ) {
+          const confirmed = window.confirm(
+            'Căn hộ đang có hợp đồng hiệu lực. Thay đổi diện tích có thể ảnh hưởng cách tính phí dịch vụ. Bạn có chắc chắn muốn tiếp tục?'
+          );
+          if (confirmed) {
+            await buildingsService.updateApartment(id, {
+              ...payload,
+              confirm_recalculate_fees: true,
+            });
+            toast.success('Đã cập nhật thông tin căn hộ.');
+            setEditOpen(false);
+            loadApartment();
+          }
+          return;
+        }
+        throw err;
+      }
     } catch (err) {
       toast.error(extractErrorMessage(err));
     } finally {
@@ -185,7 +217,7 @@ export function ApartmentDetailPage() {
                 Nghiệm thu & Bàn giao
               </Button>
             ) : null}
-            {isManager && ['AVAILABLE', 'RESERVED'].includes(apt.status) ? (
+            {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(apt.status) ? (
               <Button
                 size="sm"
                 icon={Plus}
@@ -396,10 +428,10 @@ export function ApartmentDetailPage() {
               },
               {
                 key: 'hold_until',
-                label: 'Hạn giữ',
+                label: 'Khoảng giữ chỗ',
                 align: 'center',
                 className: 'whitespace-nowrap text-xs',
-                render: (r) => formatDate(r.hold_until),
+                render: (r) => `${formatDate(r.hold_from || r.created_at)} → ${formatDate(r.hold_until)}`,
               },
               {
                 key: 'actions',
@@ -407,7 +439,7 @@ export function ApartmentDetailPage() {
                 align: 'center',
                 className: 'whitespace-nowrap',
                 render: (r) =>
-                  r.status === 'ACTIVE' && isManager ? (
+                  r.status === 'HELD' && canEditRealEstate ? (
                     <div className="inline-flex items-center justify-center gap-1">
                       <Button size="xs" variant="outline" onClick={() => handleReservationAction(r.id, 'refund')}>
                         Hoàn cọc
@@ -417,7 +449,9 @@ export function ApartmentDetailPage() {
                       </Button>
                     </div>
                   ) : (
-                    <Badge variant="slate">{r.status}</Badge>
+                    <Badge variant={r.status === 'HELD' ? 'amber' : r.status === 'CONVERTED' ? 'emerald' : 'slate'}>
+                      {r.status}
+                    </Badge>
                   ),
               },
             ]}
@@ -474,6 +508,26 @@ export function ApartmentDetailPage() {
               label: `${z.code}${z.name ? ` — ${z.name}` : ''}`,
             }))}
           />
+          <div className="grid grid-cols-2 gap-3.5">
+            <Select
+              label="Loại căn hộ"
+              value={form.type}
+              onChange={(e) => setForm({ ...form, type: e.target.value })}
+              options={
+                form.type && !APARTMENT_TYPE_OPTIONS.includes(form.type)
+                  ? [form.type, ...APARTMENT_TYPE_OPTIONS]
+                  : APARTMENT_TYPE_OPTIONS
+              }
+            />
+            <Input
+              label="Số phòng ngủ"
+              type="number"
+              min="0"
+              required
+              value={form.bedrooms}
+              onChange={(e) => setForm({ ...form, bedrooms: e.target.value })}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-3.5">
             <Input
               label="Diện tích (m²)"

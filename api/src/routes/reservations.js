@@ -10,6 +10,8 @@ import {
   managerBuildingFilter,
   logAccessDenied,
 } from '../services/ownerScope.js';
+import { syncApartmentStatus } from '../services/apartmentStatus.js';
+import { checkFourEyesOrWarn } from '../services/pricing.js';
 
 const router = express.Router();
 
@@ -20,7 +22,7 @@ const router = express.Router();
 router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
-    const { building_id, status } = req.query;
+    const { building_id, apartment_id, status } = req.query;
     const userRoles = getUserRoleCodes(req);
     const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
@@ -74,12 +76,17 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
       sql += ` AND r.building_id = $${params.length}`;
     }
 
+    if (apartment_id) {
+      params.push(apartment_id);
+      sql += ` AND r.apartment_id = $${params.length}`;
+    }
+
     if (status) {
       params.push(status);
       sql += ` AND r.status = $${params.length}`;
     }
 
-    sql += ` ORDER BY r.created_at DESC`;
+    sql += ` ORDER BY COALESCE(r.hold_from, r.created_at::date) ASC, r.hold_until ASC, r.created_at DESC`;
 
     const result = await pool.query(sql, params);
     res.json({ data: result.rows });
@@ -95,7 +102,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
  * Quyền theo PRD 6.2 & FR-067: Chỉ MANAGER của tòa chứa căn hộ (OWNER là R)
  */
 router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
-  const { apartment_id, prospect_name, phone, hold_amount, hold_until, note } = req.body;
+  const { apartment_id, prospect_name, phone, hold_amount, hold_from, hold_until, note } = req.body;
   const orgId = req.user.org_id;
 
   if (!apartment_id || !prospect_name || !phone) {
@@ -111,16 +118,28 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
       message: 'Thời hạn giữ chỗ (hold_until) là bắt buộc.',
     });
   }
-  const holdUntilDate = new Date(hold_until);
-  const nowDate = new Date();
-  if (isNaN(holdUntilDate.getTime()) || holdUntilDate <= nowDate) {
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const holdFromStr = hold_from ? String(hold_from).slice(0, 10) : todayStr;
+  const holdUntilStr = String(hold_until).slice(0, 10);
+  const holdFromDate = new Date(`${holdFromStr}T00:00:00Z`);
+  const holdUntilDate = new Date(`${holdUntilStr}T00:00:00Z`);
+  const todayDate = new Date(`${todayStr}T00:00:00Z`);
+
+  if (
+    isNaN(holdFromDate.getTime()) ||
+    isNaN(holdUntilDate.getTime()) ||
+    holdFromDate < todayDate ||
+    holdUntilDate <= holdFromDate
+  ) {
     return res.status(400).json({
       code: 'INVALID_HOLD_DATE',
-      message: 'Thời hạn giữ chỗ phải là một ngày hợp lệ trong tương lai.',
+      message: 'Khoảng thời gian giữ chỗ không hợp lệ (ngày kết thúc phải sau ngày bắt đầu và không nằm trong quá khứ).',
     });
   }
-  const maxHoldDate = new Date(nowDate.getTime() + 30 * 24 * 60 * 60 * 1000);
-  if (holdUntilDate > maxHoldDate) {
+
+  const diffDays = Math.round((holdUntilDate.getTime() - holdFromDate.getTime()) / (24 * 60 * 60 * 1000));
+  if (diffDays > 30) {
     return res.status(400).json({
       code: 'HOLD_DURATION_EXCEEDED',
       message: 'Thời hạn giữ chỗ tối đa không quá 30 ngày theo quy định.',
@@ -152,18 +171,61 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     await client.query('BEGIN');
 
     const aptLock = await client.query('SELECT * FROM apartment WHERE id = $1 FOR UPDATE', [apartment_id]);
-    if (aptLock.rows[0].status !== 'AVAILABLE') {
+    const currentStatus = aptLock.rows[0].status;
+    if (currentStatus === 'INACTIVE' || (currentStatus === 'MAINTENANCE' && holdFromStr <= todayStr)) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         code: 'APARTMENT_NOT_AVAILABLE',
-        message: `Căn hộ ${apt.code} đang ở trạng thái ${aptLock.rows[0].status}, không thể đặt cọc giữ chỗ.`,
+        message: `Căn hộ ${apt.code} đang ở trạng thái ${currentStatus}, không thể đặt cọc giữ chỗ trong khoảng thời gian này.`,
+      });
+    }
+
+    // Kiểm tra chồng lấn với các hợp đồng hiệu lực / chờ duyệt của căn hộ
+    const overlapContract = await client.query(
+      `SELECT start_date, end_date, status
+       FROM contract
+       WHERE apartment_id = $1
+         AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'PENDING_APPROVAL')
+         AND start_date <= $2::date
+         AND end_date > $3::date
+       ORDER BY start_date ASC
+       LIMIT 1`,
+      [apartment_id, holdUntilStr, holdFromStr]
+    );
+    if (overlapContract.rows.length > 0) {
+      await client.query('ROLLBACK');
+      const oc = overlapContract.rows[0];
+      return res.status(409).json({
+        code: 'APARTMENT_NOT_AVAILABLE',
+        message: `Khoảng thời gian giữ chỗ bị chồng lấn với hợp đồng thuê (${String(oc.start_date).slice(0, 10)} → ${String(oc.end_date).slice(0, 10)}).`,
+      });
+    }
+
+    // Kiểm tra chồng lấn với các phiếu giữ chỗ đang hiệu lực (HELD) khác trên cùng căn hộ
+    const overlapRes = await client.query(
+      `SELECT prospect_name, COALESCE(hold_from, created_at::date) AS hold_from, hold_until
+       FROM reservation
+       WHERE apartment_id = $1
+         AND status = 'HELD'
+         AND COALESCE(hold_from, created_at::date) <= $2::date
+         AND hold_until >= $3::date
+       ORDER BY hold_until ASC
+       LIMIT 1`,
+      [apartment_id, holdUntilStr, holdFromStr]
+    );
+    if (overlapRes.rows.length > 0) {
+      await client.query('ROLLBACK');
+      const orow = overlapRes.rows[0];
+      return res.status(409).json({
+        code: 'APARTMENT_NOT_AVAILABLE',
+        message: `Khoảng thời gian giữ chỗ bị trùng với phiếu giữ chỗ của khách ${orow.prospect_name} (${String(orow.hold_from).slice(0, 10)} → ${String(orow.hold_until).slice(0, 10)}).`,
       });
     }
 
     const resResult = await client.query(
       `INSERT INTO reservation (
-        org_id, building_id, apartment_id, prospect_name, phone, hold_amount, hold_until, status, note, created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'HELD', $8, $9)
+        org_id, building_id, apartment_id, prospect_name, phone, hold_amount, hold_from, hold_until, status, note, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'HELD', $9, $10)
       RETURNING *`,
       [
         orgId,
@@ -172,7 +234,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         prospect_name.trim(),
         phone.trim(),
         hold_amount || 0,
-        hold_until,
+        holdFromStr,
+        holdUntilStr,
         note || '',
         req.user.sub,
       ]
@@ -180,10 +243,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     const reservation = resResult.rows[0];
 
-    await client.query(
-      `UPDATE apartment SET status = 'RESERVED', updated_at = NOW() WHERE id = $1`,
-      [apartment_id]
-    );
+    await syncApartmentStatus(client, apartment_id);
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
@@ -263,7 +323,7 @@ router.patch('/:id/convert', authenticateToken, requireRole(['MANAGER']), async 
 /**
  * PATCH /api/v1/reservations/:id/forfeit
  */
-router.patch('/:id/forfeit', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id/forfeit', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { client, release } = await getUserClient(req);
   try {
@@ -271,13 +331,16 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['MANAGER']), async 
     if (rsvExist.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
     }
-    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-    if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-      await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation forfeit on unassigned building');
-      return res.status(403).json({
-        code: 'FORBIDDEN_BUILDING',
-        message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-      });
+    const userRoles = getUserRoleCodes(req);
+    if (!userRoles.includes('SYS_ADMIN')) {
+      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+      if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
+        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation forfeit on unassigned building');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
     }
 
     await client.query('BEGIN');
@@ -298,13 +361,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['MANAGER']), async 
       [id]
     );
 
-    await client.query(
-      `UPDATE apartment a SET status = 'AVAILABLE', updated_at = NOW()
-       WHERE a.id = $1 AND a.status = 'RESERVED'
-         AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD')
-         AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE','RENEWAL_PENDING'))`,
-      [currentRes.apartment_id]
-    );
+    await syncApartmentStatus(client, currentRes.apartment_id);
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -335,7 +392,7 @@ router.patch('/:id/forfeit', authenticateToken, requireRole(['MANAGER']), async 
 /**
  * PATCH /api/v1/reservations/:id/refund
  */
-router.patch('/:id/refund', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.patch('/:id/refund', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { client, release } = await getUserClient(req);
   try {
@@ -343,13 +400,16 @@ router.patch('/:id/refund', authenticateToken, requireRole(['MANAGER']), async (
     if (rsvExist.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
     }
-    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-    if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-      await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation refund on unassigned building');
-      return res.status(403).json({
-        code: 'FORBIDDEN_BUILDING',
-        message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-      });
+    const userRoles = getUserRoleCodes(req);
+    if (!userRoles.includes('SYS_ADMIN')) {
+      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+      if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
+        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation refund on unassigned building');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
     }
 
     await client.query('BEGIN');
@@ -357,11 +417,19 @@ router.patch('/:id/refund', authenticateToken, requireRole(['MANAGER']), async (
     const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
     const currentRes = resCheck.rows[0];
 
-    if (currentRes.created_by && currentRes.created_by === req.user.sub) {
+    const fourEyes = await checkFourEyesOrWarn({
+      orgId: req.user.org_id,
+      actorId: req.user.sub,
+      creatorId: currentRes.created_by,
+      entity: 'reservation',
+      entityId: id,
+      actionContext: 'RESERVATION_REFUND',
+    });
+    if (!fourEyes.allowed) {
       await client.query('ROLLBACK');
       return res.status(403).json({
         code: 'FOUR_EYES_VIOLATION',
-        message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ.',
+        message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (Quản lý khác hoặc SYS_ADMIN).',
       });
     }
 
@@ -378,13 +446,7 @@ router.patch('/:id/refund', authenticateToken, requireRole(['MANAGER']), async (
       [id]
     );
 
-    await client.query(
-      `UPDATE apartment a SET status = 'AVAILABLE', updated_at = NOW()
-       WHERE a.id = $1 AND a.status = 'RESERVED'
-         AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD')
-         AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE','RENEWAL_PENDING'))`,
-      [currentRes.apartment_id]
-    );
+    await syncApartmentStatus(client, currentRes.apartment_id);
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)

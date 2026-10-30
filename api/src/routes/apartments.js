@@ -56,7 +56,18 @@ router.get('/', authenticateToken, async (req, res) => {
     }
 
     let sql = `
-      SELECT a.*, b.name as building_name, b.code as building_code, f.name as floor_name, z.name as zone_name, z.code as zone_code
+      SELECT a.*,
+             b.name as building_name, b.code as building_code,
+             f.name as floor_name,
+             z.name as zone_name, z.code as zone_code,
+             (SELECT COUNT(*)::int FROM contract c
+              WHERE c.apartment_id = a.id
+                AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'PENDING_APPROVAL', 'DRAFT')
+                AND c.end_date >= CURRENT_DATE) AS active_contracts_count,
+             (SELECT COUNT(*)::int FROM reservation r
+              WHERE r.apartment_id = a.id
+                AND r.status = 'HELD'
+                AND r.hold_until >= CURRENT_DATE) AS held_reservations_count
       FROM apartment a
       JOIN building b ON b.id = a.building_id
       LEFT JOIN floor f ON f.id = a.floor_id
@@ -75,10 +86,16 @@ router.get('/', authenticateToken, async (req, res) => {
       sql += mgrSql;
     } else if (isResident) {
       params.push(req.user.person_id);
+      const pIdx = params.length;
       sql += ` AND a.id IN (
         SELECT c.apartment_id FROM contract c
         JOIN tenant t ON t.id = c.primary_tenant_id
-        WHERE t.person_id = $${params.length}
+        WHERE t.person_id = $${pIdx}
+        UNION
+        SELECT c.apartment_id FROM contract c
+        JOIN contract_occupant co ON co.contract_id = c.id
+        JOIN tenant t_occ ON t_occ.id = co.tenant_id
+        WHERE t_occ.person_id = $${pIdx}
       )`;
     } else {
       return res.json({ data: [] });
@@ -110,6 +127,9 @@ router.get('/', authenticateToken, async (req, res) => {
  */
 router.get('/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+  }
   const orgId = req.user.org_id;
   const roleCodes = getUserRoleCodes(req);
   const isSysAdmin = roleCodes.includes('SYS_ADMIN');
@@ -147,7 +167,13 @@ router.get('/:id', authenticateToken, async (req, res) => {
         const resCheck = await adminPool.query(
           `SELECT 1 FROM contract c
            JOIN tenant t ON t.id = c.primary_tenant_id
-           WHERE c.apartment_id = $1 AND t.person_id = $2 LIMIT 1`,
+           WHERE c.apartment_id = $1 AND t.person_id = $2
+           UNION ALL
+           SELECT 1 FROM contract c
+           JOIN contract_occupant co ON co.contract_id = c.id
+           JOIN tenant t_occ ON t_occ.id = co.tenant_id
+           WHERE c.apartment_id = $1 AND t_occ.person_id = $2
+           LIMIT 1`,
           [id, req.user.person_id]
         );
         if (resCheck.rows.length === 0) {
@@ -181,11 +207,16 @@ router.get('/:id', authenticateToken, async (req, res) => {
          LEFT JOIN tenant t ON t.id = c.primary_tenant_id
          LEFT JOIN person p ON p.id = t.person_id
          WHERE c.apartment_id = $1
-         ORDER BY c.created_at DESC LIMIT 10`,
+         ORDER BY c.start_date ASC, c.created_at DESC
+         LIMIT 50`,
         [id]
       ),
       pool.query(
-        `SELECT * FROM reservation WHERE apartment_id = $1 ORDER BY created_at DESC LIMIT 5`,
+        `SELECT r.*, COALESCE(r.hold_from, r.created_at::date) AS hold_from
+         FROM reservation r
+         WHERE r.apartment_id = $1
+         ORDER BY COALESCE(r.hold_from, r.created_at::date) ASC, r.hold_until ASC, r.created_at DESC
+         LIMIT 50`,
         [id]
       ),
       pool.query(
@@ -311,13 +342,31 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
     if (err.code === '23505') {
       let suggestion = '';
       try {
-        const last = await pool.query(
-          `SELECT code FROM apartment WHERE building_id = $1 ORDER BY code DESC LIMIT 1`,
+        const cleanInput = String(code || '').trim().toUpperCase();
+        const inputMatch = cleanInput.match(/^(.*?)(\d+)$/);
+        const allCodesRes = await pool.query(
+          `SELECT code FROM apartment WHERE building_id = $1`,
           [building_id]
         );
-        if (last.rows.length > 0) {
-          const m = last.rows[0].code.match(/^(.*?)(\d+)$/);
-          if (m) suggestion = ` Gợi ý mã kế tiếp: ${m[1]}${parseInt(m[2], 10) + 1}.`;
+        const targetPrefix = inputMatch ? inputMatch[1] : null;
+        let maxNum = -1;
+        let bestPadLen = inputMatch ? inputMatch[2].length : 0;
+        let bestPrefix = targetPrefix ?? '';
+
+        for (const r of allCodesRes.rows) {
+          const m = String(r.code || '').match(/^(.*?)(\d+)$/);
+          if (!m) continue;
+          if (targetPrefix !== null && m[1] !== targetPrefix) continue;
+          const numVal = parseInt(m[2], 10);
+          if (numVal > maxNum) {
+            maxNum = numVal;
+            bestPrefix = m[1];
+            bestPadLen = Math.max(bestPadLen, m[2].length);
+          }
+        }
+        if (maxNum >= 0) {
+          const nextDigits = String(maxNum + 1).padStart(bestPadLen, '0');
+          suggestion = ` Gợi ý mã kế tiếp: ${bestPrefix}${nextDigits}.`;
         }
       } catch {
         // gợi ý là phụ
@@ -335,7 +384,7 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
  */
 router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { status, base_rent, area_m2, amenities, note, zone_id } = req.body;
+  const { status, base_rent, area_m2, type, bedrooms, amenities, note, zone_id } = req.body;
   const roleCodes = getUserRoleCodes(req);
   const isSysAdmin = roleCodes.includes('SYS_ADMIN');
 
@@ -434,8 +483,10 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
            amenities = COALESCE($4, amenities),
            note = COALESCE($5, note),
            zone_id = CASE WHEN $6::boolean THEN $7::uuid ELSE zone_id END,
+           type = COALESCE($8, type),
+           bedrooms = COALESCE($9, bedrooms),
            updated_at = NOW()
-       WHERE id = $8
+       WHERE id = $10
        RETURNING *`,
       [
         status || null,
@@ -445,6 +496,8 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
         note !== undefined ? note : null,
         hasZoneUpdate,
         nextZoneId,
+        type !== undefined && String(type).trim() ? String(type).trim() : null,
+        bedrooms !== undefined && bedrooms !== null && bedrooms !== '' ? Number(bedrooms) : null,
         id,
       ]
     );
@@ -558,13 +611,18 @@ router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANA
     }
 
     const activeContract = await pool.query(
-      `SELECT 1 FROM contract WHERE apartment_id = $1 AND status = 'ACTIVE'`,
+      `SELECT 1 FROM contract
+       WHERE apartment_id = $1
+         AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         AND start_date <= CURRENT_DATE
+         AND COALESCE(terminated_at, end_date) > CURRENT_DATE
+       LIMIT 1`,
       [id]
     );
     if (activeContract.rows.length > 0) {
       return res.status(409).json({
         code: 'ACTIVE_CONTRACT_EXISTS',
-        message: 'Căn đang có hợp đồng hiệu lực, phải chấm dứt hợp đồng trước khi bàn giao.',
+        message: 'Căn đang có hợp đồng hiệu lực hiện tại, phải chấm dứt hợp đồng trước khi bàn giao.',
       });
     }
 
@@ -579,10 +637,8 @@ router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANA
       warnings.push('Còn cọc đang giữ chưa tất toán. Hãy hoàn tất tất toán theo FR-024.');
     }
 
-    const result = await pool.query(
-      `UPDATE apartment SET status = 'AVAILABLE', updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [id]
-    );
+    await syncApartmentStatus(pool, id, { leaveMaintenance: true });
+    const result = await pool.query(`SELECT * FROM apartment WHERE id = $1`, [id]);
     await pool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'HANDOVER', 'apartment', $2, $3, $4)`,

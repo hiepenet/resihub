@@ -62,6 +62,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
     prospect_name: '',
     phone: '',
     hold_amount: 2000000,
+    hold_from: '',
     hold_until: '',
     note: '',
   });
@@ -185,6 +186,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
         prospect_name: resForm.prospect_name.trim(),
         phone: resForm.phone.trim(),
         hold_amount: Number(resForm.hold_amount || 0),
+        hold_from: resForm.hold_from || undefined,
         hold_until: resForm.hold_until,
         note: resForm.note.trim(),
       });
@@ -275,19 +277,23 @@ export function FloorPlanView({ buildingId, embedded = false }) {
 
         <div className="flex flex-wrap items-center gap-2">
           {zones.length > 0 ? (
-            <select
-              value={zoneFilter}
-              onChange={(e) => setZoneFilter(e.target.value)}
-              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 focus:outline-none focus:border-primary-500"
-            >
-              <option value="ALL">Tất cả phân khu ({zones.length})</option>
-              {zones.map((z) => (
-                <option key={z.id} value={z.id}>
-                  Khu {z.code}{z.name ? ` — ${z.name}` : ''}
-                </option>
-              ))}
-              <option value="UNASSIGNED">Chưa gán khu</option>
-            </select>
+            <div className="w-56">
+              <Select
+                size="sm"
+                aria-label="Lọc theo phân khu"
+                searchPlaceholder="Tìm khu / block..."
+                value={zoneFilter}
+                onChange={(e) => setZoneFilter(e.target.value)}
+                options={[
+                  { value: 'ALL', label: `Tất cả phân khu (${zones.length})` },
+                  ...zones.map((z) => ({
+                    value: z.id,
+                    label: `Khu ${z.code}${z.name ? ` — ${z.name}` : ''}`,
+                  })),
+                  { value: 'UNASSIGNED', label: 'Chưa gán khu' },
+                ]}
+              />
+            </div>
           ) : null}
 
           {embedded && canEditRealEstate ? (
@@ -446,47 +452,102 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               </div>
             </div>
 
-            {/* Active Contract Summary if loaded */}
+            {/* Active Contract & Reservation Summary if loaded */}
             {detailLoading ? (
-              <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng & đồng hồ...</p>
-            ) : aptDetail?.contracts?.length > 0 ? (
-              <div className="space-y-2">
-                <p className="text-xs font-semibold text-slate-700">Hợp đồng gần nhất</p>
-                {aptDetail.contracts.slice(0, 2).map((c) => (
-                  <div
-                    key={c.id}
-                    onClick={() => navigate(`/admin/contracts/${c.id}`)}
-                    className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between"
-                  >
-                    <div>
-                      <p className="text-xs font-semibold text-slate-800">{c.tenant_name || 'Cư dân'}</p>
-                      <p className="text-[11px] text-slate-500">
-                        {formatDate(c.start_date)} → {formatDate(c.end_date)}
-                      </p>
-                    </div>
-                    <StatusBadge status={c.status} domain="contract" />
+              <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng & giữ chỗ...</p>
+            ) : (
+              <>
+                {aptDetail?.contracts?.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-slate-700">Hợp đồng gần nhất</p>
+                    {aptDetail.contracts.slice(0, 3).map((c) => (
+                      <div
+                        key={c.id}
+                        onClick={() => navigate(`/admin/contracts/${c.id}`)}
+                        className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between"
+                      >
+                        <div>
+                          <p className="text-xs font-semibold text-slate-800">{c.tenant_name || 'Cư dân'}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {formatDate(c.start_date)} → {formatDate(c.end_date)}
+                          </p>
+                        </div>
+                        <StatusBadge status={c.status} domain="contract" />
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            ) : null}
+                ) : null}
+
+                {(aptDetail?.reservations || []).filter((r) => r.status === 'HELD').length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-amber-800">
+                      Đang giữ chỗ ({(aptDetail?.reservations || []).filter((r) => r.status === 'HELD').length} lượt)
+                    </p>
+                    {(aptDetail?.reservations || [])
+                      .filter((r) => r.status === 'HELD')
+                      .map((r) => (
+                        <div
+                          key={r.id}
+                          className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 flex items-center justify-between gap-2"
+                        >
+                          <div>
+                            <p className="text-xs font-semibold text-slate-800">
+                              {r.prospect_name} <span className="font-mono text-slate-500">({r.phone})</span>
+                            </p>
+                            <p className="text-[11px] text-amber-800 font-medium">
+                              {formatDate(r.hold_from || r.created_at)} → {formatDate(r.hold_until)}
+                            </p>
+                          </div>
+                          <span className="text-xs font-mono font-bold text-amber-900">
+                            {formatMoney(r.hold_amount)}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                ) : null}
+              </>
+            )}
 
             {/* Quick Actions */}
             <div className="space-y-2.5 pt-2 border-t border-slate-100">
               <p className="text-xs font-semibold text-slate-700">Thao tác nhanh</p>
               <div className="flex flex-wrap gap-2">
-                {isManager && selectedApt.status === 'AVAILABLE' ? (
+                {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
                   <Button
                     size="sm"
                     variant="warning"
                     icon={BookmarkPlus}
                     onClick={() => {
-                      const d = new Date();
-                      d.setDate(d.getDate() + 7);
+                      const baseStart = new Date();
+                      const heldEnds = (aptDetail?.reservations || [])
+                        .filter((r) => r.status === 'HELD' && r.hold_until)
+                        .map((r) => String(r.hold_until).slice(0, 10))
+                        .sort();
+                      const activeContractEnds = (aptDetail?.contracts || [])
+                        .filter((c) => ['ACTIVE', 'RENEWAL_PENDING'].includes(c.status) && c.end_date)
+                        .map((c) => String(c.end_date).slice(0, 10))
+                        .sort();
+
+                      let startStr = baseStart.toISOString().slice(0, 10);
+                      if (heldEnds.length > 0) {
+                        const afterHeld = new Date(`${heldEnds[heldEnds.length - 1]}T00:00:00Z`);
+                        afterHeld.setUTCDate(afterHeld.getUTCDate() + 1);
+                        const candidate = afterHeld.toISOString().slice(0, 10);
+                        if (candidate > startStr) startStr = candidate;
+                      }
+                      if (activeContractEnds.length > 0) {
+                        const afterContract = activeContractEnds[activeContractEnds.length - 1];
+                        if (afterContract > startStr) startStr = afterContract;
+                      }
+
+                      const untilDate = new Date(`${startStr}T00:00:00Z`);
+                      untilDate.setUTCDate(untilDate.getUTCDate() + 7);
                       setResForm({
                         prospect_name: '',
                         phone: '',
                         hold_amount: 2000000,
-                        hold_until: d.toISOString().slice(0, 10),
+                        hold_from: startStr,
+                        hold_until: untilDate.toISOString().slice(0, 10),
                         note: '',
                       });
                       setResModalOpen(true);
@@ -496,7 +557,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                   </Button>
                 ) : null}
 
-                {isManager && ['AVAILABLE', 'RESERVED'].includes(selectedApt.status) ? (
+                {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
                   <Button
                     size="sm"
                     icon={Plus}
@@ -615,7 +676,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               label="Loại căn"
               value={aptForm.type}
               onChange={(e) => setAptForm({ ...aptForm, type: e.target.value })}
-              options={['Studio', '1PN', '2PN', '3PN', 'Penthouse']}
+              options={['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex']}
             />
             <Input
               label="Số phòng ngủ"
@@ -683,13 +744,22 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               onChange={(e) => setResForm({ ...resForm, hold_amount: e.target.value })}
             />
           </div>
-          <Input
-            label="Giữ chỗ đến hết ngày (tối đa 30 ngày)"
-            type="date"
-            required
-            value={resForm.hold_until}
-            onChange={(e) => setResForm({ ...resForm, hold_until: e.target.value })}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <Input
+              label="Giữ chỗ từ ngày"
+              type="date"
+              required
+              value={resForm.hold_from}
+              onChange={(e) => setResForm({ ...resForm, hold_from: e.target.value })}
+            />
+            <Input
+              label="Đến hết ngày (tối đa 30 ngày)"
+              type="date"
+              required
+              value={resForm.hold_until}
+              onChange={(e) => setResForm({ ...resForm, hold_until: e.target.value })}
+            />
+          </div>
           <Input
             label="Ghi chú"
             multiline

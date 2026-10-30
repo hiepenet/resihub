@@ -10,13 +10,17 @@ import {
   MapPin,
   ArrowRight,
   Trash2,
+  Ban,
+  CheckCircle2,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Tabs } from '../../../components/ui/Tabs';
 import { Button } from '../../../components/ui/Button';
+import { Badge } from '../../../components/ui/Badge';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
@@ -46,6 +50,8 @@ export function BuildingDetailPage() {
   const [zoneModalOpen, setZoneModalOpen] = useState(false);
   const [zoneForm, setZoneForm] = useState({ code: '', name: '' });
   const [savingZone, setSavingZone] = useState(false);
+  const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
 
   const loadBuildingData = useCallback(async () => {
     setLoading(true);
@@ -103,8 +109,29 @@ export function BuildingDetailPage() {
     }
   };
 
+  const handleToggleBuildingStatus = async (nextStatus) => {
+    setUpdatingStatus(true);
+    try {
+      const res = await buildingsService.updateStatus(id, nextStatus);
+      toast.success(
+        res?.message ||
+          (nextStatus === 'INACTIVE'
+            ? 'Đã chuyển tòa nhà sang trạng thái Ngừng khai thác.'
+            : 'Đã kích hoạt khai thác lại tòa nhà.')
+      );
+      setDeactivateConfirmOpen(false);
+      await loadBuildingData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể cập nhật trạng thái tòa nhà.'));
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
+
   if (loading && !building) return <PageSkeleton />;
   if (!building) return null;
+
+  const isBuildingActive = (building.status || 'ACTIVE') === 'ACTIVE';
 
   return (
     <div className="space-y-6">
@@ -116,13 +143,36 @@ export function BuildingDetailPage() {
           { label: building.code },
         ]}
         actions={
-          <Button
-            variant="soft"
-            icon={LayoutGrid}
-            onClick={() => navigate(`/admin/buildings/${id}/floor-plan`)}
-          >
-            Mở Sơ đồ tầng toàn màn hình
-          </Button>
+          <>
+            {canEditRealEstate ? (
+              isBuildingActive ? (
+                <Button
+                  variant="danger"
+                  icon={Ban}
+                  loading={updatingStatus}
+                  onClick={() => setDeactivateConfirmOpen(true)}
+                >
+                  Ngừng khai thác
+                </Button>
+              ) : (
+                <Button
+                  variant="success"
+                  icon={CheckCircle2}
+                  loading={updatingStatus}
+                  onClick={() => handleToggleBuildingStatus('ACTIVE')}
+                >
+                  Khai thác lại
+                </Button>
+              )
+            ) : null}
+            <Button
+              variant="soft"
+              icon={LayoutGrid}
+              onClick={() => navigate(`/admin/buildings/${id}/floor-plan`)}
+            >
+              Mở Sơ đồ tầng toàn màn hình
+            </Button>
+          </>
         }
       />
 
@@ -149,7 +199,11 @@ export function BuildingDetailPage() {
                 </div>
                 <div>
                   <p className="text-xs text-slate-400">Trạng thái khai thác</p>
-                  <p className="font-semibold text-emerald-600 mt-0.5">{building.status || 'ACTIVE'}</p>
+                  <div className="mt-1">
+                    <Badge variant={isBuildingActive ? 'emerald' : 'purple'} dot>
+                      {isBuildingActive ? 'Đang khai thác (ACTIVE)' : 'Ngừng khai thác (INACTIVE)'}
+                    </Badge>
+                  </div>
                 </div>
                 <div className="sm:col-span-2">
                   <p className="text-xs text-slate-400">Địa chỉ</p>
@@ -163,21 +217,33 @@ export function BuildingDetailPage() {
 
             <Card>
               <CardHeader title="Tài khoản nhận thanh toán" />
-              {building.payment_account?.account_number ? (
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Ngân hàng:</span>
-                    <span className="font-semibold">{building.payment_account.bank_name}</span>
+              {building.payment_account?.account_number || building.payment_account?.bank_name ? (
+                <div className="space-y-2.5 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 shrink-0">Ngân hàng:</span>
+                    <span className="font-semibold flex items-center gap-2 text-right">
+                      {building.payment_account.bank_logo ? (
+                        <img
+                          src={building.payment_account.bank_logo}
+                          alt=""
+                          className="w-8 h-5 object-contain rounded bg-white border border-slate-200 p-0.5 shrink-0"
+                        />
+                      ) : null}
+                      <span>
+                        {building.payment_account.bank_name || '—'}
+                        {building.payment_account.bank_code ? ` (${building.payment_account.bank_code})` : ''}
+                      </span>
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Số TK:</span>
                     <span className="font-mono font-semibold text-primary-600">
-                      {building.payment_account.account_number}
+                      {building.payment_account.account_number || '—'}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Chủ TK:</span>
-                    <span className="font-medium text-right">{building.payment_account.account_holder}</span>
+                    <span className="font-medium text-right">{building.payment_account.account_holder || '—'}</span>
                   </div>
                 </div>
               ) : (
@@ -319,6 +385,17 @@ export function BuildingDetailPage() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={deactivateConfirmOpen}
+        onClose={() => setDeactivateConfirmOpen(false)}
+        onConfirm={() => handleToggleBuildingStatus('INACTIVE')}
+        loading={updatingStatus}
+        variant="danger"
+        title="Xác nhận ngừng khai thác tòa nhà"
+        confirmLabel="Ngừng khai thác"
+        message={`Bạn có chắc chắn muốn chuyển tòa nhà "${building.code} — ${building.name}" sang trạng thái Ngừng khai thác (INACTIVE)?`}
+      />
     </div>
   );
 }

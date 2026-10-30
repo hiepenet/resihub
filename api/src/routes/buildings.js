@@ -16,6 +16,74 @@ import { buildOwnerPreview, checkLookupRateLimit } from '../utils/piiMask.js';
 
 const router = express.Router();
 const ownerLookupBuckets = new Map();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const FALLBACK_VIETQR_BANKS = [
+  { id: 43, code: 'VCB', bin: '970436', shortName: 'Vietcombank', name: 'Ngân hàng TMCP Ngoại Thương Việt Nam', logo: 'https://cdn.vietqr.io/img/VCB.png' },
+  { id: 17, code: 'ICB', bin: '970415', shortName: 'VietinBank', name: 'Ngân hàng TMCP Công thương Việt Nam', logo: 'https://cdn.vietqr.io/img/ICB.png' },
+  { id: 4, code: 'BIDV', bin: '970418', shortName: 'BIDV', name: 'Ngân hàng TMCP Đầu tư và Phát triển Việt Nam', logo: 'https://cdn.vietqr.io/img/BIDV.png' },
+  { id: 42, code: 'VBA', bin: '970405', shortName: 'Agribank', name: 'Ngân hàng Nông nghiệp và Phát triển Nông thôn Việt Nam', logo: 'https://cdn.vietqr.io/img/VBA.png' },
+  { id: 38, code: 'TCB', bin: '970407', shortName: 'Techcombank', name: 'Ngân hàng TMCP Kỹ thương Việt Nam', logo: 'https://cdn.vietqr.io/img/TCB.png' },
+  { id: 21, code: 'MB', bin: '970422', shortName: 'MBBank', name: 'Ngân hàng TMCP Quân đội', logo: 'https://cdn.vietqr.io/img/MB.png' },
+  { id: 2, code: 'ACB', bin: '970416', shortName: 'ACB', name: 'Ngân hàng TMCP Á Châu', logo: 'https://cdn.vietqr.io/img/ACB.png' },
+  { id: 47, code: 'VPB', bin: '970432', shortName: 'VPBank', name: 'Ngân hàng TMCP Việt Nam Thịnh Vượng', logo: 'https://cdn.vietqr.io/img/VPB.png' },
+  { id: 39, code: 'TPB', bin: '970423', shortName: 'TPBank', name: 'Ngân hàng TMCP Tiên Phong', logo: 'https://cdn.vietqr.io/img/TPB.png' },
+  { id: 36, code: 'STB', bin: '970403', shortName: 'Sacombank', name: 'Ngân hàng TMCP Sài Gòn Thương Tín', logo: 'https://cdn.vietqr.io/img/STB.png' },
+  { id: 12, code: 'HDB', bin: '970437', shortName: 'HDBank', name: 'Ngân hàng TMCP Phát triển TP. Hồ Chí Minh', logo: 'https://cdn.vietqr.io/img/HDB.png' },
+  { id: 45, code: 'VIB', bin: '970441', shortName: 'VIB', name: 'Ngân hàng TMCP Quốc tế Việt Nam', logo: 'https://cdn.vietqr.io/img/VIB.png' },
+];
+
+let vietQrBankCache = {
+  items: null,
+  expiresAt: 0,
+};
+
+async function fetchVietQrBanks() {
+  const now = Date.now();
+  if (vietQrBankCache.items && vietQrBankCache.expiresAt > now) {
+    return { data: vietQrBankCache.items, cached: true };
+  }
+
+  const headers = { Accept: 'application/json' };
+  if (process.env.VIETQR_CLIENT_ID) headers['x-client-id'] = process.env.VIETQR_CLIENT_ID;
+  if (process.env.VIETQR_API_KEY) headers['x-api-key'] = process.env.VIETQR_API_KEY;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch('https://api.vietqr.io/v2/banks', {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (resp.ok) {
+      const json = await resp.json();
+      if (json?.code === '00' && Array.isArray(json.data) && json.data.length > 0) {
+        const normalized = json.data.map((b) => ({
+          id: b.id,
+          code: b.code || '',
+          bin: b.bin || '',
+          shortName: b.shortName || b.short_name || b.code || '',
+          name: b.name || '',
+          logo: b.logo || '',
+          swift_code: b.swift_code || '',
+          transferSupported: Number(b.transferSupported ?? b.isTransfer ?? 1),
+        }));
+        vietQrBankCache = {
+          items: normalized,
+          expiresAt: now + 12 * 60 * 60 * 1000,
+        };
+        return { data: normalized, cached: false };
+      }
+    }
+  } catch (err) {
+    console.warn('[VietQR Banks Warning]: Falling back to built-in bank catalog:', err.message);
+  }
+
+  return { data: vietQrBankCache.items || FALLBACK_VIETQR_BANKS, fallback: true };
+}
 
 async function attachOwnerPreviews(rows, orgId) {
   const ownerIds = Array.from(new Set((rows || []).map((r) => r.owner_id).filter(Boolean)));
@@ -41,6 +109,9 @@ async function attachOwnerPreviews(rows, orgId) {
  * - RESIDENT: R trên tòa có hợp đồng / giữ chỗ của mình
  */
 async function checkBuildingAccess(req, buildingId, requiredAction = 'read') {
+  if (!buildingId || !UUID_RE.test(String(buildingId))) {
+    return { allowed: false, status: 404, message: 'Không tìm thấy tòa nhà.' };
+  }
   const userId = req.user.sub;
   const orgId = req.user.org_id;
   const userRoleCodes = getUserRoleCodes(req);
@@ -114,6 +185,12 @@ async function checkBuildingAccess(req, buildingId, requiredAction = 'read') {
            SELECT 1 FROM contract c
            JOIN tenant t ON t.id = c.primary_tenant_id
            WHERE c.building_id = b.id AND t.person_id = $2
+         )
+         OR EXISTS (
+           SELECT 1 FROM contract c
+           JOIN contract_occupant co ON co.contract_id = c.id
+           JOIN tenant t_occ ON t_occ.id = co.tenant_id
+           WHERE c.building_id = b.id AND t_occ.person_id = $2
          )
          OR EXISTS (
            SELECT 1 FROM reservation rsv
@@ -210,10 +287,16 @@ router.get('/', authenticateToken, async (req, res) => {
       sql += mgrSql;
     } else if (isResident) {
       params.push(req.user.person_id);
+      const pIdx = params.length;
       sql += ` AND b.id IN (
         SELECT c.building_id FROM contract c
         JOIN tenant t ON t.id = c.primary_tenant_id
-        WHERE t.person_id = $${params.length}
+        WHERE t.person_id = $${pIdx}
+        UNION
+        SELECT c.building_id FROM contract c
+        JOIN contract_occupant co ON co.contract_id = c.id
+        JOIN tenant t_occ ON t_occ.id = co.tenant_id
+        WHERE t_occ.person_id = $${pIdx}
       )`;
     } else {
       return res.json({ data: [] });
@@ -446,20 +529,39 @@ router.get('/owners', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), as
   }
 });
 
-router.get('/:id', authenticateToken, async (req, res) => {
-  const { id } = req.params;
-  const check = await checkBuildingAccess(req, id, 'read');
-  if (!check.allowed) {
-    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+/**
+ * GET /api/v1/buildings/banks
+ * Danh mục ngân hàng Việt Nam từ VietQR.io (dùng cho dropdown chọn ngân hàng khi tạo/sửa tòa nhà)
+ */
+router.get('/banks', authenticateToken, async (_req, res) => {
+  try {
+    const result = await fetchVietQrBanks();
+    res.json({ data: result.data, cached: Boolean(result.cached), fallback: Boolean(result.fallback) });
+  } catch (err) {
+    console.error('[VietQR Banks Error]:', err);
+    res.json({ data: FALLBACK_VIETQR_BANKS, fallback: true });
   }
+});
 
-  const zones = await pool.query(
-    'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
-    [id]
-  );
-  const [withOwner] = await attachOwnerPreviews([check.building], req.user.org_id);
+router.get('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const check = await checkBuildingAccess(req, id, 'read');
+    if (!check.allowed) {
+      return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+    }
 
-  res.json({ data: { ...withOwner, zones: zones.rows } });
+    const zones = await pool.query(
+      'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
+      [id]
+    );
+    const [withOwner] = await attachOwnerPreviews([check.building], req.user.org_id);
+
+    res.json({ data: { ...withOwner, zones: zones.rows } });
+  } catch (err) {
+    console.error('[Building Detail Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải thông tin tòa nhà.' });
+  }
 });
 
 /**
