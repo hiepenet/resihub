@@ -30,6 +30,8 @@ services:
       APP_DATABASE_URL: postgres://resihub_app:resihub_app_secret@postgres:5432/${POSTGRES_DB:-resihub}
       JWT_SECRET: ${JWT_SECRET:-resihub_dev_jwt_secret_key_very_secure_12345}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-resihub_dev_jwt_refresh_secret_key_very_secure_67890}
+      VIETQR_CLIENT_ID: ${VIETQR_CLIENT_ID:-}
+      VIETQR_API_KEY: ${VIETQR_API_KEY:-}
       CORS_ORIGIN: "http://localhost:3000"
     ports:
       - "5000:5000"

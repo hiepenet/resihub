@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2,
@@ -25,6 +25,7 @@ import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
+import { Select } from '../../../components/ui/Select';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
@@ -44,6 +45,8 @@ export function BuildingsPage() {
   const [buildings, setBuildings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [banks, setBanks] = useState([]);
+  const [banksLoading, setBanksLoading] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -63,6 +66,9 @@ export function BuildingsPage() {
     address: '',
     owner_id: '',
     bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
     account_number: '',
     account_holder: '',
   });
@@ -79,9 +85,51 @@ export function BuildingsPage() {
     }
   }, [toast]);
 
+  const loadBanks = useCallback(async () => {
+    setBanksLoading(true);
+    try {
+      const res = await buildingsService.listBanks();
+      setBanks(Array.isArray(res?.data) ? res.data : []);
+    } catch {
+      setBanks([]);
+    } finally {
+      setBanksLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
-  }, [loadData]);
+    loadBanks();
+  }, [loadData, loadBanks]);
+
+  const bankOptions = useMemo(() => {
+    const mapped = banks.map((b) => {
+      const shortName = b.shortName || b.short_name || b.code || b.name;
+      return {
+        value: shortName,
+        label: b.code ? `${shortName} (${b.code})` : shortName,
+        sublabel: b.name || '',
+        badge: b.bin ? `BIN ${b.bin}` : '',
+        logo: b.logo || '',
+        searchText: `${shortName} ${b.code || ''} ${b.bin || ''} ${b.name || ''}`,
+        bank: b,
+      };
+    });
+
+    const cur = String(form.bank_name || '').trim();
+    if (cur && !mapped.some((o) => o.value === cur)) {
+      mapped.unshift({
+        value: cur,
+        label: cur,
+        sublabel: 'Ngân hàng hiện tại',
+        badge: form.bank_bin ? `BIN ${form.bank_bin}` : '',
+        logo: form.bank_logo || '',
+        searchText: cur,
+        bank: null,
+      });
+    }
+    return mapped;
+  }, [banks, form.bank_name, form.bank_bin, form.bank_logo]);
 
   const openCreate = () => {
     setEditing(null);
@@ -90,12 +138,17 @@ export function BuildingsPage() {
     setOwnerPreview(null);
     setOwnerLookupError('');
     setOwnerChanged(false);
+    const defaultBank =
+      banks.find((b) => (b.shortName || '').toLowerCase() === 'vietcombank' || b.code === 'VCB') || null;
     setForm({
       name: '',
       code: '',
       address: '',
       owner_id: '',
-      bank_name: 'Vietcombank',
+      bank_name: defaultBank ? defaultBank.shortName || 'Vietcombank' : 'Vietcombank',
+      bank_code: defaultBank?.code || 'VCB',
+      bank_bin: defaultBank?.bin || '970436',
+      bank_logo: defaultBank?.logo || '',
       account_number: '',
       account_holder: '',
     });
@@ -111,12 +164,24 @@ export function BuildingsPage() {
     setOwnerLookupError('');
     setOwnerChanged(false);
     const pa = b.payment_account || b.lease_terms?.payment_account || {};
+    const matchedBank =
+      banks.find(
+        (bk) =>
+          (pa.bank_code && bk.code === pa.bank_code) ||
+          (pa.bank_bin && bk.bin === pa.bank_bin) ||
+          (pa.bank_name &&
+            ((bk.shortName || '').toLowerCase() === String(pa.bank_name).toLowerCase() ||
+              (bk.code || '').toLowerCase() === String(pa.bank_name).toLowerCase()))
+      ) || null;
     setForm({
       name: b.name || '',
       code: b.code || '',
       address: b.address || '',
       owner_id: b.owner_id || '',
-      bank_name: pa.bank_name || '',
+      bank_name: matchedBank ? matchedBank.shortName : pa.bank_name || '',
+      bank_code: pa.bank_code || matchedBank?.code || '',
+      bank_bin: pa.bank_bin || matchedBank?.bin || '',
+      bank_logo: pa.bank_logo || matchedBank?.logo || '',
       account_number: pa.account_number || '',
       account_holder: pa.account_holder || '',
     });
@@ -233,6 +298,9 @@ export function BuildingsPage() {
         ...ownerPayload,
         payment_account: {
           bank_name: form.bank_name.trim(),
+          bank_code: form.bank_code || undefined,
+          bank_bin: form.bank_bin || undefined,
+          bank_logo: form.bank_logo || undefined,
           account_number: form.account_number.trim(),
           account_holder: form.account_holder.trim(),
         },
@@ -592,25 +660,42 @@ export function BuildingsPage() {
             <p className="text-xs font-semibold text-slate-700 mb-2.5">
               Tài khoản ngân hàng nhận tiền thuê / phí dịch vụ
             </p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <Input
-                label="Ngân hàng"
-                placeholder="Vietcombank"
-                value={form.bank_name}
-                onChange={(e) => setForm({ ...form, bank_name: e.target.value })}
-              />
-              <Input
-                label="Số tài khoản"
-                placeholder="001100..."
-                value={form.account_number}
-                onChange={(e) => setForm({ ...form, account_number: e.target.value })}
-              />
-              <Input
-                label="Chủ tài khoản"
-                placeholder="CONG TY..."
-                value={form.account_holder}
-                onChange={(e) => setForm({ ...form, account_holder: e.target.value })}
-              />
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+              <div className="sm:col-span-5">
+                <Select
+                  label="Ngân hàng (VietQR.io)"
+                  placeholder={banksLoading ? 'Đang tải ngân hàng VietQR...' : '-- Chọn ngân hàng --'}
+                  searchPlaceholder="Tìm tên NH, mã VCB, TCB, MB, mã BIN..."
+                  value={form.bank_name}
+                  onValueChange={(val, rawOpt) => {
+                    const chosen = rawOpt?.bank || null;
+                    setForm((prev) => ({
+                      ...prev,
+                      bank_name: val,
+                      bank_code: chosen?.code || '',
+                      bank_bin: chosen?.bin || '',
+                      bank_logo: chosen?.logo || '',
+                    }));
+                  }}
+                  options={bankOptions}
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <Input
+                  label="Số tài khoản"
+                  placeholder="001100..."
+                  value={form.account_number}
+                  onChange={(e) => setForm({ ...form, account_number: e.target.value })}
+                />
+              </div>
+              <div className="sm:col-span-4">
+                <Input
+                  label="Chủ tài khoản"
+                  placeholder="CONG TY..."
+                  value={form.account_holder}
+                  onChange={(e) => setForm({ ...form, account_holder: e.target.value })}
+                />
+              </div>
             </div>
           </div>
 

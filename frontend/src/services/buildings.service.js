@@ -6,6 +6,7 @@ export const buildingsService = {
   checkCode: (code) => api.get('/api/v1/buildings/check-code', { params: { code } }).then((r) => r.data),
   lookupOwner: (identifier) => api.get('/api/v1/buildings/lookup-owner', { params: { identifier } }).then((r) => r.data),
   listOwners: () => api.get('/api/v1/buildings/owners').then((r) => r.data),
+  listBanks: () => api.get('/api/v1/buildings/banks').then((r) => r.data),
   create: (payload) => api.post('/api/v1/buildings', payload).then((r) => r.data),
   update: (id, payload) => api.patch(`/api/v1/buildings/${id}`, payload).then((r) => r.data),
   remove: (id) => api.delete(`/api/v1/buildings/${id}`).then((r) => r.data),

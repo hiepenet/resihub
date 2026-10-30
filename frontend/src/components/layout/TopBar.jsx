@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Menu, Building2, LogOut, UserCircle2 } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { Menu, Building2, LogOut, ArrowLeft } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
 import { useNotificationStore } from '../../stores/notificationStore';
 import { authService } from '../../services/auth.service';
@@ -8,10 +8,12 @@ import { buildingsService } from '../../services/buildings.service';
 import { NotificationBell } from '../common/NotificationBell';
 import { ProfileModal } from '../common/ProfileModal';
 import { Badge } from '../ui/Badge';
+import { Select } from '../ui/Select';
 import { ROLE_LABELS, ROLE_BADGE_VARIANTS } from '../../constants/roles';
 
 export function TopBar({ onOpenMobileMenu }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const user = useAuthStore((s) => s.user);
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
   const setSelectedBuildingId = useAuthStore((s) => s.setSelectedBuildingId);
@@ -44,6 +46,29 @@ export function TopBar({ onOpenMobileMenu }) {
     return () => window.removeEventListener('resihub:buildings-updated', fetchBuildings);
   }, [setSelectedBuildingId]);
 
+  const buildingOptions = useMemo(
+    () =>
+      buildings.map((b) => ({
+        value: b.id,
+        label: `${b.code} — ${b.name}`,
+        badge: b.code,
+        sublabel: b.address || undefined,
+      })),
+    [buildings]
+  );
+
+  const canGoBack =
+    (typeof window !== 'undefined' && window.history.state && window.history.state.idx > 0) ||
+    location.pathname !== '/admin/dashboard';
+
+  const handleBack = () => {
+    if (typeof window !== 'undefined' && window.history.state && window.history.state.idx > 0) {
+      navigate(-1);
+    } else if (location.pathname !== '/admin/dashboard') {
+      navigate('/admin/dashboard');
+    }
+  };
+
   const handleLogout = async () => {
     try {
       await authService.logout();
@@ -59,34 +84,46 @@ export function TopBar({ onOpenMobileMenu }) {
   return (
     <>
       <header className="h-16 bg-white/95 backdrop-blur border-b border-slate-200/80 px-4 sm:px-6 flex items-center justify-between gap-4 sticky top-0 z-30 no-print">
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
             onClick={onOpenMobileMenu}
+            aria-label="Mở menu điều hướng"
             className="lg:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100"
           >
             <Menu className="w-5 h-5" />
           </button>
 
-          {/* Building Filter */}
+          <button
+            type="button"
+            onClick={handleBack}
+            disabled={!canGoBack}
+            title="Quay lại trang trước"
+            aria-label="Quay lại trang trước"
+            className="w-8 h-8 rounded-xl border border-slate-200 bg-white text-slate-600 hover:text-primary-600 hover:border-primary-300 hover:bg-primary-50/70 disabled:opacity-40 disabled:pointer-events-none flex items-center justify-center shrink-0 transition-all"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+
+          {/* Building Filter (Searchable Dropdown) */}
           {buildings.length > 0 ? (
-            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 max-w-xs sm:max-w-sm">
-              <Building2 className="w-4 h-4 text-primary-500 shrink-0" />
-              <select
+            <div className="w-56 sm:w-80 min-w-0">
+              <Select
+                size="sm"
+                icon={Building2}
+                aria-label="Chọn tòa nhà phạm vi"
                 value={selectedBuildingId}
-                onChange={(e) => setSelectedBuildingId(e.target.value)}
                 disabled={buildings.length === 1}
-                className="bg-transparent text-xs sm:text-sm font-medium text-slate-700 focus:outline-none truncate pr-2 disabled:opacity-90"
-              >
-                {buildings.length > 1 ? (
-                  <option value="">Tất cả tòa nhà trong phạm vi ({buildings.length})</option>
-                ) : null}
-                {buildings.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.code} — {b.name}
-                  </option>
-                ))}
-              </select>
+                placeholder={
+                  buildings.length > 1
+                    ? `Tất cả tòa nhà trong phạm vi (${buildings.length})`
+                    : undefined
+                }
+                searchPlaceholder="Tìm nhanh theo mã hoặc tên tòa nhà..."
+                options={buildingOptions}
+                onChange={(e) => setSelectedBuildingId(e.target.value)}
+                className="bg-slate-50/90 border-slate-200 rounded-xl"
+              />
             </div>
           ) : null}
         </div>
@@ -133,4 +170,3 @@ export function TopBar({ onOpenMobileMenu }) {
 }
 
 export default TopBar;
-
