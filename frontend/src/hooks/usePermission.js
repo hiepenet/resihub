@@ -26,22 +26,23 @@ export function usePermission() {
     isAccountant,
     isStaff,
     isResident,
-    // Helpers theo ma trận quyền PRD 6.2 (SYS_ADMIN = CRUD, MANAGER = CRU trên Tòa/Khu/Tầng/Căn hộ)
+    // Ma trận quyền PRD v2.0 Mục 6.1 & 6.2 (Phương án 2: OWNER 100% Read-Only, không tham gia vận hành)
     canCreateBuildings: isSysAdmin || isManager,
     canManageBuildings: isSysAdmin,
     canEditRealEstate: isSysAdmin || isManager,
     canManageTenants: isSysAdmin || isManager,
     canCreateContracts: isManager,
-    canApproveContracts: isOwner || isManager,
-    canSettleDeposits: isManager,
-    canApproveDepositRefund: isOwner,
-    canManageMeters: isSysAdmin || isManager || isStaff,
+    canApproveContracts: isSysAdmin || isManager,
+    canTerminateContracts: isSysAdmin || isManager,
+    canSettleDeposits: isSysAdmin || isManager || isAccountant,
+    canApproveDepositRefund: isSysAdmin || isManager,
+    canManageMeters: isSysAdmin || isManager || isStaff || isAccountant,
+    canManageServiceCatalog: isSysAdmin || isManager || isAccountant,
     canManageServices: isSysAdmin || isManager,
     canManageInvoices: isSysAdmin || isManager || isAccountant,
     canManagePayments: isSysAdmin || isManager || isAccountant,
     canHandleMaintenance: isSysAdmin || isManager || isStaff,
-    canSendNotifications: isSysAdmin || isOwner || isManager,
+    canSendNotifications: isSysAdmin || isManager,
     canManageUsers: isSysAdmin,
   };
 }
-

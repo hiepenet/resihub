@@ -166,7 +166,7 @@ export const router = createBrowserRouter([
       {
         path: 'contracts',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
             {withSuspense(ContractsPage)}
           </RoleGuard>
         ),
@@ -174,7 +174,7 @@ export const router = createBrowserRouter([
       {
         path: 'contracts/:id',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
             {withSuspense(ContractDetailPage)}
           </RoleGuard>
         ),
@@ -182,7 +182,7 @@ export const router = createBrowserRouter([
       {
         path: 'deposits',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
             {withSuspense(DepositsPage)}
           </RoleGuard>
         ),

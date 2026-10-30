@@ -61,7 +61,7 @@ const BILLING_TYPE_OPTIONS = Object.entries(BILLING_TYPES).map(([value, label]) 
 
 export function ServiceCatalogPage() {
   const toast = useToast();
-  const { canManageServices } = usePermission();
+  const { canManageServiceCatalog } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
   const [catalog, setCatalog] = useState([]);
@@ -251,7 +251,7 @@ export function ServiceCatalogPage() {
                 ) : null}
               </Button>
             </Link>
-            {canManageServices ? (
+            {canManageServiceCatalog ? (
               <Button variant="primary" icon={Plus} onClick={openCreateModal}>
                 Thêm dịch vụ mới
               </Button>
@@ -328,7 +328,7 @@ export function ServiceCatalogPage() {
             title="Chưa có dịch vụ nào khớp bộ lọc"
             description="Thêm dịch vụ tiện ích mới vào danh mục để áp dụng cho các hợp đồng thuê."
             action={
-              canManageServices ? (
+              canManageServiceCatalog ? (
                 <Button variant="primary" size="sm" icon={Plus} onClick={openCreateModal}>
                   Thêm dịch vụ đầu tiên
                 </Button>
@@ -406,7 +406,7 @@ export function ServiceCatalogPage() {
                     <span>{bldg ? `Tòa ${bldg.code}` : 'Toàn hệ thống'}</span>
                   </div>
 
-                  {canManageServices ? (
+                  {canManageServiceCatalog ? (
                     <div className="flex items-center gap-1.5">
                       <Button
                         variant="ghost"

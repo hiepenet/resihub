@@ -75,12 +75,36 @@ const REQUEST_STATUS_BADGE = {
   REJECTED: { label: 'Đã từ chối', variant: 'red' },
 };
 
+function toDateStr(val) {
+  if (!val) return '';
+  const s = String(val);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = new Date(val);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
 function addMonthsStr(dateStr, months) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
   if (Number.isNaN(d.getTime())) return '';
   d.setMonth(d.getMonth() + months);
   return d.toISOString().slice(0, 10);
+}
+
+function getAptSelectStatusLabel(status) {
+  switch (status) {
+    case 'AVAILABLE':
+      return 'Còn trống';
+    case 'RESERVED':
+      return 'Đã giữ chỗ';
+    case 'OCCUPIED':
+      return 'Đang có khách thuê (Tạo HĐ nối tiếp)';
+    case 'MAINTENANCE':
+      return 'Đang bảo trì (Tạo HĐ tương lai)';
+    default:
+      return status;
+  }
 }
 
 const INITIAL_NEW_TENANT = {
@@ -125,7 +149,13 @@ export function ContractsPage() {
   const [lookedUpTenant, setLookedUpTenant] = useState(null);
   const [tenantLookupState, setTenantLookupState] = useState(null);
   const [newTenantForm, setNewTenantForm] = useState(INITIAL_NEW_TENANT);
-  const [dupInfo, setDupInfo] = useState({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+  const [dupInfo, setDupInfo] = useState({
+    isDuplicate: false,
+    inScope: true,
+    canLinkCrossBuilding: false,
+    duplicates: [],
+    message: '',
+  });
   const [dupChecking, setDupChecking] = useState(false);
 
   const [todayStr] = useState(() => new Date().toISOString().slice(0, 10));
@@ -192,7 +222,13 @@ export function ContractsPage() {
     setLookedUpTenant(null);
     setTenantLookupState(null);
     setNewTenantForm(INITIAL_NEW_TENANT);
-    setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+    setDupInfo({
+      isDuplicate: false,
+      inScope: true,
+      canLinkCrossBuilding: false,
+      duplicates: [],
+      message: '',
+    });
     setCreateErrors({});
     setCreateOpen(true);
 
@@ -249,7 +285,13 @@ export function ContractsPage() {
     const shouldCheckId = cleanId.length >= 9;
 
     if (!shouldCheckPhone && !shouldCheckId) {
-      setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+      setDupInfo({
+        isDuplicate: false,
+        inScope: true,
+        canLinkCrossBuilding: false,
+        duplicates: [],
+        message: '',
+      });
       return undefined;
     }
 
@@ -263,6 +305,7 @@ export function ContractsPage() {
         setDupInfo({
           isDuplicate: Boolean(res?.isDuplicate),
           inScope: res?.inScope !== false,
+          canLinkCrossBuilding: Boolean(res?.canLinkCrossBuilding),
           duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
           message: res?.message || '',
         });
@@ -295,7 +338,7 @@ export function ContractsPage() {
   };
 
   const selectableApartments = useMemo(
-    () => apartments.filter((a) => ['AVAILABLE', 'RESERVED'].includes(a.status)),
+    () => apartments.filter((a) => a.status !== 'INACTIVE'),
     [apartments]
   );
 
@@ -316,13 +359,38 @@ export function ContractsPage() {
 
   const handleSelectApartment = (aptId) => {
     const apt = selectableApartments.find((a) => String(a.id) === String(aptId));
-    setCreateForm((p) => ({
-      ...p,
-      apartment_id: aptId,
-      building_id: apt?.building_id || p.building_id,
-      rent_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.rent_amount,
-      deposit_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.deposit_amount,
-    }));
+    let nextStart = '';
+    if (apt && ['OCCUPIED', 'MAINTENANCE'].includes(apt.status)) {
+      const openEnds = contracts
+        .filter(
+          (c) =>
+            String(c.apartment_id) === String(aptId) &&
+            ['ACTIVE', 'RENEWAL_PENDING'].includes(c.status) &&
+            toDateStr(c.end_date) > todayStr
+        )
+        .map((c) => toDateStr(c.end_date))
+        .sort();
+      if (openEnds.length > 0) {
+        nextStart = openEnds[openEnds.length - 1];
+      } else {
+        const tomorrow = new Date(`${todayStr}T00:00:00Z`);
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+        nextStart = tomorrow.toISOString().slice(0, 10);
+      }
+    }
+
+    setCreateForm((p) => {
+      const startToUse = nextStart || p.start_date;
+      return {
+        ...p,
+        apartment_id: aptId,
+        building_id: apt?.building_id || p.building_id,
+        start_date: startToUse,
+        end_date: nextStart ? addMonthsStr(startToUse, 12) : p.end_date,
+        rent_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.rent_amount,
+        deposit_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.deposit_amount,
+      };
+    });
   };
 
   const handleClearLookedUpTenant = () => {
@@ -407,6 +475,18 @@ export function ContractsPage() {
     setTenantLookupState(null);
     setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
     setTenantMode('new');
+  };
+
+  const handleSwitchToCrossBuildingLookup = async () => {
+    const cleanPhone = normalizePhone(newTenantForm.phone);
+    const cleanId = newTenantForm.id_number.trim();
+    const ident = isValidPhone(cleanPhone) ? cleanPhone : cleanId;
+    setTenantMode('existing');
+    setTenantIdentifier(ident);
+    setCreateErrors((prev) => ({ ...prev, primary_tenant_id: undefined }));
+    if (ident) {
+      await handleLookupTenant(ident);
+    }
   };
 
   const handleUseDuplicateTenant = (dup) => {
@@ -941,7 +1021,7 @@ export function ContractsPage() {
         <StatsCard
           title="Yêu cầu từ cư dân"
           value={stats.pendingReqs}
-          subtext="Đề nghị chờ BQL / CĐT xử lý"
+          subtext="Đề nghị chờ Ban Quản Lý xử lý"
           icon={Inbox}
           color="indigo"
           onClick={() => setActiveTab('requests')}
@@ -1044,13 +1124,13 @@ export function ContractsPage() {
             />
 
             <Select
-              label="Căn hộ (Trống / Đã giữ chỗ)"
+              label="Căn hộ"
               required
               placeholder={
                 loadingRefData
                   ? 'Đang tải căn hộ...'
                   : selectableApartments.length === 0
-                  ? 'Không có căn AVAILABLE / RESERVED'
+                  ? 'Không có căn hộ khả dụng'
                   : '-- Chọn căn hộ --'
               }
               value={createForm.apartment_id}
@@ -1058,10 +1138,21 @@ export function ContractsPage() {
               error={createErrors.apartment_id}
               options={selectableApartments.map((a) => ({
                 value: a.id,
-                label: `${a.code} — ${a.status === 'RESERVED' ? 'Đã giữ chỗ' : 'Còn trống'} — Niêm yết: ${formatMoney(a.base_rent)}`,
+                label: `${a.code} — ${getAptSelectStatusLabel(a.status)} — Niêm yết: ${formatMoney(a.base_rent)}`,
               }))}
             />
           </div>
+
+          {selectedApartment && ['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status) ? (
+            <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 flex items-start gap-2">
+              <Calendar className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <span>
+                Căn <strong>{selectedApartment.code}</strong> đang ở trạng thái{' '}
+                <strong>{getAptSelectStatusLabel(selectedApartment.status)}</strong>. Bạn có thể lập hợp đồng nối tiếp / tương lai với{' '}
+                <strong>ngày bắt đầu sau hôm nay</strong> và không chồng lấn kỳ hạn hợp đồng hiện tại.
+              </span>
+            </div>
+          ) : null}
 
           {/* Tra cứu cư dân bảo mật (Know-Before-You-Link) HOẶC Tạo mới cư dân chưa có trong hệ thống */}
           <div className="space-y-3 rounded-2xl border border-slate-200/90 bg-slate-50/60 p-4">
@@ -1110,9 +1201,12 @@ export function ContractsPage() {
                 {selectedTenant ? (
                   <div className="rounded-xl bg-emerald-50/90 border border-emerald-200 px-3.5 py-3 flex items-center justify-between gap-3">
                     <div className="space-y-0.5 text-xs">
-                      <p className="font-semibold text-emerald-900 flex items-center gap-1.5">
+                      <p className="font-semibold text-emerald-900 flex items-center gap-1.5 flex-wrap">
                         <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                        Đã xác thực cư dân: {selectedTenant.masked_name || selectedTenant.full_name}
+                        <span>Đã xác thực cư dân: {selectedTenant.masked_name || selectedTenant.full_name}</span>
+                        {selectedTenant.cross_building_link ? (
+                          <Badge variant="indigo">Liên kết liên tòa (Bảo mật PII)</Badge>
+                        ) : null}
                       </p>
                       <p className="text-emerald-800">
                         SĐT: <span className="font-mono">{selectedTenant.masked_phone || '—'}</span> · CCCD:{' '}
@@ -1219,12 +1313,25 @@ export function ContractsPage() {
                 </div>
 
                 {dupInfo.isDuplicate && dupInfo.inScope === false ? (
-                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                    <span>
-                      {dupInfo.message ||
-                        'Định danh (SĐT/CCCD) này đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý. Không thể tạo trùng hồ sơ.'}
-                    </span>
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <span>
+                        {dupInfo.message ||
+                          'Định danh (SĐT/CCCD) này đã tồn tại trên hệ thống ngoài phạm vi tòa nhà bạn quản lý. Không thể tạo trùng hồ sơ.'}
+                      </span>
+                    </div>
+                    {dupInfo.canLinkCrossBuilding ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="primary"
+                        icon={Search}
+                        onClick={handleSwitchToCrossBuildingLookup}
+                      >
+                        Chuyển sang Tra cứu &amp; Liên kết cư dân
+                      </Button>
+                    ) : null}
                   </div>
                 ) : dupInfo.isDuplicate && dupInfo.duplicates.length > 0 ? (
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-2">
@@ -1412,7 +1519,7 @@ export function ContractsPage() {
                 </p>
                 <p className="text-amber-800 mt-0.5">
                   Theo quy định kiểm soát nội bộ (FR-014), mức giá thuê đề xuất giảm trên 10% so với giá niêm yết. Khi bấm Kích hoạt sau khi đính kèm bản ký, hợp đồng sẽ tự động chuyển sang trạng thái{' '}
-                  <strong>PENDING_APPROVAL</strong> để chờ Chủ đầu tư (<strong>OWNER</strong>) phê duyệt.
+                  <strong>PENDING_APPROVAL</strong> để chờ cấp thẩm quyền nội bộ (<strong>SYS_ADMIN / Quản lý khác — Four-eyes</strong>) phê duyệt.
                 </p>
               </div>
             </div>

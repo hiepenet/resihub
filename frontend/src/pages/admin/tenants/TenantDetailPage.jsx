@@ -68,7 +68,7 @@ export function TenantDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { canManageTenants } = usePermission();
+  const { canManageTenants, isSysAdmin } = usePermission();
 
   const [tenant, setTenant] = useState(null);
   const [idImages, setIdImages] = useState([]);
@@ -582,11 +582,22 @@ export function TenantDetailPage() {
             />
 
             <form onSubmit={handleSaveProfile} className="space-y-4">
+              {tenant.is_shared_profile && !isSysAdmin ? (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="leading-relaxed">
+                    <p className="font-semibold">Hồ sơ định danh chung liên tòa (Shared Profile Lock)</p>
+                    <p className="text-amber-800 mt-0.5">
+                      Cư dân đang đồng thời thuê căn hộ tại tòa nhà khác trên hệ thống. Các thông tin định danh gốc đã xác thực (Họ tên, SĐT, CCCD, Ngày sinh) được khóa đối với Quản lý tòa — chỉ Cư dân tự cập nhật trên Cổng cư dân hoặc Quản trị hệ thống (SYS_ADMIN) điều chỉnh.
+                    </p>
+                  </div>
+                </div>
+              ) : null}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Input
                   label="Họ và tên"
                   required
-                  disabled={!isEditing}
+                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.full_name)}
                   value={form.full_name}
                   onChange={(e) => setForm((p) => ({ ...p, full_name: e.target.value }))}
                   error={errors.full_name}
@@ -595,7 +606,7 @@ export function TenantDetailPage() {
                   label="Số điện thoại"
                   required
                   icon={Phone}
-                  disabled={!isEditing}
+                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.phone)}
                   value={form.phone}
                   onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))}
                   error={errors.phone}
@@ -603,7 +614,7 @@ export function TenantDetailPage() {
                 <Input
                   label="Số CCCD / Hộ chiếu"
                   icon={CreditCard}
-                  disabled={!isEditing}
+                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.id_number)}
                   value={form.id_number}
                   onChange={(e) => setForm((p) => ({ ...p, id_number: e.target.value }))}
                   error={errors.id_number}
@@ -622,7 +633,7 @@ export function TenantDetailPage() {
                 <Input
                   label="Ngày sinh"
                   type="date"
-                  disabled={!isEditing}
+                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.dob)}
                   value={form.dob}
                   onChange={(e) => setForm((p) => ({ ...p, dob: e.target.value }))}
                 />

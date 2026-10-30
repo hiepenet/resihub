@@ -131,7 +131,7 @@ function ContractTimeline({ status }) {
       {
         key: 'PENDING_APPROVAL',
         label: '2. Phê duyệt giá',
-        desc: 'CĐT duyệt nếu giảm > 10%',
+        desc: 'Duyệt nội bộ nếu giảm > 10%',
         state:
           status === 'PENDING_APPROVAL'
             ? 'warning'
@@ -215,7 +215,9 @@ export function ContractDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { isManager, isOwner, user } = usePermission();
+  const { isSysAdmin, isManager, canApproveContracts, canTerminateContracts, user } = usePermission();
+  const currentUserId = user?.id || user?.sub;
+  const canManageOps = isSysAdmin || isManager;
 
   const [contract, setContract] = useState(null);
   const [occupants, setOccupants] = useState([]);
@@ -424,10 +426,10 @@ export function ContractDetailPage() {
     } catch (err) {
       const errCode = err?.response?.data?.code;
       if (errCode === 'PRICE_NEEDS_APPROVAL') {
-        // Backend đã commit chuyển hợp đồng sang PENDING_APPROVAL chờ OWNER duyệt
+        // Backend đã commit chuyển hợp đồng sang PENDING_APPROVAL chờ phê duyệt nội bộ (Four-eyes)
         toast.warning(
           err?.response?.data?.message ||
-            'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ Chủ đầu tư (OWNER) phê duyệt.'
+            'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ cấp thẩm quyền nội bộ (Four-eyes) phê duyệt.'
         );
         setConfirmState({ open: false, type: '' });
         await loadAll();
@@ -698,19 +700,22 @@ export function ContractDetailPage() {
     }
   };
 
-  // Đề xuất chấm dứt hợp đồng (MANAGER)
+  // Thanh lý / Chấm dứt hợp đồng trực tiếp (MANAGER / SYS_ADMIN)
   const handleOpenTerminate = () => {
     if (!contract) return;
     const today = new Date().toISOString().slice(0, 10);
     const sDate = toInputDate(contract.start_date);
     const eDate = toInputDate(contract.end_date);
+    const isPreMoveIn = today < sDate;
     let defaultTermDate = today;
-    if (defaultTermDate < sDate) defaultTermDate = sDate;
+    if (!isPreMoveIn && defaultTermDate < sDate) defaultTermDate = sDate;
     if (defaultTermDate > eDate) defaultTermDate = eDate;
 
     setTerminateForm({
       terminated_date: defaultTermDate,
-      reason: 'Khách thuê trả phòng / Thanh lý hợp đồng',
+      reason: isPreMoveIn
+        ? 'Thanh lý hợp đồng trước ngày nhận phòng theo thỏa thuận'
+        : 'Khách thuê trả phòng / Thanh lý hợp đồng',
       note: '',
     });
     setTerminateOpen(true);
@@ -722,6 +727,10 @@ export function ContractDetailPage() {
       toast.warning('Vui lòng chọn ngày chấm dứt hợp đồng.');
       return;
     }
+    if (!terminateForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do chấm dứt hợp đồng.');
+      return;
+    }
     setSubmittingTerminate(true);
     try {
       const res = await contractsService.terminate(id, {
@@ -729,11 +738,11 @@ export function ContractDetailPage() {
         reason: terminateForm.reason.trim(),
         note: terminateForm.note.trim(),
       });
-      toast.success(res?.message || 'Đã gửi đề xuất chấm dứt hợp đồng chờ OWNER duyệt.');
+      toast.success(res?.message || 'Đã chấm dứt hợp đồng thành công.');
       setTerminateOpen(false);
       await loadAll();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể gửi đề xuất chấm dứt hợp đồng.'));
+      toast.error(extractErrorMessage(err, 'Không thể thực hiện chấm dứt hợp đồng.'));
     } finally {
       setSubmittingTerminate(false);
     }
@@ -905,8 +914,8 @@ export function ContractDetailPage() {
               Xem & In hợp đồng A4
             </Button>
 
-            {/* Nút hành động dành cho MANAGER */}
-            {isManager && contract.status === 'DRAFT' ? (
+            {/* Nút hành động vận hành (MANAGER / SYS_ADMIN) */}
+            {canManageOps && contract.status === 'DRAFT' ? (
               <>
                 <Button variant="outline" icon={Edit3} onClick={handleOpenEditDraft}>
                   Sửa nháp
@@ -924,37 +933,40 @@ export function ContractDetailPage() {
               </>
             ) : null}
 
-            {isManager && contract.status === 'PENDING_APPROVAL' ? (
+            {canManageOps && contract.status === 'PENDING_APPROVAL' ? (
               <Button variant="outline" icon={XCircle} onClick={() => setCancelOpen(true)}>
                 Hủy đề xuất
               </Button>
             ) : null}
 
-            {isManager && ['ACTIVE', 'RENEWAL_PENDING', 'EXPIRED'].includes(contract.status) ? (
+            {canManageOps && ['ACTIVE', 'RENEWAL_PENDING', 'EXPIRED'].includes(contract.status) ? (
               <Button variant="outline" icon={RefreshCw} onClick={handleOpenRenew}>
                 Gia hạn HĐ
               </Button>
             ) : null}
 
-            {isManager && ['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) ? (
+            {canManageOps && ['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) ? (
               <Button variant="outline" icon={FilePlus2} onClick={handleOpenAmend}>
                 Phụ lục điều chỉnh
               </Button>
             ) : null}
 
-            {isManager && contract.status === 'ACTIVE' ? (
-              <>
-                <Button variant="soft" icon={ArrowRightLeft} onClick={handleOpenTransfer}>
-                  Chuyển phòng
-                </Button>
-                <Button variant="danger" icon={XCircle} onClick={handleOpenTerminate}>
-                  Yêu cầu chấm dứt
-                </Button>
-              </>
+            {canManageOps && contract.status === 'ACTIVE' ? (
+              <Button variant="soft" icon={ArrowRightLeft} onClick={handleOpenTransfer}>
+                Chuyển phòng
+              </Button>
             ) : null}
 
-            {/* Nút hành động dành cho OWNER */}
-            {isOwner && contract.status === 'PENDING_APPROVAL' ? (
+            {canTerminateContracts && ['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) ? (
+              <Button variant="danger" icon={XCircle} onClick={handleOpenTerminate}>
+                Thanh lý / Chấm dứt HĐ
+              </Button>
+            ) : null}
+
+            {/* Phê duyệt nội bộ Four-eyes (SYS_ADMIN / Quản lý khác) */}
+            {canApproveContracts &&
+            contract.status === 'PENDING_APPROVAL' &&
+            (!contract.created_by || String(contract.created_by) !== String(currentUserId)) ? (
               <Button
                 variant="success"
                 icon={ShieldCheck}
@@ -964,7 +976,7 @@ export function ContractDetailPage() {
               </Button>
             ) : null}
 
-            {isOwner && contract.status === 'TERMINATION_PENDING' ? (
+            {canApproveContracts && contract.status === 'TERMINATION_PENDING' ? (
               <>
                 <Button variant="outline" icon={XCircle} onClick={() => setRejectTermOpen(true)}>
                   Từ chối chấm dứt
@@ -1003,11 +1015,11 @@ export function ContractDetailPage() {
           <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="leading-relaxed">
             <p className="font-semibold">
-              Hợp đồng đang chờ Chủ đầu tư (OWNER) phê duyệt chấm dứt — Ngày thanh lý dự kiến:{' '}
+              Hợp đồng đang chờ cấp thẩm quyền nội bộ phê duyệt chấm dứt — Ngày thanh lý dự kiến:{' '}
               {formatDate(contract.terminated_at)}
             </p>
             <p className="text-amber-800 mt-0.5">
-              Theo nguyên tắc Four-eyes (FR-017), người đề xuất chấm dứt không được tự phê duyệt. Sau khi OWNER phê duyệt, căn hộ sẽ chuyển sang Bảo trì chờ nghiệm thu và sổ cọc được mở hạn hoàn cọc 5 ngày.
+              Sau khi phê duyệt, căn hộ sẽ được cập nhật trạng thái và sổ cọc được mở hạn hoàn cọc 5 ngày.
             </p>
           </div>
         </div>
@@ -1158,7 +1170,7 @@ export function ContractDetailPage() {
               </div>
             )}
 
-            {isManager ? (
+            {canManageOps ? (
               <FileUpload
                 label="Đính kèm thêm ảnh scan hợp đồng đã ký"
                 value=""
@@ -1184,7 +1196,7 @@ export function ContractDetailPage() {
                 Gỡ thành viên khỏi hợp đồng sẽ không xóa cứng hồ sơ định danh cá nhân (NFR-016).
               </p>
             </div>
-            {isManager ? (
+            {canManageOps ? (
               <Button variant="primary" size="sm" icon={UserPlus} onClick={() => setOccModalOpen(true)}>
                 Thêm thành viên ở cùng
               </Button>
@@ -1245,7 +1257,7 @@ export function ContractDetailPage() {
                 label: 'Thao tác',
                 align: 'center',
                 render: (row) =>
-                  isManager ? (
+                  canManageOps ? (
                     <Button
                       variant="ghost"
                       size="xs"
@@ -1269,10 +1281,10 @@ export function ContractDetailPage() {
             <div>
               <h3 className="text-sm font-semibold text-slate-900">Phụ lục điều chỉnh hợp đồng</h3>
               <p className="text-xs text-slate-500">
-                Mọi thay đổi về giá thuê, tiền cọc hoặc ngày kết thúc sau khi ACTIVE đều lưu vết phiên bản và cần phê duyệt (FR-016).
+                Mọi thay đổi về giá thuê, tiền cọc hoặc ngày kết thúc sau khi ACTIVE đều lưu vết phiên bản và cần phê duyệt nội bộ Four-eyes (FR-016).
               </p>
             </div>
-            {isManager && ['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) ? (
+            {canManageOps && ['ACTIVE', 'RENEWAL_PENDING'].includes(contract.status) ? (
               <Button variant="primary" size="sm" icon={FilePlus2} onClick={handleOpenAmend}>
                 Tạo phụ lục mới
               </Button>
@@ -1299,13 +1311,10 @@ export function ContractDetailPage() {
                   (f) => diff[f] && typeof diff[f] === 'object'
                 );
 
-                const isPureExtension =
-                  Boolean(diff.end_date) && !diff.rent_amount && !diff.deposit_amount;
-                const canManagerApproveExt =
-                  isManager &&
-                  isPureExtension &&
-                  diff.created_by &&
-                  diff.created_by !== user?.id;
+                const isAmendCreator = Boolean(
+                  diff.created_by && currentUserId && String(diff.created_by) === String(currentUserId)
+                );
+                const canApproveThisAmend = canApproveContracts && !isAmendCreator;
 
                 return (
                   <Card key={ver.id} className="p-5">
@@ -1336,21 +1345,19 @@ export function ContractDetailPage() {
                         </p>
                       </div>
 
-                      {isPending && (isOwner || canManagerApproveExt) ? (
+                      {isPending && canApproveThisAmend ? (
                         <div className="flex items-center gap-2">
-                          {isOwner ? (
-                            <Button
-                              variant="outline"
-                              size="xs"
-                              icon={XCircle}
-                              onClick={() => {
-                                setRejectAmendTarget(ver);
-                                setRejectAmendReason('');
-                              }}
-                            >
-                              Từ chối
-                            </Button>
-                          ) : null}
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            icon={XCircle}
+                            onClick={() => {
+                              setRejectAmendTarget(ver);
+                              setRejectAmendReason('');
+                            }}
+                          >
+                            Từ chối
+                          </Button>
                           <Button
                             variant="success"
                             size="xs"
@@ -1360,6 +1367,10 @@ export function ContractDetailPage() {
                             Phê duyệt phụ lục
                           </Button>
                         </div>
+                      ) : isPending && canApproveContracts && isAmendCreator ? (
+                        <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                          Chờ Quản lý khác / SYS_ADMIN duyệt (Four-eyes)
+                        </span>
                       ) : null}
                     </div>
 
@@ -1467,7 +1478,7 @@ export function ContractDetailPage() {
               title="Đơn giá dịch vụ riêng"
               subtitle="Áp dụng riêng cho hợp đồng này (FR-065)"
               action={
-                isManager ? (
+                canManageOps ? (
                   <Button
                     variant="soft"
                     size="xs"
@@ -1505,7 +1516,7 @@ export function ContractDetailPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-slate-900">{formatMoney(sp.unit_price)}</span>
-                      {isManager ? (
+                      {canManageOps ? (
                         <button
                           type="button"
                           onClick={() => handleDeleteServicePrice(sp.id)}
@@ -1727,7 +1738,7 @@ export function ContractDetailPage() {
         open={amendOpen}
         onClose={() => setAmendOpen(false)}
         title="Lập phụ lục điều chỉnh hợp đồng"
-        subtitle="Đề xuất điều chỉnh giá thuê, tiền cọc hoặc ngày kết thúc trình OWNER phê duyệt (FR-016)"
+        subtitle="Đề xuất điều chỉnh giá thuê, tiền cọc hoặc ngày kết thúc trình cấp thẩm quyền nội bộ phê duyệt (FR-016)"
         size="md"
         footer={
           <>
@@ -1927,12 +1938,12 @@ export function ContractDetailPage() {
         </form>
       </Modal>
 
-      {/* Modal Đề xuất chấm dứt hợp đồng (MANAGER) */}
+      {/* Modal Thanh lý / Chấm dứt hợp đồng trực tiếp (MANAGER / SYS_ADMIN) */}
       <Modal
         open={terminateOpen}
         onClose={() => setTerminateOpen(false)}
-        title="Đề xuất chấm dứt hợp đồng"
-        subtitle="Gửi yêu cầu thanh lý sang trạng thái TERMINATION_PENDING chờ Chủ đầu tư (OWNER) phê duyệt (FR-017)"
+        title="Thanh lý / Chấm dứt hợp đồng"
+        subtitle="Chấm dứt hiệu lực hợp đồng ngay lập tức, đồng bộ trạng thái căn hộ và mở hạn hoàn cọc 5 ngày (FR-017, FR-068)"
         size="md"
         footer={
           <>
@@ -1940,7 +1951,7 @@ export function ContractDetailPage() {
               Hủy bỏ
             </Button>
             <Button variant="danger" onClick={handleTerminateSubmit} loading={submittingTerminate}>
-              Gửi đề xuất chấm dứt
+              Xác nhận chấm dứt hợp đồng
             </Button>
           </>
         }
@@ -1950,12 +1961,22 @@ export function ContractDetailPage() {
             label="Ngày chấm dứt hợp đồng"
             type="date"
             required
+            min={
+              toInputDate(contract.start_date) > new Date().toISOString().slice(0, 10)
+                ? new Date().toISOString().slice(0, 10)
+                : toInputDate(contract.start_date)
+            }
+            max={toInputDate(contract.end_date)}
             value={terminateForm.terminated_date}
             onChange={(e) => setTerminateForm((p) => ({ ...p, terminated_date: e.target.value }))}
-            hint={`Phải nằm trong kỳ hạn hợp đồng (${formatDate(contract.start_date)} – ${formatDate(contract.end_date)})`}
+            hint={
+              toInputDate(contract.start_date) > new Date().toISOString().slice(0, 10)
+                ? `Hợp đồng tương lai (chưa nhận phòng): có thể thanh lý từ hôm nay đến ${formatDate(contract.end_date)}`
+                : `Phải nằm trong kỳ hạn hợp đồng (${formatDate(contract.start_date)} – ${formatDate(contract.end_date)})`
+            }
           />
           <Input
-            label="Lý do chấm dứt"
+            label="Lý do chấm dứt (Bắt buộc ghi Audit Log)"
             required
             value={terminateForm.reason}
             onChange={(e) => setTerminateForm((p) => ({ ...p, reason: e.target.value }))}

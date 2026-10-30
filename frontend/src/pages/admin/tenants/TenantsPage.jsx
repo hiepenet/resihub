@@ -89,7 +89,7 @@ const TYPE_FILTER_OPTIONS = [
 export function TenantsPage() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { canManageTenants } = usePermission();
+  const { canManageTenants, isSysAdmin } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
   const [tenants, setTenants] = useState([]);
@@ -411,6 +411,11 @@ export function TenantsPage() {
                 {row.type === 'occupant' ? (
                   <Badge variant="indigo" className="text-[10px] px-1.5 py-0">
                     Ở cùng
+                  </Badge>
+                ) : null}
+                {row.is_shared_profile ? (
+                  <Badge variant="sky" className="text-[10px] px-1.5 py-0">
+                    Liên tòa
                   </Badge>
                 ) : null}
                 {row.status === 'MERGED' ? (
@@ -861,10 +866,22 @@ export function TenantsPage() {
         }
       >
         <form onSubmit={handleEditSubmit} className="space-y-4">
+          {editingTenant?.is_shared_profile && !isSysAdmin ? (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="leading-relaxed">
+                <p className="font-semibold">Hồ sơ định danh chung liên tòa (Shared Profile Lock)</p>
+                <p className="text-amber-800 mt-0.5">
+                  Cư dân này đang đồng thời có hợp đồng hiệu lực tại tòa nhà khác trên hệ thống. Để tránh ghi đè chéo dữ liệu pháp lý, các trường gốc đã có dữ liệu (Họ tên, SĐT, CCCD, Ngày sinh) được khóa đối với Quản lý tòa — chỉ Cư dân tự cập nhật trên Cổng cư dân hoặc Quản trị hệ thống (SYS_ADMIN) điều chỉnh.
+                </p>
+              </div>
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input
               label="Họ và tên"
               required
+              disabled={Boolean(editingTenant?.is_shared_profile && !isSysAdmin && editingTenant?.full_name)}
               value={editForm.full_name}
               onChange={(e) => setEditForm((p) => ({ ...p, full_name: e.target.value }))}
               error={editErrors.full_name}
@@ -873,6 +890,7 @@ export function TenantsPage() {
               label="Số điện thoại"
               required
               icon={Phone}
+              disabled={Boolean(editingTenant?.is_shared_profile && !isSysAdmin && editingTenant?.phone)}
               value={editForm.phone}
               onChange={(e) => setEditForm((p) => ({ ...p, phone: e.target.value }))}
               error={editErrors.phone}
@@ -880,6 +898,7 @@ export function TenantsPage() {
             <Input
               label="Số CCCD / Hộ chiếu"
               icon={CreditCard}
+              disabled={Boolean(editingTenant?.is_shared_profile && !isSysAdmin && editingTenant?.id_number)}
               value={editForm.id_number}
               onChange={(e) => setEditForm((p) => ({ ...p, id_number: e.target.value }))}
               error={editErrors.id_number}
@@ -895,6 +914,7 @@ export function TenantsPage() {
             <Input
               label="Ngày sinh"
               type="date"
+              disabled={Boolean(editingTenant?.is_shared_profile && !isSysAdmin && editingTenant?.dob)}
               value={editForm.dob}
               onChange={(e) => setEditForm((p) => ({ ...p, dob: e.target.value }))}
             />

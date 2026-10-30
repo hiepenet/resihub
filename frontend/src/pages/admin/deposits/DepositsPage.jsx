@@ -80,7 +80,8 @@ function createEmptyDeductionItem() {
 export function DepositsPage() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { isManager, isOwner, canSettleDeposits, canApproveDepositRefund } = usePermission();
+  const { isSysAdmin, isManager, canSettleDeposits, canApproveDepositRefund, user } = usePermission();
+  const currentUserId = user?.id || user?.sub;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
   const [deposits, setDeposits] = useState([]);
@@ -397,7 +398,9 @@ export function DepositsPage() {
       };
 
       const res = await depositsService.submitSettlement(settlementDeposit.id, payload);
-      toast.success(res?.message || 'Đã trình hồ sơ tất toán cọc chờ Chủ đầu tư (OWNER) phê duyệt.');
+      toast.success(
+        res?.message || 'Đã trình hồ sơ tất toán cọc chờ cấp thẩm quyền nội bộ (Four-Eyes) phê duyệt.'
+      );
       setSettlementOpen(false);
       setActiveTab('pending');
       await fetchDeposits();
@@ -621,7 +624,7 @@ export function DepositsPage() {
                 >
                   {canApproveDepositRefund ? 'Xem & Duyệt hoàn cọc' : 'Xem biên bản'}
                 </Button>
-                {canSettleDeposits ? (
+                {(isSysAdmin || isManager) ? (
                   <Button
                     variant="outline"
                     size="xs"
@@ -649,7 +652,7 @@ export function DepositsPage() {
         ),
       },
     ],
-    [canSettleDeposits, canApproveDepositRefund, handleOpenTransactions, handleOpenSettlement]
+    [isSysAdmin, isManager, canSettleDeposits, canApproveDepositRefund, handleOpenTransactions, handleOpenSettlement]
   );
 
   const tabs = [
@@ -665,14 +668,19 @@ export function DepositsPage() {
   ];
 
   // Xác định chế độ hiển thị trong Settlement Modal:
-  // MANAGER có thể lập/sửa khi status thuộc ['HELD', 'SETTLEMENT_DRAFT']
+  // ACCOUNTANT / MANAGER / SYS_ADMIN có thể lập/sửa khi status thuộc ['HELD', 'SETTLEMENT_DRAFT']
   const effectiveDepositStatus = settlementDetail?.status || settlementDeposit?.status;
   const effectiveContractStatus =
     settlementDetail?.contract_status || settlementDeposit?.contract_status;
   const isManagerEditableSettlement =
-    isManager && ['HELD', 'SETTLEMENT_DRAFT'].includes(effectiveDepositStatus);
+    canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(effectiveDepositStatus);
   const isContractReadyForSettlement = ['TERMINATED', 'EXPIRED'].includes(effectiveContractStatus);
   const readonlySettlementData = settlementDetail?.settlement || settlementDeposit?.settlement || null;
+  const isSettlementCreator = Boolean(
+    readonlySettlementData?.created_by &&
+      currentUserId &&
+      String(readonlySettlementData.created_by) === String(currentUserId)
+  );
 
   return (
     <div className="space-y-6">
@@ -697,7 +705,7 @@ export function DepositsPage() {
           onClick={() => setActiveTab('held')}
         />
         <StatsCard
-          title="Chờ OWNER duyệt hoàn"
+          title="Chờ duyệt hoàn cọc"
           value={tabCounts.pending}
           subtext="Biên bản tất toán chờ Four-Eyes"
           icon={Clock}
@@ -941,12 +949,14 @@ export function DepositsPage() {
             ? `Biên bản Tất toán & Hoàn cọc — Căn ${settlementDeposit.apartment_code}`
             : 'Hồ sơ tất toán tiền cọc'
         }
-        subtitle="Quy trình kiểm soát chéo Four-Eyes: Quản lý tòa nhà (MANAGER) lập biên bản & bằng chứng → Chủ đầu tư (OWNER) phê duyệt (FR-024)"
+        subtitle="Quy trình kiểm soát chéo nội bộ Four-Eyes: Kế toán / Quản lý lập biên bản & bằng chứng → SYS_ADMIN / Quản lý khác phê duyệt (FR-024)"
         size="xl"
         footer={
           <div className="flex items-center justify-between w-full flex-wrap gap-2">
             <div>
-              {isManager && effectiveDepositStatus === 'PENDING_APPROVAL' && settlementDeposit ? (
+              {(isSysAdmin || isManager) &&
+              effectiveDepositStatus === 'PENDING_APPROVAL' &&
+              settlementDeposit ? (
                 <Button
                   variant="outline"
                   icon={ShieldAlert}
@@ -958,7 +968,7 @@ export function DepositsPage() {
               ) : null}
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" onClick={() => setSettlementOpen(false)}>
                 Đóng
               </Button>
@@ -971,11 +981,13 @@ export function DepositsPage() {
                   disabled={!isContractReadyForSettlement}
                   onClick={handleSubmitSettlement}
                 >
-                  Trình OWNER phê duyệt tất toán
+                  Gửi phê duyệt tất toán (Four-Eyes)
                 </Button>
               ) : null}
 
-              {isOwner && effectiveDepositStatus === 'PENDING_APPROVAL' ? (
+              {canApproveDepositRefund &&
+              !isSettlementCreator &&
+              effectiveDepositStatus === 'PENDING_APPROVAL' ? (
                 <>
                   <Button
                     variant="danger"
@@ -995,6 +1007,12 @@ export function DepositsPage() {
                     Phê duyệt hoàn cọc
                   </Button>
                 </>
+              ) : canApproveDepositRefund &&
+                isSettlementCreator &&
+                effectiveDepositStatus === 'PENDING_APPROVAL' ? (
+                <span className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg">
+                  Chờ Quản lý khác / SYS_ADMIN duyệt (Four-Eyes)
+                </span>
               ) : null}
             </div>
           </div>
@@ -1035,11 +1053,11 @@ export function DepositsPage() {
               </div>
             ) : null}
 
-            {/* Hiển thị lý do bị OWNER từ chối trước đó (nếu đang SETTLEMENT_DRAFT) */}
+            {/* Hiển thị lý do bị từ chối trước đó (nếu đang SETTLEMENT_DRAFT) */}
             {readonlySettlementData?.rejection_reason ? (
               <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">
                 <p className="font-semibold">
-                  Biên bản trước đó đã bị Chủ đầu tư (OWNER) từ chối — Vui lòng điều chỉnh lại:
+                  Biên bản trước đó đã bị từ chối phê duyệt — Vui lòng điều chỉnh lại:
                 </p>
                 <p className="mt-1">{readonlySettlementData.rejection_reason}</p>
               </div>
@@ -1226,7 +1244,7 @@ export function DepositsPage() {
                       Phát sinh thiếu hụt sau trả phòng (Shortfall): {formatMoney(liveCalc.shortfall)}
                     </p>
                     <p className="mt-0.5">
-                      Tổng khấu trừ &amp; công nợ vượt số cọc đang giữ. Khi OWNER duyệt, hệ thống tự động tạo khoản phải thu sau trả phòng (<code>RECEIVABLE_AFTER_MOVE_OUT</code>).
+                      Tổng khấu trừ &amp; công nợ vượt số cọc đang giữ. Khi phê duyệt tất toán, hệ thống tự động tạo khoản phải thu sau trả phòng (<code>RECEIVABLE_AFTER_MOVE_OUT</code>).
                     </p>
                   </div>
                 ) : null}
