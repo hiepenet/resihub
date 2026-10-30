@@ -11,7 +11,7 @@ import {
 export const receivablesRouter = express.Router();
 const router = express.Router();
 
-const VALID_METHODS = ['BANK_TRANSFER', 'CASH', 'CARD', 'EWALLET', 'OTHER'];
+const VALID_METHODS = ['BANK_TRANSFER', 'CASH', 'CARD', 'EWALLET', 'E_WALLET', 'QR_CODE', 'OTHER'];
 
 /**
  * Helper áp dụng số tiền thanh toán đã xác nhận vào Hóa đơn & Công nợ (FR-038, FR-039, FR-040)
@@ -60,7 +60,7 @@ async function applyPaymentToInvoice(client, invoiceId, payAmount) {
 router.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, status, method, overpayment_only, search } = req.query;
     const orgId = req.user.org_id;
@@ -141,7 +141,7 @@ router.get(
 router.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { invoice_id, receivable_id, amount, method = 'BANK_TRANSFER', reference_code, note, proof_image } = req.body;
     const orgId = req.user.org_id;
@@ -293,7 +293,7 @@ router.post(
 router.patch(
   '/:id/confirm',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { note } = req.body;
@@ -362,7 +362,7 @@ router.patch(
 router.patch(
   '/:id/reject',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -426,7 +426,7 @@ router.patch(
 receivablesRouter.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, status = 'OPEN,PARTIALLY_PAID', type } = req.query;
     const orgId = req.user.org_id;

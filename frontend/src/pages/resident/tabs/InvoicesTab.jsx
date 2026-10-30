@@ -15,6 +15,7 @@ import {
   Clock,
   Send,
   Calendar,
+  AlertTriangle,
 } from 'lucide-react';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -39,22 +40,29 @@ const LINE_TYPE_META = {
   ELECTRICITY: { label: 'Tiền điện', icon: Zap, badgeVariant: 'amber' },
   WATER: { label: 'Tiền nước', icon: Droplets, badgeVariant: 'indigo' },
   SERVICE: { label: 'Dịch vụ tiện ích', icon: Sparkles, badgeVariant: 'emerald' },
+  LATE_FEE: { label: 'Phạt chậm thanh toán', icon: AlertTriangle, badgeVariant: 'red' },
+  ADJUSTMENT: { label: 'Điều chỉnh', icon: FileText, badgeVariant: 'purple' },
   OTHER: { label: 'Khoản mục khác', icon: FileText, badgeVariant: 'slate' },
 };
 
 const PAYMENT_METHODS = [
-  { value: 'BANK_TRANSFER', label: 'Chuyển khoản ngân hàng (Internet Banking)' },
-  { value: 'QR_CODE', label: 'Quét mã VietQR' },
-  { value: 'E_WALLET', label: 'Ví điện tử (MoMo / ZaloPay / VNPay)' },
-  { value: 'CASH', label: 'Tiền mặt tại quầy Ban Quản Lý' },
+  { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
+  { value: 'QR_CODE', label: 'QR Code' },
+  { value: 'E_WALLET', label: 'Ví điện tử' },
+  { value: 'CASH', label: 'Tiền mặt' },
+  { value: 'CARD', label: 'Thẻ' },
+  { value: 'OTHER', label: 'Khác' },
 ];
 
 const PAYMENT_METHOD_LABELS = {
-  BANK_TRANSFER: 'Chuyển khoản NH',
-  TRANSFER: 'Chuyển khoản NH',
-  QR_CODE: 'VietQR',
+  BANK_TRANSFER: 'Chuyển khoản',
+  TRANSFER: 'Chuyển khoản',
+  QR_CODE: 'QR Code',
   E_WALLET: 'Ví điện tử',
+  EWALLET: 'Ví điện tử',
   CASH: 'Tiền mặt',
+  CARD: 'Thẻ',
+  OTHER: 'Khác',
 };
 
 const DEFAULT_CORPORATE_ACCOUNT = {

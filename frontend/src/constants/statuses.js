@@ -55,7 +55,38 @@ export const DEPOSIT_STATUS = {
   PENDING_APPROVAL: { label: 'Chờ duyệt hoàn cọc', variant: 'amber' },
   PARTIALLY_REFUNDED: { label: 'Hoàn cọc một phần', variant: 'indigo' },
   REFUNDED: { label: 'Đã tất toán / Hoàn đủ', variant: 'emerald' },
+  TRANSFERRED: { label: 'Đã kết chuyển', variant: 'indigo' },
   DISPUTED: { label: 'Đang tranh chấp', variant: 'red' },
+};
+
+export const PAYMENT_METHOD_LABELS = {
+  BANK_TRANSFER: 'Chuyển khoản',
+  TRANSFER: 'Chuyển khoản',
+  QR_CODE: 'QR Code',
+  E_WALLET: 'Ví điện tử',
+  EWALLET: 'Ví điện tử',
+  CASH: 'Tiền mặt',
+  CARD: 'Thẻ',
+  OTHER: 'Khác',
+};
+
+export const PAYMENT_METHOD_OPTIONS = [
+  { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
+  { value: 'QR_CODE', label: 'QR Code' },
+  { value: 'E_WALLET', label: 'Ví điện tử' },
+  { value: 'CASH', label: 'Tiền mặt' },
+  { value: 'CARD', label: 'Thẻ' },
+  { value: 'OTHER', label: 'Khác' },
+];
+
+export const INVOICE_LINE_TYPES = {
+  RENT: { label: 'Tiền thuê phòng', variant: 'sky' },
+  ELECTRICITY: { label: 'Tiền điện', variant: 'amber' },
+  WATER: { label: 'Tiền nước', variant: 'sky' },
+  SERVICE: { label: 'Dịch vụ tiện ích', variant: 'indigo' },
+  LATE_FEE: { label: 'Phạt chậm thanh toán', variant: 'red' },
+  ADJUSTMENT: { label: 'Điều chỉnh', variant: 'purple' },
+  OTHER: { label: 'Khoản khác', variant: 'slate' },
 };
 
 export const INVOICE_STATUS = {

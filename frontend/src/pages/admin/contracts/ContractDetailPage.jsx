@@ -38,6 +38,7 @@ import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { contractsService } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
+import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
@@ -59,6 +60,8 @@ const RELATIONSHIP_OPTIONS = [
 ];
 
 const SERVICE_CODE_OPTIONS = [
+  { value: 'ELECTRICITY', label: 'Điện sinh hoạt (kWh)' },
+  { value: 'WATER', label: 'Nước sinh hoạt (m³)' },
   { value: 'INTERNET', label: 'Internet / Wifi (INTERNET)' },
   { value: 'MOTORBIKE_PARKING', label: 'Gửi xe máy xăng (MOTORBIKE_PARKING)' },
   { value: 'ELECTRICBIKE_PARKING', label: 'Gửi xe đạp/máy điện (ELECTRICBIKE_PARKING)' },
@@ -307,6 +310,12 @@ export function ContractDetailPage() {
   const [rejectTermReason, setRejectTermReason] = useState('');
   const [submittingRejectTerm, setSubmittingRejectTerm] = useState(false);
 
+  // Reject PENDING_APPROVAL contract (return to DRAFT) + Four-eyes self-approval setting
+  const [allowSelfApproval, setAllowSelfApproval] = useState(false);
+  const [rejectPriceOpen, setRejectPriceOpen] = useState(false);
+  const [rejectPriceReason, setRejectPriceReason] = useState('');
+  const [submittingRejectPrice, setSubmittingRejectPrice] = useState(false);
+
   // Occupants Add / Remove
   const [occModalOpen, setOccModalOpen] = useState(false);
   const [occForm, setOccForm] = useState({
@@ -335,16 +344,18 @@ export function ContractDetailPage() {
     if (!id) return;
     setLoading(true);
     try {
-      const [cRes, oRes, aRes, spRes] = await Promise.all([
+      const [cRes, oRes, aRes, spRes, settingsRes] = await Promise.all([
         contractsService.getById(id),
         contractsService.listOccupants(id).catch(() => ({ data: [] })),
         contractsService.listAmendments(id).catch(() => ({ data: [] })),
         contractsService.listServicePrices(id).catch(() => ({ data: [] })),
+        usersService.getSettings().catch(() => null),
       ]);
       setContract(cRes?.data || null);
       setOccupants(Array.isArray(oRes?.data) ? oRes.data : []);
       setAmendments(Array.isArray(aRes?.data) ? aRes.data : []);
       setServicePrices(Array.isArray(spRes?.data) ? spRes.data : []);
+      setAllowSelfApproval(Boolean(settingsRes?.data?.approval_config?.allow_self_approval));
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải thông tin chi tiết hợp đồng.'));
     } finally {
@@ -748,6 +759,27 @@ export function ContractDetailPage() {
     }
   };
 
+  // Từ chối phê duyệt hợp đồng giá ưu đãi -> trả về nháp (DRAFT)
+  const handleRejectPriceSubmit = async (e) => {
+    e?.preventDefault();
+    if (!rejectPriceReason.trim()) {
+      toast.warning('Vui lòng nhập lý do từ chối phê duyệt hợp đồng.');
+      return;
+    }
+    setSubmittingRejectPrice(true);
+    try {
+      const res = await contractsService.rejectContract(id, rejectPriceReason.trim());
+      toast.success(res?.message || 'Đã từ chối phê duyệt, hợp đồng được trả về trạng thái bản nháp.');
+      setRejectPriceOpen(false);
+      setRejectPriceReason('');
+      await loadAll();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể từ chối phê duyệt hợp đồng.'));
+    } finally {
+      setSubmittingRejectPrice(false);
+    }
+  };
+
   // Từ chối chấm dứt (OWNER)
   const handleRejectTerminationSubmit = async (e) => {
     e?.preventDefault();
@@ -963,17 +995,31 @@ export function ContractDetailPage() {
               </Button>
             ) : null}
 
-            {/* Phê duyệt nội bộ Four-eyes (SYS_ADMIN / Quản lý khác) */}
+            {/* Phê duyệt / Từ chối nội bộ Four-eyes (SYS_ADMIN / Quản lý khác hoặc cho phép tự duyệt) */}
             {canApproveContracts &&
             contract.status === 'PENDING_APPROVAL' &&
-            (!contract.created_by || String(contract.created_by) !== String(currentUserId)) ? (
-              <Button
-                variant="success"
-                icon={ShieldCheck}
-                onClick={() => setConfirmState({ open: true, type: 'approve' })}
-              >
-                Phê duyệt HĐ giá ưu đãi
-              </Button>
+            (!contract.created_by ||
+              String(contract.created_by) !== String(currentUserId) ||
+              allowSelfApproval) ? (
+              <>
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    setRejectPriceReason('');
+                    setRejectPriceOpen(true);
+                  }}
+                >
+                  Từ chối (trả về nháp)
+                </Button>
+                <Button
+                  variant="success"
+                  icon={ShieldCheck}
+                  onClick={() => setConfirmState({ open: true, type: 'approve' })}
+                >
+                  Phê duyệt HĐ giá ưu đãi
+                </Button>
+              </>
             ) : null}
 
             {canApproveContracts && contract.status === 'TERMINATION_PENDING' ? (
@@ -1314,7 +1360,7 @@ export function ContractDetailPage() {
                 const isAmendCreator = Boolean(
                   diff.created_by && currentUserId && String(diff.created_by) === String(currentUserId)
                 );
-                const canApproveThisAmend = canApproveContracts && !isAmendCreator;
+                const canApproveThisAmend = canApproveContracts && (!isAmendCreator || allowSelfApproval);
 
                 return (
                   <Card key={ver.id} className="p-5">
@@ -1509,7 +1555,9 @@ export function ContractDetailPage() {
                     className="p-3 rounded-lg border border-slate-200 flex items-center justify-between gap-2 text-xs"
                   >
                     <div>
-                      <p className="font-semibold text-slate-800">{sp.service_code}</p>
+                      <p className="font-semibold text-slate-800">
+                        {SERVICE_CODE_OPTIONS.find((opt) => opt.value === sp.service_code)?.label || sp.service_code}
+                      </p>
                       <p className="text-slate-500">
                         Hiệu lực từ: {formatDate(sp.effective_from)}
                       </p>
@@ -1988,6 +2036,41 @@ export function ContractDetailPage() {
             placeholder="Tình trạng sơ bộ, lịch hẹn kiểm tra phòng..."
             value={terminateForm.note}
             onChange={(e) => setTerminateForm((p) => ({ ...p, note: e.target.value }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Từ chối phê duyệt hợp đồng giá ưu đãi -> trả về nháp */}
+      <Modal
+        open={rejectPriceOpen}
+        onClose={() => setRejectPriceOpen(false)}
+        title="Từ chối phê duyệt hợp đồng (trả về bản nháp)"
+        subtitle="Hợp đồng sẽ chuyển về trạng thái Bản nháp (DRAFT) để điều chỉnh lại mức giá hoặc điều khoản"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setRejectPriceOpen(false)} disabled={submittingRejectPrice}>
+              Hủy
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleRejectPriceSubmit}
+              loading={submittingRejectPrice}
+            >
+              Xác nhận từ chối
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleRejectPriceSubmit} className="space-y-3">
+          <Input
+            label="Lý do từ chối phê duyệt"
+            required
+            multiline
+            rows={3}
+            placeholder="Nhập lý do từ chối mức giá ưu đãi để người tạo điều chỉnh..."
+            value={rejectPriceReason}
+            onChange={(e) => setRejectPriceReason(e.target.value)}
           />
         </form>
       </Modal>

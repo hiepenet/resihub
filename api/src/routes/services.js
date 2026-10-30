@@ -6,6 +6,7 @@ import {
   scopedBuildingFilter,
   checkBuildingAccess,
 } from '../services/ownerScope.js';
+import { roundVND } from '../services/pricing.js';
 
 export const serviceCatalogRouter = express.Router();
 export const serviceSubscriptionsRouter = express.Router();
@@ -21,7 +22,7 @@ function computeProrata(unitPrice, quantity, targetDateStr, mode = 'subscribe') 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const day = dt.getDate();
   const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  return Math.round((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
+  return roundVND((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
 }
 
 /**
@@ -55,7 +56,7 @@ serviceCatalogRouter.get('/', authenticateToken, async (req, res) => {
 serviceCatalogRouter.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { code, name, category = 'UTILITY', billing_type = 'FIXED', unit = 'tháng', unit_price = 0, description, building_id } = req.body;
     const orgId = req.user.org_id;
@@ -104,7 +105,7 @@ serviceCatalogRouter.post(
 serviceCatalogRouter.patch(
   '/:id',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { name, category, billing_type, unit, unit_price, description, is_active } = req.body;
@@ -153,7 +154,7 @@ serviceCatalogRouter.patch(
 serviceSubscriptionsRouter.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, status } = req.query;
     const orgId = req.user.org_id;

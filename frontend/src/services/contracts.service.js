@@ -7,6 +7,11 @@ export const contractsService = {
   update: (id, payload) => api.patch(`/api/v1/contracts/${id}`, payload).then((r) => r.data),
   activate: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/activate`, payload).then((r) => r.data),
   approve: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/approve`, payload).then((r) => r.data),
+  reject: (id, payload) => api.post(`/api/v1/contracts/${id}/reject`, payload).then((r) => r.data),
+  rejectContract: (id, reason) =>
+    api
+      .post(`/api/v1/contracts/${id}/reject`, typeof reason === 'string' ? { reason } : reason)
+      .then((r) => r.data),
   cancel: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/cancel`, payload).then((r) => r.data),
   uploadScan: (id, payload) => api.post(`/api/v1/contracts/${id}/scan`, payload).then((r) => r.data),
 

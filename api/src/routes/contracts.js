@@ -8,14 +8,13 @@ import { refundDeadline } from '../services/deadlines.js';
 import { splitDepositOpening } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
+import { checkFourEyesOrWarn } from '../services/pricing.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
   getManagerBuildingIds,
-  getAccountantBuildingIds,
   ownerBuildingFilter,
   managerBuildingFilter,
-  accountantBuildingFilter,
   logAccessDenied,
 } from '../services/ownerScope.js';
 import {
@@ -78,26 +77,11 @@ async function checkContractAccess(req, contractId) {
     if (mgrIds.includes(meta.building_id)) {
       return { ok: true, meta };
     }
-    if (!userRoles.includes('ACCOUNTANT')) {
-      await logAccessDenied(req, 'contract', contractId, 'MANAGER is not assigned to contract building');
-      return {
-        ok: false,
-        status: 403,
-        body: { code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' },
-      };
-    }
-  }
-
-  if (userRoles.includes('ACCOUNTANT')) {
-    const accIds = await getAccountantBuildingIds(req.user.sub, req.user.org_id);
-    if (accIds.includes(meta.building_id)) {
-      return { ok: true, meta };
-    }
-    await logAccessDenied(req, 'contract', contractId, 'ACCOUNTANT is not assigned to contract building');
+    await logAccessDenied(req, 'contract', contractId, 'MANAGER is not assigned to contract building');
     return {
       ok: false,
       status: 403,
-      body: { code: 'ACCESS_DENIED', message: 'Bạn không được phân công phụ trách kế toán tòa nhà này.' },
+      body: { code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý hợp đồng của tòa nhà này.' },
     };
   }
 
@@ -135,17 +119,15 @@ async function checkContractAccess(req, contractId) {
  * - SYS_ADMIN: Xem toàn bộ hợp đồng trong tổ chức (R)
  * - OWNER: Xem hợp đồng thuộc các tòa mình sở hữu (100% Read-Only theo PRD 6.2)
  * - MANAGER: Xem hợp đồng thuộc tòa được gán (CRU)
- * - ACCOUNTANT: Xem hợp đồng thuộc tòa được gán (R)
  * - RESIDENT: Xem hợp đồng của chính mình (R)
  */
-router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const userRoles = getUserRoleCodes(req);
     const isSysAdmin = userRoles.includes('SYS_ADMIN');
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
-    const isAccountant = userRoles.includes('ACCOUNTANT');
     const isResident = userRoles.includes('RESIDENT');
     const { building_id, status } = req.query;
 
@@ -161,12 +143,6 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER',
         if (!mgrIds.includes(building_id)) {
           await logAccessDenied(req, 'building', building_id, 'MANAGER requested contracts of unassigned building');
           return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công quản lý tòa nhà này.' });
-        }
-      } else if (isAccountant) {
-        const accIds = await getAccountantBuildingIds(req.user.sub, orgId);
-        if (!accIds.includes(building_id)) {
-          await logAccessDenied(req, 'building', building_id, 'ACCOUNTANT requested contracts of unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không được phân công phụ trách tòa nhà này.' });
         }
       }
     }
@@ -192,9 +168,6 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER',
     } else if (isManager) {
       const { sql: mgrSql } = await managerBuildingFilter('c.building_id', req.user.sub, orgId, params);
       sql += mgrSql;
-    } else if (isAccountant) {
-      const { sql: accSql } = await accountantBuildingFilter('c.building_id', req.user.sub, orgId, params);
-      sql += accSql;
     } else if (isResident) {
       params.push(req.user.person_id);
       sql += ` AND p.id = $${params.length}`;
@@ -554,7 +527,7 @@ router.post('/requests/:id/reject', authenticateToken, requireRole(['SYS_ADMIN',
 /**
  * GET /api/v1/contracts/:id
  */
-router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   try {
     const access = await checkContractAccess(req, id);
@@ -641,6 +614,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     apartment_id,
     building_id,
     primary_tenant_id,
+    reservation_id,
     new_tenant,
     start_date,
     end_date,
@@ -869,6 +843,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         contract.id,
         JSON.stringify({
           ...contract,
+          ...(reservation_id && UUID_REGEX.test(String(reservation_id)) ? { reservation_id: String(reservation_id) } : {}),
           ...(linkedCrossBuilding ? { cross_building_link: true } : {}),
         }),
       ]
@@ -932,7 +907,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 /**
  * GET /api/v1/contracts/:id/occupants — thành viên cùng ở theo hợp đồng (B6)
  */
-router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -1682,53 +1657,139 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
     return { needsApproval: pendingRes.rows[0] };
   }
 
-  // 4. ACTIVE + chuyển cọc giữ chỗ thành cọc hợp đồng (FR-067)
+  // 4. ACTIVE + chuyển cọc giữ chỗ / kết chuyển cọc gia hạn thành cọc hợp đồng (FR-067, R-03, R-19)
   const activeRes = await client.query(
     `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 RETURNING *`,
     [contract.id]
   );
 
-  const rsvRes = await client.query(
-    `SELECT id, hold_amount FROM reservation
-     WHERE apartment_id = $1 AND status = 'HELD'
-     ORDER BY created_at DESC LIMIT 1`,
-    [contract.apartment_id]
-  );
+  let preferredRsvId = req.body?.reservation_id || null;
+  if (!preferredRsvId) {
+    const createAudit = await adminPool.query(
+      `SELECT after->>'reservation_id' AS reservation_id
+       FROM audit_log
+       WHERE entity = 'contract' AND entity_id = $1 AND action = 'CREATE'
+       ORDER BY at DESC LIMIT 1`,
+      [contract.id]
+    );
+    preferredRsvId = createAudit.rows[0]?.reservation_id || null;
+  }
 
-  const opensDeposit = contract.deposit_amount > 0 || rsvRes.rows.length > 0;
+  let matchedRsv = null;
+  if (preferredRsvId) {
+    const rsvById = await client.query(
+      `SELECT id, hold_amount FROM reservation
+       WHERE id = $1 AND apartment_id = $2 AND status = 'HELD'
+       LIMIT 1`,
+      [preferredRsvId, contract.apartment_id]
+    );
+    matchedRsv = rsvById.rows[0] || null;
+  } else if (contract.tenant_phone) {
+    const startStr = contract.start_date?.toISOString
+      ? contract.start_date.toISOString().slice(0, 10)
+      : String(contract.start_date).slice(0, 10);
+    const rsvByPhone = await client.query(
+      `SELECT id, hold_amount FROM reservation
+       WHERE apartment_id = $1
+         AND status = 'HELD'
+         AND regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
+       ORDER BY
+         CASE WHEN COALESCE(hold_from, created_at::date) <= $3::date AND hold_until >= $3::date THEN 0 ELSE 1 END,
+         created_at DESC
+       LIMIT 1`,
+      [contract.apartment_id, String(contract.tenant_phone), startStr]
+    );
+    matchedRsv = rsvByPhone.rows[0] || null;
+  }
+
+  let parentDep = null;
+  if (!matchedRsv && contract.parent_contract_id) {
+    const pDepRes = await client.query(
+      `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' AND amount_held > 0 FOR UPDATE`,
+      [contract.parent_contract_id]
+    );
+    parentDep = pDepRes.rows[0] || null;
+  }
+
+  const opensDeposit = Number(contract.deposit_amount) > 0 || Boolean(matchedRsv) || Boolean(parentDep);
   let remainingCollect = 0n;
 
   if (opensDeposit) {
     const existing = await client.query(`SELECT id FROM deposit WHERE contract_id = $1`, [contract.id]);
     if (existing.rows.length === 0) {
-      const holdAmount = rsvRes.rows.length > 0 ? rsvRes.rows[0].hold_amount : null;
-      const split = splitDepositOpening({
-        depositAmount: contract.deposit_amount,
-        holdAmount,
-      });
-      remainingCollect = split.remainingCollect;
+      if (parentDep) {
+        const parentHeld = BigInt(parentDep.amount_held);
+        const split = splitDepositOpening({
+          depositAmount: contract.deposit_amount,
+          holdAmount: parentHeld,
+        });
+        remainingCollect = split.remainingCollect;
 
-      const depRes = await client.query(
-        `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-         VALUES ($1, $2, $3, 'HELD')
-         RETURNING id`,
-        [contract.id, rsvRes.rows[0]?.id ?? null, split.openHeld.toString()]
-      );
-
-      const newDepositId = depRes.rows[0].id;
-
-      if (split.openHeld > 0n && rsvRes.rows.length > 0) {
+        await client.query(
+          `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
+          [parentDep.id]
+        );
         await client.query(
           `INSERT INTO deposit_transaction (
              deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
            )
-           VALUES ($1, 'transfer', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
-          [newDepositId, split.openHeld.toString(), req.user.sub]
+           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+          [
+            parentDep.id,
+            parentHeld.toString(),
+            `Chuyển kết dư tiền cọc sang hợp đồng gia hạn ${contract.id.slice(0, 8).toUpperCase()}`,
+            req.user.sub,
+          ]
         );
+
+        const depRes = await client.query(
+          `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+           VALUES ($1, NULL, $2, 'HELD')
+           RETURNING id`,
+          [contract.id, parentHeld.toString()]
+        );
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+          [
+            depRes.rows[0].id,
+            parentHeld.toString(),
+            `Nhận kết chuyển tiền cọc từ hợp đồng kỳ trước ${contract.parent_contract_id.slice(0, 8).toUpperCase()}`,
+            req.user.sub,
+          ]
+        );
+      } else {
+        const holdAmount = matchedRsv ? matchedRsv.hold_amount : null;
+        const split = splitDepositOpening({
+          depositAmount: contract.deposit_amount,
+          holdAmount,
+        });
+        remainingCollect = split.remainingCollect;
+
+        const depRes = await client.query(
+          `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+           VALUES ($1, $2, $3, 'HELD')
+           RETURNING id`,
+          [contract.id, matchedRsv?.id ?? null, split.openHeld.toString()]
+        );
+
+        const newDepositId = depRes.rows[0].id;
+
+        if (split.openHeld > 0n && matchedRsv) {
+          await client.query(
+            `INSERT INTO deposit_transaction (
+               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+             )
+             VALUES ($1, 'transfer', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
+            [newDepositId, split.openHeld.toString(), req.user.sub]
+          );
+        }
       }
     }
-    if (rsvRes.rows.length > 0) {
-      await client.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [rsvRes.rows[0].id]);
+    if (matchedRsv) {
+      await client.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [matchedRsv.id]);
     }
   }
 
@@ -1747,7 +1808,7 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
 // Guard điều kiện chung trước khi gọi completeActivation
 async function assertActivatable(client, contractId) {
   const cRes = await client.query(
-    `SELECT c.*, t.id AS tenant_id, t.status AS tenant_status, p.id AS person_id, p.id_number
+    `SELECT c.*, t.id AS tenant_id, t.status AS tenant_status, p.id AS person_id, p.id_number, p.phone AS tenant_phone
      FROM contract c
      JOIN tenant t ON t.id = c.primary_tenant_id
      JOIN person p ON p.id = t.person_id
@@ -1861,21 +1922,66 @@ router.post('/:id/approve', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGE
       });
     }
 
-    // Nguyên tắc Four-eyes nội bộ: Người tạo / trình duyệt hợp đồng lệch khung giá không được tự phê duyệt
+    // Kiểm tra lại đầy đủ điều kiện kích hoạt trước khi duyệt (R-12)
+    const scanRes = await client.query(
+      `SELECT 1 FROM attachment WHERE owner_entity = 'contract' AND owner_id = $1`,
+      [id]
+    );
+    if (scanRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'MISSING_SIGNED_SCAN',
+        message: 'Chưa đính kèm bản scan hợp đồng đã ký. Vui lòng đính kèm bản ký trước khi phê duyệt kích hoạt.',
+      });
+    }
+    if (!contract.id_number) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'MISSING_IDENTITY_PAPER',
+        message: 'Thiếu thông tin CCCD/hộ chiếu của khách thuê chính.',
+      });
+    }
+    if (contract.tenant_status !== 'APPROVED') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'TENANT_NOT_APPROVED',
+        message: 'Khách thuê chính chưa được phê duyệt hồ sơ (yêu cầu trạng thái APPROVED).',
+      });
+    }
+
+    // Nguyên tắc Four-eyes nội bộ (R-23): kiểm tra cấu hình allow_self_approval
     const submitAudit = await adminPool.query(
       `SELECT actor_id FROM audit_log
        WHERE entity = 'contract' AND entity_id = $1 AND action = 'SUBMIT_APPROVAL'
        ORDER BY at DESC LIMIT 1`,
       [id]
     );
-    const submitterId = submitAudit.rows[0]?.actor_id || contract.created_by;
-    if ((contract.created_by && contract.created_by === req.user.sub) || (submitterId && submitterId === req.user.sub)) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        code: 'SELF_APPROVAL',
-        message: 'Nguyên tắc Four-eyes: Người lập / trình duyệt hợp đồng lệch khung giá không được tự phê duyệt. Vui lòng chuyển Quản lý khác hoặc Ban Giám đốc (SYS_ADMIN) phê duyệt.',
+    const submitterId = submitAudit.rows[0]?.actor_id || null;
+    const matchedCreator =
+      contract.created_by && String(contract.created_by) === String(req.user.sub)
+        ? contract.created_by
+        : submitterId && String(submitterId) === String(req.user.sub)
+          ? submitterId
+          : null;
+
+    if (matchedCreator) {
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: matchedCreator,
+        entity: 'contract',
+        entityId: id,
+        actionContext: 'CONTRACT_APPROVE',
       });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'SELF_APPROVAL',
+          message: 'Nguyên tắc Four-eyes: Người lập / trình duyệt hợp đồng lệch khung giá không được tự phê duyệt. Vui lòng chuyển Quản lý khác hoặc Ban Giám đốc (SYS_ADMIN) phê duyệt.',
+        });
+      }
     }
+
     const result = await completeActivation(client, contract, res, req, { skipPriceCheck: true });
     if (result.needsApproval) {
       await client.query('COMMIT');
@@ -1898,6 +2004,100 @@ router.post('/:id/approve', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGE
     await client.query('ROLLBACK');
     console.error('[Approve Contract Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi phê duyệt hợp đồng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/contracts/:id/reject — Từ chối phê duyệt hợp đồng lệch khung giá, trả về DRAFT để chỉnh sửa (R-12)
+ */
+router.post('/:id/reject', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do từ chối phê duyệt hợp đồng.' });
+  }
+
+  const access = await checkContractAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json(access.body);
+  }
+
+  const { client, release } = await getUserClient(req);
+  try {
+    await client.query('BEGIN');
+    const curRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
+    if (curRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
+    }
+    const cur = curRes.rows[0];
+    if (cur.status !== 'PENDING_APPROVAL') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: `Hợp đồng đang ở trạng thái ${cur.status}. Chỉ hợp đồng PENDING_APPROVAL mới được từ chối phê duyệt để trả về DRAFT.`,
+      });
+    }
+
+    const submitAudit = await adminPool.query(
+      `SELECT actor_id FROM audit_log
+       WHERE entity = 'contract' AND entity_id = $1 AND action = 'SUBMIT_APPROVAL'
+       ORDER BY at DESC LIMIT 1`,
+      [id]
+    );
+    const submitterId = submitAudit.rows[0]?.actor_id || null;
+    const matchedCreator =
+      cur.created_by && String(cur.created_by) === String(req.user.sub)
+        ? cur.created_by
+        : submitterId && String(submitterId) === String(req.user.sub)
+          ? submitterId
+          : null;
+
+    if (matchedCreator) {
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: matchedCreator,
+        entity: 'contract',
+        entityId: id,
+        actionContext: 'CONTRACT_REJECT',
+      });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'SELF_APPROVAL',
+          message: 'Nguyên tắc Four-eyes: Người lập / trình duyệt hợp đồng không được tự phê duyệt hoặc từ chối phê duyệt.',
+        });
+      }
+    }
+
+    const trimmedReason = String(reason).trim();
+    const updatedNote = `${cur.note || ''} [Từ chối duyệt giá: ${trimmedReason}]`.trim();
+    const updated = await client.query(
+      `UPDATE contract SET status = 'DRAFT', note = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [updatedNote, id]
+    );
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'REJECT_APPROVAL', 'contract', $2, $3, $4)`,
+      [
+        req.user.sub,
+        id,
+        JSON.stringify(cur),
+        JSON.stringify({ ...updated.rows[0], rejection_reason: trimmedReason }),
+      ]
+    );
+    await client.query('COMMIT');
+    res.json({
+      message: 'Đã từ chối phê duyệt và trả hợp đồng về trạng thái bản nháp (DRAFT) để điều chỉnh.',
+      data: updated.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[Reject Contract Approval Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi từ chối phê duyệt hợp đồng.' });
   } finally {
     await release();
   }
@@ -1986,12 +2186,12 @@ router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req
   }
 });
 
-export const SERVICE_CODES = ['INTERNET', 'MOTORBIKE_PARKING', 'ELECTRICBIKE_PARKING', 'TRASH', 'COMMON_SERVICE'];
+export const SERVICE_CODES = ['ELECTRICITY', 'WATER', 'INTERNET', 'MOTORBIKE_PARKING', 'ELECTRICBIKE_PARKING', 'TRASH', 'COMMON_SERVICE'];
 
 /**
  * GET /api/v1/contracts/:id/service-prices (FR-065, C1)
  */
-router.get('/:id/service-prices', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/:id/service-prices', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -2014,9 +2214,9 @@ router.get('/:id/service-prices', authenticateToken, requireRole(['SYS_ADMIN', '
 
 /**
  * POST /api/v1/contracts/:id/service-prices (FR-065, C1)
- * Quyền: MANAGER, ACCOUNTANT (CRU trên tòa được gán)
+ * Quyền: SYS_ADMIN, MANAGER (CRU trên tòa được gán)
  */
-router.post('/:id/service-prices', authenticateToken, requireRole(['MANAGER', 'ACCOUNTANT']), async (req, res) => {
+router.post('/:id/service-prices', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { service_code, unit_price, effective_from } = req.body;
   const normCode = typeof service_code === 'string' ? service_code.trim().toUpperCase() : '';
@@ -2091,7 +2291,7 @@ router.post('/:id/service-prices', authenticateToken, requireRole(['MANAGER', 'A
 /**
  * DELETE /api/v1/contracts/:id/service-prices/:priceId (FR-065, C1)
  */
-router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['MANAGER', 'ACCOUNTANT']), async (req, res) => {
+router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id, priceId } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -2131,7 +2331,7 @@ router.delete('/:id/service-prices/:priceId', authenticateToken, requireRole(['M
 /**
  * GET /api/v1/contracts/:id/amendments (FR-016, C7)
  */
-router.get('/:id/amendments', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/:id/amendments', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -2323,13 +2523,23 @@ router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole
       return res.status(409).json({ code: 'ALREADY_REJECTED', message: 'Phụ lục này đã bị từ chối trước đó.' });
     }
 
-    // Nguyên tắc Four-eyes nội bộ: Người lập phụ lục không được tự phê duyệt
-    if (diff.created_by && diff.created_by === req.user.sub) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        code: 'SELF_APPROVAL',
-        message: 'Người lập phụ lục không được tự phê duyệt (Nguyên tắc Four-eyes). Vui lòng chuyển Quản lý khác hoặc Ban Giám đốc (SYS_ADMIN) phê duyệt.',
+    // Nguyên tắc Four-eyes nội bộ (R-23): kiểm tra cấu hình allow_self_approval
+    if (diff.created_by && String(diff.created_by) === String(req.user.sub)) {
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: diff.created_by,
+        entity: 'contract_version',
+        entityId: versionId,
+        actionContext: 'AMENDMENT_APPROVE',
       });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'SELF_APPROVAL',
+          message: 'Người lập phụ lục không được tự phê duyệt (Nguyên tắc Four-eyes). Vui lòng chuyển Quản lý khác hoặc Ban Giám đốc (SYS_ADMIN) phê duyệt.',
+        });
+      }
     }
 
     // Áp dụng các thay đổi từ diff vào bảng contract (Lưu ý 1)
@@ -2457,7 +2667,7 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
  * GET /api/v1/contracts/:id/template (FR-020, C10)
  * Xuất mẫu hợp đồng thuê A4 chuẩn pháp lý (HTML printable)
  */
-router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']), async (req, res) => {
+router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -2533,6 +2743,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     const contractCode = `HĐ-${c.id.slice(0, 8).toUpperCase()}`;
 
     const serviceCodeLabels = {
+      ELECTRICITY: { name: 'Điện sinh hoạt', unit: 'kWh' },
       ELEC: { name: 'Điện sinh hoạt', unit: 'kWh' },
       WATER: { name: 'Nước sinh hoạt', unit: 'm³' },
       INTERNET: { name: 'Internet / Wifi', unit: 'tháng' },
@@ -3201,6 +3412,19 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), a
         await client.query(
           `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
           [oldDep.id]
+        );
+
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+          [
+            oldDep.id,
+            heldAmt,
+            `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptLock.rows[0].code} (FR-013)`,
+            req.user.sub,
+          ]
         );
 
         const newDepRes = await client.query(

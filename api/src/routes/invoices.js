@@ -6,9 +6,343 @@ import {
   scopedBuildingFilter,
   checkBuildingAccess,
 } from '../services/ownerScope.js';
+import { roundVND } from '../services/pricing.js';
 
 const router = express.Router();
 const PERIOD_RE = /^\d{4}-\d{2}$/;
+
+/**
+ * Core batch invoice generator dùng chung cho API /generate-batch và Cron Job hằng ngày theo billing_day (FR-032, FR-033, FR-066, R-04, R-05, R-10, R-11, R-16)
+ */
+export async function generateInvoicesCore(
+  client,
+  {
+    orgId,
+    targetPeriod,
+    buildingId = null,
+    applyScope = null,
+    matchBillingDays = null,
+    onlyOngoingContracts = false,
+    autoIssue = false,
+    actorId = null,
+  }
+) {
+  // Đếm số HĐ tương lai chưa tới kỳ để phản hồi minh bạch trên UI (Điểm 4)
+  const futureParams = [orgId, targetPeriod];
+  let futureFilterSql = '';
+  if (typeof applyScope === 'function') {
+    const { sql } = await applyScope(futureParams);
+    futureFilterSql += sql;
+  }
+  if (buildingId) {
+    futureParams.push(buildingId);
+    futureFilterSql += ` AND c.building_id = $${futureParams.length}`;
+  }
+  const futureCountRes = await client.query(
+    `SELECT COUNT(*)::int AS cnt
+     FROM contract c
+     JOIN building b ON b.id = c.building_id
+     WHERE b.org_id = $1
+       AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+       AND c.start_date >= (($2 || '-01')::date + INTERVAL '1 month')::date
+       ${futureFilterSql}`,
+    futureParams
+  );
+  const skippedFutureCount = futureCountRes.rows[0]?.cnt || 0;
+
+  // Lọc HĐ có giao thoa thực sự với kỳ (mở rộng cho HĐ TERMINATED/EXPIRED kết thúc trong kỳ — R-04; tính inclusive ngày trả phòng — R-16)
+  const params = [orgId, targetPeriod];
+  let filterSql = '';
+  if (typeof applyScope === 'function') {
+    const { sql } = await applyScope(params);
+    filterSql += sql;
+  }
+  if (buildingId) {
+    params.push(buildingId);
+    filterSql += ` AND c.building_id = $${params.length}`;
+  }
+  if (Array.isArray(matchBillingDays) && matchBillingDays.length > 0) {
+    params.push(matchBillingDays);
+    filterSql += ` AND c.billing_day = ANY($${params.length}::int[])`;
+  }
+
+  const statusClause = onlyOngoingContracts
+    ? `c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')`
+    : `(
+         c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         OR (
+           c.status IN ('TERMINATED', 'EXPIRED')
+           AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+           AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+         )
+       )`;
+
+  const contractSql = `
+    SELECT c.*, a.code AS apartment_code, b.code AS building_code,
+           au.id AS resident_user_id,
+           ((($2 || '-01')::date + INTERVAL '1 month')::date - ($2 || '-01')::date)::int AS days_in_month,
+           (
+             (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
+              - GREATEST(c.start_date, ($2 || '-01')::date))::int
+             + CASE
+                 WHEN c.status IN ('TERMINATED', 'EXPIRED')
+                  AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+                  AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+                 THEN 1
+                 ELSE 0
+               END
+           ) AS active_days
+    FROM contract c
+    JOIN apartment a ON a.id = c.apartment_id
+    JOIN building b ON b.id = c.building_id
+    LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+    LEFT JOIN app_user au ON au.person_id = t.person_id
+    WHERE b.org_id = $1
+      AND ${statusClause}
+      AND c.start_date < (($2 || '-01')::date + INTERVAL '1 month')::date
+      AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+      AND COALESCE(c.terminated_at, c.end_date) > c.start_date
+      AND NOT EXISTS (
+        SELECT 1 FROM invoice inv
+        WHERE inv.contract_id = c.id
+          AND inv.period = $2
+          AND inv.status != 'CANCELLED'
+      )
+      ${filterSql}
+    ORDER BY c.start_date ASC, c.created_at ASC
+  `;
+
+  const contractsRes = await client.query(contractSql, params);
+  const createdInvoices = [];
+
+  for (const c of contractsRes.rows) {
+    const lines = [];
+    const fullRent = Number(c.rent_amount || 0);
+    const daysInMonth = Math.max(1, Number(c.days_in_month || 30));
+    const activeDays = Math.max(0, Math.min(daysInMonth, Number(c.active_days || daysInMonth)));
+    if (activeDays <= 0) continue;
+
+    const isProrataRent = activeDays < daysInMonth;
+    const rentAmt = isProrataRent ? roundVND((fullRent * activeDays) / daysInMonth) : roundVND(fullRent);
+    const rentDesc = isProrataRent
+      ? `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod} (Pro-rata ${activeDays}/${daysInMonth} ngày)`
+      : `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod}`;
+
+    lines.push({
+      item_type: 'RENT',
+      description: rentDesc,
+      quantity: isProrataRent ? Number((activeDays / daysInMonth).toFixed(4)) : 1,
+      unit: 'tháng',
+      unit_price: fullRent,
+      amount: rentAmt,
+    });
+
+    // FR-065 & R-10: Bảng giá dịch vụ/điện/nước ghi đè theo hợp đồng (ưu tiên: giá hợp đồng -> giá đồng hồ/đăng ký -> giá danh mục)
+    const cspRes = await client.query(
+      `SELECT service_code, unit_price
+       FROM contract_service_price
+       WHERE contract_id = $1
+         AND effective_from <= (($2 || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
+       ORDER BY effective_from DESC`,
+      [c.id, targetPeriod]
+    );
+    const cspMap = new Map();
+    for (const row of cspRes.rows) {
+      const key = String(row.service_code || '').toUpperCase();
+      if (key && !cspMap.has(key)) {
+        cspMap.set(key, Number(row.unit_price));
+      }
+    }
+
+    // Điện / Nước từ meter_reading kỳ này (chống thu trùng nếu căn hộ có 2 HĐ nối tiếp trong cùng tháng)
+    const mrRes = await client.query(
+      `SELECT mr.consumption, mr.previous_reading, mr.current_reading, m.meter_type, m.unit, m.unit_price
+       FROM meter_reading mr
+       JOIN meter m ON m.id = mr.meter_id
+       WHERE mr.apartment_id = $1 AND mr.period = $2`,
+      [c.apartment_id, targetPeriod]
+    );
+    for (const mr of mrRes.rows) {
+      const itemType = mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER';
+      const alreadyBilledRes = await client.query(
+        `SELECT 1
+         FROM invoice i2
+         JOIN invoice_line il2 ON il2.invoice_id = i2.id
+         WHERE i2.apartment_id = $1
+           AND i2.period = $2
+           AND i2.status != 'CANCELLED'
+           AND il2.item_type = $3
+         LIMIT 1`,
+        [c.apartment_id, targetPeriod, itemType]
+      );
+      if (alreadyBilledRes.rows.length > 0) continue;
+
+      const cons = Number(mr.consumption || 0);
+      const hasContractPrice = cspMap.has(itemType);
+      const price = hasContractPrice ? cspMap.get(itemType) : Number(mr.unit_price || 0);
+      const lineAmt = roundVND(cons * price);
+      if (lineAmt > 0) {
+        lines.push({
+          item_type: itemType,
+          description: `${itemType === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${mr.previous_reading} → ${mr.current_reading} ${mr.unit})${hasContractPrice ? ' (Giá HĐ)' : ''}`,
+          quantity: cons,
+          unit: mr.unit,
+          unit_price: price,
+          amount: lineAmt,
+        });
+      }
+    }
+
+    // Dịch vụ tiện ích đang ACTIVE hoặc vừa CANCELLED trong kỳ (R-04)
+    const subRes = await client.query(
+      `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
+       FROM service_subscription ss
+       JOIN service_catalog sc ON sc.id = ss.service_id
+       WHERE ss.contract_id = $1
+         AND sc.billing_type != 'METERED'
+         AND (
+           ss.status = 'ACTIVE'
+           OR (
+             ss.status = 'CANCELLED'
+             AND ss.end_date >= ($2 || '-01')::date
+             AND ss.end_date < (($2 || '-01')::date + INTERVAL '1 month')::date
+           )
+         )`,
+      [c.id, targetPeriod]
+    );
+    for (const sub of subRes.rows) {
+      const codeKey = String(sub.service_code || '').toUpperCase();
+      const catKey = String(sub.service_category || '').toUpperCase();
+      let overrideUnitPrice = cspMap.has(codeKey) ? cspMap.get(codeKey) : undefined;
+      if (overrideUnitPrice === undefined) {
+        if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
+          overrideUnitPrice = cspMap.get('INTERNET');
+        } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
+          overrideUnitPrice = cspMap.get('COMMON_SERVICE');
+        }
+      }
+
+      const effectiveUnitPrice =
+        overrideUnitPrice !== undefined ? Number(overrideUnitPrice) : Number(sub.unit_price || 0);
+      const qty = Number(sub.quantity || 1);
+      const subStartPeriod = sub.start_date ? new Date(sub.start_date).toISOString().slice(0, 7) : '';
+      const subEndPeriod = sub.end_date ? new Date(sub.end_date).toISOString().slice(0, 7) : '';
+      const isCancelledThisPeriod = sub.status === 'CANCELLED' && subEndPeriod === targetPeriod;
+      const isStartedThisPeriod = subStartPeriod === targetPeriod && Number(sub.prorata_amount) > 0;
+      const useProrata = isCancelledThisPeriod || isStartedThisPeriod;
+
+      let amt = roundVND(effectiveUnitPrice * qty);
+      if (isCancelledThisPeriod) {
+        if (overrideUnitPrice !== undefined && sub.end_date) {
+          const endDay = new Date(sub.end_date).getDate();
+          const subActiveDays = Math.max(1, Math.min(daysInMonth, endDay));
+          amt = roundVND((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
+        } else if (Number(sub.prorata_amount) > 0) {
+          amt = roundVND(Number(sub.prorata_amount));
+        }
+      } else if (isStartedThisPeriod) {
+        if (overrideUnitPrice !== undefined && sub.start_date) {
+          const startDay = new Date(sub.start_date).getDate();
+          const subActiveDays = Math.max(1, daysInMonth - startDay + 1);
+          amt = roundVND((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
+        } else {
+          amt = roundVND(Number(sub.prorata_amount));
+        }
+      }
+
+      if (amt > 0) {
+        lines.push({
+          item_type: 'SERVICE',
+          description: `${sub.service_name}${useProrata ? ' (Pro-rata)' : ''}${overrideUnitPrice !== undefined ? ' (Giá HĐ)' : ''}`,
+          quantity: qty,
+          unit: sub.unit || 'tháng',
+          unit_price: effectiveUnitPrice,
+          amount: amt,
+        });
+      }
+    }
+
+    const subtotal = roundVND(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
+    const dueDays = Number(c.payment_due_days || 5);
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + dueDays);
+    const dueDateStr = dueDate.toISOString().slice(0, 10);
+
+    const randSuffix = Math.floor(1000 + Math.random() * 9000);
+    const invCode = `INV-${targetPeriod.replace('-', '')}-${c.building_code}-${c.apartment_code}-${randSuffix}`;
+    const initStatus = autoIssue ? 'ISSUED' : 'DRAFT';
+
+    const invIns = await client.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, total_amount, paid_amount,
+         status, created_by, issued_by, issued_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, 0, $9, 0, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        orgId,
+        c.building_id,
+        c.apartment_id,
+        c.id,
+        c.primary_tenant_id,
+        invCode,
+        targetPeriod,
+        dueDateStr,
+        subtotal,
+        initStatus,
+        actorId,
+        autoIssue ? actorId : null,
+        autoIssue ? new Date().toISOString() : null,
+      ]
+    );
+    const inv = invIns.rows[0];
+
+    for (const l of lines) {
+      await client.query(
+        `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [inv.id, l.item_type, l.description, l.quantity, l.unit, l.unit_price, l.amount]
+      );
+    }
+
+    if (autoIssue && subtotal > 0) {
+      await client.query(
+        `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
+         VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
+        [
+          orgId,
+          c.building_id,
+          c.id,
+          c.primary_tenant_id,
+          inv.id,
+          subtotal,
+          dueDateStr,
+          `Công nợ hóa đơn ${invCode} kỳ ${targetPeriod}`,
+        ]
+      );
+
+      if (c.resident_user_id) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
+          [
+            orgId,
+            c.resident_user_id,
+            `Hóa đơn mới kỳ ${targetPeriod}`,
+            `Hóa đơn ${invCode} cho căn ${c.apartment_code} với tổng số tiền ${subtotal.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
+            JSON.stringify({ invoice_id: inv.id, invoice_code: invCode, period: targetPeriod }),
+          ]
+        );
+      }
+    }
+
+    createdInvoices.push(inv);
+  }
+
+  return { createdInvoices, skippedFutureCount };
+}
 
 /**
  * GET /api/v1/invoices
@@ -17,7 +351,7 @@ const PERIOD_RE = /^\d{4}-\d{2}$/;
 router.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, period, status, search } = req.query;
     const orgId = req.user.org_id;
@@ -100,7 +434,7 @@ router.get(
 router.post(
   '/generate-batch',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { building_id, period, auto_issue = false } = req.body;
     const orgId = req.user.org_id;
@@ -118,265 +452,14 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        // Đếm số HĐ tương lai chưa tới kỳ để phản hồi minh bạch trên UI (Điểm 4)
-        const futureParams = [orgId, targetPeriod];
-        const { sql: futureScopeSql } = await scopedBuildingFilter(req, 'c.building_id', futureParams);
-        let futureSql = `
-          SELECT COUNT(*)::int AS cnt
-          FROM contract c
-          JOIN building b ON b.id = c.building_id
-          WHERE b.org_id = $1
-            AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-            AND c.start_date >= (($2 || '-01')::date + INTERVAL '1 month')::date
-            ${futureScopeSql}
-        `;
-        if (building_id) {
-          futureParams.push(building_id);
-          futureSql += ` AND c.building_id = $${futureParams.length}`;
-        }
-        const futureCountRes = await client.query(futureSql, futureParams);
-        const skippedFutureCount = futureCountRes.rows[0]?.cnt || 0;
-
-        // Lọc HĐ có giao thoa thực sự với kỳ nửa mở [periodStart, periodEndExclusive) (Điểm 4 & AC-015.3)
-        const params = [orgId, targetPeriod];
-        const { sql: scopeSql } = await scopedBuildingFilter(req, 'c.building_id', params);
-        let contractSql = `
-          SELECT c.*, a.code AS apartment_code, b.code AS building_code,
-                 au.id AS resident_user_id,
-                 ((($2 || '-01')::date + INTERVAL '1 month')::date - ($2 || '-01')::date)::int AS days_in_month,
-                 (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
-                  - GREATEST(c.start_date, ($2 || '-01')::date))::int AS active_days
-          FROM contract c
-          JOIN apartment a ON a.id = c.apartment_id
-          JOIN building b ON b.id = c.building_id
-          LEFT JOIN tenant t ON t.id = c.primary_tenant_id
-          LEFT JOIN app_user au ON au.person_id = t.person_id
-          WHERE b.org_id = $1
-            AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-            AND c.start_date < (($2 || '-01')::date + INTERVAL '1 month')::date
-            AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
-            AND COALESCE(c.terminated_at, c.end_date) > c.start_date
-            AND NOT EXISTS (
-              SELECT 1 FROM invoice inv
-              WHERE inv.contract_id = c.id
-                AND inv.period = $2
-                AND inv.status != 'CANCELLED'
-            )
-            ${scopeSql}
-        `;
-        if (building_id) {
-          params.push(building_id);
-          contractSql += ` AND c.building_id = $${params.length}`;
-        }
-        contractSql += ' ORDER BY c.start_date ASC, c.created_at ASC';
-
-        const contractsRes = await client.query(contractSql, params);
-        const createdInvoices = [];
-
-        for (const c of contractsRes.rows) {
-          const lines = [];
-          const fullRent = Number(c.rent_amount || 0);
-          const daysInMonth = Math.max(1, Number(c.days_in_month || 30));
-          const activeDays = Math.max(0, Math.min(daysInMonth, Number(c.active_days || daysInMonth)));
-          if (activeDays <= 0) continue;
-
-          const isProrataRent = activeDays < daysInMonth;
-          const rentAmt = isProrataRent ? Math.round((fullRent * activeDays) / daysInMonth) : fullRent;
-          const rentDesc = isProrataRent
-            ? `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod} (Pro-rata ${activeDays}/${daysInMonth} ngày)`
-            : `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod}`;
-
-          lines.push({
-            item_type: 'RENT',
-            description: rentDesc,
-            quantity: isProrataRent ? Number((activeDays / daysInMonth).toFixed(4)) : 1,
-            unit: 'tháng',
-            unit_price: fullRent,
-            amount: rentAmt,
-          });
-
-          // Điện / Nước từ meter_reading kỳ này (chống thu trùng nếu căn hộ có 2 HĐ nối tiếp trong cùng tháng)
-          const mrRes = await client.query(
-            `SELECT mr.consumption, mr.previous_reading, mr.current_reading, m.meter_type, m.unit, m.unit_price
-             FROM meter_reading mr
-             JOIN meter m ON m.id = mr.meter_id
-             WHERE mr.apartment_id = $1 AND mr.period = $2`,
-            [c.apartment_id, targetPeriod]
-          );
-          for (const mr of mrRes.rows) {
-            const itemType = mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER';
-            const alreadyBilledRes = await client.query(
-              `SELECT 1
-               FROM invoice i2
-               JOIN invoice_line il2 ON il2.invoice_id = i2.id
-               WHERE i2.apartment_id = $1
-                 AND i2.period = $2
-                 AND i2.status != 'CANCELLED'
-                 AND il2.item_type = $3
-               LIMIT 1`,
-              [c.apartment_id, targetPeriod, itemType]
-            );
-            if (alreadyBilledRes.rows.length > 0) continue;
-
-            const cons = Number(mr.consumption || 0);
-            const price = Number(mr.unit_price || 0);
-            const lineAmt = Math.round(cons * price);
-            if (lineAmt > 0) {
-              lines.push({
-                item_type: itemType,
-                description: `${itemType === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${mr.previous_reading} → ${mr.current_reading} ${mr.unit})`,
-                quantity: cons,
-                unit: mr.unit,
-                unit_price: price,
-                amount: lineAmt,
-              });
-            }
-          }
-
-          // FR-065: Bảng giá dịch vụ ghi đè theo hợp đồng (ưu tiên: giá hợp đồng -> giá đăng ký/tòa -> giá danh mục)
-          const cspRes = await client.query(
-            `SELECT service_code, unit_price
-             FROM contract_service_price
-             WHERE contract_id = $1
-               AND effective_from <= (($2 || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
-             ORDER BY effective_from DESC`,
-            [c.id, targetPeriod]
-          );
-          const cspMap = new Map();
-          for (const row of cspRes.rows) {
-            const key = String(row.service_code || '').toUpperCase();
-            if (key && !cspMap.has(key)) {
-              cspMap.set(key, Number(row.unit_price));
-            }
-          }
-
-          // Dịch vụ tiện ích đang ACTIVE
-          const subRes = await client.query(
-            `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
-             FROM service_subscription ss
-             JOIN service_catalog sc ON sc.id = ss.service_id
-             WHERE ss.contract_id = $1
-               AND ss.status = 'ACTIVE'
-               AND sc.billing_type != 'METERED'`,
-            [c.id]
-          );
-          for (const sub of subRes.rows) {
-            const codeKey = String(sub.service_code || '').toUpperCase();
-            const catKey = String(sub.service_category || '').toUpperCase();
-            let overrideUnitPrice = cspMap.has(codeKey) ? cspMap.get(codeKey) : undefined;
-            if (overrideUnitPrice === undefined) {
-              if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
-                overrideUnitPrice = cspMap.get('INTERNET');
-              } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
-                overrideUnitPrice = cspMap.get('COMMON_SERVICE');
-              }
-            }
-
-            const effectiveUnitPrice =
-              overrideUnitPrice !== undefined ? Number(overrideUnitPrice) : Number(sub.unit_price || 0);
-            const qty = Number(sub.quantity || 1);
-            const subStartPeriod = sub.start_date ? new Date(sub.start_date).toISOString().slice(0, 7) : '';
-            const useProrata = subStartPeriod === targetPeriod && Number(sub.prorata_amount) > 0;
-            let amt = Math.round(effectiveUnitPrice * qty);
-            if (useProrata) {
-              if (overrideUnitPrice !== undefined && sub.start_date) {
-                const startDay = new Date(sub.start_date).getDate();
-                const subActiveDays = Math.max(1, daysInMonth - startDay + 1);
-                amt = Math.round((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
-              } else {
-                amt = Number(sub.prorata_amount);
-              }
-            }
-            if (amt > 0) {
-              lines.push({
-                item_type: 'SERVICE',
-                description: `${sub.service_name}${useProrata ? ' (Pro-rata)' : ''}${overrideUnitPrice !== undefined ? ' (Giá HĐ)' : ''}`,
-                quantity: qty,
-                unit: sub.unit || 'tháng',
-                unit_price: effectiveUnitPrice,
-                amount: amt,
-              });
-            }
-          }
-
-          const subtotal = lines.reduce((s, l) => s + Number(l.amount || 0), 0);
-          const dueDays = Number(c.payment_due_days || 5);
-          const dueDate = new Date();
-          dueDate.setDate(dueDate.getDate() + dueDays);
-          const dueDateStr = dueDate.toISOString().slice(0, 10);
-
-          const randSuffix = Math.floor(1000 + Math.random() * 9000);
-          const invCode = `INV-${targetPeriod.replace('-', '')}-${c.building_code}-${c.apartment_code}-${randSuffix}`;
-          const initStatus = auto_issue ? 'ISSUED' : 'DRAFT';
-
-          const invIns = await client.query(
-            `INSERT INTO invoice (
-               org_id, building_id, apartment_id, contract_id, tenant_id,
-               invoice_code, period, issue_date, due_date,
-               subtotal_amount, adjustment_amount, total_amount, paid_amount,
-               status, created_by, issued_by, issued_at
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, 0, $9, 0, $10, $11, $12, $13)
-             RETURNING *`,
-            [
-              orgId,
-              c.building_id,
-              c.apartment_id,
-              c.id,
-              c.primary_tenant_id,
-              invCode,
-              targetPeriod,
-              dueDateStr,
-              subtotal,
-              initStatus,
-              req.user.sub,
-              auto_issue ? req.user.sub : null,
-              auto_issue ? new Date().toISOString() : null,
-            ]
-          );
-          const inv = invIns.rows[0];
-
-          for (const l of lines) {
-            await client.query(
-              `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-              [inv.id, l.item_type, l.description, l.quantity, l.unit, l.unit_price, l.amount]
-            );
-          }
-
-          if (auto_issue && subtotal > 0) {
-            await client.query(
-              `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
-               VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
-              [
-                orgId,
-                c.building_id,
-                c.id,
-                c.primary_tenant_id,
-                inv.id,
-                subtotal,
-                dueDateStr,
-                `Công nợ hóa đơn ${invCode} kỳ ${targetPeriod}`,
-              ]
-            );
-
-            if (c.resident_user_id) {
-              await adminPool.query(
-                `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-                 VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
-                [
-                  orgId,
-                  c.resident_user_id,
-                  `Hóa đơn mới kỳ ${targetPeriod}`,
-                  `Hóa đơn ${invCode} cho căn ${c.apartment_code} với tổng số tiền ${subtotal.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
-                  JSON.stringify({ invoice_id: inv.id, invoice_code: invCode, period: targetPeriod }),
-                ]
-              );
-            }
-          }
-
-          createdInvoices.push(inv);
-        }
+        const { createdInvoices, skippedFutureCount } = await generateInvoicesCore(client, {
+          orgId,
+          targetPeriod,
+          buildingId: building_id || null,
+          applyScope: (p) => scopedBuildingFilter(req, 'c.building_id', p),
+          autoIssue: Boolean(auto_issue),
+          actorId: req.user.sub,
+        });
 
         await client.query('COMMIT');
         const skippedNote = skippedFutureCount > 0 ? ` (Đã bỏ qua ${skippedFutureCount} hợp đồng tương lai chưa tới kỳ).` : '';
@@ -384,7 +467,7 @@ router.post(
           message:
             createdInvoices.length > 0
               ? `Đã sinh thành công ${createdInvoices.length} hóa đơn kỳ ${targetPeriod}.${skippedNote}`
-              : `Tất cả hợp đồng đang hiệu lực trong kỳ ${targetPeriod} đều đã có hóa đơn.${skippedNote}`,
+              : `Tất cả hợp đồng đủ điều kiện trong kỳ ${targetPeriod} đều đã có hóa đơn.${skippedNote}`,
           created_count: createdInvoices.length,
           skipped_future_count: skippedFutureCount,
           data: createdInvoices,
@@ -409,7 +492,7 @@ router.post(
 router.get(
   '/:id',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'RESIDENT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']),
   async (req, res) => {
     const { id } = req.params;
     const orgId = req.user.org_id;
@@ -480,7 +563,7 @@ router.get(
 router.patch(
   '/:id/status',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { status, adjustment_amount, adjustment_reason, note, due_date } = req.body;

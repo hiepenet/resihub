@@ -35,11 +35,23 @@ import { PAYMENT_STATUS, RECEIVABLE_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDate, formatDateTime, exportToCsv } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 
+const PAYMENT_METHOD_OPTIONS = [
+  { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
+  { value: 'QR_CODE', label: 'QR Code' },
+  { value: 'E_WALLET', label: 'Ví điện tử' },
+  { value: 'CASH', label: 'Tiền mặt' },
+  { value: 'CARD', label: 'Thẻ' },
+  { value: 'OTHER', label: 'Khác' },
+];
+
 const PAYMENT_METHODS = {
-  BANK_TRANSFER: 'Chuyển khoản ngân hàng',
-  CASH: 'Tiền mặt',
-  CARD: 'Thẻ POS / Quốc tế',
+  BANK_TRANSFER: 'Chuyển khoản',
+  TRANSFER: 'Chuyển khoản',
+  QR_CODE: 'QR Code',
+  E_WALLET: 'Ví điện tử',
   EWALLET: 'Ví điện tử',
+  CASH: 'Tiền mặt',
+  CARD: 'Thẻ',
   OTHER: 'Khác',
 };
 
@@ -826,10 +838,7 @@ export function PaymentsPage() {
                 value={payMethodFilter}
                 onChange={(e) => setPayMethodFilter(e.target.value)}
                 placeholder="Tất cả phương thức"
-                options={Object.entries(PAYMENT_METHODS).map(([value, label]) => ({
-                  value,
-                  label,
-                }))}
+                options={PAYMENT_METHOD_OPTIONS}
               />
             </div>
           </Card>
@@ -1029,10 +1038,7 @@ export function PaymentsPage() {
               required
               value={createForm.method}
               onChange={(e) => setCreateForm((s) => ({ ...s, method: e.target.value }))}
-              options={Object.entries(PAYMENT_METHODS).map(([value, label]) => ({
-                value,
-                label,
-              }))}
+              options={PAYMENT_METHOD_OPTIONS}
             />
           </div>
 

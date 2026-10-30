@@ -17,6 +17,7 @@ import {
   UserPlus,
   ShieldCheck,
   Search,
+  Bookmark,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -54,6 +55,7 @@ const CONTRACT_STATUS_OPTIONS = [
   { value: 'TERMINATION_PENDING', label: 'Chờ duyệt chấm dứt (TERMINATION_PENDING)' },
   { value: 'EXPIRED', label: 'Đã hết hạn (EXPIRED)' },
   { value: 'TERMINATED', label: 'Đã thanh lý (TERMINATED)' },
+  { value: 'CANCELLED', label: 'Đã hủy (CANCELLED)' },
 ];
 
 const REQUEST_STATUS_OPTIONS = [
@@ -141,6 +143,12 @@ export function ContractsPage() {
   const [loadingRefData, setLoadingRefData] = useState(false);
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [createErrors, setCreateErrors] = useState({});
+  const [aptSchedule, setAptSchedule] = useState({
+    loading: false,
+    apartmentId: '',
+    contracts: [],
+    reservations: [],
+  });
 
   // Chế độ chọn khách thuê: 'existing' (tra cứu SĐT/CCCD bảo mật) | 'new' (cư dân mới chưa nằm trong hệ thống)
   const [tenantMode, setTenantMode] = useState('existing');
@@ -163,6 +171,7 @@ export function ContractsPage() {
     building_id: '',
     apartment_id: '',
     primary_tenant_id: '',
+    reservation_id: '',
     start_date: todayStr,
     end_date: addMonthsStr(todayStr, 12),
     rent_amount: '',
@@ -209,6 +218,7 @@ export function ContractsPage() {
       building_id: defaultBld,
       apartment_id: cleanAptId,
       primary_tenant_id: '',
+      reservation_id: '',
       start_date: todayStr,
       end_date: addMonthsStr(todayStr, 12),
       rent_amount: '',
@@ -319,11 +329,84 @@ export function ContractsPage() {
     return () => clearTimeout(timer);
   }, [createOpen, tenantMode, newTenantForm.phone, newTenantForm.id_number]);
 
+  // Tải lịch các khoảng thời gian đã có khách thuê & đang giữ chỗ của căn hộ được chọn
+  useEffect(() => {
+    if (!createOpen || !createForm.apartment_id) {
+      setAptSchedule({ loading: false, apartmentId: '', contracts: [], reservations: [] });
+      return undefined;
+    }
+    let cancelled = false;
+    const aptId = createForm.apartment_id;
+    setAptSchedule((prev) => ({
+      loading: true,
+      apartmentId: aptId,
+      contracts: prev.apartmentId === aptId ? prev.contracts : [],
+      reservations: prev.apartmentId === aptId ? prev.reservations : [],
+    }));
+
+    buildingsService
+      .getApartment(aptId)
+      .then((res) => {
+        if (cancelled) return;
+        const detail = res?.data || {};
+        const activeOrScheduledContracts = (Array.isArray(detail.contracts) ? detail.contracts : [])
+          .filter(
+            (c) =>
+              ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'PENDING_APPROVAL', 'DRAFT'].includes(
+                c.status
+              ) && toDateStr(c.end_date) >= todayStr
+          )
+          .sort((a, b) => toDateStr(a.start_date).localeCompare(toDateStr(b.start_date)));
+
+        const activeHeldReservations = (Array.isArray(detail.reservations) ? detail.reservations : [])
+          .filter((r) => r.status === 'HELD' && toDateStr(r.hold_until) >= todayStr)
+          .sort((a, b) =>
+            toDateStr(a.hold_from || a.created_at).localeCompare(toDateStr(b.hold_from || b.created_at))
+          );
+
+        setAptSchedule({
+          loading: false,
+          apartmentId: aptId,
+          contracts: activeOrScheduledContracts,
+          reservations: activeHeldReservations,
+        });
+
+        // Nếu mở trực tiếp từ căn đang OCCUPIED / MAINTENANCE, tự động gợi ý ngày bắt đầu sau HĐ hiện tại
+        if (['OCCUPIED', 'MAINTENANCE'].includes(detail.status) && activeOrScheduledContracts.length > 0) {
+          const latestEnd = activeOrScheduledContracts
+            .map((c) => toDateStr(c.end_date))
+            .filter(Boolean)
+            .sort()
+            .pop();
+          if (latestEnd && latestEnd > todayStr) {
+            setCreateForm((prev) => {
+              if (String(prev.apartment_id) !== String(aptId) || prev.start_date > todayStr) return prev;
+              return {
+                ...prev,
+                start_date: latestEnd,
+                end_date: addMonthsStr(latestEnd, 12),
+              };
+            });
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAptSchedule({ loading: false, apartmentId: aptId, contracts: [], reservations: [] });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [createOpen, createForm.apartment_id, todayStr]);
+
   const handleBuildingChangeInModal = async (buildingId) => {
     setCreateForm((p) => ({
       ...p,
       building_id: buildingId,
       apartment_id: '',
+      reservation_id: '',
       rent_amount: '',
       deposit_amount: '',
     }));
@@ -381,10 +464,12 @@ export function ContractsPage() {
 
     setCreateForm((p) => {
       const startToUse = nextStart || p.start_date;
+      const aptChanged = String(p.apartment_id) !== String(aptId);
       return {
         ...p,
         apartment_id: aptId,
         building_id: apt?.building_id || p.building_id,
+        reservation_id: aptChanged ? '' : p.reservation_id,
         start_date: startToUse,
         end_date: nextStart ? addMonthsStr(startToUse, 12) : p.end_date,
         rent_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.rent_amount,
@@ -397,7 +482,7 @@ export function ContractsPage() {
     setLookedUpTenant(null);
     setTenantLookupState(null);
     setTenantIdentifier('');
-    setCreateForm((p) => ({ ...p, primary_tenant_id: '' }));
+    setCreateForm((p) => ({ ...p, primary_tenant_id: '', reservation_id: '' }));
   };
 
   const handleLookupTenant = async (rawValue = tenantIdentifier) => {
@@ -511,6 +596,54 @@ export function ContractsPage() {
     }
   };
 
+  const handleApplyReservationProspect = async (resItem) => {
+    const rawPhone = normalizePhone(resItem?.phone || '');
+    const holdStart = toDateStr(resItem?.hold_from || '');
+    setCreateForm((p) => ({
+      ...p,
+      reservation_id: resItem?.id || '',
+      ...(holdStart && holdStart >= todayStr
+        ? {
+            start_date: holdStart,
+            end_date: addMonthsStr(holdStart, 12),
+          }
+        : {}),
+    }));
+    if (isValidPhone(rawPhone)) {
+      setTenantMode('existing');
+      setTenantIdentifier(rawPhone);
+      const found = await handleLookupTenant(rawPhone);
+      if (!found) {
+        setTenantLookupState(null);
+        setTenantMode('new');
+        setNewTenantForm((prev) => ({
+          ...prev,
+          full_name: resItem?.prospect_name || prev.full_name,
+          phone: rawPhone,
+        }));
+        toast.info(`Đã điền thông tin khách giữ chỗ "${resItem?.prospect_name || rawPhone}" vào biểu mẫu tạo mới.`);
+      }
+    } else if (resItem?.prospect_name) {
+      setTenantMode('new');
+      setNewTenantForm((prev) => ({
+        ...prev,
+        full_name: resItem.prospect_name,
+      }));
+    }
+  };
+
+  const overlappingScheduleContracts = useMemo(() => {
+    if (!createForm.start_date || !createForm.end_date || createForm.end_date <= createForm.start_date) {
+      return [];
+    }
+    return aptSchedule.contracts.filter((c) => {
+      const s = toDateStr(c.start_date);
+      const e = toDateStr(c.end_date);
+      if (!s || !e) return false;
+      return s < createForm.end_date && e > createForm.start_date;
+    });
+  }, [aptSchedule.contracts, createForm.start_date, createForm.end_date]);
+
   const handleCreateSubmit = async (e) => {
     e?.preventDefault();
 
@@ -577,6 +710,7 @@ export function ContractsPage() {
       const payload = {
         apartment_id: createForm.apartment_id,
         building_id: selectedApartment?.building_id || createForm.building_id || undefined,
+        ...(createForm.reservation_id ? { reservation_id: createForm.reservation_id } : {}),
         ...(tenantMode === 'existing'
           ? { primary_tenant_id: resolvedPrimaryTenantId }
           : {
@@ -1133,24 +1267,164 @@ export function ContractsPage() {
                   ? 'Không có căn hộ khả dụng'
                   : '-- Chọn căn hộ --'
               }
+              searchPlaceholder="Tìm mã căn hộ, trạng thái, giá thuê..."
               value={createForm.apartment_id}
               onChange={(e) => handleSelectApartment(e.target.value)}
               error={createErrors.apartment_id}
-              options={selectableApartments.map((a) => ({
-                value: a.id,
-                label: `${a.code} — ${getAptSelectStatusLabel(a.status)} — Niêm yết: ${formatMoney(a.base_rent)}`,
-              }))}
+              options={selectableApartments.map((a) => {
+                const cCount = Number(a.active_contracts_count || 0);
+                const rCount = Number(a.held_reservations_count || 0);
+                const badgeParts = [];
+                if (cCount > 0) badgeParts.push(`${cCount} HĐ`);
+                if (rCount > 0) badgeParts.push(`${rCount} giữ chỗ`);
+                return {
+                  value: a.id,
+                  label: `${a.code} — ${getAptSelectStatusLabel(a.status)} — Niêm yết: ${formatMoney(a.base_rent)}`,
+                  sublabel: [a.building_name, a.floor_name].filter(Boolean).join(' · '),
+                  badge: badgeParts.join(' · '),
+                };
+              })}
             />
           </div>
 
-          {selectedApartment && ['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status) ? (
-            <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 flex items-start gap-2">
-              <Calendar className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
-              <span>
-                Căn <strong>{selectedApartment.code}</strong> đang ở trạng thái{' '}
-                <strong>{getAptSelectStatusLabel(selectedApartment.status)}</strong>. Bạn có thể lập hợp đồng nối tiếp / tương lai với{' '}
-                <strong>ngày bắt đầu sau hôm nay</strong> và không chồng lấn kỳ hạn hợp đồng hiện tại.
-              </span>
+          {/* Hiển thị đầy đủ khoảng thời gian đã được thuê & các lượt đang giữ chỗ của căn hộ */}
+          {selectedApartment &&
+          (aptSchedule.loading ||
+            aptSchedule.contracts.length > 0 ||
+            aptSchedule.reservations.length > 0 ||
+            ['OCCUPIED', 'RESERVED', 'MAINTENANCE'].includes(selectedApartment.status)) ? (
+            <div
+              data-testid="apartment-occupancy-schedule"
+              className="rounded-2xl border border-amber-200/90 bg-amber-50/40 p-3.5 space-y-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="text-xs font-bold text-slate-800">
+                    Lịch đã thuê &amp; đang giữ chỗ — Căn {selectedApartment.code}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {aptSchedule.contracts.length > 0 ? (
+                    <Badge variant="sky">{aptSchedule.contracts.length} hợp đồng</Badge>
+                  ) : null}
+                  {aptSchedule.reservations.length > 0 ? (
+                    <Badge variant="amber">{aptSchedule.reservations.length} lượt giữ chỗ</Badge>
+                  ) : null}
+                </div>
+              </div>
+
+              {aptSchedule.loading ? (
+                <p className="text-xs text-slate-500">
+                  Đang tải chi tiết khoảng thời gian thuê &amp; giữ chỗ của căn {selectedApartment.code}...
+                </p>
+              ) : (
+                <div className="space-y-2.5">
+                  {aptSchedule.contracts.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-sky-800 flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5 text-sky-600" />
+                        Khoảng thời gian đã có khách thuê / hợp đồng ({aptSchedule.contracts.length})
+                      </p>
+                      <div className="space-y-1.5">
+                        {aptSchedule.contracts.map((c, idx) => (
+                          <div
+                            key={c.id || idx}
+                            className="rounded-xl bg-white border border-sky-200/90 px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="space-y-0.5">
+                              <p className="font-semibold text-slate-900">
+                                Từ <span className="text-sky-700 font-mono">{formatDate(c.start_date)}</span> → đến{' '}
+                                <span className="text-sky-700 font-mono">{formatDate(c.end_date)}</span>
+                              </p>
+                              <p className="text-[11px] text-slate-600">
+                                Khách thuê: <strong>{c.tenant_name || 'Đang thuê'}</strong>
+                                {c.rent_amount ? ` · Giá thuê: ${formatMoney(c.rent_amount)}/tháng` : ''}
+                              </p>
+                            </div>
+                            <StatusBadge status={c.status} domain="contract" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {aptSchedule.reservations.length > 0 ? (
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800 flex items-center gap-1.5">
+                        <Bookmark className="w-3.5 h-3.5 text-amber-600" />
+                        Khoảng thời gian đang được giữ chỗ ({aptSchedule.reservations.length} người giữ chỗ)
+                      </p>
+                      <div className="space-y-1.5">
+                        {aptSchedule.reservations.map((r, idx) => {
+                          const isSelectedRsv =
+                            Boolean(createForm.reservation_id) &&
+                            String(createForm.reservation_id) === String(r.id);
+                          return (
+                            <div
+                              key={r.id || idx}
+                              className={`rounded-xl bg-white border px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs ${
+                                isSelectedRsv
+                                  ? 'border-emerald-400 ring-1 ring-emerald-200'
+                                  : 'border-amber-200'
+                              }`}
+                            >
+                              <div className="space-y-0.5">
+                                <p className="font-semibold text-slate-900">
+                                  <span className="inline-block mr-1.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                                    Giữ chỗ #{idx + 1}
+                                  </span>
+                                  Từ{' '}
+                                  <span className="text-amber-700 font-mono">
+                                    {formatDate(r.hold_from || r.created_at)}
+                                  </span>{' '}
+                                  → đến hết{' '}
+                                  <span className="text-amber-700 font-mono">{formatDate(r.hold_until)}</span>
+                                </p>
+                                <p className="text-[11px] text-slate-600">
+                                  Khách đặt: <strong>{r.prospect_name}</strong>
+                                  {r.phone ? ` (${r.phone})` : ''} · Cọc giữ chỗ:{' '}
+                                  <strong className="text-amber-800">{formatMoney(r.hold_amount)}</strong>
+                                </p>
+                              </div>
+                              <Button
+                                type="button"
+                                size="xs"
+                                variant={isSelectedRsv ? 'success' : 'soft'}
+                                onClick={() => handleApplyReservationProspect(r)}
+                              >
+                                {isSelectedRsv ? 'Đã chọn khách này' : 'Chọn khách này'}
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status) ? (
+                    <p className="text-[11px] text-slate-600 pt-0.5">
+                      Lưu ý: Căn <strong>{selectedApartment.code}</strong> đang ở trạng thái{' '}
+                      <strong>{getAptSelectStatusLabel(selectedApartment.status)}</strong>. Vui lòng chọn ngày bắt đầu{' '}
+                      <strong>sau hôm nay</strong> và không chồng lấn với các khoảng thời gian hợp đồng ở trên.
+                    </p>
+                  ) : null}
+
+                  {overlappingScheduleContracts.length > 0 ? (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                      <span>
+                        Kỳ hạn bạn đang chọn (<strong>{formatDate(createForm.start_date)}</strong> →{' '}
+                        <strong>{formatDate(createForm.end_date)}</strong>) đang bị chồng lấn với hợp đồng hiện có (
+                        {overlappingScheduleContracts
+                          .map((c) => `${formatDate(c.start_date)} → ${formatDate(c.end_date)}`)
+                          .join(', ')}
+                        ). Hãy chọn ngày bắt đầu từ ngày kết thúc của hợp đồng trước trở đi.
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           ) : null}
 
