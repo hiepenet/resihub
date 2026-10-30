@@ -12,6 +12,8 @@ import {
 import {
   normalizeVnPhone,
   checkPersonScopeForActor,
+  isInternalPerson,
+  hasContractOutsideManagerScope,
   upsertPersonAndTenantInTx,
   ensureResidentAccount,
 } from '../services/residentAccount.js';
@@ -88,7 +90,13 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
 
     const roleCodes = getUserRoleCodes(req);
     const inScopeRows = [];
+    let hasValidResidentDup = false;
     for (const row of result.rows) {
+      const internal = await isInternalPerson(row.id, orgId);
+      if (internal) {
+        continue;
+      }
+      hasValidResidentDup = true;
       const allowed = await checkPersonScopeForActor(row.id, {
         actorId: req.user.sub,
         orgId,
@@ -113,8 +121,11 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
       return res.json({
         isDuplicate: true,
         inScope: false,
+        canLinkCrossBuilding: hasValidResidentDup,
         duplicates: [],
-        message: 'Định danh (SĐT/CCCD) này đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý.',
+        message: hasValidResidentDup
+          ? 'Định danh (SĐT/CCCD) này đã tồn tại trên hệ thống. Vui lòng chuyển sang tab "Tra cứu SĐT / CCCD" để xác minh và liên kết hồ sơ có sẵn thay vì tạo trùng.'
+          : 'Định danh (SĐT/CCCD) này đã gắn với tài khoản nội bộ trên hệ thống, không thể tạo trùng.',
       });
     }
 
@@ -144,7 +155,7 @@ router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
     });
   }
 
-  const rl = checkLookupRateLimit(tenantLookupBuckets, String(req.user.sub), 20, 5 * 60 * 1000);
+  const rl = checkLookupRateLimit(tenantLookupBuckets, String(req.user.sub), 15, 5 * 60 * 1000);
   if (!rl.allowed) {
     return res.status(429).json({
       code: 'TOO_MANY_REQUESTS',
@@ -170,7 +181,7 @@ router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
     const matchValue = isPhone ? normPhone : cleanId;
 
     const personRes = await adminPool.query(
-      `SELECT p.id, p.full_name, p.phone, p.id_number,
+      `SELECT p.id, p.full_name, p.phone, p.email, p.id_number,
               t.id AS tenant_id, t.status AS tenant_status
        FROM person p
        LEFT JOIN LATERAL (
@@ -196,7 +207,9 @@ router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
       return res.json({
         found: false,
         outOfScopeConflict: false,
+        cross_building_link: false,
         tenant: null,
+        data: null,
         normalizedPhone: isPhone ? normPhone : null,
         normalizedIdNumber: isIdNumber ? cleanId : null,
         message: 'Chưa tìm thấy hồ sơ cư dân khớp với SĐT / CCCD này. Bạn có thể chuyển sang tạo mới hồ sơ cư dân.',
@@ -204,13 +217,36 @@ router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
     }
 
     const row = personRes.rows[0];
-    if (!row.tenant_id) {
+
+    // Ẩn hoàn toàn nhân sự nội bộ & chủ đầu tư (SYS_ADMIN, OWNER, MANAGER, ACCOUNTANT, STAFF)
+    const internal = await isInternalPerson(row.id, orgId);
+    if (internal) {
       return res.json({
         found: false,
-        outOfScopeConflict: true,
+        outOfScopeConflict: false,
+        cross_building_link: false,
         tenant: null,
-        message: 'Định danh này đã gắn với tài khoản hệ thống khác, không thể dùng làm hồ sơ khách thuê.',
+        data: null,
+        normalizedPhone: isPhone ? normPhone : null,
+        normalizedIdNumber: isIdNumber ? cleanId : null,
+        message: 'Chưa tìm thấy hồ sơ cư dân khớp với SĐT / CCCD này. Bạn có thể chuyển sang tạo mới hồ sơ cư dân.',
       });
+    }
+
+    let tenantId = row.tenant_id;
+    let tenantStatus = row.tenant_status;
+
+    // Nếu person cư dân đã tồn tại (VD: tự đăng ký tài khoản Cổng cư dân) nhưng chưa có dòng tenant primary
+    if (!tenantId) {
+      const initStatus = row.id_number ? 'APPROVED' : 'PENDING';
+      const createdTenantRes = await adminPool.query(
+        `INSERT INTO tenant (person_id, org_id, type, status, created_by)
+         VALUES ($1, $2, 'primary', $3, $4)
+         RETURNING id, status`,
+        [row.id, orgId, initStatus, req.user.sub]
+      );
+      tenantId = createdTenantRes.rows[0].id;
+      tenantStatus = createdTenantRes.rows[0].status;
     }
 
     const inScope = await checkPersonScopeForActor(row.id, {
@@ -220,28 +256,42 @@ router.get('/lookup', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
     });
 
     if (!inScope) {
-      return res.json({
-        found: false,
-        outOfScopeConflict: true,
-        tenant: null,
-        message: 'Hồ sơ mang SĐT / CCCD này thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
-      });
+      await adminPool.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         VALUES ($1, 'LOOKUP_TENANT_CROSS_SCOPE', 'tenant', $2, $3)`,
+        [
+          req.user.sub,
+          tenantId,
+          JSON.stringify({
+            by: isPhone ? 'phone' : 'id_number',
+            cross_building_link: true,
+          }),
+        ]
+      );
     }
+
+    const tenantPreview = {
+      id: tenantId,
+      person_id: row.id,
+      ...(inScope ? { full_name: row.full_name } : {}),
+      masked_name: maskName(row.full_name),
+      masked_phone: maskPhone(row.phone),
+      masked_email: maskEmail(row.email),
+      masked_id_number: maskIdNumber(row.id_number),
+      has_id_number: Boolean(row.id_number),
+      status: tenantStatus,
+      cross_building_link: !inScope,
+    };
 
     return res.json({
       found: true,
       outOfScopeConflict: false,
-      tenant: {
-        id: row.tenant_id,
-        person_id: row.id,
-        full_name: row.full_name,
-        masked_name: maskName(row.full_name),
-        masked_phone: maskPhone(row.phone),
-        masked_id_number: maskIdNumber(row.id_number),
-        has_id_number: Boolean(row.id_number),
-        status: row.tenant_status,
-      },
-      message: 'Đã tìm thấy hồ sơ cư dân hợp lệ.',
+      cross_building_link: !inScope,
+      tenant: tenantPreview,
+      data: tenantPreview,
+      message: inScope
+        ? 'Đã tìm thấy hồ sơ cư dân hợp lệ.'
+        : 'Đã xác minh hồ sơ khách thuê trên hệ thống (đã che PII bảo mật). Bạn có thể liên kết để lập hợp đồng cho tòa nhà của mình.',
     });
   } catch (err) {
     console.error('[Tenant Lookup Error]:', err);
@@ -357,7 +407,41 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
     sql += ` ORDER BY t.created_at DESC`;
 
     const result = await pool.query(sql, params);
-    res.json({ data: result.rows });
+    let rows = result.rows;
+
+    if (!isSysAdmin && isManager && rows.length > 0) {
+      const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
+      const personIds = Array.from(new Set(rows.map((r) => r.person_id).filter(Boolean)));
+      if (personIds.length > 0) {
+        const sharedRes = await adminPool.query(
+          `SELECT DISTINCT t_all.person_id
+           FROM tenant t_all
+           WHERE t_all.person_id = ANY($1::uuid[])
+             AND (
+               EXISTS (
+                 SELECT 1 FROM contract c
+                 WHERE c.primary_tenant_id = t_all.id
+                   AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+                   AND NOT (c.building_id = ANY($2::uuid[]))
+               )
+               OR EXISTS (
+                 SELECT 1 FROM contract_occupant co
+                 JOIN contract c ON c.id = co.contract_id
+                 WHERE co.tenant_id = t_all.id
+                   AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+                   AND NOT (c.building_id = ANY($2::uuid[]))
+               )
+             )`,
+          [personIds, mgrBuildingIds]
+        );
+        const sharedSet = new Set(sharedRes.rows.map((r) => r.person_id));
+        rows = rows.map((r) => ({ ...r, is_shared_profile: sharedSet.has(r.person_id) }));
+      }
+    } else {
+      rows = rows.map((r) => ({ ...r, is_shared_profile: false }));
+    }
+
+    res.json({ data: rows });
   } catch (err) {
     console.error('[Tenants Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi lấy danh sách cư dân.' });
@@ -532,6 +616,19 @@ router.post('/merge', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
           message: 'Hồ sơ cư dân thuộc tòa nhà ngoài phạm vi quản lý của bạn.',
         });
       }
+
+      const sourceShared = await hasContractOutsideManagerScope(sourceTenant.person_id, {
+        actorId: req.user.sub,
+        orgId,
+        roleCodes: userRoles,
+      });
+      if (sourceShared) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SHARED_PROFILE_LOCKED',
+          message: 'Không thể gộp hồ sơ nguồn đang gắn với hợp đồng hiệu lực khác trong hệ thống. Vui lòng liên hệ SYS_ADMIN.',
+        });
+      }
     }
 
     // 1. Chuyển toàn bộ liên kết nghiệp vụ (contract, occupant, invoice, payment, receivable) sang target_tenant_id
@@ -694,9 +791,16 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
       occupants = occRes.rows;
     }
 
+    const isSharedProfile = await hasContractOutsideManagerScope(tenant.person_id, {
+      actorId: req.user.sub,
+      orgId: req.user.org_id,
+      roleCodes: getUserRoleCodes(req),
+    });
+
     res.json({
       data: {
         ...tenant,
+        is_shared_profile: isSharedProfile,
         contracts: contractsRes.rows,
         occupants,
       },
@@ -708,12 +812,14 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
 });
 
 /**
- * PATCH /api/v1/tenants/:id — sửa hồ sơ + duyệt cư dân (A8, FR-021)
+ * PATCH /api/v1/tenants/:id — sửa hồ sơ + duyệt cư dân (A8, FR-021 & Điểm 2 Shared Profile Lock)
  */
 router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
   const { full_name, phone, email, dob, id_number, address, nationality, action } = req.body;
   const orgId = req.user.org_id;
+  const userRoles = getUserRoleCodes(req);
+  const isSysAdmin = userRoles.includes('SYS_ADMIN');
 
   const { client, release } = await getUserClient(req);
   try {
@@ -731,6 +837,14 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
     }
     const tenant = tenantRes.rows[0];
 
+    const isSharedProfile = !isSysAdmin
+      ? await hasContractOutsideManagerScope(tenant.person_id, {
+          actorId: req.user.sub,
+          orgId,
+          roleCodes: userRoles,
+        })
+      : false;
+
     if (action === 'approve' || action === 'reject') {
       if (tenant.status !== 'PENDING') {
         await client.query('ROLLBACK');
@@ -739,8 +853,28 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
           message: `Hồ sơ đang ở trạng thái ${tenant.status}, chỉ hồ sơ PENDING mới được duyệt/từ chối.`,
         });
       }
+      if (action === 'reject' && isSharedProfile) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SHARED_PROFILE_LOCKED',
+          message: 'Hồ sơ định danh này đang gắn với hợp đồng hiệu lực khác trong hệ thống, không thể từ chối hồ sơ dùng chung.',
+        });
+      }
       const nextStatus = action === 'approve' ? 'APPROVED' : 'REJECTED';
-      const finalIdNumber = id_number ?? tenant.id_number;
+      const incomingIdNum = id_number !== undefined && id_number !== null ? String(id_number).trim() : null;
+      if (
+        isSharedProfile &&
+        tenant.id_number &&
+        incomingIdNum &&
+        incomingIdNum !== String(tenant.id_number).trim()
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SHARED_PROFILE_LOCKED',
+          message: 'Hồ sơ định danh này đang gắn với hợp đồng hiệu lực khác trong hệ thống. Chỉ Cư dân (trên Cổng cư dân) hoặc SYS_ADMIN mới được thay đổi CCCD gốc.',
+        });
+      }
+      const finalIdNumber = incomingIdNum || tenant.id_number;
       if (action === 'approve' && !finalIdNumber) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -752,7 +886,9 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
         `UPDATE tenant SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
         [nextStatus, id]
       );
-      if (id_number) {
+      if (incomingIdNum && !tenant.id_number) {
+        await client.query(`UPDATE person SET id_number = $1 WHERE id = $2`, [finalIdNumber, tenant.person_id]);
+      } else if (incomingIdNum && !isSharedProfile) {
         await client.query(`UPDATE person SET id_number = $1 WHERE id = $2`, [finalIdNumber, tenant.person_id]);
       }
       await client.query(
@@ -764,32 +900,85 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       return res.json({ message: nextStatus === 'APPROVED' ? 'Đã duyệt hồ sơ cư dân.' : 'Đã từ chối hồ sơ cư dân.', data: upd.rows[0] });
     }
 
+    const normDate = (d) => {
+      if (!d) return '';
+      if (d instanceof Date) return d.toISOString().slice(0, 10);
+      return String(d).slice(0, 10);
+    };
+
+    if (isSharedProfile) {
+      const lockedFields = [];
+      if (
+        tenant.full_name &&
+        full_name !== undefined &&
+        String(full_name || '').trim() !== String(tenant.full_name).trim()
+      ) {
+        lockedFields.push('full_name');
+      }
+      if (
+        tenant.phone &&
+        phone !== undefined &&
+        normalizeVnPhone(phone) !== normalizeVnPhone(tenant.phone)
+      ) {
+        lockedFields.push('phone');
+      }
+      if (
+        tenant.id_number &&
+        id_number !== undefined &&
+        String(id_number || '').trim() !== String(tenant.id_number).trim()
+      ) {
+        lockedFields.push('id_number');
+      }
+      if (
+        tenant.dob &&
+        dob !== undefined &&
+        normDate(dob) !== normDate(tenant.dob)
+      ) {
+        lockedFields.push('dob');
+      }
+
+      if (lockedFields.length > 0) {
+        await client.query('ROLLBACK');
+        await adminPool.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+           VALUES ($1, 'SHARED_PROFILE_EDIT_BLOCKED', 'tenant', $2, $3)`,
+          [req.user.sub, id, JSON.stringify({ locked_fields: lockedFields })]
+        );
+        return res.status(409).json({
+          code: 'SHARED_PROFILE_LOCKED',
+          locked_fields: lockedFields,
+          message:
+            'Hồ sơ định danh này đang gắn với hợp đồng hiệu lực khác trong hệ thống. Chỉ Cư dân (trên Cổng cư dân) hoặc SYS_ADMIN mới được thay đổi Họ tên / SĐT / CCCD / Ngày sinh gốc.',
+        });
+      }
+    }
+
     const nextPerson = {
-      full_name: full_name ?? tenant.full_name,
-      phone: phone ?? tenant.phone,
-      email: email ?? tenant.email,
-      dob: dob ?? tenant.dob,
-      id_number: id_number ?? tenant.id_number,
-      address: address ?? tenant.address,
-      nationality: nationality ?? tenant.nationality,
+      full_name: full_name !== undefined ? String(full_name).trim() : tenant.full_name,
+      phone: phone !== undefined ? normalizeVnPhone(phone) : tenant.phone,
+      email: email !== undefined ? (email ? String(email).trim().toLowerCase() : null) : tenant.email,
+      dob: dob !== undefined ? (dob || null) : tenant.dob,
+      id_number: id_number !== undefined ? (id_number ? String(id_number).trim() : null) : tenant.id_number,
+      address: address !== undefined ? address : tenant.address,
+      nationality: nationality !== undefined ? nationality : tenant.nationality,
     };
     if (!nextPerson.full_name || !nextPerson.phone) {
       await client.query('ROLLBACK');
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại không được để trống.' });
     }
 
-    const dup = await client.query(
+    const dup = await adminPool.query(
       `SELECT 1 FROM person
        WHERE org_id = $1 AND id <> $2 AND (
-         phone = $3 OR (id_number IS NOT NULL AND id_number = $4)
+         phone = $3 OR ($4::text IS NOT NULL AND id_number = $4)
        ) LIMIT 1`,
-      [orgId, tenant.person_id, nextPerson.phone, nextPerson.id_number]
+      [orgId, tenant.person_id, nextPerson.phone, nextPerson.id_number || null]
     );
     if (dup.rows.length > 0) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         code: 'DUPLICATE_PERSON',
-        message: 'SĐT hoặc CCCD đã tồn tại trên một cư dân khác trong tổ chức.',
+        message: 'SĐT hoặc CCCD đã tồn tại trên một hồ sơ khác trong tổ chức.',
       });
     }
 

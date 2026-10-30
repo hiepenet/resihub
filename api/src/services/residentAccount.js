@@ -112,6 +112,88 @@ export async function checkPersonScopeForActor(personId, { actorId, orgId, roleC
 }
 
 /**
+ * Kiểm tra xem person_id có thuộc tài khoản nhân sự nội bộ / chủ sở hữu tòa nhà
+ * (SYS_ADMIN, OWNER, MANAGER, ACCOUNTANT, STAFF hoặc bảng owner) hay không.
+ * Dùng để ẩn hoàn toàn nhân sự nội bộ khỏi luồng tra cứu & liên kết khách thuê.
+ */
+export async function isInternalPerson(personId, orgId) {
+  if (!personId || !orgId) return false;
+  const res = await adminPool.query(
+    `SELECT 1
+     FROM person p
+     WHERE p.id = $1
+       AND p.org_id = $2
+       AND (
+         EXISTS (
+           SELECT 1
+           FROM app_user au
+           JOIN user_role ur ON ur.user_id = au.id
+           JOIN role r ON r.id = ur.role_id
+           WHERE au.person_id = p.id
+             AND r.code IN ('SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'STAFF')
+         )
+         OR EXISTS (
+           SELECT 1 FROM owner o WHERE o.person_id = p.id
+         )
+       )
+     LIMIT 1`,
+    [personId, orgId]
+  );
+  return res.rows.length > 0;
+}
+
+/**
+ * Kiểm tra xem hồ sơ person có đang gắn với hợp đồng đang mở
+ * (DRAFT, PENDING_APPROVAL, ACTIVE, RENEWAL_PENDING, TERMINATION_PENDING)
+ * tại tòa nhà nằm ngoài phạm vi quản lý của MANAGER đang thao tác hay không.
+ * Dùng để khóa bảo vệ định danh gốc (Điểm 2 — Shared Profile Lock).
+ */
+export async function hasContractOutsideManagerScope(personId, { actorId, orgId, roleCodes } = {}) {
+  if (!personId || !orgId) return false;
+
+  let roles = Array.isArray(roleCodes) ? roleCodes : null;
+  if (!roles && actorId) {
+    const roleRes = await adminPool.query(
+      `SELECT r.code
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [actorId]
+    );
+    roles = roleRes.rows.map((r) => r.code);
+  }
+  roles = roles || [];
+
+  if (roles.includes('SYS_ADMIN')) {
+    return false;
+  }
+
+  const mgrIds = actorId ? await getManagerBuildingIds(actorId, orgId) : [];
+
+  const checkRes = await adminPool.query(
+    `SELECT 1
+     FROM contract c
+     WHERE c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+       AND NOT (c.building_id = ANY($2::uuid[]))
+       AND (
+         EXISTS (
+           SELECT 1 FROM tenant t
+           WHERE t.id = c.primary_tenant_id AND t.person_id = $1
+         )
+         OR EXISTS (
+           SELECT 1 FROM contract_occupant co
+           JOIN tenant t2 ON t2.id = co.tenant_id
+           WHERE co.contract_id = c.id AND t2.person_id = $1
+         )
+       )
+     LIMIT 1`,
+    [personId, mgrIds]
+  );
+
+  return checkRes.rows.length > 0;
+}
+
+/**
  * Khởi tạo hoặc tái sử dụng hồ sơ person + tenant bên trong transaction hiện hành (RLS client).
  * Nếu có CCCD/Hộ chiếu -> tenant.status = 'APPROVED'; thiếu CCCD -> 'PENDING'.
  */
