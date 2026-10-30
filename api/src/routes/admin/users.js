@@ -32,10 +32,9 @@ router.get('/roles', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANA
 
 /**
  * GET /api/v1/admin/users
- * Danh sách người dùng toàn tổ chức (M01, FR-004)
- * Cho phép SYS_ADMIN xem đầy đủ; OWNER xem nhân sự tòa mình sở hữu (hữu ích khi tra cứu)
+ * Danh sách người dùng toàn tổ chức (M01, FR-004, PRD 6.2: Chỉ SYS_ADMIN CRUD)
  */
-router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) => {
   const { role, status, search } = req.query;
   const orgId = req.user.org_id;
 

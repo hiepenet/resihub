@@ -29,10 +29,10 @@ router.get('/', authenticateToken, async (req, res) => {
       [orgId, userId]
     );
 
-    // Nếu là ADMIN / MANAGER / OWNER, trả thêm lịch sử thông báo đã phát hành
+    // Nếu là SYS_ADMIN / MANAGER, trả thêm lịch sử thông báo đã phát hành (OWNER 100% Read-Only thông báo nhận)
     const roles = getUserRoleCodes(req);
     let sentHistory = [];
-    if (roles.some((r) => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(r))) {
+    if (roles.some((r) => ['SYS_ADMIN', 'MANAGER'].includes(r))) {
       const sentRes = await adminPool.query(
         `SELECT id, title, content, type, payload, created_at
          FROM notification
@@ -58,13 +58,13 @@ router.get('/', authenticateToken, async (req, res) => {
 /**
  * POST /api/v1/notifications (M13, FR-051)
  * Gửi thông báo theo nhóm nhận: toàn tổ chức (ALL), theo tòa (BUILDING), tầng (FLOOR), hoặc căn hộ (APARTMENT)
+ * OWNER 100% Read-Only (PRD 6.1 & 6.2), chỉ SYS_ADMIN và MANAGER được phát thông báo vận hành.
  */
-router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { title, content, type = 'ANNOUNCEMENT', target_scope = 'BUILDING', building_id, floor_id, apartment_id } = req.body;
   const orgId = req.user.org_id;
   const roles = getUserRoleCodes(req);
   const isSysAdmin = roles.includes('SYS_ADMIN');
-  const isOwner = roles.includes('OWNER');
   const isManager = roles.includes('MANAGER');
 
   if (!title?.trim() || !content?.trim()) {
@@ -79,19 +79,11 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER'
       });
     }
 
-    if (building_id && !isSysAdmin) {
-      if (isManager) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
-        if (!mgrIds.includes(building_id)) {
-          await logAccessDenied(req, 'building', building_id, 'MANAGER attempted notification on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà này.' });
-        }
-      } else if (isOwner) {
-        const ownIds = await getOwnerBuildingIds(req.user.sub, orgId);
-        if (!ownIds.includes(building_id)) {
-          await logAccessDenied(req, 'building', building_id, 'OWNER attempted notification on unowned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không sở hữu tòa nhà này.' });
-        }
+    if (building_id && !isSysAdmin && isManager) {
+      const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
+      if (!mgrIds.includes(building_id)) {
+        await logAccessDenied(req, 'building', building_id, 'MANAGER attempted notification on unassigned building');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà này.' });
       }
     }
 
@@ -143,10 +135,6 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER'
     } else if (isManager) {
       const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
       params.push(mgrIds);
-      userSql += ` AND c.building_id = ANY($${params.length}::uuid[])`;
-    } else if (isOwner) {
-      const ownIds = await getOwnerBuildingIds(req.user.sub, orgId);
-      params.push(ownIds);
       userSql += ` AND c.building_id = ANY($${params.length}::uuid[])`;
     }
 

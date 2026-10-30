@@ -87,10 +87,74 @@ export async function managerBuildingFilter(buildingColumn, userId, orgId, exist
 }
 
 /**
- * Lấy danh sách building_id được gán cho STAFF / ACCOUNTANT / MANAGER (qua user_role.building_id).
+ * Lấy danh sách building_id được gán cho ACCOUNTANT (qua user_role.building_id;
+ * nếu ur.building_id IS NULL nghĩa là Kế toán toàn tổ chức -> trả toàn bộ tòa thuộc org).
+ */
+export async function getAccountantBuildingIds(userId, orgId) {
+  if (!userId || !orgId) return [];
+  const globalCheck = await adminPool.query(
+    `SELECT 1
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     WHERE ur.user_id = $1 AND r.code = 'ACCOUNTANT' AND ur.building_id IS NULL
+     LIMIT 1`,
+    [userId]
+  );
+  if (globalCheck.rows.length > 0) {
+    const allBldgs = await adminPool.query(`SELECT id FROM building WHERE org_id = $1`, [orgId]);
+    return allBldgs.rows.map((r) => r.id);
+  }
+
+  const result = await adminPool.query(
+    `SELECT DISTINCT ur.building_id
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     JOIN building b ON b.id = ur.building_id
+     WHERE ur.user_id = $1
+       AND r.code = 'ACCOUNTANT'
+       AND b.org_id = $2
+       AND ur.building_id IS NOT NULL`,
+    [userId, orgId]
+  );
+  return result.rows.map((r) => r.building_id);
+}
+
+/**
+ * Tạo SQL fragment để filter building cho ACCOUNTANT.
+ */
+export async function accountantBuildingFilter(buildingColumn, userId, orgId, existingParams) {
+  const ids = await getAccountantBuildingIds(userId, orgId);
+  if (ids.length === 0) {
+    return { sql: ` AND FALSE`, params: existingParams };
+  }
+  existingParams.push(ids);
+  return {
+    sql: ` AND ${buildingColumn} = ANY($${existingParams.length}::uuid[])`,
+    params: existingParams,
+  };
+}
+
+/**
+ * Lấy danh sách building_id được gán cho STAFF / ACCOUNTANT / MANAGER (qua user_role.building_id;
+ * riêng ACCOUNTANT / STAFF nếu ur.building_id IS NULL -> toàn bộ tòa thuộc org).
  */
 export async function getStaffBuildingIds(userId, orgId) {
   if (!userId || !orgId) return [];
+  const globalCheck = await adminPool.query(
+    `SELECT 1
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     WHERE ur.user_id = $1
+       AND r.code IN ('STAFF', 'ACCOUNTANT')
+       AND ur.building_id IS NULL
+     LIMIT 1`,
+    [userId]
+  );
+  if (globalCheck.rows.length > 0) {
+    const allBldgs = await adminPool.query(`SELECT id FROM building WHERE org_id = $1`, [orgId]);
+    return allBldgs.rows.map((r) => r.id);
+  }
+
   const result = await adminPool.query(
     `SELECT DISTINCT ur.building_id
      FROM user_role ur
