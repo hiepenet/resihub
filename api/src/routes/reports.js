@@ -28,7 +28,7 @@ function buildLast12MonthsPeriods() {
 router.get(
   '/dashboard',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id } = req.query;
     const orgId = req.user.org_id;
@@ -223,7 +223,7 @@ router.get(
 router.get(
   '/summary',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id } = req.query;
     const orgId = req.user.org_id;

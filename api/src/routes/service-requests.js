@@ -32,7 +32,7 @@ async function generateTrackingCode() {
 router.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, status, category, priority, search } = req.query;
     const orgId = req.user.org_id;
@@ -115,7 +115,7 @@ router.get(
 router.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { apartment_id, title, category = 'OTHER', description, priority = 'NORMAL', images = [] } = req.body;
     const orgId = req.user.org_id;
@@ -205,7 +205,7 @@ router.post(
 router.get(
   '/:id',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const orgId = req.user.org_id;
@@ -254,7 +254,7 @@ router.get(
          WHERE p.org_id = $1
            AND au.status = 'ACTIVE'
            AND (
-             (r.code IN ('MANAGER', 'STAFF') AND ur.building_id = $2)
+             (r.code = 'MANAGER' AND ur.building_id = $2)
              OR r.code = 'SYS_ADMIN'
            )
          ORDER BY p.full_name ASC`,
@@ -281,7 +281,7 @@ router.get(
 router.patch(
   '/:id/status',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { status, assigned_to, internal_note, priority } = req.body;

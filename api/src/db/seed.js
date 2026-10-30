@@ -29,6 +29,7 @@ async function seedData() {
 
     // 2. Roles (Chỉ 3 vai trò: OWNER, MANAGER, RESIDENT)
     const roles = [
+      { code: 'SYS_ADMIN', name: 'Quản trị hệ thống', scope: 'org' },
       { code: 'OWNER', name: 'Chủ đầu tư / Chủ nhà', scope: 'org' },
       { code: 'MANAGER', name: 'Quản lý tòa nhà', scope: 'building' },
       { code: 'RESIDENT', name: 'Cư dân', scope: 'building' },

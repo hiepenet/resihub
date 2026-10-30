@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Users,
   UserPlus,
@@ -10,6 +11,10 @@ import {
   Trash2,
   Save,
   Shield,
+  ShieldCheck,
+  AlertTriangle,
+  ScrollText,
+  ExternalLink,
   Building2,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
@@ -26,6 +31,7 @@ import { SearchBar } from '../../../components/common/SearchBar';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { usersService } from '../../../services/users.service';
 import { buildingsService } from '../../../services/buildings.service';
+import { AuditLogsView } from '../audit/AuditLogsPage';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
@@ -37,8 +43,6 @@ const ALL_ROLE_OPTIONS = [
   ROLES.SYS_ADMIN,
   ROLES.OWNER,
   ROLES.MANAGER,
-  ROLES.STAFF,
-  ROLES.ACCOUNTANT,
   ROLES.RESIDENT,
 ].map((code) => ({
   value: code,
@@ -70,11 +74,12 @@ const DEFAULT_CONTACT_CONFIG = {
 };
 
 export function UsersPage() {
+  const navigate = useNavigate();
   const toast = useToast();
   const { user: currentUser, canManageUsers } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [activeTab, setActiveTab] = useState('users'); // 'users' | 'settings'
+  const [activeTab, setActiveTab] = useState('users'); // 'users' | 'settings' | 'audit'
 
   // Tab 1: Danh sách tài khoản
   const [users, setUsers] = useState([]);
@@ -109,6 +114,7 @@ export function UsersPage() {
   const [billingConfig, setBillingConfig] = useState(DEFAULT_BILLING_CONFIG);
   const [slaConfig, setSlaConfig] = useState(DEFAULT_SLA_CONFIG);
   const [contactConfig, setContactConfig] = useState(DEFAULT_CONTACT_CONFIG);
+  const [approvalConfig, setApprovalConfig] = useState({ allow_self_approval: false });
 
   const fetchUsersData = useCallback(async () => {
     setLoadingUsers(true);
@@ -161,6 +167,11 @@ export function UsersPage() {
           ...data.contact_config,
         });
       }
+      if (data.approval_config) {
+        setApprovalConfig({
+          allow_self_approval: Boolean(data.approval_config.allow_self_approval),
+        });
+      }
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải cấu hình hệ thống.'));
     } finally {
@@ -211,7 +222,7 @@ export function UsersPage() {
             role_code: r.code,
             building_id: r.building_id || '',
           }))
-        : [{ role_code: 'STAFF', building_id: selectedBuildingId || '' }];
+        : [{ role_code: 'MANAGER', building_id: selectedBuildingId || '' }];
 
     setUserForm({
       full_name: u.full_name || '',
@@ -228,7 +239,7 @@ export function UsersPage() {
   const addRoleRow = () => {
     setUserForm((s) => ({
       ...s,
-      roles: [...s.roles, { role_code: 'STAFF', building_id: selectedBuildingId || '' }],
+      roles: [...s.roles, { role_code: 'MANAGER', building_id: selectedBuildingId || '' }],
     }));
   };
 
@@ -374,6 +385,9 @@ export function UsersPage() {
           emergency_phone: contactConfig.emergency_phone.trim(),
           support_email: contactConfig.support_email.trim(),
         },
+        approval_config: {
+          allow_self_approval: Boolean(approvalConfig.allow_self_approval),
+        },
       });
       toast.success(res.message || 'Đã lưu cấu hình hệ thống thành công.');
     } catch (err) {
@@ -498,20 +512,30 @@ export function UsersPage() {
         title="Người dùng & Cấu hình Hệ thống"
         subtitle="Quản lý tài khoản nhân sự, phân quyền theo phạm vi tòa nhà (RBAC + RLS) và thiết lập tham số vận hành."
         actions={
-          activeTab === 'users' && canManageUsers ? (
-            <Button variant="primary" icon={UserPlus} onClick={openCreateUserModal}>
-              Tạo tài khoản mới
-            </Button>
-          ) : activeTab === 'settings' && canManageUsers ? (
+          <div className="flex flex-wrap items-center gap-2">
             <Button
-              variant="primary"
-              icon={Save}
-              loading={savingSettings}
-              onClick={handleSaveSettings}
+              variant="outline"
+              icon={ScrollText}
+              rightIcon={ExternalLink}
+              onClick={() => navigate('/admin/audit-logs')}
             >
-              Lưu cấu hình hệ thống
+              Mở trang Nhật ký hệ thống
             </Button>
-          ) : null
+            {activeTab === 'users' && canManageUsers ? (
+              <Button variant="primary" icon={UserPlus} onClick={openCreateUserModal}>
+                Tạo tài khoản mới
+              </Button>
+            ) : activeTab === 'settings' && canManageUsers ? (
+              <Button
+                variant="primary"
+                icon={Save}
+                loading={savingSettings}
+                onClick={handleSaveSettings}
+              >
+                Lưu cấu hình hệ thống
+              </Button>
+            ) : null}
+          </div>
         }
       />
 
@@ -529,6 +553,11 @@ export function UsersPage() {
             id: 'settings',
             label: 'Cấu hình hệ thống',
             icon: Settings,
+          },
+          {
+            id: 'audit',
+            label: 'Nhật ký hệ thống',
+            icon: ScrollText,
           },
         ]}
       />
@@ -604,6 +633,51 @@ export function UsersPage() {
           </div>
         ) : (
           <form onSubmit={handleSaveSettings} className="space-y-6">
+            {/* Quy tắc Phê duyệt Nội bộ (Four-eyes) — R-23 */}
+            <Card className="space-y-4">
+              <CardHeader
+                title="Quy tắc Phê duyệt Nội bộ (Four-eyes)"
+                subtitle="Khóa cấu hình: approval_config"
+              />
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-primary-600 shrink-0" />
+                    Cho phép người tạo tự phê duyệt trong mô hình vận hành 1 nhân sự (allow_self_approval)
+                  </p>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Mặc định tắt (<strong>Four-eyes nghiêm ngặt</strong>: người lập hồ sơ không được tự duyệt hợp đồng giá ưu đãi, phụ lục hay hoàn cọc). Khi bật cho mô hình vận hành 1 người, người tạo được phép tự phê duyệt hồ sơ của mình và hệ thống tự động ghi nhận cảnh báo{' '}
+                    <code className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-mono text-[11px]">
+                      SELF_APPROVAL_WARNING
+                    </code>{' '}
+                    trong Nhật ký hệ thống (Audit Log).
+                  </p>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    disabled={!canManageUsers}
+                    checked={Boolean(approvalConfig.allow_self_approval)}
+                    onChange={(e) =>
+                      setApprovalConfig({ allow_self_approval: e.target.checked })
+                    }
+                  />
+                  <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600 peer-disabled:opacity-60" />
+                </label>
+              </div>
+
+              {approvalConfig.allow_self_approval ? (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-xs text-amber-900">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    Chế độ cho phép tự phê duyệt đang <strong>BẬT</strong>. Mọi thao tác tự phê duyệt sẽ tự động ghi nhận cảnh báo <strong>SELF_APPROVAL_WARNING</strong> vào Nhật ký hệ thống.
+                  </span>
+                </div>
+              ) : null}
+            </Card>
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* 1. Billing Config */}
               <Card className="space-y-4">
@@ -792,6 +866,9 @@ export function UsersPage() {
         )
       ) : null}
 
+      {/* TAB 3: NHẬT KÝ HỆ THỐNG (AUDIT LOGS) */}
+      {activeTab === 'audit' ? <AuditLogsView /> : null}
+
       {/* Modal Tạo / Sửa Tài khoản & Phân quyền nhiều vai trò */}
       <Modal
         open={userModalOpen}
@@ -847,7 +924,7 @@ export function UsersPage() {
             <Input
               label="Email đăng nhập"
               type="email"
-              placeholder="staff@resihub.vn"
+              placeholder="manager@resihub.vn"
               value={userForm.email}
               onChange={(e) => setUserForm((s) => ({ ...s, email: e.target.value }))}
             />

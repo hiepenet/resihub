@@ -19,7 +19,7 @@ const PERIOD_RE = /^\d{4}-\d{2}$/;
 router.get(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, meter_type, period, search } = req.query;
     const orgId = req.user.org_id;
@@ -103,7 +103,7 @@ router.get(
 router.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { apartment_id, meter_type, meter_code, unit_price, initial_reading = 0 } = req.body;
     const orgId = req.user.org_id;
@@ -173,7 +173,7 @@ router.post(
 router.get(
   '/readings',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { building_id, period, meter_type, abnormal_only } = req.query;
     const orgId = req.user.org_id;
@@ -356,7 +356,7 @@ async function upsertSingleReading(client, req, meterId, { period, current_readi
 router.post(
   '/readings/batch',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { period, readings } = req.body;
     if (!Array.isArray(readings) || readings.length === 0) {
@@ -404,7 +404,7 @@ router.post(
 router.get(
   '/:id/readings',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     try {
@@ -444,7 +444,7 @@ router.get(
 router.post(
   '/:id/readings',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER', 'STAFF', 'ACCOUNTANT']),
+  requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
     const { client, release } = await getUserClient(req);

@@ -7,6 +7,12 @@ export const usersService = {
   update: (id, payload) => api.patch(`/api/v1/admin/users/${id}`, payload).then((r) => r.data),
 
   getSettings: () => api.get('/api/v1/settings').then((r) => r.data),
-  updateSettings: (settings) => api.put('/api/v1/settings', { settings }).then((r) => r.data),
+  updateSettings: (settings) =>
+    api
+      .put('/api/v1/settings', {
+        settings,
+        ...(settings && typeof settings === 'object' ? settings : {}),
+      })
+      .then((r) => r.data),
 };
 

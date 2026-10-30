@@ -36,6 +36,8 @@ const ServiceRequestsPage = lazy(() => import('../pages/admin/maintenance/Servic
 const NotificationsPage = lazy(() => import('../pages/admin/notifications/NotificationsPage'));
 const ReportsPage = lazy(() => import('../pages/admin/reports/ReportsPage'));
 const UsersPage = lazy(() => import('../pages/admin/users/UsersPage'));
+const SettingsPage = lazy(() => import('../pages/admin/settings/SettingsPage'));
+const AuditLogsPage = lazy(() => import('../pages/admin/audit/AuditLogsPage'));
 
 const ResidentPortalPage = lazy(() => import('../pages/resident/ResidentPortalPage'));
 
@@ -166,7 +168,7 @@ export const router = createBrowserRouter([
       {
         path: 'contracts',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(ContractsPage)}
           </RoleGuard>
         ),
@@ -174,7 +176,7 @@ export const router = createBrowserRouter([
       {
         path: 'contracts/:id',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(ContractDetailPage)}
           </RoleGuard>
         ),
@@ -182,7 +184,7 @@ export const router = createBrowserRouter([
       {
         path: 'deposits',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(DepositsPage)}
           </RoleGuard>
         ),
@@ -192,7 +194,7 @@ export const router = createBrowserRouter([
       {
         path: 'services',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(ServiceCatalogPage)}
           </RoleGuard>
         ),
@@ -200,7 +202,7 @@ export const router = createBrowserRouter([
       {
         path: 'services/subscriptions',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(SubscriptionsPage)}
           </RoleGuard>
         ),
@@ -208,7 +210,7 @@ export const router = createBrowserRouter([
       {
         path: 'meters',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.STAFF, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(MeterReadingsPage)}
           </RoleGuard>
         ),
@@ -218,7 +220,7 @@ export const router = createBrowserRouter([
       {
         path: 'invoices',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(InvoicesPage)}
           </RoleGuard>
         ),
@@ -226,7 +228,7 @@ export const router = createBrowserRouter([
       {
         path: 'invoices/:id',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(InvoiceDetailPage)}
           </RoleGuard>
         ),
@@ -234,17 +236,17 @@ export const router = createBrowserRouter([
       {
         path: 'payments',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(PaymentsPage)}
           </RoleGuard>
         ),
       },
 
-      // Bảo trì (M11), Thông báo (M13), Báo cáo (M14), Quản trị user (M01)
+      // Bảo trì (M11), Thông báo (M13), Báo cáo (M14), Quản trị user & Nhật ký (M01)
       {
         path: 'maintenance',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.STAFF]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(ServiceRequestsPage)}
           </RoleGuard>
         ),
@@ -260,8 +262,24 @@ export const router = createBrowserRouter([
       {
         path: 'reports',
         element: (
-          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER, ROLES.ACCOUNTANT]}>
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(ReportsPage)}
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'audit-logs',
+        element: (
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER]}>
+            {withSuspense(AuditLogsPage)}
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'settings',
+        element: (
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN]}>
+            {withSuspense(SettingsPage)}
           </RoleGuard>
         ),
       },

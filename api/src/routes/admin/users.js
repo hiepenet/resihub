@@ -13,9 +13,11 @@ function normalizePhone(phone) {
   return clean;
 }
 
+const VALID_ROLE_CODES = ['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT'];
+
 /**
  * GET /api/v1/admin/users/roles
- * Lấy danh mục vai trò của tổ chức (SYS_ADMIN, OWNER, MANAGER, STAFF, ACCOUNTANT, RESIDENT)
+ * Lấy danh mục vai trò của tổ chức (SYS_ADMIN, OWNER, MANAGER, RESIDENT)
  */
 router.get('/roles', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   try {
@@ -177,11 +179,18 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
     const appUser = uIns.rows[0];
 
     // Gán vai trò
-    const roleAssignments = Array.isArray(roles) && roles.length > 0 ? roles : [{ role_code: 'STAFF', building_id: null }];
+    const roleAssignments = Array.isArray(roles) && roles.length > 0 ? roles : [{ role_code: 'MANAGER', building_id: null }];
     for (const item of roleAssignments) {
       const code = typeof item === 'string' ? item : (item.role_code || item.code);
       const bId = typeof item === 'object' ? (item.building_id || null) : null;
       if (!code) continue;
+      if (!VALID_ROLE_CODES.includes(code)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'INVALID_ROLE',
+          message: `Vai trò "${code}" không còn hợp lệ. Hệ thống chỉ hỗ trợ: ${VALID_ROLE_CODES.join(', ')}.`,
+        });
+      }
 
       const rRes = await client.query('SELECT id, code FROM role WHERE org_id = $1 AND code = $2', [orgId, code]);
       if (rRes.rows.length === 0) continue;
@@ -286,6 +295,16 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
 
     // Cập nhật phân quyền user_role nếu có truyền mảng roles
     if (Array.isArray(roles)) {
+      for (const item of roles) {
+        const code = typeof item === 'string' ? item : (item.role_code || item.code);
+        if (code && !VALID_ROLE_CODES.includes(code)) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            code: 'INVALID_ROLE',
+            message: `Vai trò "${code}" không còn hợp lệ. Hệ thống chỉ hỗ trợ: ${VALID_ROLE_CODES.join(', ')}.`,
+          });
+        }
+      }
       await client.query('DELETE FROM user_role WHERE user_id = $1', [id]);
       for (const item of roles) {
         const code = typeof item === 'string' ? item : (item.role_code || item.code);

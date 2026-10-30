@@ -113,7 +113,7 @@ export async function checkPersonScopeForActor(personId, { actorId, orgId, roleC
 
 /**
  * Kiểm tra xem person_id có thuộc tài khoản nhân sự nội bộ / chủ sở hữu tòa nhà
- * (SYS_ADMIN, OWNER, MANAGER, ACCOUNTANT, STAFF hoặc bảng owner) hay không.
+ * (SYS_ADMIN, OWNER, MANAGER hoặc bảng owner) hay không.
  * Dùng để ẩn hoàn toàn nhân sự nội bộ khỏi luồng tra cứu & liên kết khách thuê.
  */
 export async function isInternalPerson(personId, orgId) {
@@ -130,7 +130,7 @@ export async function isInternalPerson(personId, orgId) {
            JOIN user_role ur ON ur.user_id = au.id
            JOIN role r ON r.id = ur.role_id
            WHERE au.person_id = p.id
-             AND r.code IN ('SYS_ADMIN', 'OWNER', 'MANAGER', 'ACCOUNTANT', 'STAFF')
+             AND r.code IN ('SYS_ADMIN', 'OWNER', 'MANAGER')
          )
          OR EXISTS (
            SELECT 1 FROM owner o WHERE o.person_id = p.id

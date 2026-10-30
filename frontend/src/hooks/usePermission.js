@@ -11,8 +11,6 @@ export function usePermission() {
   const isSysAdmin = roleCodes.includes(ROLES.SYS_ADMIN);
   const isOwner = roleCodes.includes(ROLES.OWNER);
   const isManager = roleCodes.includes(ROLES.MANAGER);
-  const isAccountant = roleCodes.includes(ROLES.ACCOUNTANT);
-  const isStaff = roleCodes.includes(ROLES.STAFF);
   const isResident = roleCodes.includes(ROLES.RESIDENT);
 
   return {
@@ -23,26 +21,25 @@ export function usePermission() {
     isSysAdmin,
     isOwner,
     isManager,
-    isAccountant,
-    isStaff,
     isResident,
-    // Ma trận quyền PRD v2.0 Mục 6.1 & 6.2 (Phương án 2: OWNER 100% Read-Only, không tham gia vận hành)
+    // Ma trận quyền 4 vai trò: SYS_ADMIN, OWNER (100% Read-Only), MANAGER (vận hành + kế toán + kỹ thuật), RESIDENT
     canCreateBuildings: isSysAdmin || isManager,
     canManageBuildings: isSysAdmin,
     canEditRealEstate: isSysAdmin || isManager,
     canManageTenants: isSysAdmin || isManager,
-    canCreateContracts: isManager,
+    canCreateContracts: isSysAdmin || isManager,
     canApproveContracts: isSysAdmin || isManager,
     canTerminateContracts: isSysAdmin || isManager,
-    canSettleDeposits: isSysAdmin || isManager || isAccountant,
+    canSettleDeposits: isSysAdmin || isManager,
     canApproveDepositRefund: isSysAdmin || isManager,
-    canManageMeters: isSysAdmin || isManager || isStaff || isAccountant,
-    canManageServiceCatalog: isSysAdmin || isManager || isAccountant,
+    canManageMeters: isSysAdmin || isManager,
+    canManageServiceCatalog: isSysAdmin || isManager,
     canManageServices: isSysAdmin || isManager,
-    canManageInvoices: isSysAdmin || isManager || isAccountant,
-    canManagePayments: isSysAdmin || isManager || isAccountant,
-    canHandleMaintenance: isSysAdmin || isManager || isStaff,
+    canManageInvoices: isSysAdmin || isManager,
+    canManagePayments: isSysAdmin || isManager,
+    canHandleMaintenance: isSysAdmin || isManager,
     canSendNotifications: isSysAdmin || isManager,
     canManageUsers: isSysAdmin,
+    canViewAuditLogs: isSysAdmin || isOwner,
   };
 }
