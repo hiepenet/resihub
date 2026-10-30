@@ -13,6 +13,7 @@ import {
   Wrench,
   BellRing,
   BarChart3,
+  ScrollText,
   UserCog,
   X,
   Home,
@@ -34,6 +35,7 @@ const ICON_MAP = {
   Wrench,
   BellRing,
   BarChart3,
+  ScrollText,
   UserCog,
 };
 

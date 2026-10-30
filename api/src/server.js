@@ -21,6 +21,7 @@ import servicesRoute, { serviceCatalogRouter, serviceSubscriptionsRouter } from 
 import invoicesRoute from './routes/invoices.js';
 import paymentsRoute, { receivablesRouter } from './routes/payments.js';
 import adminUsersRoute from './routes/admin/users.js';
+import auditLogsRoute from './routes/admin/audit-logs.js';
 import settingsRoute from './routes/settings.js';
 import reportsRoute from './routes/reports.js';
 import { startDailyJobs } from './jobs/daily.js';
@@ -68,6 +69,7 @@ app.use('/api/v1/invoices', invoicesRoute);
 app.use('/api/v1/payments', paymentsRoute);
 app.use('/api/v1/receivables', receivablesRouter);
 app.use('/api/v1/admin/users', adminUsersRoute);
+app.use('/api/v1/audit-logs', auditLogsRoute);
 app.use('/api/v1/settings', settingsRoute);
 app.use('/api/v1/reports', reportsRoute);
 
