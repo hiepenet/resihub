@@ -23,11 +23,15 @@ yarn-error.log*
 # Editor / IDE
 .vscode/
 .idea/
+.agents/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Test artifacts
+api/test-artifacts/
 
 # OS files
 .DS_Store
