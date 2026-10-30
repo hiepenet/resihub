@@ -249,40 +249,23 @@ try {
   const vopAId = vopARes.rows[0].id;
   const vscAId = vscARes.rows[0].id;
 
-  const accEmail = `acc.ui.${suffix}@resihub.vn`;
-  const staffEmail = `staff.ui.${suffix}@resihub.vn`;
+  const mgr2Email = `mgr2.ui.${suffix}@resihub.vn`;
 
-  const accCreate = await apiJson('/api/v1/admin/users', adminToken, {
+  const mgr2Create = await apiJson('/api/v1/admin/users', adminToken, {
     method: 'POST',
     body: JSON.stringify({
-      full_name: 'Kế Toán Giao Diện',
-      email: accEmail,
+      full_name: 'Quản Lý Vận Hành Giao Diện',
+      email: mgr2Email,
       phone: `096${suffix}1`,
       password: 'Password@123',
-      roles: [{ role_code: 'ACCOUNTANT', building_id: vopAId }],
+      roles: [{ role_code: 'MANAGER', building_id: vopAId }],
     }),
   });
-  if (accCreate.status !== 201) {
-    throw new Error(`Failed to create temp ACCOUNTANT: ${accCreate.status} ${JSON.stringify(accCreate.body)}`);
+  if (mgr2Create.status !== 201) {
+    throw new Error(`Failed to create temp MANAGER: ${mgr2Create.status} ${JSON.stringify(mgr2Create.body)}`);
   }
-  tempCleanup.userIds.push(accCreate.body.data.id);
-  if (accCreate.body.data.person_id) tempCleanup.personIds.push(accCreate.body.data.person_id);
-
-  const staffCreate = await apiJson('/api/v1/admin/users', adminToken, {
-    method: 'POST',
-    body: JSON.stringify({
-      full_name: 'Kỹ Thuật Giao Diện',
-      email: staffEmail,
-      phone: `096${suffix}2`,
-      password: 'Password@123',
-      roles: [{ role_code: 'STAFF', building_id: vopAId }],
-    }),
-  });
-  if (staffCreate.status !== 201) {
-    throw new Error(`Failed to create temp STAFF: ${staffCreate.status} ${JSON.stringify(staffCreate.body)}`);
-  }
-  tempCleanup.userIds.push(staffCreate.body.data.id);
-  if (staffCreate.body.data.person_id) tempCleanup.personIds.push(staffCreate.body.data.person_id);
+  tempCleanup.userIds.push(mgr2Create.body.data.id);
+  if (mgr2Create.body.data.person_id) tempCleanup.personIds.push(mgr2Create.body.data.person_id);
 
   const crossTenantRes = await adminPool.query(
     `
@@ -400,15 +383,17 @@ try {
     return { verifyScreenShown };
   });
 
-  await recordStep('UI-03 [SYS_ADMIN] Executive Dashboard KPIs, 9 Buildings / 450 Apartments & Revenue Chart', async () => {
+  await recordStep('UI-03 [SYS_ADMIN] Executive Dashboard KPIs, Org Buildings / Apartments & Revenue Chart', async () => {
+    const expectedAptsRes = await adminPool.query('SELECT COUNT(*)::int AS cnt FROM apartment');
+    const expectedAptsStr = String(expectedAptsRes.rows[0].cnt);
     await loginWithEmailForm(pageId, 'admin@resihub.vn', 'Admin@123456', '/admin/dashboard');
     await sleep(1100);
     const snap = await callTool('take_snapshot', { pageId });
-    const has450 = snap.text.includes('450');
+    const hasExpectedApts = snap.text.includes(expectedAptsStr);
     await screenshot(pageId, 'dt_v2_01_sysadmin_dashboard.png');
     await collectDiagnostics(pageId, 'SysAdminDashboard');
-    if (!has450) throw new Error('Dashboard did not display 450 total apartments');
-    return { has450 };
+    if (!hasExpectedApts) throw new Error(`Dashboard did not display ${expectedAptsStr} total apartments`);
+    return { totalApartmentsDisplayed: expectedAptsRes.rows[0].cnt };
   });
 
   await recordStep('UI-04 [SYS_ADMIN] Floor Plan Grid (FR-010), Users & System Settings (M01) & Reports (M14)', async () => {
@@ -531,7 +516,7 @@ try {
 
   await recordStep('UI-08 [MANAGER] Shared Cross-Building Resident Badge ("Liên tòa") on TenantsPage', async () => {
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/tenants` });
-    await sleep(1100);
+    await callTool('wait_for', { pageId, text: ['Liên tòa'], timeout: 8000 });
     const snap = await callTool('take_snapshot', { pageId });
     const hasSharedBadge = snap.text.includes('Liên tòa');
     await screenshot(pageId, 'dt_v2_04_manager_shared_tenant_badge.png');
@@ -573,8 +558,8 @@ try {
     return { hasMaskedTenant, hasCrossBadge, leakedCrossBuildingInfo: false };
   });
 
-  await recordStep('UI-10 [ACCOUNTANT] Service Catalog CRU Button (FR-026), Batch Invoices & Aging Report', async () => {
-    await loginWithEmailForm(pageId, accEmail, 'Password@123', '/admin/dashboard');
+  await recordStep('UI-10 [MANAGER Consolidated R-01] Service Catalog CRU, Finance/Aging, Meters & Maintenance Kanban', async () => {
+    await loginWithEmailForm(pageId, mgr2Email, 'Password@123', '/admin/dashboard');
     await sleep(900);
 
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/services` });
@@ -583,76 +568,95 @@ try {
     const svcSnap = await callTool('take_snapshot', { pageId });
     const canAddService = /thêm dịch vụ/i.test(svcSnap.text);
     if (!canAddService) {
-      throw new Error('ACCOUNTANT did not see "Thêm dịch vụ" button on ServiceCatalogPage (FR-026)');
+      throw new Error('MANAGER did not see "Thêm dịch vụ" button on ServiceCatalogPage (R-01)');
     }
     await screenshot(pageId, 'dt_v2_06_accountant_services_finance.png');
 
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/invoices` });
-    await sleep(950);
+    await sleep(800);
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/payments` });
-    await sleep(950);
+    await sleep(800);
     const paySnap = await callTool('take_snapshot', { pageId });
     const agingTabUid = findUid(paySnap.text, (l) => l.includes('button') && l.includes('Tuổi nợ'));
     if (agingTabUid) {
       await callTool('click', { pageId, uid: agingTabUid, includeSnapshot: false });
-      await sleep(700);
+      await sleep(600);
     }
-    await collectDiagnostics(pageId, 'AccountantFinance');
-    return { canAddService, agingTabVerified: Boolean(agingTabUid) };
-  });
-
-  await recordStep('UI-11 [STAFF] Meter Readings & Maintenance Kanban + Strict Financial Menu Isolation', async () => {
-    await loginWithEmailForm(pageId, staffEmail, 'Password@123', '/admin/dashboard');
-    await sleep(900);
-
-    const navAudit = await callTool('evaluate_script', {
-      pageId,
-      function: `() => {
-        const links = Array.from(document.querySelectorAll('aside a')).map(a => a.getAttribute('href'));
-        return links;
-      }`,
-    });
-    const sidebarLinks = parseEvalJson(navAudit.text);
 
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/meters` });
-    await sleep(950);
+    await sleep(800);
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/maintenance` });
-    await sleep(950);
+    await sleep(800);
     await screenshot(pageId, 'dt_v2_07_staff_meters_workorders.png');
-    await collectDiagnostics(pageId, 'StaffOperations');
 
-    await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/contracts` });
+    // Verify MANAGER is blocked from /admin/users and /admin/audit-logs (4-role isolation)
+    await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/users` });
     await sleep(650);
-    const blockedSnap = await callTool('take_snapshot', { pageId });
-    const contractsBlocked = /không có quyền|truy cập bị từ chối|403/i.test(blockedSnap.text);
-    if (!contractsBlocked) throw new Error('STAFF was not blocked from /admin/contracts');
-    if (
-      Array.isArray(sidebarLinks) &&
-      sidebarLinks.some((h) => ['/admin/contracts', '/admin/invoices', '/admin/payments'].includes(h))
-    ) {
-      throw new Error(`STAFF sidebar leaked financial links: ${JSON.stringify(sidebarLinks)}`);
-    }
-    return { sidebarLinks, contractsBlocked };
+    const blockedUsersSnap = await callTool('take_snapshot', { pageId });
+    const usersBlocked = /không có quyền|truy cập bị từ chối|403/i.test(blockedUsersSnap.text);
+    if (!usersBlocked) throw new Error('MANAGER was not blocked from /admin/users');
+
+    await collectDiagnostics(pageId, 'ManagerConsolidatedOperations');
+    return { canAddService, agingTabVerified: Boolean(agingTabUid), usersBlocked };
+  });
+
+  await recordStep('UI-11 [SYS_ADMIN & OWNER R-23/R-24] Audit Logs Viewer & Four-Eyes Approval Settings', async () => {
+    await loginWithEmailForm(pageId, 'admin@resihub.vn', 'Admin@123456', '/admin/dashboard');
+    await sleep(900);
+
+    await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/audit-logs` });
+    await sleep(1000);
+    const auditSnap = await callTool('take_snapshot', { pageId });
+    const hasAuditPage = /nhật ký|audit/i.test(auditSnap.text);
+    if (!hasAuditPage) throw new Error('AuditLogsPage did not render for SYS_ADMIN');
+
+    await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/settings` });
+    await sleep(900);
+    const setSnap = await callTool('take_snapshot', { pageId });
+    const hasFourEyesSetting = /four-eyes|tự phê duyệt/i.test(setSnap.text);
+    if (!hasFourEyesSetting) throw new Error('Four-eyes self-approval setting did not render on SettingsPage');
+
+    await collectDiagnostics(pageId, 'SysAdminAuditAndSettings');
+    return { hasAuditPage, hasFourEyesSetting };
   });
 
   await recordStep('UI-12 [RESIDENT] Multi-Apartment Switcher Across 2 Buildings + All 8 Portal Tabs (P1..P8)', async () => {
     await loginWithEmailForm(pageId, 'tenant1@resihub.vn', 'Demo@123456', '/resident');
     await sleep(1200);
 
+    const openSwitcher = await callTool('evaluate_script', {
+      pageId,
+      function: `() => {
+        const trigger = document.querySelector('[aria-label="Chọn căn hộ đang thuê"]');
+        if (!trigger) return { found: false };
+        trigger.click();
+        return { found: true, tagName: trigger.tagName };
+      }`,
+    });
+    const opened = parseEvalJson(openSwitcher.text);
+    if (!opened?.found) {
+      throw new Error(`Expected Multi-Apartment Switcher trigger, got: ${JSON.stringify(opened)}`);
+    }
+    await sleep(250);
+
     const switcherInfo = await callTool('evaluate_script', {
       pageId,
       function: `() => {
-        const sel = document.querySelector('select[aria-label="Chọn căn hộ đang thuê"]');
-        if (!sel) return { found: false, options: [] };
+        const searchInput = document.querySelector('input[aria-label="Lọc danh sách tùy chọn"]');
+        const opts = Array.from(document.querySelectorAll('[role="option"]'));
         return {
           found: true,
-          options: Array.from(sel.options).map(o => ({ value: o.value, text: o.text })),
+          hasSearchInput: Boolean(searchInput),
+          options: opts.map(o => ({
+            value: o.getAttribute('data-option-value') || '',
+            text: (o.textContent || '').trim(),
+          })),
         };
       }`,
     });
     const sw = parseEvalJson(switcherInfo.text);
-    if (!sw.found || sw.options.length < 2) {
-      throw new Error(`Expected Multi-Apartment Switcher with >=2 apartments, got: ${JSON.stringify(sw)}`);
+    if (!sw.found || !sw.hasSearchInput || sw.options.length < 2) {
+      throw new Error(`Expected Searchable Multi-Apartment Switcher with >=2 apartments, got: ${JSON.stringify(sw)}`);
     }
     await screenshot(pageId, 'dt_v2_08_resident_multi_apartment.png');
 

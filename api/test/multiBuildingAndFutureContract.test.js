@@ -75,11 +75,21 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
         );
         await adminPool.query('DELETE FROM payment WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice WHERE contract_id = $1', [cId]);
-        await adminPool.query(
-          'DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = $1)',
-          [cId]
-        );
-        await adminPool.query('DELETE FROM deposit WHERE contract_id = $1', [cId]);
+        const cleanClient = await adminPool.connect();
+        try {
+          await cleanClient.query('BEGIN');
+          await cleanClient.query("SET LOCAL app.allow_test_cleanup = 'true'");
+          await cleanClient.query(
+            'DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = $1)',
+            [cId]
+          );
+          await cleanClient.query('DELETE FROM deposit WHERE contract_id = $1', [cId]);
+          await cleanClient.query('COMMIT');
+        } catch {
+          await cleanClient.query('ROLLBACK').catch(() => {});
+        } finally {
+          cleanClient.release();
+        }
         await adminPool.query('DELETE FROM attachment WHERE owner_entity = $1 AND owner_id = $2', ['contract', cId]);
         await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]);
         await adminPool.query('DELETE FROM contract_request WHERE contract_id = $1', [cId]);
@@ -139,39 +149,18 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
   assert.equal(vscMgrRow.rows.length, 1, 'VSC-A manager must exist');
   const mgrB = await login(vscMgrRow.rows[0].email, 'Demo@123456');
 
-  let accEmail = null;
-  const accRow = await adminPool.query(
-    `SELECT p.email
-     FROM app_user au
-     JOIN person p ON p.id = au.person_id
-     JOIN user_role ur ON ur.user_id = au.id
-     JOIN role r ON r.id = ur.role_id
-     WHERE r.code = 'ACCOUNTANT'
-     ORDER BY (ur.building_id IS NULL) DESC, p.email ASC
-     LIMIT 1`
-  );
-  if (accRow.rows.length > 0) {
-    accEmail = accRow.rows[0].email;
-  } else {
-    const tempAccDigits = Date.now().toString().slice(-6);
-    accEmail = `acc.t6p.${tempAccDigits}@resihub.vn`;
-    const createAccRes = await apiFetch('/api/v1/admin/users', sysAdmin.token, {
-      method: 'POST',
-      body: JSON.stringify({
-        full_name: 'Kế Toán Kiểm Thử 6 Điểm',
-        email: accEmail,
-        phone: `0944${tempAccDigits}`,
-        password: 'Demo@123456',
-        roles: [{ role_code: 'ACCOUNTANT', building_id: null }],
-      }),
-    });
-    assert.equal(createAccRes.status, 201, `Create temp ACCOUNTANT failed: ${JSON.stringify(createAccRes.body)}`);
-    const accPersonRow = await adminPool.query('SELECT id FROM person WHERE LOWER(email) = $1', [accEmail]);
-    if (accPersonRow.rows[0]?.id) {
-      createdPersonIds.push(accPersonRow.rows[0].id);
-    }
-  }
-  const accountant = await login(accEmail, 'Demo@123456');
+  // Verify R-01: Creating deprecated ACCOUNTANT / STAFF roles is rejected with 400 INVALID_ROLE
+  const deprecatedRoleTry = await apiFetch('/api/v1/admin/users', sysAdmin.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      full_name: 'Vai Trò Đã Lược Bỏ',
+      email: `deprecated.role.${Date.now().toString().slice(-6)}@resihub.vn`,
+      phone: `0944${Date.now().toString().slice(-6)}`,
+      password: 'Demo@123456',
+      roles: [{ role_code: 'ACCOUNTANT', building_id: null }],
+    }),
+  });
+  assert.equal(deprecatedRoleTry.status, 400, 'Deprecated ACCOUNTANT role must be rejected with 400');
 
   // Helper to create a clean temporary apartment in a building
   async function createTempApartment(buildingCode, codeSuffix, baseRent = 10000000) {
@@ -443,7 +432,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     assert.equal(finishMaint.body.data.status, 'RESERVED', 'Finishing MAINTENANCE with active future contract must sync to RESERVED');
 
     // Điểm 4: Batch invoice for 2029-04 (before 2029-05-16) MUST skip futContractId!
-    const batchBefore = await apiFetch('/api/v1/invoices/generate-batch', accountant.token, {
+    const batchBefore = await apiFetch('/api/v1/invoices/generate-batch', mgrA.token, {
       method: 'POST',
       body: JSON.stringify({
         building_id: vopABldgId,
@@ -459,7 +448,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     assert.equal(invBeforeDb.rows.length, 0, 'Zero invoices may be generated before contract start_date');
 
     // Điểm 4: Batch invoice for 2029-05 (31 days; active 2029-05-16..2029-05-31 = 16 days) -> Pro-rata 31,000,000 * 16 / 31 = 16,000,000!
-    const batchMay = await apiFetch('/api/v1/invoices/generate-batch', accountant.token, {
+    const batchMay = await apiFetch('/api/v1/invoices/generate-batch', mgrA.token, {
       method: 'POST',
       body: JSON.stringify({
         building_id: vopABldgId,
@@ -605,7 +594,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
       rlsClient.release();
     }
 
-    // 3.5 Terminate discContractId (1-step by Manager A), collect deposit & submit settlement by ACCOUNTANT, block OWNER/self-approve, approve by SYS_ADMIN!
+    // 3.5 Terminate discContractId (1-step by Manager A), collect deposit & submit settlement by MANAGER, block OWNER/self-approve, approve by SYS_ADMIN!
     const depRow = await adminPool.query(`SELECT id FROM deposit WHERE contract_id = $1`, [discContractId]);
     const depositId = depRow.rows[0].id;
 
@@ -616,8 +605,8 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(ownerCollectTry.status, 403, 'OWNER must be blocked (403) from recording deposit transactions');
 
-    // ACCOUNTANT collects deposit (8,000,000)
-    const accCollectRes = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, accountant.token, {
+    // MANAGER collects deposit (8,000,000)
+    const mgrCollectRes = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrA.token, {
       method: 'POST',
       body: JSON.stringify({
         type: 'collect',
@@ -626,7 +615,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
         description: 'Thu đủ cọc hợp đồng ưu đãi',
       }),
     });
-    assert.equal(accCollectRes.status, 201, `ACCOUNTANT collect deposit failed: ${JSON.stringify(accCollectRes.body)}`);
+    assert.equal(mgrCollectRes.status, 201, `MANAGER collect deposit failed: ${JSON.stringify(mgrCollectRes.body)}`);
 
     // Manager A terminates active contract directly -> TERMINATED, apartment -> MAINTENANCE
     const termDiscRes = await apiFetch(`/api/v1/contracts/${discContractId}/terminate`, mgrA.token, {

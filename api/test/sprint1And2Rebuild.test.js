@@ -158,18 +158,38 @@ test('Sprint 1 & 2 Integration — Anti-enumeration OTP, ServiceRequest table, M
     await adminPool.query('DELETE FROM service_request WHERE id = $1', [createdSr.id]);
 
     // 4. Kiểm tra các API Sprint 2 (M01, M07, M08, M09, M10, M11, M14) + phân quyền
+    const [totalAptRow, mgrAptRow, ownerBldgRow] = await Promise.all([
+      adminPool.query('SELECT COUNT(*)::int AS cnt FROM apartment'),
+      adminPool.query(
+        `SELECT COUNT(*)::int AS cnt FROM apartment
+         WHERE building_id IN (
+           SELECT ur.building_id FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           WHERE ur.user_id = $1 AND r.code = 'MANAGER' AND ur.building_id IS NOT NULL
+         )`,
+        [mgrVopA.user.sub]
+      ),
+      adminPool.query(
+        `SELECT COUNT(*)::int AS cnt FROM building b
+         JOIN owner o ON o.id = b.owner_id
+         JOIN app_user u ON u.person_id = o.person_id
+         WHERE u.id = $1`,
+        [ownerVop.user.sub]
+      ),
+    ]);
+
     const dashAdmin = await apiFetch('/api/v1/reports/dashboard', sysAdmin.token);
     assert.equal(dashAdmin.status, 200);
     assert.equal(dashAdmin.body.data.revenue_12m.length, 12, 'Biểu đồ doanh thu phải đủ 12 tháng (AC-018)');
-    assert.equal(dashAdmin.body.data.kpis.total_apartments, 450);
+    assert.equal(dashAdmin.body.data.kpis.total_apartments, totalAptRow.rows[0].cnt);
 
     const dashMgr = await apiFetch('/api/v1/reports/dashboard', mgrVopA.token);
     assert.equal(dashMgr.status, 200);
-    assert.equal(dashMgr.body.data.kpis.total_apartments, 50, 'MANAGER VOP-A chỉ thấy đúng 50 căn thuộc tòa VOP-A');
+    assert.equal(dashMgr.body.data.kpis.total_apartments, mgrAptRow.rows[0].cnt, 'MANAGER VOP-A chỉ thấy đúng căn thuộc tòa được gán');
 
     const summaryOwner = await apiFetch('/api/v1/reports/summary', ownerVop.token);
     assert.equal(summaryOwner.status, 200);
-    assert.equal(summaryOwner.body.data.occupancy_by_building.length, 3, 'OWNER VOP chỉ thấy 3 tòa của mình');
+    assert.equal(summaryOwner.body.data.occupancy_by_building.length, ownerBldgRow.rows[0].cnt, 'OWNER VOP chỉ thấy các tòa của mình');
 
     const metersMgr = await apiFetch('/api/v1/meters', mgrVopA.token);
     assert.equal(metersMgr.status, 200);

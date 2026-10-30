@@ -65,16 +65,23 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
     await appPool.end();
   });
 
-  await t.test('1. SYS_ADMIN sees all 9 buildings & 450 apartments, R-only on contracts', async () => {
+  await t.test('1. SYS_ADMIN sees all org buildings & apartments, R-only on contracts', async () => {
     const { token } = await login('admin@resihub.vn', 'Admin@123456');
+
+    const [expectedBldgs, expectedApts] = await Promise.all([
+      adminPool.query('SELECT COUNT(*)::int AS cnt FROM building'),
+      adminPool.query('SELECT COUNT(*)::int AS cnt FROM apartment'),
+    ]);
 
     const bRes = await apiFetch('/api/v1/buildings', token);
     assert.strictEqual(bRes.status, 200);
-    assert.strictEqual(bRes.body.data.length, 9, 'SYS_ADMIN must see all 9 tower buildings');
+    assert.ok(expectedBldgs.rows[0].cnt >= 9, 'Org must have at least 9 seeded buildings');
+    assert.strictEqual(bRes.body.data.length, expectedBldgs.rows[0].cnt, 'SYS_ADMIN must see all org buildings');
 
     const aRes = await apiFetch('/api/v1/apartments', token);
     assert.strictEqual(aRes.status, 200);
-    assert.strictEqual(aRes.body.data.length, 450, 'SYS_ADMIN must see all 450 apartments');
+    assert.ok(expectedApts.rows[0].cnt >= 450, 'Org must have at least 450 seeded apartments');
+    assert.strictEqual(aRes.body.data.length, expectedApts.rows[0].cnt, 'SYS_ADMIN must see all org apartments');
 
     const cRes = await apiFetch('/api/v1/contracts', token);
     assert.strictEqual(cRes.status, 200);
@@ -88,17 +95,37 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
     assert.strictEqual(createContractRes.status, 403);
   });
 
-  await t.test('2. MANAGER VOP-A sees ONLY VOP-A (1 building, 50 apts) and non-zero contracts/tenants/deposits', async () => {
-    const { token } = await login('manager.vop.a@resihub.vn', 'Demo@123456');
+  await t.test('2. MANAGER VOP-A sees ONLY assigned buildings/apartments and non-zero contracts/tenants/deposits', async () => {
+    const { token, user } = await login('manager.vop.a@resihub.vn', 'Demo@123456');
+
+    const mgrScopeRes = await adminPool.query(
+      `SELECT b.id, b.code
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       JOIN building b ON b.id = ur.building_id
+       WHERE ur.user_id = $1 AND r.code = 'MANAGER'
+       ORDER BY b.code`,
+      [user.sub]
+    );
+    const expectedMgrCodes = mgrScopeRes.rows.map((r) => r.code);
+    const expectedMgrBldgIds = mgrScopeRes.rows.map((r) => r.id);
+    const expectedMgrApts = await adminPool.query(
+      'SELECT COUNT(*)::int AS cnt FROM apartment WHERE building_id = ANY($1::uuid[])',
+      [expectedMgrBldgIds]
+    );
 
     const bRes = await apiFetch('/api/v1/buildings', token);
     assert.strictEqual(bRes.status, 200);
-    assert.strictEqual(bRes.body.data.length, 1, 'Manager VOP-A must only see 1 assigned building');
-    assert.strictEqual(bRes.body.data[0].code, 'VOP-A');
+    assert.deepStrictEqual(
+      bRes.body.data.map((b) => b.code).sort(),
+      expectedMgrCodes,
+      'Manager VOP-A must only see assigned buildings'
+    );
+    assert.ok(expectedMgrCodes.includes('VOP-A'));
 
     const aRes = await apiFetch('/api/v1/apartments', token);
     assert.strictEqual(aRes.status, 200);
-    assert.strictEqual(aRes.body.data.length, 50, 'Manager VOP-A must only see 50 apartments of VOP-A');
+    assert.strictEqual(aRes.body.data.length, expectedMgrApts.rows[0].cnt, 'Manager VOP-A must only see apartments of assigned buildings');
 
     // Regression check for 021 RLS bug: Manager must see contracts, tenants, deposits of VOP-A
     const cRes = await apiFetch('/api/v1/contracts', token);
@@ -180,9 +207,9 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
       assert.strictEqual(adminDelBldg.status, 200, 'SYS_ADMIN must be able to delete empty building (CRUD)');
       createdBuildingId = null;
 
-      // Verify user_role scope cleaned up so manager is back to 1 building (VOP-A)
+      // Verify user_role scope cleaned up so manager is back to baseline assigned buildings
       const bRestored = await apiFetch('/api/v1/buildings', token);
-      assert.strictEqual(bRestored.body.data.length, 1);
+      assert.strictEqual(bRestored.body.data.length, expectedMgrCodes.length);
     } finally {
       if (createdBuildingId) {
         await adminPool.query('DELETE FROM user_role WHERE building_id = $1', [createdBuildingId]);
@@ -222,17 +249,32 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
     );
   });
 
-  await t.test('4. OWNER VOP sees 3 buildings (VOP-A/B/C = 150 apts), R-only on real estate/tenants/reservations', async () => {
-    const { token } = await login('owner.vop@resihub.vn', 'Demo@123456');
+  await t.test('4. OWNER VOP sees only owned buildings & apartments, R-only on real estate/tenants/reservations', async () => {
+    const { token, user } = await login('owner.vop@resihub.vn', 'Demo@123456');
+
+    const expectedOwnerBldgs = await adminPool.query(
+      `SELECT b.id, b.code
+       FROM building b
+       JOIN owner o ON o.id = b.owner_id
+       JOIN app_user u ON u.person_id = o.person_id
+       WHERE u.id = $1
+       ORDER BY b.code`,
+      [user.sub]
+    );
+    const expectedOwnerCodes = expectedOwnerBldgs.rows.map((r) => r.code);
+    const expectedOwnerApts = await adminPool.query(
+      'SELECT COUNT(*)::int AS cnt FROM apartment WHERE building_id = ANY($1::uuid[])',
+      [expectedOwnerBldgs.rows.map((r) => r.id)]
+    );
 
     const bRes = await apiFetch('/api/v1/buildings', token);
     assert.strictEqual(bRes.status, 200);
     const codes = bRes.body.data.map((b) => b.code).sort();
-    assert.deepStrictEqual(codes, ['VOP-A', 'VOP-B', 'VOP-C']);
+    assert.deepStrictEqual(codes, expectedOwnerCodes);
 
     const aRes = await apiFetch('/api/v1/apartments', token);
     assert.strictEqual(aRes.status, 200);
-    assert.strictEqual(aRes.body.data.length, 150);
+    assert.strictEqual(aRes.body.data.length, expectedOwnerApts.rows[0].cnt);
 
     // Owner cannot mutate buildings, apartments, tenants, reservations
     const postApt = await apiFetch('/api/v1/apartments', token, {
@@ -267,6 +309,15 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
       WHERE p.email IN ('owner.vop@resihub.vn', 'manager.vop.a@resihub.vn', 'tenant1@resihub.vn')
     `);
     const idByEmail = Object.fromEntries(usersRes.rows.map((r) => [r.email, r.id]));
+    const expectedMgrRls = await adminPool.query(
+      `SELECT b.id, b.code
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       JOIN building b ON b.id = ur.building_id
+       WHERE ur.user_id = $1 AND r.code = 'MANAGER'
+       ORDER BY b.code`,
+      [idByEmail['manager.vop.a@resihub.vn']]
+    );
 
     const client = await appPool.connect();
     try {
@@ -278,10 +329,13 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
       const ownerSeeVsc = await client.query(`SELECT id FROM building WHERE code = 'VSC-A'`);
       assert.strictEqual(ownerSeeVsc.rowCount, 0, 'RLS must block OWNER VOP from seeing VSC-A');
 
-      // (b) MANAGER VOP-A only sees VOP-A via RLS, CAN see VOP-A tenants/persons, CANNOT see VOP-B contracts
+      // (b) MANAGER VOP-A only sees assigned buildings via RLS, CAN see tenants/persons, CANNOT see unassigned contracts
       await client.query(`SELECT set_config('app.current_user_id', $1, false)`, [idByEmail['manager.vop.a@resihub.vn']]);
-      const mgrBldgs = await client.query(`SELECT id, code FROM building`);
-      assert.deepStrictEqual(mgrBldgs.rows.map((r) => r.code), ['VOP-A']);
+      const mgrBldgs = await client.query(`SELECT id, code FROM building ORDER BY code`);
+      assert.deepStrictEqual(
+        mgrBldgs.rows.map((r) => r.code),
+        expectedMgrRls.rows.map((r) => r.code)
+      );
 
       const mgrTenants = await client.query(`SELECT id FROM tenant`);
       assert.ok(mgrTenants.rowCount >= 15, 'RLS must allow MANAGER VOP-A to see tenants of VOP-A');
@@ -290,8 +344,8 @@ test('PRD v2.0 RBAC & Multi-Building Isolation (API + PostgreSQL RLS + AC-019.1 
       assert.ok(mgrPersons.rowCount >= 15, 'RLS must allow MANAGER VOP-A to see persons of VOP-A without recursion');
 
       const mgrCrossContracts = await client.query(
-        `SELECT c.id FROM contract c WHERE c.building_id <> $1`,
-        [mgrBldgs.rows[0].id]
+        `SELECT c.id FROM contract c WHERE NOT (c.building_id = ANY($1::uuid[]))`,
+        [mgrBldgs.rows.map((r) => r.id)]
       );
       assert.strictEqual(mgrCrossContracts.rowCount, 0, 'RLS must hide contracts of all other buildings from MANAGER VOP-A');
 

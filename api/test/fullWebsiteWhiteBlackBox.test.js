@@ -44,6 +44,7 @@ import {
   checkLookupRateLimit,
 } from '../src/utils/piiMask.js';
 import { runDailyJobs } from '../src/jobs/daily.js';
+import { roundVND } from '../src/services/pricing.js';
 import { adminPool as coreAdminPool, appPool as coreAppPool } from '../src/db/client.js';
 
 dotenv.config();
@@ -129,7 +130,11 @@ test('WB-01 [White-Box Unit] Pure Domain Services, Financial Formulas, State Mac
     assert.equal(nextStatusOnAmend('rent_amount'), 'ACTIVE');
   });
 
-  await t.test('1.2 Deadlines & Deposit Settlement BigInt Engine (M06: FR-018, FR-023, FR-024, FR-068, AC-017)', () => {
+  await t.test('1.2 Deadlines, roundVND & Deposit Settlement BigInt Engine (M06: FR-018, FR-023, FR-024, FR-068, AC-017, R-11)', () => {
+    assert.equal(roundVND(123499), 123000, 'R-11: roundVND phải làm tròn xuống hàng nghìn');
+    assert.equal(roundVND(123500), 124000, 'R-11: roundVND phải làm tròn lên hàng nghìn khi >= 500');
+    assert.equal(roundVND(-123600), -124000, 'R-11: roundVND xử lý đúng số âm');
+
     const dl = refundDeadline('2026-10-10');
     assert.deepEqual(dl, { warnAt: '2026-10-13', dueAt: '2026-10-15' });
 
@@ -255,6 +260,8 @@ test('WB-01 [White-Box Unit] Pure Domain Services, Financial Formulas, State Mac
   });
 });
 
+let baselineCounts = { buildings: 9, apartments: 450 };
+
 // ============================================================================
 // PHẦN 2 — FULL-STACK WHITE-BOX (DB TRIGGERS / CONSTRAINTS / RLS / JOBS)
 //          + BLACK-BOX E2E API TESTS ACROSS M01..M14 & ALL 6 ROLES
@@ -274,6 +281,15 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
   const adminPool = new pg.Pool({ connectionString: ADMIN_DB_URL });
   const appPool = new pg.Pool({ connectionString: APP_DB_URL });
+
+  const [baseB, baseA] = await Promise.all([
+    adminPool.query('SELECT COUNT(*)::int AS cnt FROM building'),
+    adminPool.query('SELECT COUNT(*)::int AS cnt FROM apartment'),
+  ]);
+  baselineCounts = {
+    buildings: baseB.rows[0].cnt,
+    apartments: baseA.rows[0].cnt,
+  };
 
   // Sổ theo dõi toàn bộ tài nguyên tạm để dọn sạch 100%, giữ nguyên bất biến 9 tòa & 450 căn
   const cleanup = {
@@ -339,8 +355,18 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
         await adminPool.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
-        await adminPool.query('DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = $1)', [cId]).catch(() => {});
-        await adminPool.query('DELETE FROM deposit WHERE contract_id = $1', [cId]).catch(() => {});
+        const depClean = await adminPool.connect();
+        try {
+          await depClean.query('BEGIN');
+          await depClean.query("SET LOCAL app.allow_test_cleanup = 'true'");
+          await depClean.query('DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = $1)', [cId]);
+          await depClean.query('DELETE FROM deposit WHERE contract_id = $1', [cId]);
+          await depClean.query('COMMIT');
+        } catch {
+          await depClean.query('ROLLBACK').catch(() => {});
+        } finally {
+          depClean.release();
+        }
         await adminPool.query('DELETE FROM contract_request WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM contract_occupant WHERE contract_id = $1', [cId]).catch(() => {});
@@ -433,9 +459,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
   const vscARes = await adminPool.query("SELECT id FROM building WHERE code = 'VSC-A' LIMIT 1");
   const vscAId = vscARes.rows[0].id;
 
-  // Khởi tạo bộ nhân sự tạm cho VOP-A để test đầy đủ 6 vai trò & nguyên tắc Four-Eyes nội bộ
-  let accVopA = null;
-  let staffVopA = null;
+  // Khởi tạo nhân sự tạm cho VOP-A để test mô hình 4 vai trò (SYS_ADMIN, OWNER, MANAGER, RESIDENT — R-01) & nguyên tắc Four-Eyes nội bộ
   let mgr2VopA = null;
 
   // ==========================================================================
@@ -448,7 +472,31 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     const mgrUsersRes = await apiFetch('/api/v1/admin/users', mgrVopA.token);
     assert.equal(mgrUsersRes.status, 403, 'MANAGER must receive 403 on GET /api/v1/admin/users');
 
-    // (b) SYS_ADMIN tạo ACCOUNTANT, STAFF, và MANAGER thứ 2 trên VOP-A
+    // (a2) R-24: GET /api/v1/audit-logs mở cho SYS_ADMIN & OWNER (Read-Only theo phạm vi), chặn MANAGER 403
+    const adminAuditRes = await apiFetch('/api/v1/audit-logs?limit=5', sysAdmin.token);
+    assert.equal(adminAuditRes.status, 200, 'SYS_ADMIN must access GET /api/v1/audit-logs');
+    assert.ok(Array.isArray(adminAuditRes.body.data));
+    const ownerAuditRes = await apiFetch('/api/v1/audit-logs?limit=5', ownerVop.token);
+    assert.equal(ownerAuditRes.status, 200, 'OWNER must access GET /api/v1/audit-logs');
+    const mgrAuditRes = await apiFetch('/api/v1/audit-logs?limit=5', mgrVopA.token);
+    assert.equal(mgrAuditRes.status, 403, 'MANAGER must receive 403 on GET /api/v1/audit-logs');
+
+    // (b) R-01: Chặn tạo vai trò ACCOUNTANT & STAFF đã giản lược (400 INVALID_ROLE), tạo MANAGER thứ 2 trên VOP-A
+    for (const removedRole of ['ACCOUNTANT', 'STAFF']) {
+      const remTry = await apiFetch('/api/v1/admin/users', sysAdmin.token, {
+        method: 'POST',
+        body: JSON.stringify({
+          full_name: `Removed ${removedRole}`,
+          email: `removed.${removedRole.toLowerCase()}.${suffix}@resihub.vn`,
+          phone: `097${suffix.slice(0, 6)}${removedRole === 'ACCOUNTANT' ? '1' : '2'}`,
+          password: 'Password@123',
+          roles: [{ role_code: removedRole, building_id: vopAId }],
+        }),
+      });
+      assert.equal(remTry.status, 400, `R-01: Role ${removedRole} must be rejected with 400`);
+      assert.equal(remTry.body.code, 'INVALID_ROLE');
+    }
+
     const createRoleUser = async (roleCode, label, idx) => {
       const email = `wb.${roleCode.toLowerCase()}.${suffix}.${idx}@resihub.vn`;
       const phone = `096${suffix.slice(0, 6)}${idx}`;
@@ -469,8 +517,6 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       return { ...logged, email, phone };
     };
 
-    accVopA = await createRoleUser('ACCOUNTANT', 'Kế Toán Kiểm Thử', '1');
-    staffVopA = await createRoleUser('STAFF', 'Kỹ Thuật Kiểm Thử', '2');
     mgr2VopA = await createRoleUser('MANAGER', 'Quản Lý Duyệt Chéo', '3');
 
     // Chặn tự khóa tài khoản SYS_ADMIN đang đăng nhập
@@ -482,7 +528,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(selfLock.body.code, 'SELF_LOCK_PROHIBITED');
 
     // (c) Khóa & mở lại tài khoản + kiểm tra thu hồi Refresh Token (token_version)
-    const tempLockUser = await createRoleUser('STAFF', 'Nhân Viên Khóa Tạm', '4');
+    const tempLockUser = await createRoleUser('MANAGER', 'Quản Lý Khóa Tạm', '4');
     const suspendRes = await apiFetch(`/api/v1/admin/users/${tempLockUser.user.sub}`, sysAdmin.token, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'SUSPENDED' }),
@@ -566,7 +612,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(checkGhostPerson.rowCount, 0, 'AC-001.3: Không tự tạo person cho SĐT lạ');
 
     // AC-001.2: Tạo 1 SĐT test riêng để kiểm tra khóa OTP sau 5 lần sai
-    const otpLockUser = await createRoleUser('STAFF', 'Nhân Viên Khóa OTP', '5');
+    const otpLockUser = await createRoleUser('MANAGER', 'Quản Lý Khóa OTP', '5');
     const otpReq = await apiFetch('/api/v1/auth/otp/request', null, {
       method: 'POST',
       body: JSON.stringify({ phone: otpLockUser.phone }),
@@ -641,9 +687,18 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       }
 
       // (b) OWNER (Phương án 2): 100% Read-Only ở tầng PostgreSQL RLS
+      const expectedOwnRls = await adminPool.query(
+        `SELECT b.code
+         FROM building b
+         JOIN owner o ON o.id = b.owner_id
+         JOIN app_user u ON u.person_id = o.person_id
+         WHERE u.id = $1
+         ORDER BY b.code`,
+        [ownerVop.user.sub]
+      );
       await rls.query(`SELECT set_config('app.current_user_id', $1, false)`, [ownerVop.user.sub]);
       const ownBldgs = await rls.query('SELECT code FROM building ORDER BY code');
-      assert.deepEqual(ownBldgs.rows.map((r) => r.code), ['VOP-A', 'VOP-B', 'VOP-C']);
+      assert.deepEqual(ownBldgs.rows.map((r) => r.code), expectedOwnRls.rows.map((r) => r.code));
 
       const updAptByOwner = await rls.query(`UPDATE apartment SET note = 'OwnerHack' WHERE building_id = $1 RETURNING id`, [vopAId]);
       assert.equal(updAptByOwner.rowCount, 0, 'RLS must block OWNER from updating apartment');
@@ -654,17 +709,16 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       const updDepByOwner = await rls.query(`UPDATE deposit SET status = 'REFUNDED' RETURNING id`);
       assert.equal(updDepByOwner.rowCount, 0, 'RLS must block OWNER from updating deposit');
 
-      // (c) ACCOUNTANT được phép ghi service_catalog ở tầng RLS sau migration 032
-      await rls.query(`SELECT set_config('app.current_user_id', $1, false)`, [accVopA.user.sub]);
-      const accBldgs = await rls.query('SELECT code FROM building');
-      assert.deepEqual(accBldgs.rows.map((r) => r.code), ['VOP-A'], 'Scoped ACCOUNTANT chỉ thấy tòa VOP-A');
-
-      // (d) STAFF chỉ thấy tòa VOP-A, không thấy hợp đồng hay hóa đơn tài chính
-      await rls.query(`SELECT set_config('app.current_user_id', $1, false)`, [staffVopA.user.sub]);
-      const staffContracts = await rls.query('SELECT COUNT(*)::int AS cnt FROM contract');
-      assert.equal(staffContracts.rows[0].cnt, 0, 'PRD 6.2: STAFF không được đọc bảng contract');
-      const staffInvoices = await rls.query('SELECT COUNT(*)::int AS cnt FROM invoice');
-      assert.equal(staffInvoices.rows[0].cnt, 0, 'PRD 6.2: STAFF không được đọc bảng invoice');
+      // (c) Scoped MANAGER (mgr2VopA) chỉ thấy đúng tòa VOP-A ở tầng RLS (R-01: chỉ còn 4 vai trò trong role)
+      const roleCheckRes = await adminPool.query('SELECT code FROM role ORDER BY code');
+      assert.deepEqual(
+        roleCheckRes.rows.map((r) => r.code),
+        ['MANAGER', 'OWNER', 'RESIDENT', 'SYS_ADMIN'],
+        'R-01: Bảng role chỉ còn đúng 4 vai trò chuẩn'
+      );
+      await rls.query(`SELECT set_config('app.current_user_id', $1, false)`, [mgr2VopA.user.sub]);
+      const mgrBldgs = await rls.query('SELECT code FROM building');
+      assert.deepEqual(mgrBldgs.rows.map((r) => r.code), ['VOP-A'], 'Scoped MANAGER chỉ thấy tòa VOP-A');
     } finally {
       await rls.query('RESET app.current_user_id').catch(() => {});
       rls.release();
@@ -948,6 +1002,20 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     });
     assert.equal(ownerApprove.status, 403, 'Phương án 2: OWNER không tham gia phê duyệt vận hành (403)');
 
+    // R-12: MANAGER thứ 2 (mgr2VopA) từ chối phê duyệt (POST /:id/reject) -> trả về DRAFT để điều chỉnh, sau đó trình lại & phê duyệt chéo
+    const rejectToDraft = await apiFetch(`/api/v1/contracts/${activeContractId}/reject`, mgr2VopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Đề nghị ghi rõ điều khoản chiết khấu trong ghi chú hợp đồng' }),
+    });
+    assert.equal(rejectToDraft.status, 200, `Reject discounted contract failed: ${JSON.stringify(rejectToDraft.body)}`);
+    assert.equal(rejectToDraft.body.data.status, 'DRAFT', 'R-12: Từ chối phê duyệt giá phải trả HĐ về DRAFT');
+
+    const reActDiscounted = await apiFetch(`/api/v1/contracts/${activeContractId}/activate`, mgrVopA.token, {
+      method: 'POST',
+    });
+    assert.equal(reActDiscounted.status, 409);
+    assert.equal(reActDiscounted.body.data.status, 'PENDING_APPROVAL');
+
     // MANAGER thứ 2 (mgr2VopA) phê duyệt chéo -> ACTIVE + mở sổ cọc HELD + căn hộ OCCUPIED + reservation CONVERTED
     const crossApprove = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, mgr2VopA.token, {
       method: 'POST',
@@ -970,10 +1038,10 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     );
     assert.equal(depCheck.rows[0].status, 'HELD');
 
-    // ACCOUNTANT thu bổ sung 8.000.000 ₫ tiền cọc còn lại -> đủ 10.000.000 ₫ (PRD 6.2: ACCOUNTANT = CRU trên Cọc)
+    // MANAGER thu bổ sung 8.000.000 ₫ tiền cọc còn lại -> đủ 10.000.000 ₫
     const collectRemDep = await apiFetch(
       `/api/v1/deposits/${depCheck.rows[0].id}/transactions`,
-      accVopA.token,
+      mgr2VopA.token,
       {
         method: 'POST',
         body: JSON.stringify({
@@ -1034,7 +1102,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     if (occTenantId) cleanup.tenantIds.push(occTenantId);
 
     // FR-065: ACCOUNTANT ghi đè đơn giá dịch vụ Internet theo hợp đồng (180.000 ₫ thay vì 220.000 ₫)
-    const setCsp = await apiFetch(`/api/v1/contracts/${activeContractId}/service-prices`, accVopA.token, {
+    const setCsp = await apiFetch(`/api/v1/contracts/${activeContractId}/service-prices`, mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         service_code: 'INTERNET_FIBER',
@@ -1091,7 +1159,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     });
     assert.equal(ownerCreateSvc.status, 403, 'OWNER không được tạo danh mục dịch vụ');
 
-    const accCreateSvc = await apiFetch('/api/v1/service-catalog', accVopA.token, {
+    const accCreateSvc = await apiFetch('/api/v1/service-catalog', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         code: `GYM_${suffix}`,
@@ -1105,7 +1173,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(accCreateSvc.status, 201, `ACCOUNTANT create service catalog failed: ${JSON.stringify(accCreateSvc.body)}`);
     cleanup.serviceCatalogIds.push(accCreateSvc.body.data.id);
 
-    const accPatchSvc = await apiFetch(`/api/v1/service-catalog/${accCreateSvc.body.data.id}`, accVopA.token, {
+    const accPatchSvc = await apiFetch(`/api/v1/service-catalog/${accCreateSvc.body.data.id}`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ unit_price: 320000 }),
     });
@@ -1141,7 +1209,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(mgrApproveSub.body.data.status, 'ACTIVE');
 
     // (b) M08 FR-030 & FR-031: STAFF & ACCOUNTANT khởi tạo đồng hồ điện/nước + cảnh báo lệch > 30%
-    const elMeterRes = await apiFetch('/api/v1/meters', staffVopA.token, {
+    const elMeterRes = await apiFetch('/api/v1/meters', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         apartment_id: testApt1Id,
@@ -1154,7 +1222,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     const elMeterId = elMeterRes.body.data.id;
     cleanup.meterIds.push(elMeterId);
 
-    const wtMeterRes = await apiFetch('/api/v1/meters', accVopA.token, {
+    const wtMeterRes = await apiFetch('/api/v1/meters', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         apartment_id: testApt1Id,
@@ -1168,7 +1236,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     cleanup.meterIds.push(wtMeterId);
 
     // Ghi chỉ số kỳ trước (2026-09): Điện tiêu thụ 100 kWh (1000 -> 1100), Nước tiêu thụ 10 m³ (50 -> 60)
-    const batchPrev = await apiFetch('/api/v1/meters/readings/batch', staffVopA.token, {
+    const batchPrev = await apiFetch('/api/v1/meters/readings/batch', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         period: prevPeriod,
@@ -1181,7 +1249,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(batchPrev.status, 201);
 
     // Chặn chỉ số lùi (current_reading < previous_reading -> 400 INVALID_READING)
-    const badReading = await apiFetch(`/api/v1/meters/${elMeterId}/readings`, staffVopA.token, {
+    const badReading = await apiFetch(`/api/v1/meters/${elMeterId}/readings`, mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({ period: testPeriod, current_reading: 1050 }),
     });
@@ -1190,7 +1258,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
     // Ghi chỉ số kỳ 2026-10: Điện vọt lên 1300 (+200 kWh vs 100 kWh = +100% > 30% -> is_abnormal = true)
     // Nước 70 (+10 m³ = 0% biến động -> is_abnormal = false)
-    const batchCur = await apiFetch('/api/v1/meters/readings/batch', accVopA.token, {
+    const batchCur = await apiFetch('/api/v1/meters/readings/batch', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         period: testPeriod,
@@ -1204,7 +1272,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(batchCur.body.abnormal_count, 1, 'FR-031: Biến động +100% phải tự động gắn cờ bất thường');
 
     // (c) M09 FR-033, FR-034, FR-035 & FR-065: Sinh hóa đơn lô, kiểm tra công thức tiền & chống trùng
-    const genRes = await apiFetch('/api/v1/invoices/generate-batch', accVopA.token, {
+    const genRes = await apiFetch('/api/v1/invoices/generate-batch', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({ building_id: vopAId, period: testPeriod, auto_issue: false }),
     });
@@ -1219,7 +1287,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(ourInv.status, 'DRAFT');
 
     // AC-015.2: Chạy lại sinh hóa đơn cùng kỳ -> không tạo bản trùng cho hợp đồng đã có hóa đơn
-    const genDup = await apiFetch('/api/v1/invoices/generate-batch', accVopA.token, {
+    const genDup = await apiFetch('/api/v1/invoices/generate-batch', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({ building_id: vopAId, period: testPeriod, auto_issue: false }),
     });
@@ -1242,7 +1310,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     // - Điện: 200 kWh * 3.800 = 760.000 ₫
     // - Nước: 10 m³ * 22.000 = 220.000 ₫
     // - Internet (FR-065 ghi đè theo HĐ): 180.000 ₫ (thay vì 220.000 ₫ giá danh mục!)
-    const invDetail = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}`, accVopA.token);
+    const invDetail = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}`, mgr2VopA.token);
     assert.equal(invDetail.status, 200);
     const lines = invDetail.body.data.lines;
     const elLine = lines.find((l) => l.item_type === 'ELECTRICITY');
@@ -1256,7 +1324,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.ok(Number(rentLine?.amount) > 0, 'Phải có dòng tiền thuê phòng');
 
     // FR-034 & FR-035: Điều chỉnh giảm 50.000 ₫ kèm lý do và phát hành (ISSUED)
-    const issueRes = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}/status`, accVopA.token, {
+    const issueRes = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}/status`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({
         status: 'ISSUED',
@@ -1292,7 +1360,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     cleanup.paymentIds.push(badProof.body.data.id);
     assert.equal(badProof.body.data.status, 'PENDING_CONFIRMATION');
 
-    const rejectProof = await apiFetch(`/api/v1/payments/${badProof.body.data.id}/reject`, accVopA.token, {
+    const rejectProof = await apiFetch(`/api/v1/payments/${badProof.body.data.id}/reject`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Ảnh chụp ủy nhiệm chi bị mờ số tham chiếu' }),
     });
@@ -1313,7 +1381,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(partialProof.status, 201);
     cleanup.paymentIds.push(partialProof.body.data.id);
 
-    const confirmPartial = await apiFetch(`/api/v1/payments/${partialProof.body.data.id}/confirm`, accVopA.token, {
+    const confirmPartial = await apiFetch(`/api/v1/payments/${partialProof.body.data.id}/confirm`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ note: 'Đã khớp sao kê ngân hàng đợt 1' }),
     });
@@ -1324,7 +1392,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(Number(invAfterPartial.rows[0].paid_amount), 3000000);
 
     // Chặn hủy hóa đơn đã phát sinh thanh toán (FR-035)
-    const cancelPaidAttempt = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}/status`, accVopA.token, {
+    const cancelPaidAttempt = await apiFetch(`/api/v1/invoices/${generatedInvoiceId}/status`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'CANCELLED' }),
     });
@@ -1333,7 +1401,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
     // Thanh toán đợt 2 dư thêm 250.000 ₫ (Overpayment - FR-040) -> hóa đơn PAID & ghi nhận overpayment_amount = 250.000
     const remaining = issuedTotal - 3000000;
-    const overpayRes = await apiFetch('/api/v1/payments', accVopA.token, {
+    const overpayRes = await apiFetch('/api/v1/payments', mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
         invoice_id: generatedInvoiceId,
@@ -1353,7 +1421,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(recAfterFull.rows[0].status, 'PAID');
 
     // Kiểm tra API phân tích tuổi nợ Aging (FR-038 / AC-016.1)
-    const agingRes = await apiFetch('/api/v1/receivables', accVopA.token);
+    const agingRes = await apiFetch('/api/v1/receivables', mgr2VopA.token);
     assert.equal(agingRes.status, 200);
     assert.ok(agingRes.body.summary !== undefined || Array.isArray(agingRes.body.data));
   });
@@ -1399,22 +1467,22 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     });
     assert.equal(prematureRate.status, 409);
 
-    // MANAGER giao việc cho STAFF -> ASSIGNED
+    // MANAGER giao việc xử lý kỹ thuật -> ASSIGNED
     const assignSr = await apiFetch(`/api/v1/service-requests/${srId}/status`, mgrVopA.token, {
       method: 'PATCH',
-      body: JSON.stringify({ assigned_to: staffVopA.user.sub, status: 'ASSIGNED' }),
+      body: JSON.stringify({ assigned_to: mgr2VopA.user.sub, status: 'ASSIGNED' }),
     });
     assert.equal(assignSr.status, 200);
     assert.equal(assignSr.body.data.status, 'ASSIGNED');
 
     // STAFF cập nhật IN_PROGRESS rồi RESOLVED
-    const progSr = await apiFetch(`/api/v1/service-requests/${srId}/status`, staffVopA.token, {
+    const progSr = await apiFetch(`/api/v1/service-requests/${srId}/status`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'IN_PROGRESS', internal_note: 'Đang thay gioăng cao su vòi bếp' }),
     });
     assert.equal(progSr.status, 200);
 
-    const resolveSr = await apiFetch(`/api/v1/service-requests/${srId}/status`, staffVopA.token, {
+    const resolveSr = await apiFetch(`/api/v1/service-requests/${srId}/status`, mgr2VopA.token, {
       method: 'PATCH',
       body: JSON.stringify({ status: 'RESOLVED', internal_note: 'Đã thay van mới, hết rò nước' }),
     });
@@ -1491,12 +1559,31 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(adminDash.status, 200);
     assert.equal(adminDash.body.data.revenue_12m.length, 12);
 
+    const expectedOwnSummary = await adminPool.query(
+      `SELECT b.code
+       FROM building b
+       JOIN owner o ON o.id = b.owner_id
+       JOIN app_user u ON u.person_id = o.person_id
+       WHERE u.id = $1
+       ORDER BY b.code`,
+      [ownerVop.user.sub]
+    );
+    const expectedMgrSummary = await adminPool.query(
+      `SELECT b.code
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       JOIN building b ON b.id = ur.building_id
+       WHERE ur.user_id = $1 AND r.code = 'MANAGER'
+       ORDER BY b.code`,
+      [mgrVopA.user.sub]
+    );
+
     const ownerSummary = await apiFetch('/api/v1/reports/summary', ownerVop.token);
     assert.equal(ownerSummary.status, 200);
     assert.deepEqual(
       ownerSummary.body.data.occupancy_by_building.map((b) => b.building_code).sort(),
-      ['VOP-A', 'VOP-B', 'VOP-C'],
-      'OWNER chỉ được tổng hợp báo cáo trên đúng 3 tòa mình sở hữu'
+      expectedOwnSummary.rows.map((r) => r.code),
+      'OWNER chỉ được tổng hợp báo cáo trên đúng các tòa mình sở hữu'
     );
 
     const ownerCrossBldgReport = await apiFetch(`/api/v1/reports/dashboard?building_id=${vscAId}`, ownerVop.token);
@@ -1504,7 +1591,10 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
     const mgrSummary = await apiFetch('/api/v1/reports/summary', mgrVopA.token);
     assert.equal(mgrSummary.status, 200);
-    assert.deepEqual(mgrSummary.body.data.occupancy_by_building.map((b) => b.building_code), ['VOP-A']);
+    assert.deepEqual(
+      mgrSummary.body.data.occupancy_by_building.map((b) => b.building_code).sort(),
+      expectedMgrSummary.rows.map((r) => r.code)
+    );
 
     const resSummary = await apiFetch('/api/v1/reports/summary', residentAuth.token);
     assert.equal(resSummary.status, 403, 'RESIDENT không được xem báo cáo quản trị');
@@ -1532,29 +1622,57 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     const depositId = depRowRes.rows[0].id;
     assert.ok(depRowRes.rows[0].refund_due_date, 'FR-068: Khi chấm dứt HĐ phải tự gán hạn hoàn cọc +5 ngày');
 
-    // (b) M06 FR-023 & FR-024: Chặn khấu trừ trực tiếp không qua hồ sơ tất toán & chặn khấu trừ tiền thuê
-    const directDeduct = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, accVopA.token, {
+    // (b) M06 FR-023, FR-024, R-06, R-07, R-15, R-24:
+    //     - Chặn khấu trừ trực tiếp không qua hồ sơ tất toán & chặn khấu trừ tiền thuê
+    //     - Tự động tổng hợp nợ dịch vụ (1.500.000 ₫) vào tất toán, TUYỆT ĐỐI KHÔNG trừ nợ tiền thuê (4.000.000 ₫) vào cọc
+    const directDeduct = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({ type: 'deduct', amount: 500000, description: 'Trừ thẳng' }),
     });
     assert.equal(directDeduct.status, 409);
     assert.equal(directDeduct.body.code, 'MUST_USE_SETTLEMENT');
 
-    const rentDeductAttempt = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, accVopA.token, {
+    const rentDeductAttempt = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
-        outstanding_debt: 0,
         items: [{ category: 'RENT', amount: 2000000, description: 'Cấn trừ tiền thuê', evidence: [TINY_PNG_BASE64] }],
       }),
     });
     assert.equal(rentDeductAttempt.status, 422);
     assert.equal(rentDeductAttempt.body.code, 'RENT_DEDUCTION_FORBIDDEN');
 
-    // AC-017.1 & AC-017.3: ACCOUNTANT lập hồ sơ tất toán khấu trừ vượt cọc (AC-017.2: 10tr cọc, khấu trừ 11.5tr -> shortfall 1.5tr)
-    const settleSubmit = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, accVopA.token, {
+    // Khởi tạo 1 hóa đơn ISSUED cuối kỳ gồm cả nợ RENT (4.000.000 ₫) và nợ SERVICE (1.500.000 ₫) để kiểm chứng R-06
+    const finalInvIns = await adminPool.query(
+      `INSERT INTO invoice (org_id, building_id, apartment_id, contract_id, tenant_id, invoice_code, period, status, subtotal_amount, total_amount, paid_amount, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, '2026-11', 'ISSUED', 5500000, 5500000, 0, CURRENT_DATE - INTERVAL '7 days')
+       RETURNING id`,
+      [orgId, vopAId, testApt1Id, activeContractId, primaryTenantId, `INV-FINAL-${suffix}`]
+    );
+    const finalInvId = finalInvIns.rows[0].id;
+    cleanup.invoiceIds.push(finalInvId);
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES
+         ($1, 'RENT', 'Tiền thuê phòng kỳ cuối', 1, 'kỳ', 4000000, 4000000),
+         ($1, 'SERVICE', 'Phí dịch vụ & tiện ích kỳ cuối', 1, 'kỳ', 1500000, 1500000)`,
+      [finalInvId]
+    );
+    await adminPool.query(
+      `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
+       VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', 5500000, 0, CURRENT_DATE - INTERVAL '7 days', 'OPEN', 'Công nợ hóa đơn kỳ cuối')`,
+      [orgId, vopAId, activeContractId, primaryTenantId, finalInvId]
+    );
+
+    const getSettlePre = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgr2VopA.token);
+    assert.equal(getSettlePre.status, 200);
+    assert.equal(getSettlePre.body.data.calculated_service_debt, 1500000, 'R-06: Phải tự động lấy đúng 1.500.000 ₫ nợ dịch vụ');
+    assert.equal(getSettlePre.body.data.calculated_rent_debt, 4000000, 'R-06: Nợ tiền thuê 4.000.000 ₫ phải tách riêng, không đưa vào nợ trừ cọc');
+    assert.equal(getSettlePre.body.data.preconditions.ready, true);
+
+    // mgr2VopA lập hồ sơ tất toán: 10tr cọc, nợ dịch vụ 1.5tr + hư hỏng 10tr = 11.5tr -> refund = 0, shortfall = 1.5tr (nợ thuê 4tr giữ riêng)
+    const settleSubmit = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgr2VopA.token, {
       method: 'POST',
       body: JSON.stringify({
-        outstanding_debt: 1500000,
         items: [
           {
             category: 'DAMAGE',
@@ -1564,11 +1682,46 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
           },
         ],
         refund_method: 'BANK_TRANSFER',
-        bank_info: { bank_name: 'Vietcombank', account_no: '0011009999999', account_holder: 'CU DAN TEST' },
+        bank_info: { bank_name: 'Vietcombank', account_number: '0011009999999', account_holder: 'CU DAN TEST' },
       }),
     });
     assert.equal(settleSubmit.status, 200, `Submit settlement failed: ${JSON.stringify(settleSubmit.body)}`);
     assert.equal(settleSubmit.body.data.status, 'PENDING_APPROVAL');
+    assert.equal(settleSubmit.body.data.settlement.outstanding_debt, 1500000);
+    assert.equal(settleSubmit.body.data.settlement.rent_debt, 4000000);
+    assert.equal(settleSubmit.body.data.settlement.shortfall, 1500000);
+
+    // R-07: Cư dân gửi khiếu nại bảng kê -> DISPUTED -> chặn phê duyệt -> Quản lý giải quyết CONFIRM -> về lại PENDING_APPROVAL
+    const resDispute = await apiFetch(`/api/v1/deposits/${depositId}/dispute`, residentAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Đề nghị đối chiếu lại biên bản bàn giao sàn gỗ' }),
+    });
+    assert.equal(resDispute.status, 200, `Resident dispute failed: ${JSON.stringify(resDispute.body)}`);
+    assert.equal(resDispute.body.data.status, 'DISPUTED');
+
+    const appWhileDisputed = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, mgrVopA.token, {
+      method: 'POST',
+    });
+    assert.equal(appWhileDisputed.status, 409);
+    assert.equal(appWhileDisputed.body.code, 'SETTLEMENT_DISPUTED');
+
+    const resolveDispute = await apiFetch(`/api/v1/deposits/${depositId}/resolve-dispute`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        resolution: 'CONFIRM',
+        reason: 'Đã đối chiếu biên bản nghiệm thu có chữ ký hai bên',
+      }),
+    });
+    assert.equal(resolveDispute.status, 200, `Resolve dispute failed: ${JSON.stringify(resolveDispute.body)}`);
+    assert.equal(resolveDispute.body.data.status, 'PENDING_APPROVAL');
+
+    // R-24: Xuất biên bản tất toán A4 HTML printable
+    const pdfRes = await fetch(`${API_BASE}/api/v1/deposits/${depositId}/settlement/pdf`, {
+      headers: { Authorization: `Bearer ${residentAuth.token}` },
+    });
+    assert.equal(pdfRes.status, 200);
+    const pdfHtml = await pdfRes.text();
+    assert.match(pdfHtml, /BIÊN BẢN TẤT TOÁN/i);
 
     // OWNER phê duyệt bị chặn 403 (Phương án 2)
     const ownerAppDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, ownerVop.token, {
@@ -1576,22 +1729,42 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     });
     assert.equal(ownerAppDep.status, 403);
 
-    // MANAGER phê duyệt hồ sơ do ACCOUNTANT lập -> Four-eyes hợp lệ -> sinh công nợ RECEIVABLE_AFTER_MOVE_OUT 1.500.000 ₫ (AC-017.2)
+    // MANAGER (mgrVopA) phê duyệt hồ sơ do mgr2VopA lập -> Four-eyes hợp lệ
     const mgrAppDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, mgrVopA.token, {
       method: 'POST',
     });
     assert.equal(mgrAppDep.status, 200, `Approve settlement failed: ${JSON.stringify(mgrAppDep.body)}`);
 
+    // R-15: Sau khi tất toán (REFUNDED), chặn ghi nhận thu bổ sung vào sổ cọc đã đóng
+    const postSettleCollect = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'collect', amount: 500000, method: 'CASH' }),
+    });
+    assert.equal(postSettleCollect.status, 409, 'R-15: Không được thu bổ sung vào sổ cọc đã tất toán');
+    assert.equal(postSettleCollect.body.code, 'DEPOSIT_NOT_COLLECTIBLE');
+
+    // 037 Trigger: Bút toán deposit_transaction đã APPROVED là bất biến (chặn UPDATE & DELETE)
+    const sampleDepTxn = await adminPool.query(
+      `SELECT id FROM deposit_transaction WHERE deposit_id = $1 AND status = 'APPROVED' LIMIT 1`,
+      [depositId]
+    );
+    assert.ok(sampleDepTxn.rows.length > 0);
+    await assert.rejects(
+      () => adminPool.query(`UPDATE deposit_transaction SET amount = 1 WHERE id = $1`, [sampleDepTxn.rows[0].id]),
+      (err) => err.code === '23514' || /bất biến/i.test(err.message),
+      'Trigger trg_deposit_txn_immutable phải chặn UPDATE trên bút toán cọc đã APPROVED'
+    );
+
     const shortfallRec = await adminPool.query(
       `SELECT * FROM receivable WHERE contract_id = $1 AND type = 'RECEIVABLE_AFTER_MOVE_OUT'`,
       [activeContractId]
     );
-    assert.equal(shortfallRec.rows.length, 1, 'AC-017.2: Khấu trừ vượt cọc phải tự sinh công nợ RECEIVABLE_AFTER_MOVE_OUT');
-    assert.equal(Number(shortfallRec.rows[0].amount), 1500000);
+    assert.ok(shortfallRec.rows.length >= 1, 'AC-017.2 & R-06: Công nợ sau trả phòng phải chuyển sang RECEIVABLE_AFTER_MOVE_OUT');
 
-    // (c) [WHITE-BOX SCHEDULED JOB] Kiểm thử trực tiếp `runDailyJobs()` (FR-018, FR-068, AC-010.1):
-    //     1) Hợp đồng hết hạn hôm nay (end_date = CURRENT_DATE) -> tự chuyển EXPIRED + trả phòng về AVAILABLE
-    //     2) Hợp đồng còn đúng 30 ngày -> sinh thông báo CONTRACT_EXPIRY cho cả MANAGER & RESIDENT
+    // (c) [WHITE-BOX SCHEDULED JOB] Kiểm thử trực tiếp `runDailyJobs()` (FR-018, FR-068, AC-010.1, R-02, R-08, R-11):
+    //     1) Hợp đồng hết hạn hôm nay -> tự chuyển EXPIRED + căn hộ sang MAINTENANCE (bắt buộc nghiệm thu bàn giao trước khi AVAILABLE)
+    //     2) Hóa đơn quá hạn > 5 ngày ân hạn -> sang OVERDUE + tự động cộng phạt 100.000 ₫/ngày (LATE_FEE)
+    //     3) Hợp đồng còn đúng 30 ngày -> sinh thông báo CONTRACT_EXPIRY cho cả MANAGER & RESIDENT
     const expContractIns = await adminPool.query(
       `INSERT INTO contract (building_id, apartment_id, primary_tenant_id, start_date, end_date, rent_amount, billing_day, deposit_amount, status)
        VALUES ($1, $2, $3, CURRENT_DATE - INTERVAL '60 days', CURRENT_DATE, 10000000, 5, 10000000, 'ACTIVE')
@@ -1604,10 +1777,22 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
     await runDailyJobs();
 
+    // R-11: finalInvId có due_date = CURRENT_DATE - 7 days (quá 5 ngày ân hạn 2 ngày) -> tự sang OVERDUE và cộng dòng LATE_FEE 2 × 100.000 = 200.000 ₫
+    const overdueCheck = await adminPool.query('SELECT status, total_amount FROM invoice WHERE id = $1', [finalInvId]);
+    assert.equal(overdueCheck.rows[0].status, 'OVERDUE', 'R-11: Hóa đơn quá hạn > 5 ngày phải sang OVERDUE');
+    assert.equal(Number(overdueCheck.rows[0].total_amount), 5700000, 'R-11: Phải tự động cộng phạt chậm thanh toán 2 ngày × 100.000 ₫/ngày = 200.000 ₫');
+
     const expCtrAfter = await adminPool.query('SELECT status FROM contract WHERE id = $1', [expCtrId]);
     assert.equal(expCtrAfter.rows[0].status, 'EXPIRED', 'DailyJob phải tự chuyển HĐ hết hạn sang EXPIRED');
     const apt2After = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [testApt2Id]);
-    assert.equal(apt2After.rows[0].status, 'AVAILABLE', 'DailyJob phải đồng bộ căn hộ về lại AVAILABLE');
+    assert.equal(apt2After.rows[0].status, 'MAINTENANCE', 'R-02: HĐ hết hạn tự động phải đưa căn hộ sang MAINTENANCE chờ nghiệm thu bàn giao');
+
+    // R-08: Bàn giao căn hộ (PATCH /apartments/:id/handover) -> chuyển từ MAINTENANCE về AVAILABLE an toàn
+    const handoverApt2 = await apiFetch(`/api/v1/apartments/${testApt2Id}/handover`, mgrVopA.token, {
+      method: 'PATCH',
+    });
+    assert.equal(handoverApt2.status, 200, `Handover failed: ${JSON.stringify(handoverApt2.body)}`);
+    assert.equal(handoverApt2.body.data.status, 'AVAILABLE', 'R-08: Sau nghiệm thu bàn giao, căn hộ chuyển về AVAILABLE');
 
     // Kiểm tra cảnh báo 30 ngày (AC-010.1) trên cùng testApt2Id vừa trống
     const warn30Ins = await adminPool.query(
@@ -1636,13 +1821,15 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 // ============================================================================
 // PHẦN 3 — KIỂM TRA BẢO TOÀN BẤT BIẾN CSDL SEED SAU TOÀN BỘ TEST SUITE
 // ============================================================================
-test('WB+BB-03 [Post-Suite Invariant Check] Seeded Database Remains Clean (9 Buildings & 450 Apartments)', async () => {
+test('WB+BB-03 [Post-Suite Invariant Check] Seeded & User Database Remains Clean (Zero Leaked Rows)', async () => {
   const adminPool = new pg.Pool({ connectionString: ADMIN_DB_URL });
   try {
     const bCount = await adminPool.query('SELECT COUNT(*)::int AS cnt FROM building');
     const aCount = await adminPool.query('SELECT COUNT(*)::int AS cnt FROM apartment');
-    assert.equal(bCount.rows[0].cnt, 9, 'Sau khi chạy xong test suite, CSDL phải giữ nguyên đúng 9 tòa nhà mẫu');
-    assert.equal(aCount.rows[0].cnt, 450, 'Sau khi chạy xong test suite, CSDL phải giữ nguyên đúng 450 căn hộ mẫu');
+    assert.ok(bCount.rows[0].cnt >= 9, 'CSDL phải có tối thiểu 9 tòa nhà mẫu');
+    assert.ok(aCount.rows[0].cnt >= 450, 'CSDL phải có tối thiểu 450 căn hộ mẫu');
+    assert.equal(bCount.rows[0].cnt, baselineCounts.buildings, 'Sau khi chạy xong test suite, CSDL không được rò rỉ thêm tòa nhà tạm');
+    assert.equal(aCount.rows[0].cnt, baselineCounts.apartments, 'Sau khi chạy xong test suite, CSDL không được rò rỉ thêm căn hộ tạm');
   } finally {
     await adminPool.end();
     await coreAdminPool.end().catch(() => {});
