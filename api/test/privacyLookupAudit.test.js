@@ -249,18 +249,37 @@ test('Security & Privacy Audit — Owner Lookup Confidentiality & Cross-Building
       rlsClientB.release();
     }
 
-    // 2.4 Manager B probing secretPhone / secretCccd via lookup or check-dup gets ZERO PII leaked!
+    // 2.4 Manager B looking up secretCccd via Know-Before-You-Link gets ONLY masked preview (cross_building_link: true) & ZERO raw PII!
     const lookupByMgrB = await apiFetch(`/api/v1/tenants/lookup?identifier=${secretCccd}`, mgrB.token);
     assert.equal(lookupByMgrB.status, 200);
-    assert.equal(lookupByMgrB.body.found, false);
-    assert.equal(lookupByMgrB.body.outOfScopeConflict, true);
-    assert.equal(lookupByMgrB.body.tenant, null);
+    assert.equal(lookupByMgrB.body.found, true);
+    assert.equal(lookupByMgrB.body.cross_building_link, true);
+    assert.equal(lookupByMgrB.body.tenant?.id, tenantIdA);
+    assert.equal(lookupByMgrB.body.tenant?.cross_building_link, true);
+    assert.equal(lookupByMgrB.body.tenant?.full_name, undefined);
+    assert.equal(lookupByMgrB.body.tenant?.phone, undefined);
+    assert.equal(lookupByMgrB.body.tenant?.id_number, undefined);
+    assert.ok(lookupByMgrB.body.tenant?.masked_name?.includes('*'));
     assert.doesNotMatch(JSON.stringify(lookupByMgrB.body), /Trần Bảo Mật/);
+
+    // 2.4a Internal staff / OWNER phones MUST NEVER be linkable as tenants
+    const ownerPhoneRow = await adminPool.query(
+      `SELECT p.phone FROM person p JOIN owner o ON o.person_id = p.id WHERE p.phone IS NOT NULL LIMIT 1`
+    );
+    if (ownerPhoneRow.rows[0]?.phone) {
+      const lookupOwnerAsTenant = await apiFetch(
+        `/api/v1/tenants/lookup?identifier=${encodeURIComponent(ownerPhoneRow.rows[0].phone)}`,
+        mgrB.token
+      );
+      assert.equal(lookupOwnerAsTenant.status, 200);
+      assert.equal(lookupOwnerAsTenant.body.found, false);
+    }
 
     const checkDupByMgrB = await apiFetch(`/api/v1/tenants/check-dup?phone=${secretPhone}`, mgrB.token);
     assert.equal(checkDupByMgrB.status, 200);
     assert.equal(checkDupByMgrB.body.isDuplicate, true);
     assert.equal(checkDupByMgrB.body.inScope, false);
+    assert.equal(checkDupByMgrB.body.canLinkCrossBuilding, true);
     assert.equal(checkDupByMgrB.body.duplicates.length, 0);
     assert.doesNotMatch(JSON.stringify(checkDupByMgrB.body), /Trần Bảo Mật/);
 
@@ -277,22 +296,24 @@ test('Security & Privacy Audit — Owner Lookup Confidentiality & Cross-Building
     assert.equal(dupPostByMgrB.body.existing_person?.in_scope, false);
     assert.doesNotMatch(JSON.stringify(dupPostByMgrB.body), /Trần Bảo Mật/);
 
-    // 2.6 Manager B attempting to inject tenantIdA into POST /api/v1/contracts gets 403 ACCESS_DENIED
+    // 2.6 Manager B CAN link verified existing resident tenantIdA to a new contract in Building B (Điểm 1)
     const aptMgrB = await apiFetch('/api/v1/apartments?status=AVAILABLE', mgrB.token);
     const availAptB = aptMgrB.body.data?.[0];
     if (availAptB) {
-      const spoofContract = await apiFetch('/api/v1/contracts', mgrB.token, {
+      const linkedContract = await apiFetch('/api/v1/contracts', mgrB.token, {
         method: 'POST',
         body: JSON.stringify({
           apartment_id: availAptB.id,
           primary_tenant_id: tenantIdA,
-          start_date: '2027-01-01',
-          end_date: '2027-12-31',
+          start_date: '2028-01-01',
+          end_date: '2028-12-31',
           rent_amount: 9000000,
         }),
       });
-      assert.equal(spoofContract.status, 403);
-      assert.equal(spoofContract.body.code, 'ACCESS_DENIED');
+      assert.equal(linkedContract.status, 201);
+      if (linkedContract.body.data?.id) {
+        await adminPool.query('DELETE FROM contract WHERE id = $1', [linkedContract.body.data.id]);
+      }
     }
   });
 });
