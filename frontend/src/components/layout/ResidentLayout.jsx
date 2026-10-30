@@ -29,7 +29,15 @@ const TAB_ICONS = {
   UserCircle,
 };
 
-export function ResidentLayout({ activeTab, onChangeTab, apartmentBadge, children }) {
+export function ResidentLayout({
+  activeTab,
+  onChangeTab,
+  apartmentBadge,
+  activeContracts = [],
+  selectedContractId = '',
+  onSelectContract,
+  children,
+}) {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const clearSession = useAuthStore((s) => s.clearSession);
@@ -63,7 +71,25 @@ export function ResidentLayout({ activeTab, onChangeTab, apartmentBadge, childre
                 Cổng cư dân
               </span>
             </div>
-            {apartmentBadge ? (
+            {activeContracts.length > 1 ? (
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <Building2 className="w-3.5 h-3.5 text-primary-500 shrink-0" />
+                <select
+                  aria-label="Chọn căn hộ đang thuê"
+                  value={selectedContractId || activeContracts[0]?.contract_id || ''}
+                  onChange={(e) => onSelectContract?.(e.target.value)}
+                  className="text-xs font-semibold text-primary-700 bg-primary-50/80 border border-primary-200 rounded-lg px-2 py-0.5 max-w-[230px] sm:max-w-[320px] truncate focus:outline-none focus:ring-2 focus:ring-primary-500 cursor-pointer"
+                >
+                  {activeContracts.map((c) => (
+                    <option key={c.contract_id} value={c.contract_id}>
+                      Căn {c.apartment_code}
+                      {c.building_name ? ` — ${c.building_name}` : ''}
+                      {c.is_future_contract ? ' (HĐ tương lai)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : apartmentBadge ? (
               <p className="text-xs text-slate-500 flex items-center gap-1 truncate mt-0.5">
                 <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                 <span className="truncate">{apartmentBadge}</span>

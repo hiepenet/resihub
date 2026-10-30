@@ -77,7 +77,7 @@ function calculateProrataDetails(unitPrice, quantity, targetDateStr, mode = 'sub
 export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const toast = useToast();
   const contract = overview?.active_contract || overview?.contract || null;
-  const hasActiveContract = contract?.contract_status === 'ACTIVE';
+  const hasActiveContract = ['ACTIVE', 'RENEWAL_PENDING'].includes(contract?.contract_status);
 
   const [catalog, setCatalog] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
@@ -105,7 +105,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const loadServices = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await residentService.listServices();
+      const res = await residentService.listServices(contract?.contract_id);
       setCatalog(res?.data?.catalog || []);
       setSubscriptions(res?.data?.subscriptions || []);
     } catch (err) {
@@ -113,7 +113,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [contract?.contract_id, toast]);
 
   useEffect(() => {
     loadServices();
@@ -194,6 +194,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     setSubmitting(true);
     try {
       const res = await residentService.subscribeService({
+        contract_id: contract?.contract_id || undefined,
         service_id: subForm.service_id,
         quantity: Math.max(1, parseInt(subForm.quantity, 10) || 1),
         start_date: subForm.start_date || toInputDate(new Date()),

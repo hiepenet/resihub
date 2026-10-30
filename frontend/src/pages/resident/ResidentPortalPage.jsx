@@ -34,6 +34,7 @@ export function ResidentPortalPage() {
   const rawTab = searchParams.get('tab');
   const activeTab = VALID_TABS.includes(rawTab) ? rawTab : 'overview';
   const actionParam = searchParams.get('action') || '';
+  const contractIdParam = searchParams.get('contract_id') || '';
 
   const [overview, setOverview] = useState(null);
   const [openRequestsCount, setOpenRequestsCount] = useState(0);
@@ -53,8 +54,8 @@ export function ResidentPortalPage() {
       setError('');
       try {
         const [ovRes, srRes] = await Promise.allSettled([
-          residentService.getOverview(),
-          residentService.listServiceRequests(),
+          residentService.getOverview(contractIdParam),
+          residentService.listServiceRequests(contractIdParam),
         ]);
 
         if (ovRes.status === 'fulfilled') {
@@ -81,7 +82,7 @@ export function ResidentPortalPage() {
         if (!silent) setLoading(false);
       }
     },
-    [computeOpenRequests]
+    [computeOpenRequests, contractIdParam]
   );
 
   useEffect(() => {
@@ -92,6 +93,9 @@ export function ResidentPortalPage() {
     (nextTab, extra = {}) => {
       const safeTab = VALID_TABS.includes(nextTab) ? nextTab : 'overview';
       const nextParams = { tab: safeTab };
+      if (contractIdParam) {
+        nextParams.contract_id = contractIdParam;
+      }
       if (extra && typeof extra === 'object') {
         Object.entries(extra).forEach(([k, v]) => {
           if (v !== undefined && v !== null && v !== '') {
@@ -102,13 +106,28 @@ export function ResidentPortalPage() {
       setSearchParams(nextParams);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [setSearchParams]
+    [contractIdParam, setSearchParams]
   );
 
   const handleClearActionParam = useCallback(() => {
     if (!searchParams.get('action')) return;
-    setSearchParams({ tab: activeTab }, { replace: true });
-  }, [activeTab, searchParams, setSearchParams]);
+    const nextParams = { tab: activeTab };
+    if (contractIdParam) {
+      nextParams.contract_id = contractIdParam;
+    }
+    setSearchParams(nextParams, { replace: true });
+  }, [activeTab, contractIdParam, searchParams, setSearchParams]);
+
+  const handleSelectContract = useCallback(
+    (nextContractId) => {
+      const nextParams = { tab: activeTab };
+      if (nextContractId) {
+        nextParams.contract_id = String(nextContractId);
+      }
+      setSearchParams(nextParams);
+    },
+    [activeTab, setSearchParams]
+  );
 
   const handleRefreshOverview = useCallback(() => {
     return fetchOverviewData(true);
@@ -202,6 +221,13 @@ export function ResidentPortalPage() {
       activeTab={activeTab}
       onChangeTab={(tabId) => handleNavigateTab(tabId)}
       apartmentBadge={apartmentBadge}
+      activeContracts={overview?.active_contracts || []}
+      selectedContractId={
+        overview?.selected_contract_id ||
+        overview?.active_contract?.contract_id ||
+        contractIdParam
+      }
+      onSelectContract={handleSelectContract}
     >
       {renderTabContent()}
     </ResidentLayout>

@@ -97,7 +97,7 @@ export function MaintenanceTab({
   const loadRequests = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await residentService.listServiceRequests();
+      const res = await residentService.listServiceRequests(contract?.contract_id);
       const rows = res?.data || [];
       setRequests(rows);
       onRequestsChanged?.(rows);
@@ -106,7 +106,7 @@ export function MaintenanceTab({
     } finally {
       setLoading(false);
     }
-  }, [onRequestsChanged, toast]);
+  }, [contract?.contract_id, onRequestsChanged, toast]);
 
   useEffect(() => {
     loadRequests();
@@ -203,6 +203,7 @@ export function MaintenanceTab({
       priority: srForm.priority,
       title: srForm.title?.trim() || undefined,
       description: srForm.description.trim(),
+      contract_id: contract?.contract_id || undefined,
       apartment_id: contract?.apartment_id || undefined,
       images: srForm.images.slice(0, 3),
     };

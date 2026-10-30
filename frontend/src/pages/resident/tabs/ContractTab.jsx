@@ -95,8 +95,8 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     setLoadingExtra(true);
     try {
       const promises = [
-        residentService.listDepositTransactions(),
-        residentService.listContractRequests(),
+        residentService.listDepositTransactions(contract?.contract_id),
+        residentService.listContractRequests(contract?.contract_id),
       ];
       if (contract?.contract_id) {
         promises.push(contractsService.listOccupants(contract.contract_id));
@@ -191,6 +191,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     setReqSubmitting(true);
     try {
       const res = await residentService.createContractRequest({
+        contract_id: contract?.contract_id || undefined,
         type: reqForm.type,
         desired_date: reqForm.desired_date || undefined,
         note: reqForm.note?.trim() || undefined,

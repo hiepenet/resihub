@@ -109,7 +109,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
     setLoading(true);
     try {
       const [invRes, bldgRes, settingsRes] = await Promise.allSettled([
-        residentService.listInvoices(),
+        residentService.listInvoices(contract?.contract_id),
         buildingsService.list(),
         usersService.getSettings(),
       ]);
@@ -157,7 +157,11 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
     } finally {
       setLoading(false);
     }
-  }, [contract?.building_id, contract?.payment_account, overview?.payment_account]);
+  }, [contract?.contract_id, contract?.building_id, contract?.payment_account, overview?.payment_account]);
+
+  useEffect(() => {
+    hasAutoExpandedRef.current = false;
+  }, [contract?.contract_id]);
 
   useEffect(() => {
     loadInvoicesAndAccount();
