@@ -37,6 +37,7 @@ import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { contractsService } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { tenantsService } from '../../../services/tenants.service';
+import { servicesService } from '../../../services/services.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
@@ -192,6 +193,9 @@ export function ContractsPage() {
   });
   const [dupChecking, setDupChecking] = useState(false);
   const [inlineOccupants, setInlineOccupants] = useState([]);
+  const [serviceCatalog, setServiceCatalog] = useState([]);
+  const [selectedServices, setSelectedServices] = useState({});
+  const [customMeterPrices, setCustomMeterPrices] = useState({ ELECTRICITY: '', WATER: '' });
   const userEditedCreateDatesRef = useRef(false);
 
   const [todayStr] = useState(() => toDateOnlyStr(new Date()));
@@ -206,6 +210,7 @@ export function ContractsPage() {
     deposit_amount: '',
     billing_cycle: 'monthly',
     billing_day: '1',
+    payment_due_days: '5',
     note: '',
   });
 
@@ -254,6 +259,7 @@ export function ContractsPage() {
       deposit_amount: '',
       billing_cycle: 'monthly',
       billing_day: '1',
+      payment_due_days: '5',
       note: '',
     });
     setTenantMode('existing');
@@ -269,21 +275,26 @@ export function ContractsPage() {
       message: '',
     });
     setInlineOccupants([]);
+    setSelectedServices({});
+    setCustomMeterPrices({ ELECTRICITY: '', WATER: '' });
     setCreateErrors({});
     setCreateOpen(true);
 
     setLoadingRefData(true);
     try {
-      const [bRes, aRes] = await Promise.all([
+      const [bRes, aRes, sRes] = await Promise.all([
         buildingsService.list(),
         buildingsService.listApartments(
           !cleanAptId && defaultBld ? { building_id: defaultBld } : {}
         ),
+        servicesService.listCatalog({ active_only: 'true' }).catch(() => ({ data: [] })),
       ]);
       const bList = Array.isArray(bRes?.data) ? bRes.data : [];
       const aList = Array.isArray(aRes?.data) ? aRes.data : [];
+      const sList = Array.isArray(sRes?.data) ? sRes.data : [];
       setBuildings(bList);
       setApartments(aList);
+      setServiceCatalog(sList);
 
       if (cleanAptId) {
         const matchedApt = aList.find((a) => String(a.id) === String(cleanAptId));
@@ -478,6 +489,20 @@ export function ContractsPage() {
   const selectedApartment = useMemo(
     () => selectableApartments.find((a) => String(a.id) === String(createForm.apartment_id)) || null,
     [selectableApartments, createForm.apartment_id]
+  );
+
+  const effectiveModalBuildingId = selectedApartment?.building_id || createForm.building_id || '';
+  const selectableCatalogServices = useMemo(
+    () =>
+      serviceCatalog.filter(
+        (svc) =>
+          svc.is_active !== false &&
+          svc.billing_type !== 'METERED' &&
+          (!svc.building_id ||
+            !effectiveModalBuildingId ||
+            String(svc.building_id) === String(effectiveModalBuildingId))
+      ),
+    [serviceCatalog, effectiveModalBuildingId]
   );
 
   const selectedTenant = lookedUpTenant;
@@ -827,6 +852,14 @@ export function ContractsPage() {
     if (createForm.deposit_amount !== '' && Number(createForm.deposit_amount) < 0) {
       errs.deposit_amount = 'Tiền cọc không được âm.';
     }
+    const dayNum = Number(createForm.billing_day || 1);
+    if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 31) {
+      errs.billing_day = 'Ngày phát hành hóa đơn phải từ 1 đến 31.';
+    }
+    const dueNum = Number(createForm.payment_due_days || 5);
+    if (!Number.isInteger(dueNum) || dueNum < 1 || dueNum > 60) {
+      errs.payment_due_days = 'Thời hạn thanh toán phải từ 1 đến 60 ngày.';
+    }
 
     const activeOccupants = inlineOccupants.filter(
       (o) => o.full_name.trim() || o.phone.trim() || o.id_number.trim()
@@ -893,17 +926,53 @@ export function ContractsPage() {
         end_date: createForm.end_date,
         rent_amount: Math.round(Number(createForm.rent_amount)),
         deposit_amount: Math.round(Number(createForm.deposit_amount || 0)),
-        billing_day: Math.min(28, Math.max(1, Number(createForm.billing_day || 1))),
+        billing_cycle: createForm.billing_cycle || 'monthly',
+        billing_day: Math.min(31, Math.max(1, Math.round(Number(createForm.billing_day || 1)))),
+        payment_due_days: Math.min(60, Math.max(1, Math.round(Number(createForm.payment_due_days || 5)))),
         note: createForm.note.trim(),
       };
+
+      const servicesPayload = selectableCatalogServices
+        .filter((svc) => selectedServices[svc.id]?.checked)
+        .map((svc) => {
+          const cfg = selectedServices[svc.id] || {};
+          const qty =
+            svc.billing_type === 'QUANTITY'
+              ? Math.max(1, Math.round(Number(cfg.quantity || 1)))
+              : 1;
+          const priceVal =
+            cfg.unit_price !== undefined && cfg.unit_price !== ''
+              ? Math.max(0, Math.round(Number(cfg.unit_price)))
+              : Math.round(Number(svc.unit_price || 0));
+          return {
+            service_id: svc.id,
+            quantity: qty,
+            unit_price: priceVal,
+          };
+        });
+      if (servicesPayload.length > 0) {
+        payload.services = servicesPayload;
+      }
+
+      const servicePricesPayload = [];
+      if (customMeterPrices.ELECTRICITY !== '' && Number(customMeterPrices.ELECTRICITY) >= 0) {
+        servicePricesPayload.push({
+          service_code: 'ELECTRICITY',
+          unit_price: Math.round(Number(customMeterPrices.ELECTRICITY)),
+        });
+      }
+      if (customMeterPrices.WATER !== '' && Number(customMeterPrices.WATER) >= 0) {
+        servicePricesPayload.push({
+          service_code: 'WATER',
+          unit_price: Math.round(Number(customMeterPrices.WATER)),
+        });
+      }
+      if (servicePricesPayload.length > 0) {
+        payload.service_prices = servicePricesPayload;
+      }
+
       const res = await contractsService.create(payload);
       const created = res?.data;
-
-      if (created?.id && createForm.billing_cycle && createForm.billing_cycle !== 'monthly') {
-        await contractsService.update(created.id, {
-          billing_cycle: createForm.billing_cycle,
-        }).catch(() => {});
-      }
 
       toast.success(res?.message || 'Đã tạo hợp đồng nháp thành công.');
       setCreateOpen(false);
@@ -2122,14 +2191,14 @@ export function ContractsPage() {
                   Cảnh báo khung giá ưu đãi (&lt; 90% giá niêm yết {formatMoney(selectedApartment?.base_rent)})
                 </p>
                 <p className="text-amber-800 mt-0.5">
-                  Theo quy định kiểm soát nội bộ (FR-014), mức giá thuê đề xuất giảm trên 10% so với giá niêm yết. Khi bấm Kích hoạt sau khi đính kèm bản ký, hợp đồng sẽ tự động chuyển sang trạng thái{' '}
-                  <strong>PENDING_APPROVAL</strong> để chờ cấp thẩm quyền nội bộ (<strong>SYS_ADMIN / Quản lý khác — Four-eyes</strong>) phê duyệt.
+                  Theo quy định kiểm soát khung giá (FR-014), mức giá thuê đề xuất giảm trên 10% so với giá niêm yết. Khi bấm Kích hoạt sau khi đính kèm bản ký, hợp đồng sẽ tự động chuyển sang trạng thái{' '}
+                  <strong>PENDING_APPROVAL</strong> để chờ <strong>Chủ sở hữu tòa nhà (OWNER)</strong> phê duyệt.
                 </p>
               </div>
             </div>
           ) : null}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Select
               label="Chu kỳ thanh toán"
               value={createForm.billing_cycle}
@@ -2143,11 +2212,156 @@ export function ContractsPage() {
               label="Ngày phát hành hóa đơn định kỳ"
               type="number"
               min="1"
-              max="28"
+              max="31"
               value={createForm.billing_day}
               onChange={(e) => setCreateForm((p) => ({ ...p, billing_day: e.target.value }))}
-              hint="Ngày chốt hóa đơn hàng tháng (1 – 28)"
+              error={createErrors.billing_day}
+              hint="Ngày chốt hóa đơn (1 – 31, tự kẹp cuối tháng)"
             />
+            <Input
+              label="Thời hạn thanh toán (ngày)"
+              type="number"
+              min="1"
+              max="60"
+              value={createForm.payment_due_days}
+              onChange={(e) => setCreateForm((p) => ({ ...p, payment_due_days: e.target.value }))}
+              error={createErrors.payment_due_days}
+              hint="Số ngày hạn đóng sau ngày phát hành (mặc định 5)"
+            />
+          </div>
+
+          {/* Bước 4: Chọn Dịch vụ đi kèm (services[]) & Đơn giá riêng theo hợp đồng (FR-014, FR-065) */}
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <p className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                  <FileSignature className="w-3.5 h-3.5 text-primary-600" />
+                  Bước 4: Dịch vụ đi kèm &amp; Đơn giá riêng theo hợp đồng (Tùy chọn)
+                </p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Đăng ký sẵn các dịch vụ định kỳ (sẽ tự động kích hoạt khi hợp đồng sang ACTIVE) và cấu hình đơn giá ưu đãi riêng nếu có
+                </p>
+              </div>
+              {Object.values(selectedServices).filter((s) => s?.checked).length > 0 ? (
+                <Badge variant="emerald">
+                  Đã chọn {Object.values(selectedServices).filter((s) => s?.checked).length} dịch vụ
+                </Badge>
+              ) : null}
+            </div>
+
+            {selectableCatalogServices.length > 0 ? (
+              <div className="space-y-2">
+                {selectableCatalogServices.map((svc) => {
+                  const cfg = selectedServices[svc.id] || {
+                    checked: false,
+                    quantity: '1',
+                    unit_price: String(Math.round(Number(svc.unit_price || 0))),
+                  };
+                  return (
+                    <div
+                      key={svc.id}
+                      className={`p-2.5 rounded-lg border transition-colors ${
+                        cfg.checked
+                          ? 'bg-white border-primary-300 shadow-xs'
+                          : 'bg-white/70 border-slate-200'
+                      }`}
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center">
+                        <label className="sm:col-span-6 flex items-start gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(cfg.checked)}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setSelectedServices((prev) => ({
+                                ...prev,
+                                [svc.id]: {
+                                  checked,
+                                  quantity: prev[svc.id]?.quantity || '1',
+                                  unit_price:
+                                    prev[svc.id]?.unit_price !== undefined
+                                      ? prev[svc.id].unit_price
+                                      : String(Math.round(Number(svc.unit_price || 0))),
+                                },
+                              }));
+                            }}
+                            className="mt-0.5 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+                          />
+                          <div className="text-xs">
+                            <p className="font-semibold text-slate-800">
+                              {svc.name}{' '}
+                              <span className="font-mono text-[11px] text-slate-400">({svc.code})</span>
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              Niêm yết: {formatMoney(svc.unit_price)} / {svc.unit || 'tháng'}
+                              {svc.billing_type === 'QUANTITY' ? ' • Tính theo số lượng' : ' • Trọn gói cố định'}
+                            </p>
+                          </div>
+                        </label>
+
+                        {cfg.checked ? (
+                          <>
+                            <div className="sm:col-span-2">
+                              {svc.billing_type === 'QUANTITY' ? (
+                                <Input
+                                  label="Số lượng"
+                                  type="number"
+                                  min="1"
+                                  value={cfg.quantity}
+                                  onChange={(e) =>
+                                    setSelectedServices((prev) => ({
+                                      ...prev,
+                                      [svc.id]: { ...cfg, quantity: e.target.value },
+                                    }))
+                                  }
+                                />
+                              ) : (
+                                <div className="text-[11px] text-slate-400 sm:pt-5 text-center">1 gói</div>
+                              )}
+                            </div>
+                            <div className="sm:col-span-4">
+                              <MoneyInput
+                                label="Đơn giá áp dụng (VND)"
+                                value={cfg.unit_price}
+                                onChange={(e) =>
+                                  setSelectedServices((prev) => ({
+                                    ...prev,
+                                    [svc.id]: { ...cfg, unit_price: e.target.value },
+                                  }))
+                                }
+                              />
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 italic">
+                Chưa có dịch vụ định kỳ nào trong danh mục hoạt động của tòa nhà.
+              </p>
+            )}
+
+            <div className="pt-2 border-t border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <MoneyInput
+                label="Đơn giá Điện riêng theo HĐ (VND/kWh)"
+                placeholder="Để trống = theo giá đồng hồ tòa nhà"
+                value={customMeterPrices.ELECTRICITY}
+                onChange={(e) =>
+                  setCustomMeterPrices((p) => ({ ...p, ELECTRICITY: e.target.value }))
+                }
+              />
+              <MoneyInput
+                label="Đơn giá Nước riêng theo HĐ (VND/m³)"
+                placeholder="Để trống = theo giá đồng hồ tòa nhà"
+                value={customMeterPrices.WATER}
+                onChange={(e) =>
+                  setCustomMeterPrices((p) => ({ ...p, WATER: e.target.value }))
+                }
+              />
+            </div>
           </div>
 
           <Input

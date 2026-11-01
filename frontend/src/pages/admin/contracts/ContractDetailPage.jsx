@@ -21,6 +21,7 @@ import {
   Plus,
   ShieldCheck,
   Clock,
+  Calendar,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -30,7 +31,7 @@ import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Tabs } from '../../../components/ui/Tabs';
-import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
+import { FileUpload, AuthImage, AuthPdfViewer } from '../../../components/ui/FileUpload';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
@@ -144,7 +145,7 @@ function ContractTimeline({ status }) {
       {
         key: 'PENDING_APPROVAL',
         label: '2. Phê duyệt giá',
-        desc: 'Duyệt nội bộ nếu giảm > 10%',
+        desc: 'Chủ sở hữu tòa nhà duyệt nếu giảm > 10%',
         state:
           status === 'PENDING_APPROVAL'
             ? 'warning'
@@ -228,9 +229,16 @@ export function ContractDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { isSysAdmin, isManager, canApproveContracts, canTerminateContracts, user } = usePermission();
+  const {
+    isSysAdmin,
+    isOwner,
+    isManager,
+    canApproveContractAmendments,
+    canTerminateContracts,
+    user,
+  } = usePermission();
   const currentUserId = user?.id || user?.sub;
-  const canManageOps = isSysAdmin || isManager;
+  const canManageOps = isManager;
 
   const [contract, setContract] = useState(null);
   const [occupants, setOccupants] = useState([]);
@@ -242,7 +250,7 @@ export function ContractDetailPage() {
   // Action loading states
   const [printing, setPrinting] = useState(false);
   const [uploadingScan, setUploadingScan] = useState(false);
-  const [previewScanSrc, setPreviewScanSrc] = useState(null);
+  const [previewScanItem, setPreviewScanItem] = useState(null);
 
   // Confirm Dialogs (Activate / Approve / ApproveTermination)
   const [confirmState, setConfirmState] = useState({ open: false, type: '' });
@@ -258,6 +266,7 @@ export function ContractDetailPage() {
     deposit_amount: '',
     billing_cycle: 'monthly',
     billing_day: '1',
+    payment_due_days: '5',
     note: '',
   });
   const [savingDraft, setSavingDraft] = useState(false);
@@ -444,6 +453,15 @@ export function ContractDetailPage() {
     () => (Array.isArray(contract?.related_contracts) ? contract.related_contracts : []),
     [contract]
   );
+  const serviceSubscriptions = useMemo(
+    () => (Array.isArray(contract?.service_subscriptions) ? contract.service_subscriptions : []),
+    [contract]
+  );
+  const invoiceSchedule = useMemo(
+    () => (Array.isArray(contract?.invoice_schedule) ? contract.invoice_schedule : []),
+    [contract]
+  );
+  const canApprovePrice = isOwner || (isSysAdmin && contract?.has_building_owner === false);
 
   // Xem & In hợp đồng A4 chuẩn pháp lý
   const handlePrintA4 = async () => {
@@ -475,7 +493,10 @@ export function ContractDetailPage() {
     if (!base64Val) return;
     setUploadingScan(true);
     try {
-      const res = await contractsService.uploadScan(id, { image_base64: base64Val });
+      const res = await contractsService.uploadScan(id, {
+        file_base64: base64Val,
+        image_base64: base64Val,
+      });
       toast.success(res?.message || 'Đã đính kèm bản scan hợp đồng thành công.');
       await loadAll();
     } catch (err) {
@@ -506,10 +527,10 @@ export function ContractDetailPage() {
     } catch (err) {
       const errCode = err?.response?.data?.code;
       if (errCode === 'PRICE_NEEDS_APPROVAL') {
-        // Backend đã commit chuyển hợp đồng sang PENDING_APPROVAL chờ phê duyệt nội bộ (Four-eyes)
+        // Backend đã commit chuyển hợp đồng sang PENDING_APPROVAL chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt
         toast.warning(
           err?.response?.data?.message ||
-            'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ cấp thẩm quyền nội bộ (Four-eyes) phê duyệt.'
+            'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt.'
         );
         setConfirmState({ open: false, type: '' });
         await loadAll();
@@ -766,6 +787,7 @@ export function ContractDetailPage() {
       deposit_amount: String(Math.round(Number(contract.deposit_amount || 0))),
       billing_cycle: contract.billing_cycle || 'monthly',
       billing_day: String(contract.billing_day || 1),
+      payment_due_days: String(contract.payment_due_days || 5),
       note: contract.note || '',
     });
     setEditDraftOpen(true);
@@ -789,7 +811,8 @@ export function ContractDetailPage() {
         rent_amount: Math.round(Number(editDraftForm.rent_amount || 0)),
         deposit_amount: Math.round(Number(editDraftForm.deposit_amount || 0)),
         billing_cycle: editDraftForm.billing_cycle,
-        billing_day: Math.min(28, Math.max(1, Number(editDraftForm.billing_day || 1))),
+        billing_day: Math.min(31, Math.max(1, Number(editDraftForm.billing_day || 1))),
+        payment_due_days: Math.min(60, Math.max(1, Number(editDraftForm.payment_due_days || 5))),
         note: editDraftForm.note,
       });
       toast.success(res?.message || 'Cập nhật bản nháp hợp đồng thành công.');
@@ -1245,6 +1268,7 @@ export function ContractDetailPage() {
 
   const tabs = [
     { id: 'overview', label: 'Chi tiết & Bản scan ký kết', icon: FileText },
+    { id: 'schedule', label: 'Lịch hóa đơn dự kiến', icon: Calendar, count: invoiceSchedule.length },
     { id: 'occupants', label: 'Người ở cùng', icon: Users, count: occupants.length },
     {
       id: 'amendments',
@@ -1324,8 +1348,8 @@ export function ContractDetailPage() {
               </Button>
             ) : null}
 
-            {/* Phê duyệt / Từ chối nội bộ Four-eyes (SYS_ADMIN / Quản lý khác hoặc cho phép tự duyệt) */}
-            {canApproveContracts &&
+            {/* Phê duyệt / Từ chối giá ưu đãi (OWNER tòa nhà hoặc SYS_ADMIN khi tòa chưa gán OWNER) */}
+            {canApprovePrice &&
             contract.status === 'PENDING_APPROVAL' &&
             (!contract.created_by ||
               String(contract.created_by) !== String(currentUserId) ||
@@ -1473,10 +1497,10 @@ export function ContractDetailPage() {
               </div>
 
               <div className="p-3 rounded-lg border border-slate-100">
-                <p className="text-xs text-slate-500">Chu kỳ &amp; Ngày chốt hóa đơn</p>
+                <p className="text-xs text-slate-500">Chu kỳ, Ngày chốt &amp; Hạn thanh toán</p>
                 <p className="font-semibold text-slate-800 mt-0.5">
                   {contract.billing_cycle === 'quarterly' ? '3 tháng / lần' : 'Hàng tháng'} • Ngày{' '}
-                  {contract.billing_day || 1}
+                  {contract.billing_day || 1} • Hạn {contract.payment_due_days || 5} ngày
                 </p>
               </div>
 
@@ -1523,22 +1547,34 @@ export function ContractDetailPage() {
               <div className="grid grid-cols-2 gap-3 mb-4">
                 {attachments.map((att, idx) => {
                   const viewUrl = `/api/v1/attachments/${att.id}/view`;
+                  const isPdf =
+                    att.mime === 'application/pdf' ||
+                    String(att.storage_path || '').toLowerCase().endsWith('.pdf');
                   return (
                     <div
                       key={att.id}
-                      onClick={() => setPreviewScanSrc(viewUrl)}
+                      onClick={() => setPreviewScanItem({ src: viewUrl, isPdf })}
                       className="group relative rounded-xl border border-slate-200 overflow-hidden bg-slate-50 cursor-pointer hover:border-primary-400 transition-all"
                     >
                       <div className="h-36 w-full">
-                        <AuthImage
-                          src={viewUrl}
-                          alt={`Bản scan #${idx + 1}`}
-                          className="w-full h-full object-cover"
-                        />
+                        {isPdf ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-rose-50/70 text-rose-700 p-3 text-center">
+                            <FileText className="w-10 h-10 text-rose-500" />
+                            <span className="text-xs font-semibold">Tệp PDF hợp đồng</span>
+                          </div>
+                        ) : (
+                          <AuthImage
+                            src={viewUrl}
+                            alt={`Bản scan #${idx + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                        )}
                       </div>
                       <div className="px-2.5 py-1.5 bg-white border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-600">
                         <div className="min-w-0">
-                          <p className="font-medium break-words">Bản ký #{attachments.length - idx}</p>
+                          <p className="font-medium break-words">
+                            Bản ký #{attachments.length - idx} {isPdf ? '(PDF)' : ''}
+                          </p>
                           {att.created_at ? (
                             <p className="text-[10px] text-slate-400">{formatDate(att.created_at)}</p>
                           ) : null}
@@ -1559,16 +1595,189 @@ export function ContractDetailPage() {
 
             {canManageOps ? (
               <FileUpload
-                label="Đính kèm thêm ảnh scan hợp đồng đã ký"
+                label="Đính kèm thêm bản scan hợp đồng đã ký (PDF / JPG / PNG)"
+                accept="image/jpeg,image/png,application/pdf"
+                maxSizeMB={10}
                 value=""
                 onChange={handleUploadScan}
                 hint={
                   uploadingScan
                     ? 'Đang tải bản scan lên máy chủ...'
-                    : 'Hỗ trợ ảnh chụp / scan rõ nét JPG, PNG (tối đa 5MB)'
+                    : 'Hỗ trợ tệp PDF hoặc ảnh chụp / scan rõ nét JPG, PNG (tối đa 10MB)'
                 }
               />
             ) : null}
+          </Card>
+        </div>
+      ) : null}
+
+      {/* TAB Lịch hóa đơn dự kiến & Dịch vụ đi kèm */}
+      {activeTab === 'schedule' ? (
+        <div className="space-y-6">
+          <Card>
+            <CardHeader
+              title="Dịch vụ đi kèm theo hợp đồng"
+              subtitle="Các gói dịch vụ định kỳ đăng ký kèm hợp đồng (tự động kích hoạt sang ACTIVE khi hợp đồng hiệu lực)"
+              action={
+                <Badge variant={serviceSubscriptions.length > 0 ? 'sky' : 'slate'}>
+                  {serviceSubscriptions.length} dịch vụ đăng ký
+                </Badge>
+              }
+            />
+            {serviceSubscriptions.length === 0 ? (
+              <p className="text-xs text-slate-500 py-4 text-center italic">
+                Chưa đăng ký gói dịch vụ cố định/theo số lượng đi kèm trên hợp đồng này.
+              </p>
+            ) : (
+              <DataTable
+                rowKey="id"
+                data={serviceSubscriptions}
+                columns={[
+                  {
+                    key: 'service_name',
+                    label: 'Dịch vụ',
+                    render: (row) => (
+                      <div>
+                        <p className="font-semibold text-slate-900">{row.service_name || row.code}</p>
+                        <p className="text-[11px] text-slate-500 font-mono">{row.service_code || row.code}</p>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'quantity',
+                    label: 'Số lượng',
+                    align: 'center',
+                    render: (row) => `${row.quantity || 1} ${row.unit || ''}`.trim(),
+                  },
+                  {
+                    key: 'unit_price',
+                    label: 'Đơn giá áp dụng',
+                    align: 'right',
+                    render: (row) => (
+                      <span className="font-semibold text-slate-900">{formatMoney(row.unit_price)}</span>
+                    ),
+                  },
+                  {
+                    key: 'status',
+                    label: 'Trạng thái',
+                    align: 'center',
+                    render: (row) => (
+                      <Badge
+                        variant={
+                          row.status === 'ACTIVE'
+                            ? 'emerald'
+                            : row.status === 'PENDING_APPROVAL'
+                            ? 'amber'
+                            : 'slate'
+                        }
+                      >
+                        {row.status === 'ACTIVE'
+                          ? 'Đang hiệu lực'
+                          : row.status === 'PENDING_APPROVAL'
+                          ? 'Chờ kích hoạt HĐ'
+                          : row.status}
+                      </Badge>
+                    ),
+                  },
+                ]}
+              />
+            )}
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Lịch hóa đơn dự kiến toàn kỳ hợp đồng"
+              subtitle={`Chu kỳ ${
+                contract.billing_cycle === 'quarterly' ? '3 tháng / lần' : 'hàng tháng'
+              } • Ngày chốt: ngày ${contract.billing_day || 1} • Hạn thanh toán: ${
+                contract.payment_due_days || 5
+              } ngày sau phát hành (chưa bao gồm điện/nước theo chỉ số đồng hồ)`}
+              action={<Badge variant="indigo">{invoiceSchedule.length} kỳ thu</Badge>}
+            />
+            <DataTable
+              rowKey="period_no"
+              data={invoiceSchedule}
+              emptyTitle="Chưa có lịch hóa đơn dự kiến"
+              emptyDescription="Lịch thu tiền dự kiến sẽ hiển thị theo kỳ hạn bắt đầu và kết thúc của hợp đồng."
+              columns={[
+                {
+                  key: 'period_no',
+                  label: 'Kỳ thu',
+                  render: (row) => (
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-bold text-slate-900">#{row.period_no}</span>
+                      <span className="text-xs text-slate-600">{row.billing_period}</span>
+                      {row.is_prorated ? <Badge variant="amber">Pro-rata</Badge> : null}
+                    </div>
+                  ),
+                },
+                {
+                  key: 'period_range',
+                  label: 'Khoảng tính phí',
+                  render: (row) => (
+                    <span className="text-xs text-slate-700 whitespace-nowrap">
+                      {formatDate(row.period_start)} → {formatDate(row.period_end)}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'issue_date',
+                  label: 'Ngày phát hành',
+                  align: 'center',
+                  render: (row) => (
+                    <span className="text-xs font-medium text-slate-800 whitespace-nowrap">
+                      {formatDate(row.issue_date)}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'due_date',
+                  label: 'Hạn thanh toán',
+                  align: 'center',
+                  render: (row) => (
+                    <span className="text-xs font-semibold text-primary-700 whitespace-nowrap">
+                      {formatDate(row.due_date)}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'expected_rent',
+                  label: 'Tiền thuê',
+                  align: 'right',
+                  render: (row) => formatMoney(row.expected_rent),
+                },
+                {
+                  key: 'expected_fixed_services',
+                  label: 'Dịch vụ cố định',
+                  align: 'right',
+                  render: (row) => formatMoney(row.expected_fixed_services),
+                },
+                {
+                  key: 'expected_total',
+                  label: 'Tổng tạm tính',
+                  align: 'right',
+                  render: (row) => (
+                    <span className="font-bold text-slate-900">{formatMoney(row.expected_total)}</span>
+                  ),
+                },
+                {
+                  key: 'actual_invoice',
+                  label: 'Hóa đơn thực tế',
+                  align: 'center',
+                  render: (row) =>
+                    row.actual_invoice ? (
+                      <Link
+                        to="/admin/invoices"
+                        className="inline-flex items-center gap-1 hover:underline"
+                      >
+                        <StatusBadge status={row.actual_invoice.status} domain="invoice" />
+                      </Link>
+                    ) : (
+                      <Badge variant="slate">Dự kiến</Badge>
+                    ),
+                },
+              ]}
+            />
           </Card>
         </div>
       ) : null}
@@ -1708,7 +1917,8 @@ export function ContractDetailPage() {
                 const isAmendCreator = Boolean(
                   diff.created_by && currentUserId && String(diff.created_by) === String(currentUserId)
                 );
-                const canApproveThisAmend = canApproveContracts && (!isAmendCreator || allowSelfApproval);
+                const canApproveThisAmend =
+                  canApproveContractAmendments && (!isAmendCreator || allowSelfApproval);
 
                 return (
                   <Card key={ver.id} className="p-5">
@@ -1716,7 +1926,9 @@ export function ContractDetailPage() {
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-bold text-slate-900">
-                            Phụ lục phiên bản #{ver.version_no}
+                            {diff.status === 'INITIAL_SNAPSHOT'
+                              ? `Phiên bản gốc #${ver.version_no} (Khi kích hoạt)`
+                              : `Phụ lục phiên bản #${ver.version_no}`}
                           </span>
                           {isApproved ? (
                             <Badge variant="emerald" dot>
@@ -1761,9 +1973,9 @@ export function ContractDetailPage() {
                             Phê duyệt phụ lục
                           </Button>
                         </div>
-                      ) : isPending && canApproveContracts && isAmendCreator ? (
+                      ) : isPending && canApproveContractAmendments && isAmendCreator ? (
                         <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
-                          Chờ Quản lý khác / SYS_ADMIN duyệt (Four-eyes)
+                          Chờ Quản lý khác duyệt (Four-eyes)
                         </span>
                       ) : null}
                     </div>
@@ -1938,25 +2150,33 @@ export function ContractDetailPage() {
         </div>
       ) : null}
 
-      {/* Modal Xem ảnh scan phóng to */}
+      {/* Modal Xem bản scan phóng to (Ảnh hoặc PDF) */}
       <Modal
-        open={Boolean(previewScanSrc)}
-        onClose={() => setPreviewScanSrc(null)}
+        open={Boolean(previewScanItem)}
+        onClose={() => setPreviewScanItem(null)}
         title={`Bản scan hợp đồng ${contractCode}`}
         size="lg"
         footer={
-          <Button variant="outline" onClick={() => setPreviewScanSrc(null)}>
+          <Button variant="outline" onClick={() => setPreviewScanItem(null)}>
             Đóng
           </Button>
         }
       >
         <div className="flex items-center justify-center bg-slate-900/5 rounded-xl p-2 min-h-[320px]">
-          {previewScanSrc ? (
-            <AuthImage
-              src={previewScanSrc}
-              alt="Bản scan hợp đồng"
-              className="max-h-[72vh] w-auto rounded-lg object-contain"
-            />
+          {previewScanItem ? (
+            previewScanItem.isPdf ? (
+              <AuthPdfViewer
+                src={previewScanItem.src}
+                title={`Bản scan PDF hợp đồng ${contractCode}`}
+                className="w-full h-[72vh] rounded-lg border border-slate-200 bg-white"
+              />
+            ) : (
+              <AuthImage
+                src={previewScanItem.src}
+                alt="Bản scan hợp đồng"
+                className="max-h-[72vh] w-auto rounded-lg object-contain"
+              />
+            )
           ) : null}
         </div>
       </Modal>
@@ -2026,12 +2246,22 @@ export function ContractDetailPage() {
               ]}
             />
             <Input
-              label="Ngày chốt hóa đơn"
+              label="Ngày chốt hóa đơn (1–31)"
               type="number"
               min="1"
-              max="28"
+              max="31"
+              hint="Tháng thiếu ngày tự lùi về cuối tháng"
               value={editDraftForm.billing_day}
               onChange={(e) => setEditDraftForm((p) => ({ ...p, billing_day: e.target.value }))}
+            />
+            <Input
+              label="Hạn thanh toán (ngày sau phát hành)"
+              type="number"
+              min="1"
+              max="60"
+              hint="Mặc định 5 ngày (1–60 ngày)"
+              value={editDraftForm.payment_due_days}
+              onChange={(e) => setEditDraftForm((p) => ({ ...p, payment_due_days: e.target.value }))}
             />
           </div>
           <Input

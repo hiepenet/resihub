@@ -1,7 +1,13 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { UploadCloud, X, Image as ImageIcon } from 'lucide-react';
+import { UploadCloud, X, Image as ImageIcon, FileText, ExternalLink } from 'lucide-react';
 import { fileToBase64 } from '../../utils/format';
 import { fetchAuthBlobUrl } from '../../services/api';
+
+function isPdfSource(src) {
+  if (!src) return false;
+  const s = String(src).toLowerCase();
+  return s.startsWith('data:application/pdf') || s.endsWith('.pdf');
+}
 
 export function AuthImage({ src, alt = 'Ảnh đính kèm', className = '' }) {
   const [resolvedSrc, setResolvedSrc] = useState(null);
@@ -44,18 +50,95 @@ export function AuthImage({ src, alt = 'Ảnh đính kèm', className = '' }) {
   return <img src={resolvedSrc} alt={alt} className={className} />;
 }
 
+export function AuthPdfViewer({ src, title = 'Bản scan PDF', className = '' }) {
+  const [resolvedSrc, setResolvedSrc] = useState(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let blobUrl = null;
+    setFailed(false);
+    if (!src) {
+      setResolvedSrc(null);
+      return undefined;
+    }
+    if (src.startsWith('data:') || src.startsWith('http://') || src.startsWith('https://')) {
+      setResolvedSrc(src);
+      return undefined;
+    }
+    fetchAuthBlobUrl(src)
+      .then((u) => {
+        if (active) {
+          blobUrl = u;
+          setResolvedSrc(u);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setResolvedSrc(null);
+          setFailed(true);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [src]);
+
+  if (failed) {
+    return (
+      <div className={`flex flex-col items-center justify-center gap-2 p-8 bg-slate-50 text-slate-500 rounded-xl ${className}`}>
+        <FileText className="w-8 h-8 text-rose-400" />
+        <p className="text-xs">Không thể tải tệp PDF. Vui lòng thử lại.</p>
+      </div>
+    );
+  }
+
+  if (!resolvedSrc) {
+    return (
+      <div className={`flex flex-col items-center justify-center gap-2 p-8 bg-slate-50 text-slate-400 rounded-xl ${className}`}>
+        <FileText className="w-8 h-8 animate-pulse" />
+        <p className="text-xs">Đang tải tài liệu PDF...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full space-y-2">
+      <div className="flex justify-end">
+        <a
+          href={resolvedSrc}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-600 hover:text-primary-700 hover:underline"
+        >
+          <ExternalLink className="w-3.5 h-3.5" /> Mở PDF trong tab mới
+        </a>
+      </div>
+      <iframe
+        src={resolvedSrc}
+        title={title}
+        className={`w-full h-[70vh] rounded-xl border border-slate-200 bg-white ${className}`}
+      />
+    </div>
+  );
+}
+
 export function FileUpload({
   label,
   value = [], // string[] hoặc string
   onChange,
   multiple = false,
   maxFiles = 3,
+  maxSizeMB = 5,
   accept = 'image/jpeg,image/png',
   hint = 'Hỗ trợ ảnh JPG, PNG (tối đa 5MB/ảnh)',
 }) {
   const inputRef = useRef(null);
   const [error, setError] = useState('');
   const files = Array.isArray(value) ? value : value ? [value] : [];
+  const acceptsPdf = String(accept).toLowerCase().includes('application/pdf') || String(accept).toLowerCase().includes('.pdf');
 
   const handleSelect = async (e) => {
     const selected = Array.from(e.target.files || []);
@@ -67,8 +150,8 @@ export function FileUpload({
 
     const encoded = [];
     for (const f of toProcess) {
-      if (f.size > 5 * 1024 * 1024) {
-        setError(`Ảnh "${f.name}" vượt quá dung lượng 5MB.`);
+      if (f.size > maxSizeMB * 1024 * 1024) {
+        setError(`Tệp "${f.name}" vượt quá dung lượng tối đa ${maxSizeMB}MB.`);
         continue;
       }
       const b64 = await fileToBase64(f);
@@ -105,7 +188,7 @@ export function FileUpload({
         >
           <UploadCloud className="w-5 h-5 text-primary-500" />
           <span className="text-xs font-medium text-slate-700">
-            Nhấn để tải ảnh lên {multiple ? `(${files.length}/${maxFiles})` : ''}
+            Nhấn để tải {acceptsPdf ? 'tệp scan / ảnh' : 'ảnh'} lên {multiple ? `(${files.length}/${maxFiles})` : ''}
           </span>
           {hint ? <span className="text-[11px] text-slate-400">{hint}</span> : null}
         </button>
@@ -129,7 +212,14 @@ export function FileUpload({
               key={idx}
               className="relative w-20 h-20 rounded-lg border border-slate-200 overflow-hidden bg-slate-50 group"
             >
-              <AuthImage src={item} className="w-full h-full object-cover" />
+              {isPdfSource(item) ? (
+                <div className="w-full h-full flex flex-col items-center justify-center gap-1 bg-rose-50 text-rose-600">
+                  <FileText className="w-6 h-6" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider">PDF</span>
+                </div>
+              ) : (
+                <AuthImage src={item} className="w-full h-full object-cover" />
+              )}
               <button
                 type="button"
                 onClick={() => handleRemove(idx)}

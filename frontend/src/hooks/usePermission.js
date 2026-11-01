@@ -22,14 +22,20 @@ export function usePermission() {
     isOwner,
     isManager,
     isResident,
-    // Ma trận quyền 4 vai trò: SYS_ADMIN, OWNER (100% Read-Only), MANAGER (vận hành + kế toán + kỹ thuật), RESIDENT
+    // Ma trận quyền 4 vai trò (PRD Mục 6.2 & FR-014):
+    // - SYS_ADMIN: cấu hình hệ thống & BĐS cấp cao, CHỈ ĐỌC (R) trên Hợp đồng (chỉ duyệt dự phòng khi tòa nhà chưa có OWNER).
+    // - OWNER: xem tài sản sở hữu & phê duyệt hợp đồng lệch khung giá (>10%) của tòa nhà mình sở hữu.
+    // - MANAGER: toàn quyền tác nghiệp vận hành, hợp đồng, cư dân, dịch vụ, hóa đơn, kỹ thuật trên tòa được gán.
     canCreateBuildings: isSysAdmin || isManager,
     canManageBuildings: isSysAdmin,
     canEditRealEstate: isSysAdmin || isManager,
     canManageTenants: isSysAdmin || isManager,
-    canCreateContracts: isSysAdmin || isManager,
-    canApproveContracts: isSysAdmin || isManager,
-    canTerminateContracts: isSysAdmin || isManager,
+    canCreateContracts: isManager,
+    canManageContracts: isManager,
+    canApproveContracts: isManager,
+    canApproveContractAmendments: isManager,
+    canApproveContractPrice: isOwner || isSysAdmin,
+    canTerminateContracts: isManager,
     canSettleDeposits: isSysAdmin || isManager,
     canApproveDepositRefund: isSysAdmin || isManager,
     canManageMeters: isSysAdmin || isManager,
