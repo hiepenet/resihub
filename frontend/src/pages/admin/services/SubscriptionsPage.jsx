@@ -24,7 +24,17 @@ import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
+import {
+  ServiceSubscriptionMetaFields,
+  VehiclePlatesBadges,
+} from '../../../components/common/ServiceSubscriptionMetaFields';
 import { servicesService } from '../../../services/services.service';
+import {
+  MAX_PARKING_QUANTITY,
+  isParkingService,
+  syncVehiclePlatesArray,
+  validateServiceMetaInput,
+} from '../../../utils/serviceSubscriptionMeta';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
@@ -77,7 +87,13 @@ export function SubscriptionsPage() {
     service_id: '',
     quantity: 1,
     start_date: toInputDate(new Date()),
+    vehicle_plates: [''],
     note: '',
+  });
+  const [assignErrors, setAssignErrors] = useState({
+    plateErrors: [],
+    quantityError: '',
+    noteError: '',
   });
 
   // Modal xác nhận hủy kèm tính phí Pro-rata
@@ -118,6 +134,8 @@ export function SubscriptionsPage() {
         s.service_name?.toLowerCase().includes(q) ||
         s.service_code?.toLowerCase().includes(q) ||
         s.tenant_name?.toLowerCase().includes(q) ||
+        (Array.isArray(s.vehicle_plates) &&
+          s.vehicle_plates.join(' ').toLowerCase().includes(q)) ||
         s.note?.toLowerCase().includes(q)
       );
     });
@@ -139,8 +157,10 @@ export function SubscriptionsPage() {
       service_id: '',
       quantity: 1,
       start_date: toInputDate(new Date()),
+      vehicle_plates: [''],
       note: '',
     });
+    setAssignErrors({ plateErrors: [], quantityError: '', noteError: '' });
     setAssignOpen(true);
     try {
       const [catRes, aptRes] = await Promise.all([
@@ -159,6 +179,7 @@ export function SubscriptionsPage() {
     () => catalog.find((c) => c.id === assignForm.service_id) || null,
     [catalog, assignForm.service_id]
   );
+  const isAssignParking = isParkingService(selectedAssignService);
 
   const assignProrataPreview = useMemo(() => {
     if (!selectedAssignService) return null;
@@ -176,14 +197,33 @@ export function SubscriptionsPage() {
       toast.warning('Vui lòng chọn căn hộ và dịch vụ cần gán.');
       return;
     }
+    const effQty =
+      selectedAssignService?.billing_type === 'FIXED' && !isAssignParking
+        ? 1
+        : assignForm.quantity;
+    const meta = validateServiceMetaInput({
+      isParking: isAssignParking,
+      quantity: effQty,
+      vehiclePlates: assignForm.vehicle_plates,
+      note: assignForm.note,
+    });
+    setAssignErrors(meta);
+    if (!meta.valid) {
+      toast.warning(meta.quantityError || meta.plateErrors.find(Boolean) || meta.noteError);
+      return;
+    }
     setAssigning(true);
     try {
       const res = await servicesService.createSubscription({
         apartment_id: assignForm.apartment_id,
         service_id: assignForm.service_id,
-        quantity: Math.max(1, Number(assignForm.quantity) || 1),
+        quantity:
+          selectedAssignService?.billing_type === 'FIXED' && !isAssignParking
+            ? 1
+            : Math.max(1, Number(assignForm.quantity) || 1),
         start_date: assignForm.start_date,
-        note: assignForm.note.trim() || null,
+        ...(isAssignParking ? { vehicle_plates: meta.cleanPlates } : {}),
+        note: meta.cleanNote || null,
       });
       toast.success(res.message || 'Đã gán dịch vụ cho căn hộ thành công.');
       setAssignOpen(false);
@@ -306,6 +346,7 @@ export function SubscriptionsPage() {
           <div>
             <p className="font-medium text-slate-900">{row.service_name}</p>
             <span className="font-mono text-[11px] text-slate-500">{row.service_code}</span>
+            <VehiclePlatesBadges plates={row.vehicle_plates} className="mt-1" />
           </div>
         ),
       },
@@ -555,7 +596,7 @@ export function SubscriptionsPage() {
             <SearchBar
               value={search}
               onChange={setSearch}
-              placeholder="Tìm căn hộ, cư dân, tên dịch vụ..."
+              placeholder="Tìm căn hộ, cư dân, biển số xe, dịch vụ..."
             />
           </div>
         </div>
@@ -607,7 +648,28 @@ export function SubscriptionsPage() {
             label="Dịch vụ tiện ích"
             required
             value={assignForm.service_id}
-            onChange={(e) => setAssignForm((s) => ({ ...s, service_id: e.target.value }))}
+            onChange={(e) => {
+              const nextServiceId = e.target.value;
+              const nextSvc = catalog.find((c) => c.id === nextServiceId);
+              const nextParking = isParkingService(nextSvc);
+              setAssignForm((s) => {
+                const nextQty =
+                  nextSvc?.billing_type === 'FIXED' && !nextParking
+                    ? 1
+                    : nextParking
+                    ? Math.min(MAX_PARKING_QUANTITY, Math.max(1, Number(s.quantity) || 1))
+                    : s.quantity;
+                return {
+                  ...s,
+                  service_id: nextServiceId,
+                  quantity: nextQty,
+                  vehicle_plates: nextParking
+                    ? syncVehiclePlatesArray(s.vehicle_plates, nextQty)
+                    : [''],
+                };
+              });
+              setAssignErrors({ plateErrors: [], quantityError: '', noteError: '' });
+            }}
             placeholder="-- Chọn dịch vụ --"
             options={catalog.map((c) => ({
               value: c.id,
@@ -620,9 +682,22 @@ export function SubscriptionsPage() {
               label="Số lượng đăng ký"
               type="number"
               min="1"
+              max={isAssignParking ? MAX_PARKING_QUANTITY : undefined}
+              disabled={selectedAssignService?.billing_type === 'FIXED' && !isAssignParking}
+              error={assignErrors.quantityError}
               required
               value={assignForm.quantity}
-              onChange={(e) => setAssignForm((s) => ({ ...s, quantity: e.target.value }))}
+              onChange={(e) => {
+                const nextQty = e.target.value;
+                setAssignForm((s) => ({
+                  ...s,
+                  quantity: nextQty,
+                  vehicle_plates: isAssignParking
+                    ? syncVehiclePlatesArray(s.vehicle_plates, nextQty)
+                    : s.vehicle_plates,
+                }));
+                setAssignErrors((prev) => ({ ...prev, quantityError: '', plateErrors: [] }));
+              }}
             />
             <Input
               label="Ngày bắt đầu tính phí"
@@ -655,13 +730,27 @@ export function SubscriptionsPage() {
             </div>
           ) : null}
 
-          <Input
-            label="Ghi chú (biển số xe, mã thẻ từ, yêu cầu khung giờ vệ sinh...)"
-            multiline
-            rows={2}
-            placeholder="VD: Xe máy Honda SH biển số 59A3-123.45..."
-            value={assignForm.note}
-            onChange={(e) => setAssignForm((s) => ({ ...s, note: e.target.value }))}
+          <ServiceSubscriptionMetaFields
+            isParking={isAssignParking}
+            quantity={assignForm.quantity}
+            vehiclePlates={assignForm.vehicle_plates}
+            note={assignForm.note}
+            plateErrors={assignErrors.plateErrors}
+            noteError={assignErrors.noteError}
+            noteMultiline
+            noteRows={2}
+            onPlateChange={(plateIdx, val) => {
+              setAssignForm((s) => {
+                const nextPlates = syncVehiclePlatesArray(s.vehicle_plates, s.quantity);
+                nextPlates[plateIdx] = val;
+                return { ...s, vehicle_plates: nextPlates };
+              });
+              setAssignErrors((prev) => ({ ...prev, plateErrors: [] }));
+            }}
+            onNoteChange={(val) => {
+              setAssignForm((s) => ({ ...s, note: val }));
+              setAssignErrors((prev) => ({ ...prev, noteError: '' }));
+            }}
           />
         </form>
       </Modal>
@@ -699,6 +788,7 @@ export function SubscriptionsPage() {
       >
         {cancelTarget ? (
           <div className="space-y-4">
+            <VehiclePlatesBadges plates={cancelTarget.vehicle_plates} />
             <Input
               label="Ngày kết thúc sử dụng thực tế"
               type="date"

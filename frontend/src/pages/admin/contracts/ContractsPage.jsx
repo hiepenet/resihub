@@ -34,7 +34,14 @@ import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
+import { ServiceSubscriptionMetaFields } from '../../../components/common/ServiceSubscriptionMetaFields';
 import { FileUpload } from '../../../components/ui/FileUpload';
+import {
+  MAX_PARKING_QUANTITY,
+  isParkingService,
+  syncVehiclePlatesArray,
+  validateServiceMetaInput,
+} from '../../../utils/serviceSubscriptionMeta';
 import { contractsService, createIdempotencyKey } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { tenantsService } from '../../../services/tenants.service';
@@ -916,8 +923,41 @@ export function ContractsPage() {
       }
     });
 
+    const checkedCatalogServices = selectableCatalogServices.filter(
+      (svc) => selectedServices[svc.id]?.checked
+    );
+    const normalizedServiceMetas = {};
+    let firstServiceErrMsg = '';
+    checkedCatalogServices.forEach((svc) => {
+      const cfg = selectedServices[svc.id] || {};
+      const parking = isParkingService(svc);
+      const effQty = svc.billing_type === 'QUANTITY' ? cfg.quantity : 1;
+      const meta = validateServiceMetaInput({
+        isParking: parking,
+        quantity: effQty,
+        vehiclePlates: cfg.vehicle_plates,
+        note: cfg.note,
+      });
+      normalizedServiceMetas[svc.id] = meta;
+      if (meta.quantityError) {
+        errs[`svc_qty_${svc.id}`] = meta.quantityError;
+        if (!firstServiceErrMsg) firstServiceErrMsg = meta.quantityError;
+      }
+      if (meta.plateErrors.some(Boolean)) {
+        errs[`svc_plates_${svc.id}`] = meta.plateErrors;
+        if (!firstServiceErrMsg) firstServiceErrMsg = meta.plateErrors.find(Boolean);
+      }
+      if (meta.noteError) {
+        errs[`svc_note_${svc.id}`] = meta.noteError;
+        if (!firstServiceErrMsg) firstServiceErrMsg = meta.noteError;
+      }
+    });
+
     setCreateErrors(errs);
-    if (Object.keys(errs).length > 0) return;
+    if (Object.keys(errs).length > 0) {
+      if (firstServiceErrMsg) toast.warning(firstServiceErrMsg);
+      return;
+    }
 
     setSubmittingCreate(true);
     try {
@@ -961,26 +1001,26 @@ export function ContractsPage() {
         note: createForm.note.trim(),
       };
 
-      const servicesPayload = selectableCatalogServices
-        .filter((svc) => selectedServices[svc.id]?.checked)
-        .map((svc) => {
-          const cfg = selectedServices[svc.id] || {};
-          const qty =
-            svc.billing_type === 'QUANTITY'
-              ? Math.max(1, Math.round(Number(cfg.quantity || 1)))
-              : 1;
-          const priceVal =
-            cfg.unit_price !== undefined && cfg.unit_price !== ''
-              ? Math.max(0, Math.round(Number(cfg.unit_price)))
-              : Math.round(Number(svc.unit_price || 0));
-          const trimmedNote = String(cfg.note || '').trim();
-          return {
-            service_id: svc.id,
-            quantity: qty,
-            unit_price: priceVal,
-            ...(trimmedNote ? { note: trimmedNote } : {}),
-          };
-        });
+      const servicesPayload = checkedCatalogServices.map((svc) => {
+        const cfg = selectedServices[svc.id] || {};
+        const parking = isParkingService(svc);
+        const meta = normalizedServiceMetas[svc.id];
+        const qty =
+          svc.billing_type === 'QUANTITY'
+            ? Math.max(1, Math.round(Number(cfg.quantity || 1)))
+            : 1;
+        const priceVal =
+          cfg.unit_price !== undefined && cfg.unit_price !== ''
+            ? Math.max(0, Math.round(Number(cfg.unit_price)))
+            : Math.round(Number(svc.unit_price || 0));
+        return {
+          service_id: svc.id,
+          quantity: qty,
+          unit_price: priceVal,
+          ...(parking ? { vehicle_plates: meta.cleanPlates } : {}),
+          ...(meta.cleanNote ? { note: meta.cleanNote } : {}),
+        };
+      });
       if (servicesPayload.length > 0) {
         payload.services = servicesPayload;
       }
@@ -2316,10 +2356,12 @@ export function ContractsPage() {
             {selectableCatalogServices.length > 0 ? (
               <div className="space-y-2">
                 {selectableCatalogServices.map((svc) => {
+                  const parking = isParkingService(svc);
                   const cfg = selectedServices[svc.id] || {
                     checked: false,
                     quantity: '1',
                     unit_price: String(Math.round(Number(svc.unit_price || 0))),
+                    vehicle_plates: [''],
                     note: '',
                   };
                   return (
@@ -2338,15 +2380,19 @@ export function ContractsPage() {
                             checked={Boolean(cfg.checked)}
                             onChange={(e) => {
                               const checked = e.target.checked;
+                              const nextQty = selectedServices[svc.id]?.quantity || '1';
                               setSelectedServices((prev) => ({
                                 ...prev,
                                 [svc.id]: {
                                   checked,
-                                  quantity: prev[svc.id]?.quantity || '1',
+                                  quantity: nextQty,
                                   unit_price:
                                     prev[svc.id]?.unit_price !== undefined
                                       ? prev[svc.id].unit_price
                                       : String(Math.round(Number(svc.unit_price || 0))),
+                                  vehicle_plates: parking
+                                    ? syncVehiclePlatesArray(prev[svc.id]?.vehicle_plates, nextQty)
+                                    : [],
                                   note: prev[svc.id]?.note || '',
                                 },
                               }));
@@ -2373,13 +2419,29 @@ export function ContractsPage() {
                                   label="Số lượng"
                                   type="number"
                                   min="1"
+                                  max={parking ? MAX_PARKING_QUANTITY : undefined}
+                                  error={createErrors[`svc_qty_${svc.id}`]}
                                   value={cfg.quantity}
-                                  onChange={(e) =>
+                                  onChange={(e) => {
+                                    const nextQty = e.target.value;
                                     setSelectedServices((prev) => ({
                                       ...prev,
-                                      [svc.id]: { ...cfg, quantity: e.target.value },
-                                    }))
-                                  }
+                                      [svc.id]: {
+                                        ...cfg,
+                                        quantity: nextQty,
+                                        vehicle_plates: parking
+                                          ? syncVehiclePlatesArray(cfg.vehicle_plates, nextQty)
+                                          : [],
+                                      },
+                                    }));
+                                    setCreateErrors((prev) => {
+                                      if (!prev[`svc_qty_${svc.id}`] && !prev[`svc_plates_${svc.id}`]) return prev;
+                                      const next = { ...prev };
+                                      delete next[`svc_qty_${svc.id}`];
+                                      delete next[`svc_plates_${svc.id}`];
+                                      return next;
+                                    });
+                                  }}
                                 />
                               ) : (
                                 <div className="text-[11px] text-slate-400 sm:pt-5 text-center">1 gói</div>
@@ -2403,20 +2465,42 @@ export function ContractsPage() {
 
                       {cfg.checked ? (
                         <div className="mt-2.5 pt-2.5 border-t border-slate-100">
-                          <Input
-                            label="Ghi chú dịch vụ / Biển số xe (tùy chọn)"
-                            placeholder={
-                              svc.category === 'PARKING' || String(svc.code || '').includes('PARKING')
-                                ? 'VD: Biển số 30A-123.45, 29B1-678.90 (hiển thị trên bản in HĐ)'
-                                : 'VD: Gói cước / thỏa thuận riêng cho dịch vụ này'
-                            }
-                            value={cfg.note || ''}
-                            onChange={(e) =>
+                          <ServiceSubscriptionMetaFields
+                            isParking={parking}
+                            quantity={svc.billing_type === 'QUANTITY' ? cfg.quantity : 1}
+                            vehiclePlates={cfg.vehicle_plates}
+                            note={cfg.note || ''}
+                            plateErrors={createErrors[`svc_plates_${svc.id}`] || []}
+                            noteError={createErrors[`svc_note_${svc.id}`] || ''}
+                            onPlateChange={(plateIdx, val) => {
+                              const nextPlates = syncVehiclePlatesArray(
+                                cfg.vehicle_plates,
+                                svc.billing_type === 'QUANTITY' ? cfg.quantity : 1
+                              );
+                              nextPlates[plateIdx] = val;
                               setSelectedServices((prev) => ({
                                 ...prev,
-                                [svc.id]: { ...cfg, note: e.target.value },
-                              }))
-                            }
+                                [svc.id]: { ...cfg, vehicle_plates: nextPlates },
+                              }));
+                              setCreateErrors((prev) => {
+                                if (!prev[`svc_plates_${svc.id}`]) return prev;
+                                const next = { ...prev };
+                                delete next[`svc_plates_${svc.id}`];
+                                return next;
+                              });
+                            }}
+                            onNoteChange={(val) => {
+                              setSelectedServices((prev) => ({
+                                ...prev,
+                                [svc.id]: { ...cfg, note: val },
+                              }));
+                              setCreateErrors((prev) => {
+                                if (!prev[`svc_note_${svc.id}`]) return prev;
+                                const next = { ...prev };
+                                delete next[`svc_note_${svc.id}`];
+                                return next;
+                              });
+                            }}
                           />
                         </div>
                       ) : null}

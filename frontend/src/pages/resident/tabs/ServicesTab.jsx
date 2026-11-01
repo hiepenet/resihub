@@ -26,7 +26,17 @@ import { Modal } from '../../../components/ui/Modal';
 import { Skeleton } from '../../../components/ui/Skeleton';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
+import {
+  ServiceSubscriptionMetaFields,
+  VehiclePlatesBadges,
+} from '../../../components/common/ServiceSubscriptionMetaFields';
 import { residentService } from '../../../services/resident.service';
+import {
+  MAX_PARKING_QUANTITY,
+  isParkingService,
+  syncVehiclePlatesArray,
+  validateServiceMetaInput,
+} from '../../../utils/serviceSubscriptionMeta';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
@@ -98,7 +108,13 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     service_id: '',
     quantity: 1,
     start_date: toInputDate(new Date()),
+    vehicle_plates: [''],
     note: '',
+  });
+  const [subErrors, setSubErrors] = useState({
+    plateErrors: [],
+    quantityError: '',
+    noteError: '',
   });
 
   // Cancel Service Modal
@@ -143,8 +159,10 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
         service_id: serviceId || selectable[0]?.id || catalog[0]?.id || '',
         quantity: 1,
         start_date: minSubscribeDate || toInputDate(new Date()),
+        vehicle_plates: [''],
         note: '',
       });
+      setSubErrors({ plateErrors: [], quantityError: '', noteError: '' });
       setSubModalOpen(true);
     },
     [catalog, hasActiveContract, minSubscribeDate, toast]
@@ -177,6 +195,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     () => catalog.find((c) => c.id === subForm.service_id) || null,
     [catalog, subForm.service_id]
   );
+  const isSubParking = isParkingService(selectedCatalogItem);
 
   const subscribeDateError = useMemo(() => {
     if (!subForm.start_date) return '';
@@ -231,14 +250,31 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
       toast.warning(subscribeDateError);
       return;
     }
+    const effQty =
+      selectedCatalogItem?.billing_type === 'FIXED' && !isSubParking ? 1 : subForm.quantity;
+    const meta = validateServiceMetaInput({
+      isParking: isSubParking,
+      quantity: effQty,
+      vehiclePlates: subForm.vehicle_plates,
+      note: subForm.note,
+    });
+    setSubErrors(meta);
+    if (!meta.valid) {
+      toast.warning(meta.quantityError || meta.plateErrors.find(Boolean) || meta.noteError);
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await residentService.subscribeService({
         contract_id: contract?.contract_id || undefined,
         service_id: subForm.service_id,
-        quantity: Math.max(1, parseInt(subForm.quantity, 10) || 1),
+        quantity:
+          selectedCatalogItem?.billing_type === 'FIXED' && !isSubParking
+            ? 1
+            : Math.max(1, parseInt(subForm.quantity, 10) || 1),
         start_date: subForm.start_date || toInputDate(new Date()),
-        note: subForm.note?.trim() || undefined,
+        ...(isSubParking ? { vehicle_plates: meta.cleanPlates } : {}),
+        note: meta.cleanNote || undefined,
       });
       toast.success(
         res?.message || 'Đã gửi yêu cầu đăng ký dịch vụ, chờ Ban Quản Lý phê duyệt!'
@@ -344,6 +380,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                           {sub.unit || 'gói'} • Đơn giá: {formatMoney(sub.unit_price)}
                           {sub.apartment_code ? ` • Căn ${sub.apartment_code}` : ''}
                         </p>
+                        <VehiclePlatesBadges plates={sub.vehicle_plates} className="mt-1.5" />
                         {sub.note ? (
                           <p className="text-xs text-slate-600 mt-1 bg-slate-50 border border-slate-200/70 rounded-lg px-2.5 py-1 whitespace-pre-line break-words">
                             Ghi chú: {sub.note}
@@ -417,6 +454,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                           {h.end_date ? ` đến ${formatDate(h.end_date)}` : ''})
                         </span>
                       </div>
+                      <VehiclePlatesBadges plates={h.vehicle_plates} className="mt-1" />
                       {h.note ? (
                         <p className="text-slate-600 whitespace-pre-line break-words">
                           Ghi chú: {h.note}
@@ -558,7 +596,28 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             label="Dịch vụ cần đăng ký"
             required
             value={subForm.service_id}
-            onChange={(e) => setSubForm((s) => ({ ...s, service_id: e.target.value }))}
+            onChange={(e) => {
+              const nextServiceId = e.target.value;
+              const nextSvc = catalog.find((c) => c.id === nextServiceId);
+              const nextParking = isParkingService(nextSvc);
+              setSubForm((s) => {
+                const nextQty =
+                  nextSvc?.billing_type === 'FIXED' && !nextParking
+                    ? 1
+                    : nextParking
+                    ? Math.min(MAX_PARKING_QUANTITY, Math.max(1, parseInt(s.quantity, 10) || 1))
+                    : s.quantity;
+                return {
+                  ...s,
+                  service_id: nextServiceId,
+                  quantity: nextQty,
+                  vehicle_plates: nextParking
+                    ? syncVehiclePlatesArray(s.vehicle_plates, nextQty)
+                    : [''],
+                };
+              });
+              setSubErrors({ plateErrors: [], quantityError: '', noteError: '' });
+            }}
             options={catalog
               .filter((c) => c.billing_type !== 'METERED')
               .map((c) => ({
@@ -571,11 +630,23 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             <Input
               type="number"
               min="1"
-              max="20"
+              max={isSubParking ? MAX_PARKING_QUANTITY : 20}
+              disabled={selectedCatalogItem?.billing_type === 'FIXED' && !isSubParking}
+              error={subErrors.quantityError}
               required
               label={`Số lượng (${selectedCatalogItem?.unit || 'đơn vị'})`}
               value={subForm.quantity}
-              onChange={(e) => setSubForm((s) => ({ ...s, quantity: e.target.value }))}
+              onChange={(e) => {
+                const nextQty = e.target.value;
+                setSubForm((s) => ({
+                  ...s,
+                  quantity: nextQty,
+                  vehicle_plates: isSubParking
+                    ? syncVehiclePlatesArray(s.vehicle_plates, nextQty)
+                    : s.vehicle_plates,
+                }));
+                setSubErrors((prev) => ({ ...prev, quantityError: '', plateErrors: [] }));
+              }}
             />
 
             <Input
@@ -623,13 +694,27 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             </div>
           ) : null}
 
-          <Input
-            multiline
-            rows={2}
-            label="Ghi chú đăng ký (biển số xe, khung giờ dọn phòng...)"
-            placeholder="Ví dụ: Biển số xe 30H-123.45, loại xe tay ga..."
-            value={subForm.note}
-            onChange={(e) => setSubForm((s) => ({ ...s, note: e.target.value }))}
+          <ServiceSubscriptionMetaFields
+            isParking={isSubParking}
+            quantity={subForm.quantity}
+            vehiclePlates={subForm.vehicle_plates}
+            note={subForm.note}
+            plateErrors={subErrors.plateErrors}
+            noteError={subErrors.noteError}
+            noteMultiline
+            noteRows={2}
+            onPlateChange={(plateIdx, val) => {
+              setSubForm((s) => {
+                const nextPlates = syncVehiclePlatesArray(s.vehicle_plates, s.quantity);
+                nextPlates[plateIdx] = val;
+                return { ...s, vehicle_plates: nextPlates };
+              });
+              setSubErrors((prev) => ({ ...prev, plateErrors: [] }));
+            }}
+            onNoteChange={(val) => {
+              setSubForm((s) => ({ ...s, note: val }));
+              setSubErrors((prev) => ({ ...prev, noteError: '' }));
+            }}
           />
         </form>
       </Modal>
