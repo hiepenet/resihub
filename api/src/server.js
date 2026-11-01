@@ -42,8 +42,8 @@ app.use(cors({
 // Request Logger
 app.use(morgan('dev'));
 
-// Body parser (hỗ trợ upload ảnh base64 tối đa 5MB/ảnh x 3 ảnh)
-app.use(express.json({ limit: '15mb' }));
+// Body parser (hỗ trợ upload ảnh base64 tối đa 5MB/ảnh x 3 ảnh hoặc PDF scan hợp đồng tối đa 10MB)
+app.use(express.json({ limit: '20mb' }));
 
 // General Rate Limiter
 app.use('/api/', generalLimiter);

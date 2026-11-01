@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { saveBase64Image } from '../src/services/imageUpload.js';
 
 dotenv.config();
 
@@ -443,5 +444,90 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
     assert.equal(Number(okPatch.body.data.payment_due_days), 7);
     assert.equal(Number(okPatch.body.data.billing_day), 30);
     assert.equal(okPatch.body.data.billing_cycle, 'quarterly');
+  });
+
+  await t.test('Task 3: Signed contract scan supports PDF (FR-020), inline viewing, magic-header check, and 10MB cap', async () => {
+    const apt = await createTestApartment(vopAId, floorId, 'T3A', 9000000);
+    const tenant = makeUniqueTenant('T3A');
+
+    const cRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenant,
+        start_date: '2027-07-01',
+        end_date: '2028-07-01',
+        rent_amount: 9000000,
+        deposit_amount: 9000000,
+      }),
+    });
+    assert.equal(cRes.status, 201);
+    const contractId = cRes.body.data.id;
+    createdContractIds.push(contractId);
+    if (cRes.body.created_tenant?.person_id) createdPersonIds.push(cRes.body.created_tenant.person_id);
+
+    const validPdfBytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'ascii');
+    const validPdfB64 = `data:application/pdf;base64,${validPdfBytes.toString('base64')}`;
+
+    // 1. Upload valid PDF scan -> 201 + application/pdf + .pdf extension
+    const scanOk = await apiFetch(`/api/v1/contracts/${contractId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: validPdfB64 }),
+    });
+    assert.equal(scanOk.status, 201, `Valid PDF upload failed: ${JSON.stringify(scanOk.body)}`);
+    assert.equal(scanOk.body.data.mime, 'application/pdf');
+    assert.ok(String(scanOk.body.data.storage_path).endsWith('.pdf'), 'Storage path must end with .pdf');
+
+    // 2. View PDF scan -> 200 + Content-Type application/pdf + Content-Disposition inline + READ audit_log
+    const attId = scanOk.body.data.id;
+    const viewRes = await fetch(`${API_BASE}/api/v1/attachments/${attId}/view`, {
+      headers: { Authorization: `Bearer ${mgrVopA.token}` },
+    });
+    assert.equal(viewRes.status, 200);
+    assert.match(viewRes.headers.get('content-type') || '', /application\/pdf/i);
+    assert.match(viewRes.headers.get('content-disposition') || '', /inline/i);
+    const downloadedBuf = Buffer.from(await viewRes.arrayBuffer());
+    assert.equal(downloadedBuf.subarray(0, 5).toString('ascii'), '%PDF-');
+
+    const auditRead = await adminPool.query(
+      `SELECT COUNT(*)::int AS cnt FROM audit_log WHERE entity = 'attachment' AND entity_id = $1 AND action = 'READ'`,
+      [attId]
+    );
+    assert.ok(auditRead.rows[0].cnt >= 1, 'Viewing PDF scan must record READ in audit_log');
+
+    // 3. Review Focus #3: Fake PDF without %PDF- magic header -> 400 VALIDATION_ERROR
+    const fakePdfB64 = `data:application/pdf;base64,${Buffer.from('HELLO_NOT_A_PDF_FILE').toString('base64')}`;
+    const fakeRes = await apiFetch(`/api/v1/contracts/${contractId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: fakePdfB64 }),
+    });
+    assert.equal(fakeRes.status, 400);
+    assert.equal(fakeRes.body.code, 'VALIDATION_ERROR');
+
+    // 4. Review Focus #3: Oversized PDF (> 10MB) -> 400 VALIDATION_ERROR
+    const bigBuf = Buffer.alloc(10 * 1024 * 1024 + 256, 0x20);
+    bigBuf.write('%PDF-1.4\n', 0, 'ascii');
+    const bigPdfB64 = `data:application/pdf;base64,${bigBuf.toString('base64')}`;
+    const bigRes = await apiFetch(`/api/v1/contracts/${contractId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: bigPdfB64 }),
+    });
+    assert.equal(bigRes.status, 400, `Oversized PDF must return 400, got ${bigRes.status}`);
+    assert.equal(bigRes.body.code, 'VALIDATION_ERROR');
+
+    // 5. Default saveBase64Image (allowPdf = false, e.g. CCCD/avatar) still rejects PDF
+    const nonPdfBlocked = await saveBase64Image({
+      imageBase64: validPdfB64,
+      folder: 'person',
+      entityId: contractId,
+      entity: 'person',
+      ownerId: contractId,
+      req: { user: { sub: mgrVopA.user.sub || mgrVopA.user.id } },
+      query: () => {
+        throw new Error('Should not reach DB query');
+      },
+    });
+    assert.ok(nonPdfBlocked.error, 'Non-contract uploads must reject PDF when allowPdf is false');
+    assert.equal(nonPdfBlocked.error.code, 'VALIDATION_ERROR');
   });
 });

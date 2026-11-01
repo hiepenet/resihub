@@ -106,6 +106,9 @@ router.get('/:id/view', authenticateToken, async (req, res) => {
         [req.user.sub, att.id, JSON.stringify({ storage_path: att.storage_path, owner_entity: att.owner_entity })]
       );
       res.contentType(att.mime || 'application/octet-stream');
+      if (att.mime === 'application/pdf') {
+        res.setHeader('Content-Disposition', `inline; filename="contract-scan-${String(att.id).slice(0, 8)}.pdf"`);
+      }
       res.send(buf);
     } catch (readErr) {
       console.error('[Attachment Read Error]:', readErr.message);

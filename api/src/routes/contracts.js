@@ -2,7 +2,7 @@ import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
-import { saveBase64Image } from '../services/imageUpload.js';
+import { saveBase64Image, MAX_CONTRACT_SCAN_BYTES } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
 import { splitDepositOpening } from '../services/depositSettlement.js';
@@ -2726,7 +2726,7 @@ router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (r
  */
 router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { image_base64 } = req.body;
+  const rawFile = req.body.file_base64 || req.body.image_base64;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json(access.body);
@@ -2735,13 +2735,15 @@ router.post('/:id/scan', authenticateToken, requireRole(['MANAGER']), async (req
   const { client, release } = await getUserClient(req);
   try {
     const saved = await saveBase64Image({
-      imageBase64: image_base64,
+      imageBase64: rawFile,
       folder: 'contract',
       entityId: id,
       entity: 'contract',
       ownerId: id,
       req,
       query: (sql, params) => client.query(sql, params),
+      allowPdf: true,
+      maxBytes: MAX_CONTRACT_SCAN_BYTES,
     });
     if (saved.error) {
       return res.status(400).json(saved.error);
