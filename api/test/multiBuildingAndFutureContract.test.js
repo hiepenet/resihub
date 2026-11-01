@@ -529,17 +529,11 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     assert.equal(discAct.status, 409);
     assert.equal(discAct.body.code, 'PRICE_NEEDS_APPROVAL');
 
-    // 3.2 OWNER VOP can READ contracts/deposits, but gets 403 on ALL operational/approval endpoints!
+    // 3.2 OWNER VOP can READ contracts/deposits, gets 403 on operational endpoints, and is the designated approver for discounted contracts on VOP-A!
     const ownerReadContracts = await apiFetch('/api/v1/contracts', ownerVop.token);
     assert.equal(ownerReadContracts.status, 200);
     const ownerReadDeposits = await apiFetch('/api/v1/deposits', ownerVop.token);
     assert.equal(ownerReadDeposits.status, 200);
-
-    const ownerApproveTry = await apiFetch(`/api/v1/contracts/${discContractId}/approve`, ownerVop.token, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-    assert.equal(ownerApproveTry.status, 403, 'OWNER must be blocked (403) from approving contracts');
 
     const ownerTerminateTry = await apiFetch(`/api/v1/contracts/${contractAId}/terminate`, ownerVop.token, {
       method: 'POST',
@@ -559,20 +553,26 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(ownerNotifTry.status, 403, 'OWNER must be blocked (403) from sending notifications');
 
-    // 3.3 Internal Four-Eyes on Discounted Contract: Creator (Manager A) gets 403 SELF_APPROVAL; SYS_ADMIN approves (200 -> ACTIVE)
+    // 3.3 Discounted Contract Approval: Creator (Manager A) and SYS_ADMIN (when building has active OWNER) get 403; Building OWNER (ownerVop) approves (200 -> ACTIVE)
     const selfApproveTry = await apiFetch(`/api/v1/contracts/${discContractId}/approve`, mgrA.token, {
       method: 'POST',
       body: JSON.stringify({}),
     });
     assert.equal(selfApproveTry.status, 403);
-    assert.equal(selfApproveTry.body.code, 'SELF_APPROVAL');
 
-    const adminApproveRes = await apiFetch(`/api/v1/contracts/${discContractId}/approve`, sysAdmin.token, {
+    const sysAdminApproveTry = await apiFetch(`/api/v1/contracts/${discContractId}/approve`, sysAdmin.token, {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    assert.equal(adminApproveRes.status, 200);
-    assert.equal(adminApproveRes.body.data.status, 'ACTIVE');
+    assert.equal(sysAdminApproveTry.status, 403);
+    assert.equal(sysAdminApproveTry.body.code, 'FORBIDDEN_NOT_BUILDING_OWNER');
+
+    const ownerApproveRes = await apiFetch(`/api/v1/contracts/${discContractId}/approve`, ownerVop.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(ownerApproveRes.status, 200, `Building OWNER approve failed: ${JSON.stringify(ownerApproveRes.body)}`);
+    assert.equal(ownerApproveRes.body.data.status, 'ACTIVE');
 
     // 3.4PostgreSQL RLS check: OWNER VOP cannot UPDATE contract or deposit at raw SQL level
     const rlsClient = await appPool.connect();

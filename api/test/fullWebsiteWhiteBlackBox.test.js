@@ -991,19 +991,19 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(actDiscounted.body.code, 'PRICE_NEEDS_APPROVAL');
     assert.equal(actDiscounted.body.data.status, 'PENDING_APPROVAL', 'Giá < 90% giá niêm yết phải vào PENDING_APPROVAL');
 
-    // Four-eyes: Người tạo (mgrVopA) tự duyệt bị chặn; OWNER (Phương án 2 Read-Only) duyệt bị chặn 403
+    // Phân quyền chuẩn PRD Mục 6.2 & FR-014: MANAGER (kể cả mgr2VopA) và SYS_ADMIN bị chặn 403 trên tòa đã gắn OWNER; OWNER tòa nhà (ownerVop) là người duyệt lệch khung giá
     const selfApprove = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, mgrVopA.token, {
       method: 'POST',
     });
-    assert.ok([403, 409].includes(selfApprove.status), 'Four-eyes phải chặn người lập tự duyệt hợp đồng giảm giá');
+    assert.equal(selfApprove.status, 403, 'MANAGER không được tự duyệt hợp đồng giảm giá');
 
-    const ownerApprove = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, ownerVop.token, {
+    const mgr2ApproveTry = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, mgr2VopA.token, {
       method: 'POST',
     });
-    assert.equal(ownerApprove.status, 403, 'Phương án 2: OWNER không tham gia phê duyệt vận hành (403)');
+    assert.equal(mgr2ApproveTry.status, 403, 'MANAGER thứ 2 không được duyệt hợp đồng lệch khung giá (thuộc thẩm quyền OWNER tòa nhà)');
 
-    // R-12: MANAGER thứ 2 (mgr2VopA) từ chối phê duyệt (POST /:id/reject) -> trả về DRAFT để điều chỉnh, sau đó trình lại & phê duyệt chéo
-    const rejectToDraft = await apiFetch(`/api/v1/contracts/${activeContractId}/reject`, mgr2VopA.token, {
+    // R-12: OWNER tòa nhà (ownerVop) từ chối phê duyệt (POST /:id/reject) -> trả về DRAFT để điều chỉnh, sau đó trình lại & phê duyệt
+    const rejectToDraft = await apiFetch(`/api/v1/contracts/${activeContractId}/reject`, ownerVop.token, {
       method: 'POST',
       body: JSON.stringify({ reason: 'Đề nghị ghi rõ điều khoản chiết khấu trong ghi chú hợp đồng' }),
     });
@@ -1016,12 +1016,12 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(reActDiscounted.status, 409);
     assert.equal(reActDiscounted.body.data.status, 'PENDING_APPROVAL');
 
-    // MANAGER thứ 2 (mgr2VopA) phê duyệt chéo -> ACTIVE + mở sổ cọc HELD + căn hộ OCCUPIED + reservation CONVERTED
-    const crossApprove = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, mgr2VopA.token, {
+    // OWNER tòa nhà (ownerVop) phê duyệt -> ACTIVE + mở sổ cọc HELD + căn hộ OCCUPIED + reservation CONVERTED
+    const ownerApprove = await apiFetch(`/api/v1/contracts/${activeContractId}/approve`, ownerVop.token, {
       method: 'POST',
     });
-    assert.equal(crossApprove.status, 200, `Cross-manager approve failed: ${JSON.stringify(crossApprove.body)}`);
-    assert.equal(crossApprove.body.data.status, 'ACTIVE');
+    assert.equal(ownerApprove.status, 200, `Building owner approve failed: ${JSON.stringify(ownerApprove.body)}`);
+    assert.equal(ownerApprove.body.data.status, 'ACTIVE');
 
     const aptStatusNow = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [testApt1Id]);
     assert.equal(aptStatusNow.rows[0].status, 'OCCUPIED', 'Căn hộ phải tự động chuyển sang OCCUPIED');
