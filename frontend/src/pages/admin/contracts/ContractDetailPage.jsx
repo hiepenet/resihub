@@ -1768,9 +1768,14 @@ export function ContractDetailPage() {
                     row.actual_invoice ? (
                       <Link
                         to="/admin/invoices"
-                        className="inline-flex items-center gap-1 hover:underline"
+                        className="inline-flex flex-col items-center gap-0.5 hover:underline"
                       >
                         <StatusBadge status={row.actual_invoice.status} domain="invoice" />
+                        {row.actual_invoice.invoice_code ? (
+                          <span className="text-[11px] font-mono text-slate-600">
+                            {row.actual_invoice.invoice_code} • {formatMoney(row.actual_invoice.total_amount)}
+                          </span>
+                        ) : null}
                       </Link>
                     ) : (
                       <Badge variant="slate">Dự kiến</Badge>

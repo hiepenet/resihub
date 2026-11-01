@@ -51,3 +51,20 @@ test('Task 5.4: ContractDetailPage enforces canManageOps = isManager, OWNER pric
   assert.match(src, /invoice_schedule/, 'ContractDetailPage must render expected invoice_schedule');
   assert.match(src, /Lịch hóa đơn dự kiến/, 'ContractDetailPage must include Lịch hóa đơn dự kiến tab');
 });
+
+test('Co-occupant inline cards in ContractsPage use spacious 2-column grid instead of cramped 12-col single row', () => {
+  const src = readSrc('pages/admin/contracts/ContractsPage.jsx');
+  assert.match(src, /data-testid="inline-occupant-card"/, 'Each co-occupant item must render as a structured card');
+  assert.doesNotMatch(
+    src,
+    /sm:grid-cols-12\s+gap-2\.5\s+items-start[\s\S]{0,400}occ_name_/,
+    'Co-occupant inputs must not be crammed into a narrow 12-column single row'
+  );
+  assert.match(
+    src,
+    /data-testid="inline-occupant-card"[\s\S]{0,1500}sm:grid-cols-2\s+gap-4/,
+    'Co-occupant card must arrange fields in a spacious 2-column grid with gap-4'
+  );
+});
+
+

@@ -37,11 +37,15 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 async function getBuildingActiveOwnerUserIds(buildingId) {
   if (!buildingId) return [];
   const res = await adminPool.query(
-    `SELECT au.id
+    `SELECT DISTINCT au.id
      FROM building b
      JOIN owner o ON o.id = b.owner_id
      JOIN app_user au ON au.person_id = o.person_id
-     WHERE b.id = $1 AND au.status = 'ACTIVE'`,
+     JOIN user_role ur ON ur.user_id = au.id
+     JOIN role r ON r.id = ur.role_id
+     WHERE b.id = $1
+       AND au.status = 'ACTIVE'
+       AND r.code = 'OWNER'`,
     [buildingId]
   );
   return res.rows.map((r) => String(r.id));
@@ -1327,21 +1331,26 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
           throw err;
         }
 
-        const hasCustomPrice =
-          svcItem.custom_unit_price !== undefined &&
-          svcItem.custom_unit_price !== null &&
-          svcItem.custom_unit_price !== '';
-        let effectivePrice = Number(cat.unit_price || 0);
-        if (hasCustomPrice) {
-          const customNum = Number(svcItem.custom_unit_price);
+        const rawCustomPrice = svcItem.custom_unit_price ?? svcItem.unit_price;
+        const hasExplicitPrice =
+          rawCustomPrice !== undefined && rawCustomPrice !== null && rawCustomPrice !== '';
+        const catalogPrice = Math.round(Number(cat.unit_price || 0));
+        let effectivePrice = catalogPrice;
+        if (hasExplicitPrice) {
+          const customNum = Number(rawCustomPrice);
           if (Number.isNaN(customNum) || customNum < 0) {
-            const err = new Error('Đơn giá dịch vụ riêng (custom_unit_price) phải >= 0.');
+            const err = new Error('Đơn giá dịch vụ riêng (unit_price / custom_unit_price) phải >= 0.');
             err.httpStatus = 422;
             err.code = 'INVALID_UNIT_PRICE';
             throw err;
           }
           effectivePrice = Math.round(customNum);
         }
+        const shouldPersistContractPrice =
+          (svcItem.custom_unit_price !== undefined &&
+            svcItem.custom_unit_price !== null &&
+            svcItem.custom_unit_price !== '') ||
+          effectivePrice !== catalogPrice;
 
         const prorataAmt =
           sd > 1 ? roundVND((effectivePrice * qty * activeStartDays) / totalDaysInStartMonth) : 0;
@@ -1373,7 +1382,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
           service_name: cat.name,
         });
 
-        if (hasCustomPrice) {
+        if (shouldPersistContractPrice) {
           const cspIns = await client.query(
             `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
              VALUES ($1, $2, $3, $4)
@@ -2050,6 +2059,55 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         nextDeposit, nextApartment, primary_tenant_id ?? null, note ?? null, id,
       ]
     );
+
+    const oldStartDateStr = formatContractDateOnly(cur.start_date);
+    const newStartDateStr = formatContractDateOnly(updated.rows[0].start_date);
+    if (newStartDateStr !== oldStartDateStr || String(nextApartment) !== String(cur.apartment_id)) {
+      const [nsY, nsM, nsD] = newStartDateStr.split('-').map(Number);
+      const totalDaysInMonth = new Date(Date.UTC(nsY, nsM, 0)).getUTCDate();
+      const activeStartDays = Math.max(1, totalDaysInMonth - nsD + 1);
+
+      const pendingSubsRes = await client.query(
+        `SELECT id, unit_price, quantity
+         FROM service_subscription
+         WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
+        [id]
+      );
+      for (const pSub of pendingSubsRes.rows) {
+        const nextProrata =
+          nsD > 1
+            ? roundVND((Number(pSub.unit_price || 0) * Number(pSub.quantity || 1) * activeStartDays) / totalDaysInMonth)
+            : 0;
+        await client.query(
+          `UPDATE service_subscription
+           SET apartment_id = $1,
+               start_date = $2,
+               prorata_amount = $3,
+               updated_at = NOW()
+           WHERE id = $4`,
+          [nextApartment, newStartDateStr, nextProrata, pSub.id]
+        );
+      }
+
+      if (newStartDateStr !== oldStartDateStr) {
+        await client.query(
+          `DELETE FROM contract_service_price csp_old
+           USING contract_service_price csp_new
+           WHERE csp_old.contract_id = $1
+             AND csp_old.effective_from = $2
+             AND csp_new.contract_id = $1
+             AND csp_new.service_code = csp_old.service_code
+             AND csp_new.effective_from = $3`,
+          [id, oldStartDateStr, newStartDateStr]
+        );
+        await client.query(
+          `UPDATE contract_service_price
+           SET effective_from = $3
+           WHERE contract_id = $1 AND effective_from = $2`,
+          [id, oldStartDateStr, newStartDateStr]
+        );
+      }
+    }
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -3481,7 +3539,7 @@ router.post('/:id/amendments', authenticateToken, requireRole(['MANAGER']), asyn
 
     await client.query('COMMIT');
     res.status(201).json({
-      message: 'Đã lập đề xuất phụ lục hợp đồng, chờ phê duyệt nội bộ (Quản lý khác / SYS_ADMIN).',
+      message: 'Đã lập đề xuất phụ lục hợp đồng, chờ phê duyệt nội bộ (Quản lý khác được phân công tòa nhà).',
       data: insRes.rows[0]
     });
   } catch (err) {
@@ -3544,7 +3602,7 @@ router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole
         await client.query('ROLLBACK');
         return res.status(403).json({
           code: 'SELF_APPROVAL',
-          message: 'Người lập phụ lục không được tự phê duyệt (Nguyên tắc Four-eyes). Vui lòng chuyển Quản lý khác hoặc Ban Giám đốc (SYS_ADMIN) phê duyệt.',
+          message: 'Người lập phụ lục không được tự phê duyệt (Nguyên tắc Four-eyes). Vui lòng chuyển Quản lý khác được phân công tòa nhà phê duyệt.',
         });
       }
     }
@@ -4056,7 +4114,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     <h3>ĐIỀU 3: GIÁ THUÊ VÀ PHƯƠNG THỨC THANH TOÁN</h3>
     <p>3.1. Giá thuê căn hộ: <strong>${fmtMoney(c.rent_amount)} / tháng</strong> (Bằng chữ: theo quy định thực tế).</p>
     <p>3.2. Chu kỳ thanh toán: <strong>${c.billing_cycle === 'quarterly' ? '3 tháng / lần' : 'Hàng tháng'}</strong>.</p>
-    <p>3.3. Ngày phát hành hóa đơn định kỳ: Ngày <strong>${c.billing_day || 1}</strong> hàng tháng. Thời hạn thanh toán: Trong vòng <strong>${c.payment_due_days || 5}</strong> ngày kể từ ngày phát hành hóa đơn.</p>
+    <p>3.3. Ngày phát hành hóa đơn định kỳ: Ngày <strong>${c.billing_day || 1}</strong> ${c.billing_cycle === 'quarterly' ? 'mỗi đầu chu kỳ quý (3 tháng / lần)' : 'hàng tháng'}. Thời hạn thanh toán: Trong vòng <strong>${c.payment_due_days || 5}</strong> ngày kể từ ngày phát hành hóa đơn.</p>
 
     <h3>ĐIỀU 4: TIỀN ĐẶT CỌC BẢO ĐẢM VÀ QUY TẮC HOÀN TRẢ</h3>
     <p>4.1. Tiền đặt cọc bảo đảm thực hiện hợp đồng: <strong>${fmtMoney(c.deposit_amount)}</strong>.</p>

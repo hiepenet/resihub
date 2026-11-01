@@ -77,6 +77,7 @@ const REQUEST_STATUS_MAP = {
 
 const AMENDMENT_META_KEYS = [
   'status',
+  'snapshot',
   'created_by',
   'approved_at',
   'approved_by',
@@ -1147,11 +1148,15 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <Badge variant="indigo">Phụ lục lần #{am.version_no}</Badge>
+                        <Badge variant="indigo">
+                          {diffObj.status === 'INITIAL_SNAPSHOT'
+                            ? `Phiên bản gốc #${am.version_no}`
+                            : `Phụ lục lần #${am.version_no}`}
+                        </Badge>
                         {diffObj.status ? (
                           <Badge
                             variant={
-                              diffObj.status === 'APPROVED'
+                              diffObj.status === 'APPROVED' || diffObj.status === 'INITIAL_SNAPSHOT'
                                 ? 'emerald'
                                 : diffObj.status === 'REJECTED'
                                 ? 'red'
@@ -1159,7 +1164,9 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                             }
                             dot
                           >
-                            {diffObj.status === 'APPROVED'
+                            {diffObj.status === 'INITIAL_SNAPSHOT'
+                              ? 'Hiệu lực gốc'
+                              : diffObj.status === 'APPROVED'
                               ? 'Đã phê duyệt'
                               : diffObj.status === 'REJECTED'
                               ? 'Từ chối'

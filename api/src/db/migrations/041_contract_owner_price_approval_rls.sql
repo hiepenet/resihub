@@ -1,10 +1,10 @@
 -- 041_contract_owner_price_approval_rls.sql
 -- Chuẩn hóa phân quyền Hợp đồng (M05) theo PRD v2.0 Mục 6.2 & FR-014:
 --   1. SYS_ADMIN chỉ có quyền Xem (R) trên Hợp đồng: gỡ quyền ghi thường trực của is_org_admin()
---      khỏi contract, contract_version, contract_request, contract_service_price.
+--      khỏi contract, contract_version, contract_request, contract_service_price, contract_occupant.
 --   2. OWNER của tòa nhà sở hữu là người phê duyệt / từ chối hợp đồng lệch khung giá (PENDING_APPROVAL -> ACTIVE | DRAFT).
 --      Khi hợp đồng đã sang ACTIVE hoặc DRAFT, OWNER tiếp tục không có quyền UPDATE trực tiếp.
---   3. Nhánh dự phòng duy nhất cho SYS_ADMIN: chỉ khi tòa nhà chưa gắn chủ sở hữu hoặc chủ nhà chưa có tài khoản ACTIVE.
+--   3. Nhánh dự phòng duy nhất cho SYS_ADMIN: chỉ khi tòa nhà chưa gắn chủ sở hữu hoặc chủ nhà chưa có tài khoản OWNER ACTIVE.
 
 BEGIN;
 
@@ -19,11 +19,14 @@ BEGIN
     FROM building b
     JOIN owner o ON o.id = b.owner_id
     JOIN app_user au ON au.person_id = o.person_id
+    JOIN user_role ur ON ur.user_id = au.id
+    JOIN role r ON r.id = ur.role_id
     WHERE b.id = p_building_id
       AND au.status = 'ACTIVE'
+      AND r.code = 'OWNER'
   );
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET row_security = off;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public SET row_security = off;
 
 DROP POLICY IF EXISTS rls_contract_insert ON contract;
 CREATE POLICY rls_contract_insert ON contract FOR INSERT
@@ -36,7 +39,8 @@ CREATE POLICY rls_contract_update ON contract FOR UPDATE
   USING (
     building_id IN (SELECT building_id FROM get_manager_building_ids())
     OR (
-      status = 'PENDING_APPROVAL'
+      is_owner()
+      AND status = 'PENDING_APPROVAL'
       AND building_id IN (SELECT building_id FROM get_owner_building_ids())
     )
     OR (
@@ -48,7 +52,8 @@ CREATE POLICY rls_contract_update ON contract FOR UPDATE
   WITH CHECK (
     building_id IN (SELECT building_id FROM get_manager_building_ids())
     OR (
-      status IN ('ACTIVE', 'DRAFT')
+      is_owner()
+      AND status IN ('ACTIVE', 'DRAFT')
       AND building_id IN (SELECT building_id FROM get_owner_building_ids())
     )
     OR (
@@ -95,6 +100,21 @@ CREATE POLICY rls_contract_request_update ON contract_request FOR UPDATE
   )
   WITH CHECK (
     building_id IN (SELECT building_id FROM get_manager_building_ids())
+  );
+
+DROP POLICY IF EXISTS rls_contract_occupant_modify ON contract_occupant;
+CREATE POLICY rls_contract_occupant_modify ON contract_occupant FOR ALL
+  USING (
+    contract_id IN (
+      SELECT id FROM contract
+      WHERE building_id IN (SELECT building_id FROM get_manager_building_ids())
+    )
+  )
+  WITH CHECK (
+    contract_id IN (
+      SELECT id FROM contract
+      WHERE building_id IN (SELECT building_id FROM get_manager_building_ids())
+    )
   );
 
 DROP POLICY IF EXISTS rls_contract_service_price_modify ON contract_service_price;

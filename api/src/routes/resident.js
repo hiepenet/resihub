@@ -186,6 +186,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
         `SELECT cv.id, cv.version_no, cv.diff, cv.effective_from, cv.reason, cv.created_at
          FROM contract_version cv
          WHERE cv.contract_id = $1
+           AND COALESCE(cv.diff->>'status', '') <> 'INITIAL_SNAPSHOT'
          ORDER BY cv.version_no DESC`,
         [contract.contract_id]
       );

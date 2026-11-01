@@ -355,6 +355,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
         await adminPool.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
+        await adminPool.query("DELETE FROM notification WHERE payload->>'contract_id' = $1", [cId]).catch(() => {});
         const depClean = await adminPool.connect();
         try {
           await depClean.query('BEGIN');
@@ -1621,6 +1622,29 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     const depRowRes = await adminPool.query('SELECT * FROM deposit WHERE contract_id = $1', [activeContractId]);
     const depositId = depRowRes.rows[0].id;
     assert.ok(depRowRes.rows[0].refund_due_date, 'FR-068: Khi chấm dứt HĐ phải tự gán hạn hoàn cọc +5 ngày');
+
+    // Đảm bảo kỳ chấm dứt thực tế (terminated_at YYYY-MM, ví dụ khi bước sang tháng 2026-11) đã ghi đủ chỉ số công tơ kỳ cuối
+    const termDateRaw = mgrTerm.body.data.terminated_at;
+    const termPeriod = String(termDateRaw || '').slice(0, 7);
+    if (termPeriod && termPeriod !== '2026-10') {
+      const metersOfApt = await adminPool.query(
+        'SELECT id, meter_type FROM meter WHERE apartment_id = $1',
+        [testApt1Id]
+      );
+      if (metersOfApt.rows.length > 0) {
+        await apiFetch('/api/v1/meters/readings/batch', mgr2VopA.token, {
+          method: 'POST',
+          body: JSON.stringify({
+            period: termPeriod,
+            readings: metersOfApt.rows.map((m) => ({
+              meter_id: m.id,
+              current_reading: m.meter_type === 'ELECTRICITY' ? 1400 : 80,
+              image_base64: TINY_PNG_BASE64,
+            })),
+          }),
+        });
+      }
+    }
 
     // (b) M06 FR-023, FR-024, R-06, R-07, R-15, R-24:
     //     - Chặn khấu trừ trực tiếp không qua hồ sơ tất toán & chặn khấu trừ tiền thuê

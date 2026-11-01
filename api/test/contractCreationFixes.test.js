@@ -707,4 +707,111 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
     );
     assert.ok(rejNotifs.rows.length >= 1, 'OWNER rejection must notify building MANAGER');
   });
+
+  await t.test('Review Regression: UI unit_price payload, DRAFT PATCH service sync, Resident INITIAL_SNAPSHOT filter, and contract_occupant RLS', async () => {
+    const apt = await createTestApartment(vopAId, floorId, 'TRV', 12000000);
+    const catRes = await apiFetch('/api/v1/services/catalog?active_only=true', mgrVopA.token);
+    const catalog = catRes.body.data || [];
+    const internetSvc = catalog.find((s) => s.code === 'INTERNET_FIBER') || catalog.find((s) => s.billing_type === 'FIXED');
+    const bikeSvc = catalog.find((s) => s.code === 'MOTORBIKE_PARKING') || catalog.find((s) => s.billing_type === 'QUANTITY');
+
+    const resTenant = { ...makeUniqueTenant('TRV'), password: 'ResidentPassword@123' };
+    const occ = makeUniqueTenant('TRVOCC');
+
+    // 1. UI Step 4 sends { service_id, quantity, unit_price } (Critical #1)
+    const createRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: resTenant,
+        occupants: [{ full_name: occ.full_name, phone: occ.phone, id_number: occ.id_number, relationship: 'spouse' }],
+        start_date: '2027-08-01',
+        end_date: '2027-11-01',
+        rent_amount: 12000000,
+        deposit_amount: 12000000,
+        services: [
+          { service_id: internetSvc.id, quantity: 1, unit_price: 175000 },
+          { service_id: bikeSvc.id, quantity: 2, unit_price: Number(bikeSvc.unit_price) },
+        ],
+      }),
+    });
+    assert.equal(createRes.status, 201, `Create TRV contract failed: ${JSON.stringify(createRes.body)}`);
+    const cId = createRes.body.data.id;
+    createdContractIds.push(cId);
+    if (createRes.body.created_tenant?.person_id) createdPersonIds.push(createRes.body.created_tenant.person_id);
+    for (const o of createRes.body.created_occupants || []) {
+      if (o.personId) createdPersonIds.push(o.personId);
+    }
+
+    const subCheck1 = await adminPool.query(
+      'SELECT service_id, unit_price, prorata_amount, start_date::text AS start_date FROM service_subscription WHERE contract_id = $1',
+      [cId]
+    );
+    const internetSub1 = subCheck1.rows.find((r) => r.service_id === internetSvc.id);
+    assert.equal(Number(internetSub1.unit_price), 175000, 'Step 4 unit_price must persist to service_subscription.unit_price');
+    assert.equal(Number(internetSub1.prorata_amount), 0, 'Day-1 start must have prorata_amount = 0');
+
+    const cspCheck1 = await adminPool.query(
+      'SELECT service_code, unit_price, effective_from::text AS effective_from FROM contract_service_price WHERE contract_id = $1',
+      [cId]
+    );
+    assert.equal(cspCheck1.rows.length, 1, 'Only overridden service price (not unchanged default catalog price) should create contract_service_price');
+    assert.equal(Number(cspCheck1.rows[0].unit_price), 175000);
+    assert.equal(cspCheck1.rows[0].effective_from, '2027-08-01');
+
+    // 2. PATCH /:id on DRAFT shifting start_date -> syncs service_subscription & contract_service_price (Important #4)
+    const patchRes = await apiFetch(`/api/v1/contracts/${cId}`, mgrVopA.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        start_date: '2027-08-16',
+        end_date: '2027-11-16',
+      }),
+    });
+    assert.equal(patchRes.status, 200);
+
+    const subCheck2 = await adminPool.query(
+      'SELECT service_id, prorata_amount, start_date::text AS start_date FROM service_subscription WHERE contract_id = $1',
+      [cId]
+    );
+    const internetSub2 = subCheck2.rows.find((r) => r.service_id === internetSvc.id);
+    assert.equal(internetSub2.start_date, '2027-08-16', 'PATCH draft start_date must sync service_subscription.start_date');
+    assert.ok(Number(internetSub2.prorata_amount) > 0, 'Mid-month draft shift must recalculate prorata_amount > 0');
+
+    const cspCheck2 = await adminPool.query(
+      'SELECT effective_from::text AS effective_from FROM contract_service_price WHERE contract_id = $1',
+      [cId]
+    );
+    assert.equal(cspCheck2.rows[0].effective_from, '2027-08-16', 'PATCH draft start_date must shift contract_service_price.effective_from');
+
+    // 3. Direct DB RLS blocks SYS_ADMIN from deleting/modifying contract_occupant (Important #3)
+    const rlsClient = await appPool.connect();
+    try {
+      await rlsClient.query('BEGIN');
+      await rlsClient.query(`SELECT set_config('app.current_user_id', $1, true)`, [String(sysAdmin.user.sub || sysAdmin.user.id)]);
+      await rlsClient.query(`SELECT set_config('app.current_org_id', $1, true)`, [String(orgId)]);
+      await rlsClient.query(`SELECT set_config('app.current_roles', 'SYS_ADMIN', true)`);
+      const delOcc = await rlsClient.query('DELETE FROM contract_occupant WHERE contract_id = $1 RETURNING id', [cId]);
+      assert.equal(delOcc.rowCount, 0, 'RLS must block SYS_ADMIN from deleting contract_occupant rows');
+      await rlsClient.query('ROLLBACK');
+    } finally {
+      rlsClient.release();
+    }
+
+    // 4. Activate contract and verify Resident overview does NOT leak INITIAL_SNAPSHOT as an amendment (Important #2)
+    await apiFetch(`/api/v1/contracts/${cId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+    const actRes = await apiFetch(`/api/v1/contracts/${cId}/activate`, mgrVopA.token, { method: 'POST' });
+    assert.equal(actRes.status, 200);
+
+    const resAuth = await login(resTenant.email, 'ResidentPassword@123');
+    const overviewRes = await apiFetch('/api/v1/resident/overview', resAuth.token);
+    assert.equal(overviewRes.status, 200);
+    const resAmendments = overviewRes.body.data?.amendments || [];
+    assert.ok(
+      !resAmendments.some((a) => a.diff?.status === 'INITIAL_SNAPSHOT'),
+      'Resident overview amendments must exclude INITIAL_SNAPSHOT version #1'
+    );
+  });
 });

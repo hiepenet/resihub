@@ -1479,7 +1479,7 @@ export function ContractsPage() {
         onClose={() => setCreateOpen(false)}
         title="Tạo hợp đồng thuê mới (Bản nháp)"
         subtitle="Lưu nháp hợp đồng → In mẫu A4 ký kết → Đính kèm bản scan → Kích hoạt (NV-08)"
-        size="lg"
+        size="xl"
         footer={
           <>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={submittingCreate}>
@@ -1975,31 +1975,33 @@ export function ContractsPage() {
           </div>
 
           {/* Khối tùy chọn: Thành viên ở cùng (occupants[]) ngay khi lập hợp đồng (FR-011 / FR-014) */}
-          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div>
+          <div className="p-4 rounded-2xl border border-slate-200/90 bg-slate-50/60 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="min-w-0">
                 <p className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-primary-600" />
+                  <Users className="w-4 h-4 text-primary-600 shrink-0" />
                   Thành viên ở cùng (Tùy chọn)
                 </p>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   Khai báo sẵn người ở ghép / gia đình để tự động liên kết định danh và cấp quyền Cổng cư dân
                 </p>
               </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                icon={UserPlus}
-                onClick={() =>
-                  setInlineOccupants((prev) => [
-                    ...prev,
-                    { full_name: '', phone: '', relationship: 'family', id_number: '' },
-                  ])
-                }
-              >
-                + Thêm thành viên ở cùng
-              </Button>
+              <div className="shrink-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  icon={UserPlus}
+                  onClick={() =>
+                    setInlineOccupants((prev) => [
+                      ...prev,
+                      { full_name: '', phone: '', relationship: 'family', id_number: '' },
+                    ])
+                  }
+                >
+                  Thêm thành viên ở cùng
+                </Button>
+              </div>
             </div>
 
             {selectedApartment &&
@@ -2023,17 +2025,38 @@ export function ContractsPage() {
             ) : null}
 
             {inlineOccupants.length > 0 ? (
-              <div className="space-y-2.5">
+              <div className="space-y-3">
                 {inlineOccupants.map((occ, idx) => (
                   <div
                     key={idx}
-                    className="p-3 rounded-lg bg-white border border-slate-200 grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-start"
+                    data-testid="inline-occupant-card"
+                    className="p-4 rounded-xl bg-white border border-slate-200/90 shadow-xs space-y-3.5"
                   >
-                    <div className="sm:col-span-3">
+                    <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+                      <span className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary-50 text-primary-700 text-[11px] font-bold">
+                          {idx + 1}
+                        </span>
+                        Thành viên #{idx + 1}
+                      </span>
+                      <button
+                        type="button"
+                        title="Xóa thành viên này"
+                        onClick={() =>
+                          setInlineOccupants((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-rose-600 hover:bg-rose-50 hover:text-rose-700 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Xóa</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <Input
                         label="Họ và tên"
                         required
-                        placeholder="Nguyễn Văn B"
+                        placeholder="VD: Nguyễn Văn B"
                         value={occ.full_name}
                         onChange={(e) =>
                           setInlineOccupants((prev) =>
@@ -2042,12 +2065,10 @@ export function ContractsPage() {
                         }
                         error={createErrors[`occ_name_${idx}`]}
                       />
-                    </div>
-                    <div className="sm:col-span-3">
                       <Input
                         label="Số điện thoại"
                         required
-                        placeholder="0912345678"
+                        placeholder="VD: 0912345678"
                         value={occ.phone}
                         onChange={(e) =>
                           setInlineOccupants((prev) =>
@@ -2056,8 +2077,6 @@ export function ContractsPage() {
                         }
                         error={createErrors[`occ_phone_${idx}`]}
                       />
-                    </div>
-                    <div className="sm:col-span-3">
                       <Select
                         label="Quan hệ"
                         value={occ.relationship}
@@ -2070,11 +2089,9 @@ export function ContractsPage() {
                         }
                         options={INLINE_RELATIONSHIP_OPTIONS}
                       />
-                    </div>
-                    <div className="sm:col-span-2">
                       <Input
-                        label="Số CCCD"
-                        placeholder="Tùy chọn"
+                        label="Số CCCD / Hộ chiếu"
+                        placeholder="12 chữ số CCCD (tùy chọn)"
                         value={occ.id_number}
                         onChange={(e) =>
                           setInlineOccupants((prev) =>
@@ -2085,18 +2102,6 @@ export function ContractsPage() {
                         }
                         error={createErrors[`occ_id_${idx}`]}
                       />
-                    </div>
-                    <div className="sm:col-span-1 sm:pt-6 flex justify-end">
-                      <button
-                        type="button"
-                        title="Xóa thành viên này"
-                        onClick={() =>
-                          setInlineOccupants((prev) => prev.filter((_, i) => i !== idx))
-                        }
-                        className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     </div>
                   </div>
                 ))}
@@ -2236,15 +2241,15 @@ export function ContractsPage() {
               <div>
                 <p className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                   <FileSignature className="w-3.5 h-3.5 text-primary-600" />
-                  Bước 4: Dịch vụ đi kèm &amp; Đơn giá riêng theo hợp đồng (Tùy chọn)
+                  Dịch vụ đi kèm &amp; Đơn giá riêng theo hợp đồng (Tùy chọn)
                 </p>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   Đăng ký sẵn các dịch vụ định kỳ (sẽ tự động kích hoạt khi hợp đồng sang ACTIVE) và cấu hình đơn giá ưu đãi riêng nếu có
                 </p>
               </div>
-              {Object.values(selectedServices).filter((s) => s?.checked).length > 0 ? (
+              {selectableCatalogServices.filter((svc) => selectedServices[svc.id]?.checked).length > 0 ? (
                 <Badge variant="emerald">
-                  Đã chọn {Object.values(selectedServices).filter((s) => s?.checked).length} dịch vụ
+                  Đã chọn {selectableCatalogServices.filter((svc) => selectedServices[svc.id]?.checked).length} dịch vụ
                 </Badge>
               ) : null}
             </div>
@@ -2266,8 +2271,8 @@ export function ContractsPage() {
                           : 'bg-white/70 border-slate-200'
                       }`}
                     >
-                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center">
-                        <label className="sm:col-span-6 flex items-start gap-2.5 cursor-pointer">
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5 items-center">
+                        <label className="sm:col-span-5 flex items-start gap-2.5 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={Boolean(cfg.checked)}
@@ -2301,7 +2306,7 @@ export function ContractsPage() {
 
                         {cfg.checked ? (
                           <>
-                            <div className="sm:col-span-2">
+                            <div className="sm:col-span-3">
                               {svc.billing_type === 'QUANTITY' ? (
                                 <Input
                                   label="Số lượng"
