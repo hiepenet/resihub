@@ -318,4 +318,130 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
     assert.equal(fallbackApprove.status, 200, `Ownerless fallback approve failed: ${JSON.stringify(fallbackApprove.body)}`);
     assert.equal(fallbackApprove.body.data.status, 'ACTIVE');
   });
+
+  await t.test('Task 2: Persist billing_cycle, payment_due_days, billing_day 1-31 on POST/PATCH and check TERMINATION_PENDING overlap on draft PATCH', async () => {
+    const apt = await createTestApartment(vopAId, floorId, 'T2A', 12000000);
+    const tenantA = makeUniqueTenant('T2A');
+
+    // Validation errors on POST /api/v1/contracts
+    const badDay = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantA,
+        start_date: '2027-05-01',
+        end_date: '2028-05-01',
+        rent_amount: 12000000,
+        billing_day: 32,
+      }),
+    });
+    assert.equal(badDay.status, 422);
+    assert.equal(badDay.body.code, 'INVALID_BILLING_DAY');
+
+    const badDue = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantA,
+        start_date: '2027-05-01',
+        end_date: '2028-05-01',
+        rent_amount: 12000000,
+        payment_due_days: 0,
+      }),
+    });
+    assert.equal(badDue.status, 422);
+    assert.equal(badDue.body.code, 'INVALID_PAYMENT_DUE_DAYS');
+
+    const badCycle = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantA,
+        start_date: '2027-05-01',
+        end_date: '2028-05-01',
+        rent_amount: 12000000,
+        billing_cycle: 'yearly',
+      }),
+    });
+    assert.equal(badCycle.status, 422);
+    assert.equal(badCycle.body.code, 'INVALID_BILLING_CYCLE');
+
+    // Atomic POST /api/v1/contracts persists billing_cycle='quarterly', billing_day=31, payment_due_days=10
+    const c1Res = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantA,
+        start_date: '2027-05-01',
+        end_date: '2028-05-01',
+        rent_amount: 12000000,
+        deposit_amount: 12000000,
+        billing_cycle: 'quarterly',
+        billing_day: 31,
+        payment_due_days: 10,
+      }),
+    });
+    assert.equal(c1Res.status, 201, `Create c1 failed: ${JSON.stringify(c1Res.body)}`);
+    const c1Id = c1Res.body.data.id;
+    createdContractIds.push(c1Id);
+    if (c1Res.body.created_tenant?.person_id) createdPersonIds.push(c1Res.body.created_tenant.person_id);
+
+    assert.equal(c1Res.body.data.billing_cycle, 'quarterly');
+    assert.equal(Number(c1Res.body.data.billing_day), 31);
+    assert.equal(Number(c1Res.body.data.payment_due_days), 10);
+
+    // Activate c1 and put it into TERMINATION_PENDING ending effectively on 2027-06-15
+    await apiFetch(`/api/v1/contracts/${c1Id}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+    const act1 = await apiFetch(`/api/v1/contracts/${c1Id}/activate`, mgrVopA.token, { method: 'POST' });
+    assert.equal(act1.status, 200);
+
+    await adminPool.query(
+      `UPDATE contract SET status = 'TERMINATION_PENDING', terminated_at = '2027-06-15' WHERE id = $1`,
+      [c1Id]
+    );
+
+    // Create back-to-back DRAFT starting 2027-06-20 (after terminated_at 2027-06-15) -> 201
+    const tenantB = makeUniqueTenant('T2B');
+    const c2Res = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantB,
+        start_date: '2027-06-20',
+        end_date: '2028-06-20',
+        rent_amount: 12000000,
+        deposit_amount: 12000000,
+      }),
+    });
+    assert.equal(c2Res.status, 201, `Create back-to-back draft failed: ${JSON.stringify(c2Res.body)}`);
+    const c2Id = c2Res.body.data.id;
+    createdContractIds.push(c2Id);
+    if (c2Res.body.created_tenant?.person_id) createdPersonIds.push(c2Res.body.created_tenant.person_id);
+
+    // PATCH /:id shifting start_date to 2027-06-10 overlaps TERMINATION_PENDING [2027-05-01, 2027-06-15) -> 409 OVERLAP_CONTRACT + conflicts
+    const overlapPatch = await apiFetch(`/api/v1/contracts/${c2Id}`, mgrVopA.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ start_date: '2027-06-10' }),
+    });
+    assert.equal(overlapPatch.status, 409, 'Draft PATCH overlapping TERMINATION_PENDING must return 409');
+    assert.equal(overlapPatch.body.code, 'OVERLAP_CONTRACT');
+    assert.ok(Array.isArray(overlapPatch.body.conflicts) && overlapPatch.body.conflicts.length >= 1, 'Must return conflicts array');
+
+    // PATCH /:id updating payment_due_days = 7, billing_day = 30, billing_cycle = 'quarterly' -> 200
+    const okPatch = await apiFetch(`/api/v1/contracts/${c2Id}`, mgrVopA.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        payment_due_days: 7,
+        billing_day: 30,
+        billing_cycle: 'quarterly',
+      }),
+    });
+    assert.equal(okPatch.status, 200, `Draft PATCH billing fields failed: ${JSON.stringify(okPatch.body)}`);
+    assert.equal(Number(okPatch.body.data.payment_due_days), 7);
+    assert.equal(Number(okPatch.body.data.billing_day), 30);
+    assert.equal(okPatch.body.data.billing_cycle, 'quarterly');
+  });
 });

@@ -47,6 +47,59 @@ async function getBuildingActiveOwnerUserIds(buildingId) {
 }
 
 /**
+ * Kiểm tra tham số chu kỳ thanh toán (billing_cycle), ngày chốt hóa đơn (billing_day: 1..31)
+ * và thời hạn thanh toán (payment_due_days: 1..60, mặc định 5).
+ */
+function validateBillingParams({ billing_cycle, billing_day, payment_due_days }, { partial = false } = {}) {
+  let billingCycle = partial ? null : 'monthly';
+  if (billing_cycle !== undefined && billing_cycle !== null && billing_cycle !== '') {
+    const cleanCycle = String(billing_cycle).trim().toLowerCase();
+    if (!['monthly', 'quarterly'].includes(cleanCycle)) {
+      return {
+        error: {
+          status: 422,
+          code: 'INVALID_BILLING_CYCLE',
+          message: 'Chu kỳ thanh toán không hợp lệ (chỉ hỗ trợ monthly hoặc quarterly).',
+        },
+      };
+    }
+    billingCycle = cleanCycle;
+  }
+
+  let billingDay = partial ? null : 1;
+  if (billing_day !== undefined && billing_day !== null && billing_day !== '') {
+    const dayNum = Number(billing_day);
+    if (!Number.isInteger(dayNum) || dayNum < 1 || dayNum > 31) {
+      return {
+        error: {
+          status: 422,
+          code: 'INVALID_BILLING_DAY',
+          message: 'Ngày phát hành hóa đơn định kỳ phải là số nguyên từ 1 đến 31.',
+        },
+      };
+    }
+    billingDay = dayNum;
+  }
+
+  let paymentDueDays = partial ? null : 5;
+  if (payment_due_days !== undefined && payment_due_days !== null && payment_due_days !== '') {
+    const dueNum = Number(payment_due_days);
+    if (!Number.isInteger(dueNum) || dueNum < 1 || dueNum > 60) {
+      return {
+        error: {
+          status: 422,
+          code: 'INVALID_PAYMENT_DUE_DAYS',
+          message: 'Thời hạn thanh toán (payment_due_days) phải là số nguyên từ 1 đến 60 ngày.',
+        },
+      };
+    }
+    paymentDueDays = dueNum;
+  }
+
+  return { billingCycle, billingDay, paymentDueDays };
+}
+
+/**
  * Kiểm tra quyền phạm vi tòa nhà trên một hợp đồng cụ thể (trước khi RLS lọc mất bản ghi thành 404).
  * Trả về { ok: true, meta } hoặc { ok: false, status, body }.
  */
@@ -768,7 +821,9 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     start_date,
     end_date,
     rent_amount,
+    billing_cycle,
     billing_day,
+    payment_due_days,
     deposit_amount,
     deposit_months,
     note,
@@ -783,6 +838,14 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     return res.status(422).json({
       code: 'VALIDATION_ERROR',
       message: 'Thiếu thông tin bắt buộc: Căn hộ, Khách thuê (có sẵn hoặc tạo mới), Ngày bắt đầu, Ngày kết thúc hoặc Giá thuê.',
+    });
+  }
+
+  const billingValidation = validateBillingParams({ billing_cycle, billing_day, payment_due_days });
+  if (billingValidation.error) {
+    return res.status(billingValidation.error.status).json({
+      code: billingValidation.error.code,
+      message: billingValidation.error.message,
     });
   }
 
@@ -961,8 +1024,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     const contractRes = await client.query(
       `INSERT INTO contract (
         apartment_id, building_id, primary_tenant_id, start_date, end_date,
-        rent_amount, billing_day, deposit_amount, status, created_by, note
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9, $10)
+        rent_amount, billing_cycle, billing_day, payment_due_days, deposit_amount, status, created_by, note
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'DRAFT', $11, $12)
        RETURNING *`,
       [
         apartment_id,
@@ -971,7 +1034,9 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         start_date,
         end_date,
         rent_amount,
-        billing_day || 1,
+        billingValidation.billingCycle,
+        billingValidation.billingDay,
+        billingValidation.paymentDueDays,
         finalDeposit,
         req.user.sub,
         note || '',
@@ -1459,9 +1524,20 @@ router.delete('/:id/occupants/:tenant_id', authenticateToken, requireRole(['MANA
 router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
   const {
-    start_date, end_date, rent_amount, billing_cycle, billing_day,
+    start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
     deposit_amount, deposit_months, apartment_id, primary_tenant_id, note,
   } = req.body;
+
+  const billingValidation = validateBillingParams(
+    { billing_cycle, billing_day, payment_due_days },
+    { partial: true }
+  );
+  if (billingValidation.error) {
+    return res.status(billingValidation.error.status).json({
+      code: billingValidation.error.code,
+      message: billingValidation.error.message,
+    });
+  }
 
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -1535,15 +1611,27 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         });
       }
       const overlap = await client.query(
-        `SELECT 1 FROM contract
-         WHERE apartment_id = $1 AND id <> $2
-           AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
-           AND (start_date < $4 AND end_date > $3)`,
+        `SELECT c.id, c.start_date, COALESCE(c.terminated_at, c.end_date) AS end_date, p.full_name
+         FROM contract c
+         LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+         LEFT JOIN person p ON p.id = t.person_id
+         WHERE c.apartment_id = $1 AND c.id <> $2
+           AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+           AND (c.start_date < $4 AND COALESCE(c.terminated_at, c.end_date) > $3)`,
         [nextApartment, id, nextStart, nextEnd]
       );
       if (overlap.rows.length > 0) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ code: 'OVERLAP_CONTRACT', message: 'Căn hộ đã có hợp đồng trong khoảng thời gian đã chọn.' });
+        return res.status(409).json({
+          code: 'OVERLAP_CONTRACT',
+          message: 'Căn hộ đã có hợp đồng trong khoảng thời gian đã chọn.',
+          conflicts: overlap.rows.map((c) => ({
+            contract_id: c.id,
+            start_date: c.start_date,
+            end_date: c.end_date,
+            tenant: c.full_name,
+          })),
+        });
       }
     }
 
@@ -1580,15 +1668,19 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
            rent_amount = COALESCE($3, rent_amount),
            billing_cycle = COALESCE($4, billing_cycle),
            billing_day = COALESCE($5, billing_day),
-           deposit_amount = $6,
-           apartment_id = $7,
-           primary_tenant_id = COALESCE($8, primary_tenant_id),
-           note = COALESCE($9, note),
+           payment_due_days = COALESCE($6, payment_due_days),
+           deposit_amount = $7,
+           apartment_id = $8,
+           primary_tenant_id = COALESCE($9, primary_tenant_id),
+           note = COALESCE($10, note),
            updated_at = NOW()
-       WHERE id = $10 RETURNING *`,
+       WHERE id = $11 RETURNING *`,
       [
         nextStart, nextEnd,
-        rent_amount ?? null, billing_cycle ?? null, billing_day ?? null,
+        rent_amount ?? null,
+        billingValidation.billingCycle,
+        billingValidation.billingDay,
+        billingValidation.paymentDueDays,
         nextDeposit, nextApartment, primary_tenant_id ?? null, note ?? null, id,
       ]
     );
@@ -3531,7 +3623,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     <h3>ĐIỀU 3: GIÁ THUÊ VÀ PHƯƠNG THỨC THANH TOÁN</h3>
     <p>3.1. Giá thuê căn hộ: <strong>${fmtMoney(c.rent_amount)} / tháng</strong> (Bằng chữ: theo quy định thực tế).</p>
     <p>3.2. Chu kỳ thanh toán: <strong>${c.billing_cycle === 'quarterly' ? '3 tháng / lần' : 'Hàng tháng'}</strong>.</p>
-    <p>3.3. Ngày phát hành hóa đơn định kỳ: Ngày <strong>${c.billing_day || 1}</strong> hàng tháng. Thời hạn thanh toán: Trong vòng <strong>${c.payment_due_days || 5}</strong> ngày kể từ ngày thông báo.</p>
+    <p>3.3. Ngày phát hành hóa đơn định kỳ: Ngày <strong>${c.billing_day || 1}</strong> hàng tháng. Thời hạn thanh toán: Trong vòng <strong>${c.payment_due_days || 5}</strong> ngày kể từ ngày phát hành hóa đơn.</p>
 
     <h3>ĐIỀU 4: TIỀN ĐẶT CỌC BẢO ĐẢM VÀ QUY TẮC HOÀN TRẢ</h3>
     <p>4.1. Tiền đặt cọc bảo đảm thực hiện hợp đồng: <strong>${fmtMoney(c.deposit_amount)}</strong>.</p>
