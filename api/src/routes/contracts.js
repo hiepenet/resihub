@@ -8,7 +8,8 @@ import { refundDeadline } from '../services/deadlines.js';
 import { splitDepositOpening } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
-import { checkFourEyesOrWarn } from '../services/pricing.js';
+import { checkFourEyesOrWarn, roundVND } from '../services/pricing.js';
+import { buildExpectedInvoiceSchedule } from '../services/invoiceSchedule.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -44,6 +45,209 @@ async function getBuildingActiveOwnerUserIds(buildingId) {
     [buildingId]
   );
   return res.rows.map((r) => String(r.id));
+}
+
+async function getBuildingActiveManagerUserIds(buildingId) {
+  if (!buildingId) return [];
+  const res = await adminPool.query(
+    `SELECT DISTINCT u.id
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     JOIN app_user u ON u.id = ur.user_id
+     WHERE ur.building_id = $1
+       AND r.code = 'MANAGER'
+       AND u.status = 'ACTIVE'`,
+    [buildingId]
+  );
+  return res.rows.map((r) => String(r.id));
+}
+
+function formatContractDateOnly(val) {
+  if (!val) return '';
+  if (typeof val === 'string') return val.slice(0, 10);
+  if (val instanceof Date && !Number.isNaN(val.getTime())) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(val).slice(0, 10);
+}
+
+async function loadContractSubscriptionsAndSchedule(contract) {
+  if (!contract?.id) {
+    return { service_subscriptions: [], invoice_schedule: [] };
+  }
+  const [subsRes, pricesRes, invRes] = await Promise.all([
+    adminPool.query(
+      `SELECT ss.*,
+              sc.code AS service_code,
+              sc.name AS service_name,
+              sc.category AS service_category,
+              sc.billing_type,
+              sc.unit
+       FROM service_subscription ss
+       JOIN service_catalog sc ON sc.id = ss.service_id
+       WHERE ss.contract_id = $1
+       ORDER BY ss.created_at ASC`,
+      [contract.id]
+    ),
+    adminPool.query(
+      `SELECT service_code, unit_price, effective_from
+       FROM contract_service_price
+       WHERE contract_id = $1
+       ORDER BY effective_from DESC`,
+      [contract.id]
+    ),
+    adminPool.query(
+      `SELECT id, invoice_code, period, status, total_amount
+       FROM invoice
+       WHERE contract_id = $1 AND status <> 'CANCELLED'
+       ORDER BY period ASC`,
+      [contract.id]
+    ),
+  ]);
+
+  const invoice_schedule = buildExpectedInvoiceSchedule({
+    contract,
+    subscriptions: subsRes.rows,
+    servicePrices: pricesRes.rows,
+    existingInvoices: invRes.rows,
+  });
+
+  return {
+    service_subscriptions: subsRes.rows,
+    invoice_schedule,
+  };
+}
+
+async function notifyContractStakeholders(contract, eventType, extra = {}) {
+  if (!contract?.id) return;
+  try {
+    const metaRes = await adminPool.query(
+      `SELECT c.id, c.building_id, c.apartment_id, c.primary_tenant_id, c.created_by,
+              c.start_date, c.end_date, c.billing_day, c.payment_due_days,
+              a.code AS apartment_code, b.name AS building_name, b.org_id
+       FROM contract c
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN building b ON b.id = c.building_id
+       WHERE c.id = $1
+       LIMIT 1`,
+      [contract.id]
+    );
+    if (metaRes.rows.length === 0) return;
+    const meta = metaRes.rows[0];
+    const sDate = formatContractDateOnly(meta.start_date);
+    const eDate = formatContractDateOnly(meta.end_date);
+
+    if (eventType === 'ACTIVATED') {
+      // Đảm bảo khách thuê chính & thành viên ở cùng đều có tài khoản Cổng cư dân ACTIVE
+      const personsRes = await adminPool.query(
+        `SELECT DISTINCT p.id AS person_id, p.email, p.phone
+         FROM person p
+         WHERE p.id IN (
+           SELECT t.person_id FROM tenant t WHERE t.id = $1
+           UNION
+           SELECT t2.person_id
+           FROM contract_occupant co
+           JOIN tenant t2 ON t2.id = co.tenant_id
+           WHERE co.contract_id = $2
+         )`,
+        [meta.primary_tenant_id, meta.id]
+      );
+      const residentUserIds = new Set();
+      for (const pRow of personsRes.rows) {
+        try {
+          const acct = await ensureResidentAccount(pRow.person_id, {
+            email: pRow.email,
+            phone: pRow.phone,
+          });
+          if (acct?.userId) residentUserIds.add(String(acct.userId));
+        } catch {
+          // Fallback query if ensureResidentAccount skips
+        }
+        const uRes = await adminPool.query(
+          `SELECT id FROM app_user WHERE person_id = $1 AND status = 'ACTIVE' LIMIT 1`,
+          [pRow.person_id]
+        );
+        if (uRes.rows[0]?.id) residentUserIds.add(String(uRes.rows[0].id));
+      }
+
+      for (const userId of residentUserIds) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'CONTRACT_ACTIVATED', $5)`,
+          [
+            meta.org_id,
+            userId,
+            `Hợp đồng thuê căn ${meta.apartment_code} đã kích hoạt`,
+            `Hợp đồng thuê căn ${meta.apartment_code} (${meta.building_name}) có hiệu lực từ ${sDate} đến ${eDate}. Bạn có thể đăng nhập Cổng cư dân bằng SĐT/email đăng ký và mã OTP để xem hợp đồng, lịch hóa đơn và thanh toán trực tuyến.`,
+            JSON.stringify({ contract_id: meta.id, link: '/resident' }),
+          ]
+        );
+      }
+
+      const mgrUserIds = await getBuildingActiveManagerUserIds(meta.building_id);
+      const scheduleLen = Number(extra.scheduleLen || 0);
+      for (const mgrId of mgrUserIds) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'CONTRACT_BILLING_SCHEDULED', $5)`,
+          [
+            meta.org_id,
+            mgrId,
+            `Hợp đồng căn ${meta.apartment_code} đã kích hoạt & lập lịch thu tiền`,
+            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) đã chuyển sang ACTIVE với ${scheduleLen} kỳ thu dự kiến (ngày chốt: ngày ${meta.billing_day || 1}, hạn thanh toán: ${meta.payment_due_days || 5} ngày).`,
+            JSON.stringify({ contract_id: meta.id, link: `/admin/contracts/${meta.id}` }),
+          ]
+        );
+      }
+    } else if (eventType === 'PENDING_APPROVAL') {
+      let approverIds = await getBuildingActiveOwnerUserIds(meta.building_id);
+      if (approverIds.length === 0) {
+        const sysRes = await adminPool.query(
+          `SELECT DISTINCT u.id
+           FROM app_user u
+           JOIN user_role ur ON ur.user_id = u.id
+           JOIN role r ON r.id = ur.role_id
+           WHERE u.org_id = $1 AND u.status = 'ACTIVE' AND r.code = 'SYS_ADMIN'`,
+          [meta.org_id]
+        );
+        approverIds = sysRes.rows.map((r) => String(r.id));
+      }
+      for (const ownerUserId of approverIds) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'CONTRACT_PENDING_APPROVAL', $5)`,
+          [
+            meta.org_id,
+            ownerUserId,
+            `Chờ phê duyệt giá hợp đồng ưu đãi — Căn ${meta.apartment_code}`,
+            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) có giá thuê thấp hơn 90% giá niêm yết và đang chờ phê duyệt để kích hoạt.`,
+            JSON.stringify({ contract_id: meta.id, link: `/admin/contracts/${meta.id}` }),
+          ]
+        );
+      }
+    } else if (eventType === 'PRICE_REJECTED') {
+      const mgrIds = new Set(await getBuildingActiveManagerUserIds(meta.building_id));
+      if (meta.created_by) mgrIds.add(String(meta.created_by));
+      for (const mgrId of mgrIds) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'CONTRACT_PRICE_REJECTED', $5)`,
+          [
+            meta.org_id,
+            mgrId,
+            `Từ chối duyệt giá hợp đồng — Căn ${meta.apartment_code}`,
+            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) đã được trả về bản nháp (DRAFT) để điều chỉnh. Lý do: ${extra.reason || 'Không đạt khung giá'}`,
+            JSON.stringify({ contract_id: meta.id, link: `/admin/contracts/${meta.id}` }),
+          ]
+        );
+      }
+    }
+  } catch (notifErr) {
+    console.error('[Contract Notification Warning]:', notifErr);
+  }
 }
 
 /**
@@ -787,7 +991,10 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
         [id]
       );
 
-      const ownerUserIds = await getBuildingActiveOwnerUserIds(result.rows[0].building_id);
+      const [ownerUserIds, scheduleBundle] = await Promise.all([
+        getBuildingActiveOwnerUserIds(result.rows[0].building_id),
+        loadContractSubscriptionsAndSchedule(result.rows[0]),
+      ]);
 
       res.json({
         data: {
@@ -795,6 +1002,8 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
           has_building_owner: ownerUserIds.length > 0,
           related_contracts: chainRes.rows,
           attachments: attRes.rows,
+          service_subscriptions: scheduleBundle.service_subscriptions,
+          invoice_schedule: scheduleBundle.invoice_schedule,
         },
       });
     } finally {
@@ -826,6 +1035,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     payment_due_days,
     deposit_amount,
     deposit_months,
+    services,
+    service_prices,
     note,
   } = req.body;
 
@@ -1062,6 +1273,157 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     // Căn hộ và cọc giữ chỗ KHÔNG đổi ở bước DRAFT: căn AVAILABLE/RESERVED giữ nguyên,
     // cọc giữ chỗ vẫn HELD — chỉ kích hoạt khi ACTIVE (Task 8, PRD 485 bước 6).
+    // Tương tự, các gói dịch vụ đi kèm (services[]) lưu ở trạng thái PENDING_APPROVAL cho tới khi hợp đồng ACTIVE.
+    const createdServices = [];
+    const createdServicePrices = [];
+
+    if (services !== undefined && !Array.isArray(services)) {
+      const err = new Error('Trường services phải là một mảng danh sách dịch vụ đăng ký.');
+      err.httpStatus = 422;
+      err.code = 'INVALID_SERVICES';
+      throw err;
+    }
+
+    if (service_prices !== undefined && !Array.isArray(service_prices)) {
+      const err = new Error('Trường service_prices phải là một mảng cấu hình đơn giá riêng.');
+      err.httpStatus = 422;
+      err.code = 'INVALID_SERVICE_PRICES';
+      throw err;
+    }
+
+    if (Array.isArray(services) && services.length > 0) {
+      const [sy, sm, sd] = sDateStr.split('-').map(Number);
+      const totalDaysInStartMonth = new Date(Date.UTC(sy, sm, 0)).getUTCDate();
+      const activeStartDays = Math.max(1, totalDaysInStartMonth - sd + 1);
+
+      for (const svcItem of services) {
+        if (!svcItem || !svcItem.service_id || !UUID_REGEX.test(String(svcItem.service_id))) {
+          const err = new Error('Mã định danh dịch vụ (service_id) không hợp lệ.');
+          err.httpStatus = 422;
+          err.code = 'INVALID_SERVICE';
+          throw err;
+        }
+        const catRes = await adminPool.query(
+          `SELECT * FROM service_catalog
+           WHERE id = $1
+             AND org_id = $2
+             AND is_active = TRUE
+             AND (building_id IS NULL OR building_id = $3)
+           LIMIT 1`,
+          [svcItem.service_id, req.user.org_id, effectiveBuildingId]
+        );
+        if (catRes.rows.length === 0) {
+          const err = new Error('Không tìm thấy dịch vụ đang hoạt động thuộc phạm vi tòa nhà.');
+          err.httpStatus = 422;
+          err.code = 'INVALID_SERVICE';
+          throw err;
+        }
+        const cat = catRes.rows[0];
+        const qty = svcItem.quantity === undefined ? 1 : Number(svcItem.quantity);
+        if (!Number.isInteger(qty) || qty < 1) {
+          const err = new Error('Số lượng dịch vụ đăng ký (quantity) phải là số nguyên dương >= 1.');
+          err.httpStatus = 422;
+          err.code = 'INVALID_SERVICE_QUANTITY';
+          throw err;
+        }
+
+        const hasCustomPrice =
+          svcItem.custom_unit_price !== undefined &&
+          svcItem.custom_unit_price !== null &&
+          svcItem.custom_unit_price !== '';
+        let effectivePrice = Number(cat.unit_price || 0);
+        if (hasCustomPrice) {
+          const customNum = Number(svcItem.custom_unit_price);
+          if (Number.isNaN(customNum) || customNum < 0) {
+            const err = new Error('Đơn giá dịch vụ riêng (custom_unit_price) phải >= 0.');
+            err.httpStatus = 422;
+            err.code = 'INVALID_UNIT_PRICE';
+            throw err;
+          }
+          effectivePrice = Math.round(customNum);
+        }
+
+        const prorataAmt =
+          sd > 1 ? roundVND((effectivePrice * qty * activeStartDays) / totalDaysInStartMonth) : 0;
+
+        const subIns = await client.query(
+          `INSERT INTO service_subscription (
+             org_id, building_id, apartment_id, contract_id, service_id,
+             quantity, unit_price, start_date, prorata_amount, status, note, requested_by
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11)
+           RETURNING *`,
+          [
+            req.user.org_id,
+            effectiveBuildingId,
+            apartment_id,
+            contract.id,
+            cat.id,
+            qty,
+            effectivePrice,
+            sDateStr,
+            prorataAmt,
+            svcItem.note ? String(svcItem.note).trim() : null,
+            req.user.sub,
+          ]
+        );
+        createdServices.push({
+          ...subIns.rows[0],
+          service_code: cat.code,
+          service_name: cat.name,
+        });
+
+        if (hasCustomPrice) {
+          const cspIns = await client.query(
+            `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (contract_id, service_code, effective_from)
+             DO UPDATE SET unit_price = EXCLUDED.unit_price
+             RETURNING *`,
+            [contract.id, String(cat.code).trim().toUpperCase(), effectivePrice, sDateStr]
+          );
+          createdServicePrices.push(cspIns.rows[0]);
+        }
+      }
+    }
+
+    if (Array.isArray(service_prices) && service_prices.length > 0) {
+      for (const spItem of service_prices) {
+        const normCode =
+          typeof spItem?.service_code === 'string' ? spItem.service_code.trim().toUpperCase() : '';
+        let validCode = Boolean(normCode) && SERVICE_CODES.includes(normCode);
+        if (!validCode && normCode) {
+          const catCheck = await adminPool.query(
+            'SELECT 1 FROM service_catalog WHERE org_id = $1 AND UPPER(code) = $2 LIMIT 1',
+            [req.user.org_id, normCode]
+          );
+          validCode = catCheck.rows.length > 0;
+        }
+        if (!validCode) {
+          const err = new Error(`Mã dịch vụ (${normCode || 'trống'}) không hợp lệ.`);
+          err.httpStatus = 422;
+          err.code = 'INVALID_SERVICE_CODE';
+          throw err;
+        }
+        const priceNum = Number(spItem?.unit_price);
+        if (spItem?.unit_price === undefined || spItem?.unit_price === null || Number.isNaN(priceNum) || priceNum < 0) {
+          const err = new Error('Đơn giá dịch vụ riêng phải >= 0.');
+          err.httpStatus = 422;
+          err.code = 'INVALID_UNIT_PRICE';
+          throw err;
+        }
+        const effDate = spItem.effective_from ? String(spItem.effective_from).slice(0, 10) : sDateStr;
+        const cspIns = await client.query(
+          `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (contract_id, service_code, effective_from)
+           DO UPDATE SET unit_price = EXCLUDED.unit_price
+           RETURNING *`,
+          [contract.id, normCode, Math.round(priceNum), effDate]
+        );
+        createdServicePrices.push(cspIns.rows[0]);
+      }
+    }
 
     // 2. Ghi audit log
     await client.query(
@@ -1075,6 +1437,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
           ...(reservation_id && UUID_REGEX.test(String(reservation_id)) ? { reservation_id: String(reservation_id) } : {}),
           ...(linkedCrossBuilding ? { cross_building_link: true } : {}),
           ...(attachedOccupants.length > 0 ? { occupants_count: attachedOccupants.length } : {}),
+          ...(createdServices.length > 0 ? { services_count: createdServices.length } : {}),
+          ...(createdServicePrices.length > 0 ? { service_prices_count: createdServicePrices.length } : {}),
         }),
       ]
     );
@@ -1118,6 +1482,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         ? 'Đã tạo hồ sơ cư dân mới (kèm tài khoản Cổng cư dân) và lưu nháp hợp đồng thành công.'
         : 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.',
       data: contract,
+      created_services: createdServices,
+      created_service_prices: createdServicePrices,
       ...(inlineTenantResult ? { created_tenant: inlineTenantResult.tenant } : {}),
       ...(attachedOccupants.length > 0 ? { created_occupants: attachedOccupants } : {}),
     });
@@ -2209,6 +2575,43 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr) {
   // Đồng bộ trạng thái căn hộ thông minh
   await syncApartmentStatus(dbClient, contract.apartment_id);
 
+  // Kích hoạt các gói dịch vụ đi kèm hợp đồng từ PENDING_APPROVAL -> ACTIVE (FR-014, FR-027)
+  await dbClient.query(
+    `UPDATE service_subscription
+     SET status = 'ACTIVE', approved_by = $2, updated_at = NOW()
+     WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
+    [contract.id, req.user.sub]
+  );
+
+  // Lưu snapshot phiên bản gốc (version_no = 1) khi kích hoạt nếu chưa có (FR-014)
+  const existingVerRes = await dbClient.query(
+    `SELECT 1 FROM contract_version WHERE contract_id = $1 LIMIT 1`,
+    [contract.id]
+  );
+  if (existingVerRes.rows.length === 0) {
+    await dbClient.query(
+      `INSERT INTO contract_version (contract_id, version_no, diff, effective_from, reason, approved_by)
+       VALUES ($1, 1, $2, $3, 'Khởi tạo hợp đồng gốc khi kích hoạt', $4)`,
+      [
+        contract.id,
+        JSON.stringify({
+          status: 'INITIAL_SNAPSHOT',
+          snapshot: {
+            start_date: formatContractDateOnly(contract.start_date),
+            end_date: formatContractDateOnly(contract.end_date),
+            rent_amount: Number(contract.rent_amount || 0),
+            deposit_amount: Number(contract.deposit_amount || 0),
+            billing_cycle: contract.billing_cycle || 'monthly',
+            billing_day: Number(contract.billing_day || 1),
+            payment_due_days: Number(contract.payment_due_days || 5),
+          },
+        }),
+        sDateStr,
+        req.user.sub,
+      ]
+    );
+  }
+
   return remainingCollect;
 }
 
@@ -2381,6 +2784,7 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
     const result = await completeActivation(client, contract, res, req);
     if (result.needsApproval) {
       await client.query('COMMIT');
+      await notifyContractStakeholders(result.needsApproval, 'PENDING_APPROVAL');
       return res.status(409).json({
         code: 'PRICE_NEEDS_APPROVAL',
         message: 'Giá thuê thấp hơn 10% so với giá niêm yết, hợp đồng chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt (PENDING_APPROVAL).',
@@ -2396,10 +2800,20 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
       });
     }
     await client.query('COMMIT');
+    const scheduleBundle = await loadContractSubscriptionsAndSchedule(result.contract);
+    await notifyContractStakeholders(result.contract, 'ACTIVATED', {
+      scheduleLen: scheduleBundle.invoice_schedule.length,
+    });
     const msg = result.remaining_collect > 0
       ? `Kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.`
       : 'Kích hoạt hợp đồng thành công.';
-    res.json({ message: msg, data: result.contract, remaining_collect: result.remaining_collect });
+    res.json({
+      message: msg,
+      data: result.contract,
+      remaining_collect: result.remaining_collect,
+      service_subscriptions: scheduleBundle.service_subscriptions,
+      invoice_schedule: scheduleBundle.invoice_schedule,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[Activate Contract Error]:', err);
@@ -2548,10 +2962,20 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
       await client.query('COMMIT');
       txOpen = false;
     }
+    const scheduleBundle = await loadContractSubscriptionsAndSchedule(result.contract);
+    await notifyContractStakeholders(result.contract, 'ACTIVATED', {
+      scheduleLen: scheduleBundle.invoice_schedule.length,
+    });
     const approveMsg = result.remaining_collect > 0
       ? `Đã phê duyệt và kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.`
       : 'Đã phê duyệt và kích hoạt hợp đồng thành công.';
-    res.json({ message: approveMsg, data: result.contract, remaining_collect: result.remaining_collect });
+    res.json({
+      message: approveMsg,
+      data: result.contract,
+      remaining_collect: result.remaining_collect,
+      service_subscriptions: scheduleBundle.service_subscriptions,
+      invoice_schedule: scheduleBundle.invoice_schedule,
+    });
   } catch (err) {
     if (txOpen) {
       await client.query('ROLLBACK').catch(() => {});
@@ -2664,6 +3088,7 @@ router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']
       ]
     );
     await client.query('COMMIT');
+    await notifyContractStakeholders(updated.rows[0], 'PRICE_REJECTED', { reason: trimmedReason });
     res.json({
       message: 'Đã từ chối phê duyệt và trả hợp đồng về trạng thái bản nháp (DRAFT) để điều chỉnh.',
       data: updated.rows[0],
@@ -2704,6 +3129,12 @@ router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (r
     const updated = await client.query(
       `UPDATE contract SET status = 'CANCELLED', note = COALESCE($1, note), updated_at = NOW() WHERE id = $2 RETURNING *`,
       [reason ? `${cur.note || ''} [Lý do hủy: ${reason}]`.trim() : null, id]
+    );
+    await client.query(
+      `UPDATE service_subscription
+       SET status = 'CANCELLED', updated_at = NOW()
+       WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
+      [id]
     );
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)

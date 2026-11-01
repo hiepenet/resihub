@@ -93,6 +93,7 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
           cleanClient.release();
         }
         await adminPool.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
+        await adminPool.query("DELETE FROM notification WHERE payload->>'contract_id' = $1", [cId]).catch(() => {});
         await adminPool.query('DELETE FROM attachment WHERE owner_entity = $1 AND owner_id = $2', ['contract', cId]);
         await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]);
         await adminPool.query('DELETE FROM contract_request WHERE contract_id = $1', [cId]);
@@ -529,5 +530,181 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
     });
     assert.ok(nonPdfBlocked.error, 'Non-contract uploads must reject PDF when allowPdf is false');
     assert.equal(nonPdfBlocked.error.code, 'VALIDATION_ERROR');
+  });
+
+  await t.test('Task 4: Accompanying services[], custom service_prices[], activation notifications, initial contract_version, and expected invoice_schedule', async () => {
+    const apt = await createTestApartment(vopAId, floorId, 'T4A', 12000000);
+    const aptCancel = await createTestApartment(vopAId, floorId, 'T4C', 12000000);
+    const aptDisc = await createTestApartment(vopAId, floorId, 'T4D', 12000000);
+
+    const catRes = await apiFetch('/api/v1/services/catalog?active_only=true', mgrVopA.token);
+    assert.equal(catRes.status, 200);
+    const catalog = catRes.body.data || [];
+    const internetSvc = catalog.find((s) => s.code === 'INTERNET_FIBER') || catalog.find((s) => s.billing_type === 'FIXED');
+    const bikeSvc = catalog.find((s) => s.code === 'MOTORBIKE_PARKING') || catalog.find((s) => s.billing_type === 'QUANTITY');
+    assert.ok(internetSvc && bikeSvc, 'Seeded service catalog must include FIXED and QUANTITY services');
+
+    // 1. Draft creation with services[] + custom_unit_price + service_prices[]
+    const tenant1 = makeUniqueTenant('T4A');
+    const occ1 = makeUniqueTenant('T4OCC');
+    const createRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenant1,
+        occupants: [{ full_name: occ1.full_name, phone: occ1.phone, id_number: occ1.id_number, relationship: 'spouse' }],
+        start_date: '2027-08-01',
+        end_date: '2027-11-01',
+        rent_amount: 12000000,
+        deposit_amount: 12000000,
+        billing_cycle: 'monthly',
+        billing_day: 5,
+        payment_due_days: 7,
+        services: [
+          { service_id: internetSvc.id, quantity: 1, custom_unit_price: 185000 },
+          { service_id: bikeSvc.id, quantity: 2 },
+        ],
+        service_prices: [{ service_code: 'ELECTRICITY', unit_price: 3600 }],
+      }),
+    });
+    assert.equal(createRes.status, 201, `Create with services[] failed: ${JSON.stringify(createRes.body)}`);
+    const cId = createRes.body.data.id;
+    createdContractIds.push(cId);
+    if (createRes.body.created_tenant?.person_id) createdPersonIds.push(createRes.body.created_tenant.person_id);
+    for (const o of createRes.body.created_occupants || []) {
+      if (o.personId) createdPersonIds.push(o.personId);
+    }
+
+    assert.equal(createRes.body.created_services?.length, 2, 'POST /contracts must return created_services');
+    assert.ok(createRes.body.created_service_prices?.length >= 2, 'POST /contracts must return created_service_prices');
+
+    // Review Focus #4: While DRAFT, service_subscription must stay PENDING_APPROVAL (not prematurely ACTIVE)
+    const draftSubs = await adminPool.query(
+      'SELECT status FROM service_subscription WHERE contract_id = $1',
+      [cId]
+    );
+    assert.equal(draftSubs.rows.length, 2);
+    for (const r of draftSubs.rows) {
+      assert.equal(r.status, 'PENDING_APPROVAL', 'Draft contract subscriptions must be PENDING_APPROVAL');
+    }
+
+    // GET /:id returns service_subscriptions and invoice_schedule preview
+    const draftDetail = await apiFetch(`/api/v1/contracts/${cId}`, mgrVopA.token);
+    assert.equal(draftDetail.status, 200);
+    assert.equal(draftDetail.body.data.service_subscriptions?.length, 2);
+    assert.equal(draftDetail.body.data.invoice_schedule?.length, 3);
+    // Expected monthly total = 12,000,000 + 185,000 + 2 * bikeSvc.unit_price
+    const expectedSvcTotal = 185000 + 2 * Number(bikeSvc.unit_price);
+    assert.equal(draftDetail.body.data.invoice_schedule[0].expected_fixed_services, expectedSvcTotal);
+    assert.equal(draftDetail.body.data.invoice_schedule[0].expected_total, 12000000 + expectedSvcTotal);
+    assert.equal(draftDetail.body.data.invoice_schedule[0].issue_date, '2027-08-05');
+    assert.equal(draftDetail.body.data.invoice_schedule[0].due_date, '2027-08-12');
+
+    // 2. Cancelling a draft cancels its PENDING_APPROVAL service_subscription rows
+    const tenantCancel = makeUniqueTenant('T4C');
+    const cCancelRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptCancel.id,
+        new_tenant: tenantCancel,
+        start_date: '2027-08-01',
+        end_date: '2028-08-01',
+        rent_amount: 12000000,
+        services: [{ service_id: internetSvc.id, quantity: 1 }],
+      }),
+    });
+    assert.equal(cCancelRes.status, 201);
+    const cCancelId = cCancelRes.body.data.id;
+    createdContractIds.push(cCancelId);
+    if (cCancelRes.body.created_tenant?.person_id) createdPersonIds.push(cCancelRes.body.created_tenant.person_id);
+
+    const cancelRes = await apiFetch(`/api/v1/contracts/${cCancelId}/cancel`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Khách đổi ý không ký nữa' }),
+    });
+    assert.equal(cancelRes.status, 200);
+    const cancelledSubs = await adminPool.query(
+      'SELECT status FROM service_subscription WHERE contract_id = $1',
+      [cCancelId]
+    );
+    assert.equal(cancelledSubs.rows[0]?.status, 'CANCELLED');
+
+    // 3. Activating cId flips subscriptions to ACTIVE, creates initial contract_version #1, sends notifications, and returns invoice_schedule
+    const pdfContent = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'ascii');
+    await apiFetch(`/api/v1/contracts/${cId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ file_base64: `data:application/pdf;base64,${pdfContent.toString('base64')}` }),
+    });
+
+    const actRes = await apiFetch(`/api/v1/contracts/${cId}/activate`, mgrVopA.token, { method: 'POST' });
+    assert.equal(actRes.status, 200, `Activate cId failed: ${JSON.stringify(actRes.body)}`);
+    assert.equal(actRes.body.invoice_schedule?.length, 3, 'Activate response must include invoice_schedule');
+
+    const activeSubs = await adminPool.query(
+      'SELECT status FROM service_subscription WHERE contract_id = $1',
+      [cId]
+    );
+    for (const r of activeSubs.rows) {
+      assert.equal(r.status, 'ACTIVE', 'Activated contract subscriptions must flip to ACTIVE');
+    }
+
+    const verRes = await adminPool.query(
+      'SELECT version_no FROM contract_version WHERE contract_id = $1 ORDER BY version_no ASC',
+      [cId]
+    );
+    assert.ok(verRes.rows.some((r) => Number(r.version_no) === 1), 'Initial contract_version #1 must be created upon activation');
+
+    const notifsRes = await adminPool.query(
+      `SELECT type, user_id, title, content FROM notification WHERE payload->>'contract_id' = $1`,
+      [cId]
+    );
+    const notifTypes = notifsRes.rows.map((r) => r.type);
+    assert.ok(notifTypes.includes('CONTRACT_ACTIVATED'), 'Must send CONTRACT_ACTIVATED notification to resident(s)');
+    assert.ok(notifTypes.includes('CONTRACT_BILLING_SCHEDULED'), 'Must send CONTRACT_BILLING_SCHEDULED notification to building manager(s)');
+
+    // 4. Discounted contract -> PENDING_APPROVAL notifies OWNER, and OWNER reject notifies MANAGER
+    const tenantDisc = makeUniqueTenant('T4D');
+    const cDiscRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptDisc.id,
+        new_tenant: tenantDisc,
+        start_date: '2027-09-01',
+        end_date: '2028-09-01',
+        rent_amount: 10000000, // < 90% of 12,000,000
+        services: [{ service_id: internetSvc.id, quantity: 1 }],
+      }),
+    });
+    assert.equal(cDiscRes.status, 201);
+    const cDiscId = cDiscRes.body.data.id;
+    createdContractIds.push(cDiscId);
+    if (cDiscRes.body.created_tenant?.person_id) createdPersonIds.push(cDiscRes.body.created_tenant.person_id);
+
+    await apiFetch(`/api/v1/contracts/${cDiscId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+
+    const actDisc = await apiFetch(`/api/v1/contracts/${cDiscId}/activate`, mgrVopA.token, { method: 'POST' });
+    assert.equal(actDisc.status, 409);
+    assert.equal(actDisc.body.code, 'PRICE_NEEDS_APPROVAL');
+
+    const ownerNotifs = await adminPool.query(
+      `SELECT type, user_id FROM notification WHERE payload->>'contract_id' = $1 AND type = 'CONTRACT_PENDING_APPROVAL'`,
+      [cDiscId]
+    );
+    assert.ok(ownerNotifs.rows.length >= 1, 'Discounted contract must notify building OWNER');
+
+    const rejDisc = await apiFetch(`/api/v1/contracts/${cDiscId}/reject`, ownerVop.token, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Giá thấp hơn khung tối thiểu của tòa' }),
+    });
+    assert.equal(rejDisc.status, 200);
+
+    const rejNotifs = await adminPool.query(
+      `SELECT type, user_id FROM notification WHERE payload->>'contract_id' = $1 AND type = 'CONTRACT_PRICE_REJECTED'`,
+      [cDiscId]
+    );
+    assert.ok(rejNotifs.rows.length >= 1, 'OWNER rejection must notify building MANAGER');
   });
 });
