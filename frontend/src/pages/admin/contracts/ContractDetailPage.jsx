@@ -38,9 +38,10 @@ import { DataTable } from '../../../components/common/DataTable';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
-import { contractsService } from '../../../services/contracts.service';
+import { contractsService, createIdempotencyKey } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { tenantsService } from '../../../services/tenants.service';
+import { servicesService } from '../../../services/services.service';
 import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
@@ -255,10 +256,17 @@ export function ContractDetailPage() {
   // Confirm Dialogs (Activate / Approve / ApproveTermination)
   const [confirmState, setConfirmState] = useState({ open: false, type: '' });
   const [processingConfirm, setProcessingConfirm] = useState(false);
+  const actionIdemKeyRef = useRef('');
 
   // Edit Draft Modal
   const [editDraftOpen, setEditDraftOpen] = useState(false);
   const [draftAptDetail, setDraftAptDetail] = useState(null);
+  const [draftServiceCatalog, setDraftServiceCatalog] = useState([]);
+  const [draftSelectedServices, setDraftSelectedServices] = useState({});
+  const [draftCustomMeterPrices, setDraftCustomMeterPrices] = useState({
+    ELECTRICITY: '',
+    WATER: '',
+  });
   const [editDraftForm, setEditDraftForm] = useState({
     start_date: '',
     end_date: '',
@@ -506,17 +514,46 @@ export function ContractDetailPage() {
     }
   };
 
+  useEffect(() => {
+    if (confirmState.open || renewOpen || transferOpen || terminateOpen) {
+      actionIdemKeyRef.current = createIdempotencyKey();
+    }
+  }, [
+    confirmState.open,
+    confirmState.type,
+    renewOpen,
+    renewForm,
+    transferOpen,
+    transferForm,
+    terminateOpen,
+    terminateForm,
+  ]);
+
+  const selectableDraftServices = useMemo(
+    () =>
+      draftServiceCatalog.filter(
+        (svc) =>
+          svc.is_active !== false &&
+          svc.billing_type !== 'METERED' &&
+          (!svc.building_id ||
+            !contract?.building_id ||
+            String(svc.building_id) === String(contract.building_id))
+      ),
+    [draftServiceCatalog, contract?.building_id]
+  );
+
   // Xử lý Kích hoạt / Phê duyệt giá / Phê duyệt chấm dứt
   const handleConfirmAction = async () => {
     const actionType = confirmState.type;
     if (!actionType) return;
     setProcessingConfirm(true);
     try {
+      const idemOpts = { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() };
       if (actionType === 'activate') {
-        const res = await contractsService.activate(id);
+        const res = await contractsService.activate(id, {}, idemOpts);
         toast.success(res?.message || 'Kích hoạt hợp đồng thành công!');
       } else if (actionType === 'approve') {
-        const res = await contractsService.approve(id);
+        const res = await contractsService.approve(id, {}, idemOpts);
         toast.success(res?.message || 'Đã phê duyệt và kích hoạt hợp đồng thành công!');
       } else if (actionType === 'approve_termination') {
         const res = await contractsService.approveTermination(id);
@@ -790,7 +827,46 @@ export function ContractDetailPage() {
       payment_due_days: String(contract.payment_due_days || 5),
       note: contract.note || '',
     });
+
+    const initServices = {};
+    for (const sub of serviceSubscriptions) {
+      if (!['PENDING_APPROVAL', 'ACTIVE'].includes(sub.status) || !sub.service_id) continue;
+      initServices[sub.service_id] = {
+        checked: true,
+        quantity: String(sub.quantity || 1),
+        unit_price: String(Math.round(Number(sub.unit_price || 0))),
+        note: sub.note || '',
+      };
+    }
+    setDraftSelectedServices(initServices);
+
+    const elecOverride = servicePrices.find(
+      (sp) => String(sp.service_code || '').toUpperCase() === 'ELECTRICITY'
+    );
+    const waterOverride = servicePrices.find(
+      (sp) => String(sp.service_code || '').toUpperCase() === 'WATER'
+    );
+    setDraftCustomMeterPrices({
+      ELECTRICITY:
+        elecOverride && elecOverride.unit_price !== null && elecOverride.unit_price !== undefined
+          ? String(Math.round(Number(elecOverride.unit_price)))
+          : '',
+      WATER:
+        waterOverride && waterOverride.unit_price !== null && waterOverride.unit_price !== undefined
+          ? String(Math.round(Number(waterOverride.unit_price)))
+          : '',
+    });
+
     setEditDraftOpen(true);
+
+    servicesService
+      .listCatalog({ active_only: 'true' })
+      .then((res) => {
+        setDraftServiceCatalog(Array.isArray(res?.data) ? res.data : []);
+      })
+      .catch(() => {
+        setDraftServiceCatalog([]);
+      });
   };
 
   const handleSaveDraft = async (e) => {
@@ -805,6 +881,56 @@ export function ContractDetailPage() {
     }
     setSavingDraft(true);
     try {
+      const draftServicesPayload =
+        draftServiceCatalog.length > 0
+          ? selectableDraftServices
+              .filter((svc) => draftSelectedServices[svc.id]?.checked)
+              .map((svc) => {
+                const cfg = draftSelectedServices[svc.id] || {};
+                const qty =
+                  svc.billing_type === 'QUANTITY'
+                    ? Math.max(1, Math.round(Number(cfg.quantity || 1)))
+                    : 1;
+                const priceVal =
+                  cfg.unit_price !== undefined && cfg.unit_price !== ''
+                    ? Math.max(0, Math.round(Number(cfg.unit_price)))
+                    : Math.round(Number(svc.unit_price || 0));
+                const cleanNote = String(cfg.note || '').trim();
+                return {
+                  service_id: svc.id,
+                  quantity: qty,
+                  unit_price: priceVal,
+                  ...(cleanNote ? { note: cleanNote } : {}),
+                };
+              })
+          : Object.entries(draftSelectedServices)
+              .filter(([, cfg]) => cfg?.checked)
+              .map(([serviceId, cfg]) => ({
+                service_id: serviceId,
+                quantity: Math.max(1, Math.round(Number(cfg.quantity || 1))),
+                unit_price: Math.max(0, Math.round(Number(cfg.unit_price || 0))),
+                ...(String(cfg.note || '').trim() ? { note: String(cfg.note).trim() } : {}),
+              }));
+
+      const draftMeterPricesPayload = [
+        {
+          service_code: 'ELECTRICITY',
+          unit_price:
+            draftCustomMeterPrices.ELECTRICITY !== '' &&
+            Number(draftCustomMeterPrices.ELECTRICITY) >= 0
+              ? Math.round(Number(draftCustomMeterPrices.ELECTRICITY))
+              : null,
+        },
+        {
+          service_code: 'WATER',
+          unit_price:
+            draftCustomMeterPrices.WATER !== '' &&
+            Number(draftCustomMeterPrices.WATER) >= 0
+              ? Math.round(Number(draftCustomMeterPrices.WATER))
+              : null,
+        },
+      ];
+
       const res = await contractsService.update(id, {
         start_date: editDraftForm.start_date,
         end_date: editDraftForm.end_date,
@@ -814,6 +940,8 @@ export function ContractDetailPage() {
         billing_day: Math.min(31, Math.max(1, Number(editDraftForm.billing_day || 1))),
         payment_due_days: Math.min(60, Math.max(1, Number(editDraftForm.payment_due_days || 5))),
         note: editDraftForm.note,
+        services: draftServicesPayload,
+        service_prices: draftMeterPricesPayload,
       });
       toast.success(res?.message || 'Cập nhật bản nháp hợp đồng thành công.');
       setEditDraftOpen(false);
@@ -868,12 +996,16 @@ export function ContractDetailPage() {
     }
     setSubmittingRenew(true);
     try {
-      const res = await contractsService.renew(id, {
-        new_end_date: renewForm.new_end_date,
-        rent_amount: Math.round(Number(renewForm.rent_amount || 0)),
-        deposit_amount: Math.round(Number(renewForm.deposit_amount || 0)),
-        note: renewForm.note.trim(),
-      });
+      const res = await contractsService.renew(
+        id,
+        {
+          new_end_date: renewForm.new_end_date,
+          rent_amount: Math.round(Number(renewForm.rent_amount || 0)),
+          deposit_amount: Math.round(Number(renewForm.deposit_amount || 0)),
+          note: renewForm.note.trim(),
+        },
+        { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() }
+      );
       toast.success(res?.message || 'Đã tạo hợp đồng gia hạn nối tiếp thành công.');
       setRenewOpen(false);
       if (res?.data?.id) {
@@ -1033,14 +1165,18 @@ export function ContractDetailPage() {
     }
     setSubmittingTransfer(true);
     try {
-      const res = await contractsService.transferRoom(id, {
-        new_apartment_id: transferForm.new_apartment_id,
-        new_start_date: transferForm.new_start_date,
-        new_end_date: transferForm.new_end_date,
-        new_rent_amount: Math.round(Number(transferForm.new_rent_amount || 0)),
-        transfer_deposit: Boolean(transferForm.transfer_deposit),
-        note: transferForm.note.trim() || undefined,
-      });
+      const res = await contractsService.transferRoom(
+        id,
+        {
+          new_apartment_id: transferForm.new_apartment_id,
+          new_start_date: transferForm.new_start_date,
+          new_end_date: transferForm.new_end_date,
+          new_rent_amount: Math.round(Number(transferForm.new_rent_amount || 0)),
+          transfer_deposit: Boolean(transferForm.transfer_deposit),
+          note: transferForm.note.trim() || undefined,
+        },
+        { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() }
+      );
       toast.success(res?.message || 'Chuyển phòng thành công!');
       setTransferOpen(false);
       const newContractId = res?.data?.new_contract?.id;
@@ -1092,11 +1228,15 @@ export function ContractDetailPage() {
     }
     setSubmittingTerminate(true);
     try {
-      const res = await contractsService.terminate(id, {
-        terminated_date: terminateForm.terminated_date,
-        reason: terminateForm.reason.trim(),
-        note: terminateForm.note.trim(),
-      });
+      const res = await contractsService.terminate(
+        id,
+        {
+          terminated_date: terminateForm.terminated_date,
+          reason: terminateForm.reason.trim(),
+          note: terminateForm.note.trim(),
+        },
+        { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() }
+      );
       toast.success(res?.message || 'Đã chấm dứt hợp đồng thành công.');
       setTerminateOpen(false);
       await loadAll();
@@ -1658,6 +1798,16 @@ export function ContractDetailPage() {
                     ),
                   },
                   {
+                    key: 'note',
+                    label: 'Ghi chú / Biển số',
+                    render: (row) =>
+                      row.note ? (
+                        <span className="text-xs text-slate-700">{row.note}</span>
+                      ) : (
+                        <span className="text-xs text-slate-400">—</span>
+                      ),
+                  },
+                  {
                     key: 'status',
                     label: 'Trạng thái',
                     align: 'center',
@@ -2192,7 +2342,7 @@ export function ContractDetailPage() {
         onClose={() => setEditDraftOpen(false)}
         title="Chỉnh sửa hợp đồng nháp"
         subtitle="Chỉ hợp đồng ở trạng thái DRAFT mới được chỉnh sửa trực tiếp"
-        size="md"
+        size="xl"
         footer={
           <>
             <Button variant="outline" onClick={() => setEditDraftOpen(false)} disabled={savingDraft}>
@@ -2269,6 +2419,152 @@ export function ContractDetailPage() {
               onChange={(e) => setEditDraftForm((p) => ({ ...p, payment_due_days: e.target.value }))}
             />
           </div>
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+            <div>
+              <p className="text-xs font-semibold text-slate-800">
+                Dịch vụ đi kèm &amp; Đơn giá Điện/Nước riêng theo hợp đồng
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Cập nhật các dịch vụ định kỳ (sẽ tự động kích hoạt khi hợp đồng sang ACTIVE) và đơn giá Điện/Nước thỏa thuận riêng
+              </p>
+            </div>
+
+            {selectableDraftServices.length > 0 ? (
+              <div className="space-y-2">
+                {selectableDraftServices.map((svc) => {
+                  const cfg = draftSelectedServices[svc.id] || {
+                    checked: false,
+                    quantity: '1',
+                    unit_price: String(Math.round(Number(svc.unit_price || 0))),
+                    note: '',
+                  };
+                  return (
+                    <div
+                      key={svc.id}
+                      className={`p-2.5 rounded-lg border transition-colors ${
+                        cfg.checked
+                          ? 'bg-white border-primary-300 shadow-xs'
+                          : 'bg-white/70 border-slate-200'
+                      }`}
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3.5 items-center">
+                        <label className="sm:col-span-5 flex items-start gap-2.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(cfg.checked)}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setDraftSelectedServices((prev) => ({
+                                ...prev,
+                                [svc.id]: {
+                                  checked,
+                                  quantity: prev[svc.id]?.quantity || '1',
+                                  unit_price:
+                                    prev[svc.id]?.unit_price !== undefined
+                                      ? prev[svc.id].unit_price
+                                      : String(Math.round(Number(svc.unit_price || 0))),
+                                  note: prev[svc.id]?.note || '',
+                                },
+                              }));
+                            }}
+                            className="mt-0.5 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+                          />
+                          <div className="text-xs">
+                            <p className="font-semibold text-slate-800">
+                              {svc.name}{' '}
+                              <span className="font-mono text-[11px] text-slate-400">({svc.code})</span>
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              Niêm yết: {formatMoney(svc.unit_price)} / {svc.unit || 'tháng'}
+                            </p>
+                          </div>
+                        </label>
+
+                        {cfg.checked ? (
+                          <>
+                            <div className="sm:col-span-3">
+                              {svc.billing_type === 'QUANTITY' ? (
+                                <Input
+                                  label="Số lượng"
+                                  type="number"
+                                  min="1"
+                                  value={cfg.quantity}
+                                  onChange={(e) =>
+                                    setDraftSelectedServices((prev) => ({
+                                      ...prev,
+                                      [svc.id]: { ...cfg, quantity: e.target.value },
+                                    }))
+                                  }
+                                />
+                              ) : (
+                                <div className="text-[11px] text-slate-400 sm:pt-5 text-center">1 gói</div>
+                              )}
+                            </div>
+                            <div className="sm:col-span-4">
+                              <MoneyInput
+                                label="Đơn giá áp dụng (VND)"
+                                value={cfg.unit_price}
+                                onChange={(e) =>
+                                  setDraftSelectedServices((prev) => ({
+                                    ...prev,
+                                    [svc.id]: { ...cfg, unit_price: e.target.value },
+                                  }))
+                                }
+                              />
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
+
+                      {cfg.checked ? (
+                        <div className="mt-2.5 pt-2.5 border-t border-slate-100">
+                          <Input
+                            label="Ghi chú dịch vụ / Biển số xe (tùy chọn)"
+                            placeholder={
+                              svc.category === 'PARKING' || String(svc.code || '').includes('PARKING')
+                                ? 'VD: Biển số 30A-123.45, 29B1-678.90'
+                                : 'VD: Ghi chú gói dịch vụ'
+                            }
+                            value={cfg.note || ''}
+                            onChange={(e) =>
+                              setDraftSelectedServices((prev) => ({
+                                ...prev,
+                                [svc.id]: { ...cfg, note: e.target.value },
+                              }))
+                            }
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 italic">
+                Chưa có dịch vụ định kỳ nào trong danh mục hoạt động của tòa nhà.
+              </p>
+            )}
+
+            <div className="pt-2 border-t border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <MoneyInput
+                label="Đơn giá Điện riêng theo HĐ (VND/kWh)"
+                placeholder="Để trống = theo giá đồng hồ tòa nhà"
+                value={draftCustomMeterPrices.ELECTRICITY}
+                onChange={(e) =>
+                  setDraftCustomMeterPrices((p) => ({ ...p, ELECTRICITY: e.target.value }))
+                }
+              />
+              <MoneyInput
+                label="Đơn giá Nước riêng theo HĐ (VND/m³)"
+                placeholder="Để trống = theo giá đồng hồ tòa nhà"
+                value={draftCustomMeterPrices.WATER}
+                onChange={(e) =>
+                  setDraftCustomMeterPrices((p) => ({ ...p, WATER: e.target.value }))
+                }
+              />
+            </div>
+          </div>
+
           <Input
             label="Ghi chú"
             multiline

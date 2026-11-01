@@ -1,12 +1,30 @@
 import api from './api';
 
+export function createIdempotencyKey() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `idem-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 12)}`;
+}
+
+function withIdempotency(options) {
+  return {
+    headers: {
+      'Idempotency-Key': options?.idempotencyKey || createIdempotencyKey(),
+    },
+  };
+}
+
 export const contractsService = {
   list: (params) => api.get('/api/v1/contracts', { params }).then((r) => r.data),
   getById: (id) => api.get(`/api/v1/contracts/${id}`).then((r) => r.data),
-  create: (payload) => api.post('/api/v1/contracts', payload).then((r) => r.data),
+  create: (payload, options = {}) =>
+    api.post('/api/v1/contracts', payload, withIdempotency(options)).then((r) => r.data),
   update: (id, payload) => api.patch(`/api/v1/contracts/${id}`, payload).then((r) => r.data),
-  activate: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/activate`, payload).then((r) => r.data),
-  approve: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/approve`, payload).then((r) => r.data),
+  activate: (id, payload = {}, options = {}) =>
+    api.post(`/api/v1/contracts/${id}/activate`, payload, withIdempotency(options)).then((r) => r.data),
+  approve: (id, payload = {}, options = {}) =>
+    api.post(`/api/v1/contracts/${id}/approve`, payload, withIdempotency(options)).then((r) => r.data),
   reject: (id, payload) => api.post(`/api/v1/contracts/${id}/reject`, payload).then((r) => r.data),
   rejectContract: (id, reason) =>
     api
@@ -15,12 +33,15 @@ export const contractsService = {
   cancel: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/cancel`, payload).then((r) => r.data),
   uploadScan: (id, payload) => api.post(`/api/v1/contracts/${id}/scan`, payload).then((r) => r.data),
 
-  terminate: (id, payload) => api.post(`/api/v1/contracts/${id}/terminate`, payload).then((r) => r.data),
+  terminate: (id, payload, options = {}) =>
+    api.post(`/api/v1/contracts/${id}/terminate`, payload, withIdempotency(options)).then((r) => r.data),
   approveTermination: (id, payload = {}) => api.post(`/api/v1/contracts/${id}/terminate/approve`, payload).then((r) => r.data),
   rejectTermination: (id, payload) => api.post(`/api/v1/contracts/${id}/terminate/reject`, payload).then((r) => r.data),
 
-  renew: (id, payload) => api.post(`/api/v1/contracts/${id}/renew`, payload).then((r) => r.data),
-  transferRoom: (id, payload) => api.post(`/api/v1/contracts/${id}/transfer-room`, payload).then((r) => r.data),
+  renew: (id, payload, options = {}) =>
+    api.post(`/api/v1/contracts/${id}/renew`, payload, withIdempotency(options)).then((r) => r.data),
+  transferRoom: (id, payload, options = {}) =>
+    api.post(`/api/v1/contracts/${id}/transfer-room`, payload, withIdempotency(options)).then((r) => r.data),
 
   listOccupants: (id) => api.get(`/api/v1/contracts/${id}/occupants`).then((r) => r.data),
   addOccupant: (id, payload) => api.post(`/api/v1/contracts/${id}/occupants`, payload).then((r) => r.data),

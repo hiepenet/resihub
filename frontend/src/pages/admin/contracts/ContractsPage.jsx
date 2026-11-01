@@ -34,7 +34,8 @@ import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
-import { contractsService } from '../../../services/contracts.service';
+import { FileUpload } from '../../../components/ui/FileUpload';
+import { contractsService, createIdempotencyKey } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { tenantsService } from '../../../services/tenants.service';
 import { servicesService } from '../../../services/services.service';
@@ -145,6 +146,8 @@ const INITIAL_NEW_TENANT = {
   nationality: 'Việt Nam',
   address: '',
   password: '',
+  id_image_front: '',
+  id_image_back: '',
 };
 
 export function ContractsPage() {
@@ -197,6 +200,7 @@ export function ContractsPage() {
   const [selectedServices, setSelectedServices] = useState({});
   const [customMeterPrices, setCustomMeterPrices] = useState({ ELECTRICITY: '', WATER: '' });
   const userEditedCreateDatesRef = useRef(false);
+  const createIdemKeyRef = useRef('');
 
   const [todayStr] = useState(() => toDateOnlyStr(new Date()));
   const [createForm, setCreateForm] = useState({
@@ -248,6 +252,7 @@ export function ContractsPage() {
     const cleanAptId = typeof preselectAptId === 'string' ? preselectAptId : '';
     const defaultBld = selectedBuildingId || '';
     userEditedCreateDatesRef.current = false;
+    createIdemKeyRef.current = createIdempotencyKey();
     setCreateForm({
       building_id: defaultBld,
       apartment_id: cleanAptId,
@@ -486,9 +491,31 @@ export function ContractsPage() {
     [apartments]
   );
 
+  useEffect(() => {
+    if (createOpen) {
+      createIdemKeyRef.current = createIdempotencyKey();
+    }
+  }, [
+    createOpen,
+    tenantMode,
+    createForm,
+    newTenantForm,
+    inlineOccupants,
+    selectedServices,
+    customMeterPrices,
+  ]);
+
   const selectedApartment = useMemo(
     () => selectableApartments.find((a) => String(a.id) === String(createForm.apartment_id)) || null,
     [selectableApartments, createForm.apartment_id]
+  );
+
+  const selectedReservation = useMemo(
+    () =>
+      (aptSchedule.reservations || []).find(
+        (r) => String(r.id) === String(createForm.reservation_id)
+      ) || null,
+    [aptSchedule.reservations, createForm.reservation_id]
   );
 
   const effectiveModalBuildingId = selectedApartment?.building_id || createForm.building_id || '';
@@ -910,6 +937,8 @@ export function ContractsPage() {
                 nationality: newTenantForm.nationality.trim() || 'Việt Nam',
                 address: newTenantForm.address.trim() || null,
                 ...(newTenantForm.password ? { password: newTenantForm.password } : {}),
+                ...(newTenantForm.id_image_front ? { id_image_front: newTenantForm.id_image_front } : {}),
+                ...(newTenantForm.id_image_back ? { id_image_back: newTenantForm.id_image_back } : {}),
               },
             }),
         ...(activeOccupants.length > 0
@@ -944,10 +973,12 @@ export function ContractsPage() {
             cfg.unit_price !== undefined && cfg.unit_price !== ''
               ? Math.max(0, Math.round(Number(cfg.unit_price)))
               : Math.round(Number(svc.unit_price || 0));
+          const trimmedNote = String(cfg.note || '').trim();
           return {
             service_id: svc.id,
             quantity: qty,
             unit_price: priceVal,
+            ...(trimmedNote ? { note: trimmedNote } : {}),
           };
         });
       if (servicesPayload.length > 0) {
@@ -971,7 +1002,9 @@ export function ContractsPage() {
         payload.service_prices = servicePricesPayload;
       }
 
-      const res = await contractsService.create(payload);
+      const res = await contractsService.create(payload, {
+        idempotencyKey: createIdemKeyRef.current || createIdempotencyKey(),
+      });
       const created = res?.data;
 
       toast.success(res?.message || 'Đã tạo hợp đồng nháp thành công.');
@@ -1970,6 +2003,28 @@ export function ContractsPage() {
                     onChange={(e) => setNewTenantForm((p) => ({ ...p, nationality: e.target.value }))}
                   />
                 </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-1">
+                  <FileUpload
+                    label="Ảnh CCCD / Hộ chiếu mặt trước (tùy chọn)"
+                    accept="image/jpeg,image/png"
+                    maxSizeMB={5}
+                    value={newTenantForm.id_image_front}
+                    onChange={(val) =>
+                      setNewTenantForm((p) => ({ ...p, id_image_front: val || '' }))
+                    }
+                    hint="Ảnh JPG/PNG tối đa 5MB"
+                  />
+                  <FileUpload
+                    label="Ảnh CCCD mặt sau (tùy chọn)"
+                    accept="image/jpeg,image/png"
+                    maxSizeMB={5}
+                    value={newTenantForm.id_image_back}
+                    onChange={(val) =>
+                      setNewTenantForm((p) => ({ ...p, id_image_back: val || '' }))
+                    }
+                    hint="Ảnh JPG/PNG tối đa 5MB"
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -2181,7 +2236,11 @@ export function ContractsPage() {
             <MoneyInput
               label="Tiền đặt cọc bảo đảm (VND)"
               placeholder="VD: 8.500.000"
-              hint="Mặc định gợi ý bằng 1 tháng tiền thuê"
+              hint={
+                selectedReservation && Number(selectedReservation.hold_amount || 0) > 0
+                  ? `Phiếu giữ chỗ đang chọn đã thu ${formatMoney(selectedReservation.hold_amount)} — nên đặt tiền cọc >= mức này để cấn trừ đủ`
+                  : 'Mặc định gợi ý bằng 1 tháng tiền thuê'
+              }
               value={createForm.deposit_amount}
               onChange={(e) => setCreateForm((p) => ({ ...p, deposit_amount: e.target.value }))}
               error={createErrors.deposit_amount}
@@ -2261,6 +2320,7 @@ export function ContractsPage() {
                     checked: false,
                     quantity: '1',
                     unit_price: String(Math.round(Number(svc.unit_price || 0))),
+                    note: '',
                   };
                   return (
                     <div
@@ -2287,6 +2347,7 @@ export function ContractsPage() {
                                     prev[svc.id]?.unit_price !== undefined
                                       ? prev[svc.id].unit_price
                                       : String(Math.round(Number(svc.unit_price || 0))),
+                                  note: prev[svc.id]?.note || '',
                                 },
                               }));
                             }}
@@ -2339,6 +2400,26 @@ export function ContractsPage() {
                           </>
                         ) : null}
                       </div>
+
+                      {cfg.checked ? (
+                        <div className="mt-2.5 pt-2.5 border-t border-slate-100">
+                          <Input
+                            label="Ghi chú dịch vụ / Biển số xe (tùy chọn)"
+                            placeholder={
+                              svc.category === 'PARKING' || String(svc.code || '').includes('PARKING')
+                                ? 'VD: Biển số 30A-123.45, 29B1-678.90 (hiển thị trên bản in HĐ)'
+                                : 'VD: Gói cước / thỏa thuận riêng cho dịch vụ này'
+                            }
+                            value={cfg.note || ''}
+                            onChange={(e) =>
+                              setSelectedServices((prev) => ({
+                                ...prev,
+                                [svc.id]: { ...cfg, note: e.target.value },
+                              }))
+                            }
+                          />
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}

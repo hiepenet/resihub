@@ -67,4 +67,53 @@ test('Co-occupant inline cards in ContractsPage use spacious 2-column grid inste
   );
 });
 
+test('Remaining Fixes UI 1: contracts.service.js exports createIdempotencyKey and sends Idempotency-Key on write transitions', () => {
+  const src = readSrc('services/contracts.service.js');
+  assert.match(src, /export\s+function\s+createIdempotencyKey/, 'Must export createIdempotencyKey');
+  assert.match(src, /['"]Idempotency-Key['"]/, 'Must attach Idempotency-Key header');
+  for (const methodName of ['create', 'activate', 'approve', 'renew', 'terminate', 'transferRoom']) {
+    assert.match(
+      src,
+      new RegExp(`${methodName}\\s*:\\s*\\([^)]*options`),
+      `contractsService.${methodName} must accept options for idempotencyKey`
+    );
+  }
+});
+
+test('Remaining Fixes UI 2: ContractsPage supports inline CCCD front/back FileUpload, service subscription note, reservation hold hint, and createIdemKeyRef', () => {
+  const src = readSrc('pages/admin/contracts/ContractsPage.jsx');
+  assert.match(src, /id_image_front/, 'ContractsPage must support id_image_front for new_tenant');
+  assert.match(src, /id_image_back/, 'ContractsPage must support id_image_back for new_tenant');
+  assert.match(src, /FileUpload/, 'ContractsPage must render FileUpload for inline CCCD images');
+  assert.match(src, /maxSizeMB=\{5\}/, 'Inline CCCD FileUpload must enforce maxSizeMB={5}');
+  assert.match(src, /createIdemKeyRef/, 'ContractsPage must keep stable createIdemKeyRef per attempt');
+  assert.match(
+    src,
+    /servicesPayload[\s\S]{0,900}note\s*:/,
+    'ContractsPage servicesPayload must include service note (e.g., vehicle license plate)'
+  );
+  assert.match(
+    src,
+    /selectedReservation[\s\S]{0,1200}hold_amount|hold_amount[\s\S]{0,1200}deposit_amount/,
+    'ContractsPage must display reservation hold_amount hint when reservation_id is selected'
+  );
+});
+
+test('Remaining Fixes UI 3: ContractDetailPage renders service subscription note column and allows editing draft services & meter overrides', () => {
+  const src = readSrc('pages/admin/contracts/ContractDetailPage.jsx');
+  assert.match(
+    src,
+    /title="Dịch vụ đi kèm theo hợp đồng"[\s\S]{0,2000}row\.note/,
+    'ContractDetailPage accompanying services DataTable must render row.note'
+  );
+  assert.match(src, /draftSelectedServices/, 'ContractDetailPage must manage draftSelectedServices in Edit Draft modal');
+  assert.match(src, /draftCustomMeterPrices/, 'ContractDetailPage must manage draftCustomMeterPrices in Edit Draft modal');
+  assert.match(
+    src,
+    /const handleSaveDraft[\s\S]{0,3200}services\s*:[\s\S]{0,800}service_prices\s*:/,
+    'handleSaveDraft must send services and service_prices to contractsService.update'
+  );
+  assert.match(src, /actionIdemKeyRef/, 'ContractDetailPage must maintain stable actionIdemKeyRef');
+});
+
 
