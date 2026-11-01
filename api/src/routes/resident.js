@@ -5,6 +5,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { roundVND } from '../services/pricing.js';
 import { normalizeVnPhone } from '../services/residentAccount.js';
+import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
 
 const router = express.Router();
 
@@ -1187,7 +1188,7 @@ router.get('/services', authenticateToken, async (req, res) => {
  * Cư dân đăng ký dịch vụ mới (kèm tính phí pro-rata kỳ đầu, hỗ trợ chọn contract_id)
  */
 router.post('/services', authenticateToken, async (req, res) => {
-  const { service_id, quantity = 1, start_date, note, contract_id } = req.body;
+  const { service_id, quantity = 1, start_date, note, vehicle_plates, contract_id } = req.body;
   if (!service_id) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng chọn dịch vụ cần đăng ký.' });
   }
@@ -1222,18 +1223,38 @@ router.post('/services', authenticateToken, async (req, res) => {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Dịch vụ không tồn tại hoặc đã ngừng cung cấp.' });
     }
     const svc = svcRes.rows[0];
-    const qty = Math.max(1, parseInt(quantity, 10) || 1);
+    const meta = validateAndNormalizeSubscriptionMeta({
+      category: svc.category,
+      billingType: svc.billing_type,
+      quantity,
+      vehiclePlates: vehicle_plates,
+      note,
+    });
+    const qty = meta.quantity;
     const effStart = start_date || new Date().toISOString().slice(0, 10);
     const prorata = computeProrata(svc.unit_price, qty, effStart, 'subscribe');
 
     const ins = await pool.query(
       `INSERT INTO service_subscription (
          org_id, building_id, apartment_id, contract_id, service_id,
-         quantity, unit_price, start_date, prorata_amount, status, note, requested_by
+         quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11, $12)
        RETURNING *`,
-      [c.org_id, c.building_id, c.apartment_id, c.contract_id, svc.id, qty, svc.unit_price, effStart, prorata, note?.trim() || null, req.user.sub]
+      [
+        c.org_id,
+        c.building_id,
+        c.apartment_id,
+        c.contract_id,
+        svc.id,
+        qty,
+        svc.unit_price,
+        effStart,
+        prorata,
+        meta.note,
+        meta.vehiclePlates,
+        req.user.sub,
+      ]
     );
 
     res.status(201).json({
@@ -1241,6 +1262,9 @@ router.post('/services', authenticateToken, async (req, res) => {
       data: ins.rows[0],
     });
   } catch (err) {
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+    }
     console.error('[Resident Subscribe Service Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi đăng ký dịch vụ.' });
   }

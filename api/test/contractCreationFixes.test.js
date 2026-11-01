@@ -562,7 +562,7 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
         payment_due_days: 7,
         services: [
           { service_id: internetSvc.id, quantity: 1, custom_unit_price: 185000 },
-          { service_id: bikeSvc.id, quantity: 2 },
+          { service_id: bikeSvc.id, quantity: 2, vehicle_plates: ['59A1-111.11', '59A1-222.22'] },
         ],
         service_prices: [{ service_code: 'ELECTRICITY', unit_price: 3600 }],
       }),
@@ -731,7 +731,7 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
         deposit_amount: 12000000,
         services: [
           { service_id: internetSvc.id, quantity: 1, unit_price: 175000 },
-          { service_id: bikeSvc.id, quantity: 2, unit_price: Number(bikeSvc.unit_price) },
+          { service_id: bikeSvc.id, quantity: 2, unit_price: Number(bikeSvc.unit_price), vehicle_plates: ['59A1-333.33', '59A1-444.44'] },
         ],
       }),
     });

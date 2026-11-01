@@ -213,6 +213,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
           {
             service_id: parkingCat.id,
             quantity: 2,
+            vehicle_plates: ['59A1-123.45', '59B2-678.90'],
             note: '59A1-123.45 <script>alert(1)</script>',
           },
           {
@@ -252,6 +253,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
           {
             service_id: parkingCat.id,
             quantity: 1,
+            vehicle_plates: ['59X3-999.99'],
             note: 'X'.repeat(501),
           },
         ],
@@ -268,6 +270,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
           {
             service_id: parkingCat.id,
             quantity: 1,
+            vehicle_plates: ['59X3-999.99'],
             note: '59X3-999.99',
           },
         ],

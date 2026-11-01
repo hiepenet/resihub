@@ -7,6 +7,7 @@ import {
   checkBuildingAccess,
 } from '../services/ownerScope.js';
 import { roundVND } from '../services/pricing.js';
+import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
 
 export const serviceCatalogRouter = express.Router();
 export const serviceSubscriptionsRouter = express.Router();
@@ -224,7 +225,7 @@ serviceSubscriptionsRouter.post(
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
-    const { contract_id, apartment_id, service_id, quantity = 1, start_date, note } = req.body;
+    const { contract_id, apartment_id, service_id, quantity = 1, start_date, note, vehicle_plates } = req.body;
     const orgId = req.user.org_id;
 
     if (!service_id || (!contract_id && !apartment_id)) {
@@ -243,6 +244,13 @@ serviceSubscriptionsRouter.post(
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy dịch vụ đang hoạt động.' });
       }
       const svc = svcRes.rows[0];
+      const meta = validateAndNormalizeSubscriptionMeta({
+        category: svc.category,
+        billingType: svc.billing_type,
+        quantity,
+        vehiclePlates: vehicle_plates,
+        note,
+      });
 
       let targetBuildingId = null;
       let targetApartmentId = apartment_id || null;
@@ -281,14 +289,14 @@ serviceSubscriptionsRouter.post(
       }
 
       const effDate = start_date || new Date().toISOString().slice(0, 10);
-      const prorata = computeProrata(svc.unit_price, quantity, effDate, 'subscribe');
+      const prorata = computeProrata(svc.unit_price, meta.quantity, effDate, 'subscribe');
 
       const ins = await pool.query(
         `INSERT INTO service_subscription (
            org_id, building_id, apartment_id, contract_id, service_id,
-           quantity, unit_price, start_date, prorata_amount, status, note, requested_by, approved_by
+           quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by, approved_by
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, $11, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, $11, $12, $12)
          RETURNING *`,
         [
           orgId,
@@ -296,17 +304,21 @@ serviceSubscriptionsRouter.post(
           targetApartmentId,
           targetContractId,
           service_id,
-          Math.max(1, Number(quantity) || 1),
+          meta.quantity,
           svc.unit_price,
           effDate,
           prorata,
-          note?.trim() || null,
+          meta.note,
+          meta.vehiclePlates,
           req.user.sub,
         ]
       );
 
       res.status(201).json({ message: 'Đăng ký dịch vụ thành công.', data: ins.rows[0] });
     } catch (err) {
+      if (err.httpStatus) {
+        return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+      }
       console.error('[Create Subscription Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi đăng ký dịch vụ.' });
     }

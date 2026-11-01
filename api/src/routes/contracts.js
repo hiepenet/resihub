@@ -17,6 +17,7 @@ import {
   escapeTemplateHtml,
   buildContractTemplateServiceRows,
 } from '../services/contractTemplate.js';
+import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -216,23 +217,16 @@ async function syncDraftContractServicesInTx(
         throw err;
       }
       const cat = catRes.rows[0];
-      const qty = svcItem.quantity === undefined ? 1 : Number(svcItem.quantity);
-      if (!Number.isInteger(qty) || qty < 1) {
-        const err = new Error('Số lượng dịch vụ đăng ký (quantity) phải là số nguyên dương >= 1.');
-        err.httpStatus = 422;
-        err.code = 'INVALID_SERVICE_QUANTITY';
-        throw err;
-      }
-
-      const rawNote =
-        svcItem.note !== undefined && svcItem.note !== null ? String(svcItem.note).trim() : '';
-      if (rawNote.length > 500) {
-        const err = new Error('Ghi chú dịch vụ / biển số xe không được vượt quá 500 ký tự.');
-        err.httpStatus = 422;
-        err.code = 'INVALID_SERVICE_NOTE';
-        throw err;
-      }
-      const cleanNote = rawNote || null;
+      const meta = validateAndNormalizeSubscriptionMeta({
+        category: cat.category,
+        billingType: cat.billing_type,
+        quantity: svcItem.quantity,
+        vehiclePlates: svcItem.vehicle_plates,
+        note: svcItem.note,
+      });
+      const qty = meta.quantity;
+      const cleanNote = meta.note;
+      const cleanVehiclePlates = meta.vehiclePlates;
 
       const rawCustomPrice = svcItem.custom_unit_price ?? svcItem.unit_price;
       const hasExplicitPrice =
@@ -261,9 +255,9 @@ async function syncDraftContractServicesInTx(
       const subIns = await client.query(
         `INSERT INTO service_subscription (
            org_id, building_id, apartment_id, contract_id, service_id,
-           quantity, unit_price, start_date, prorata_amount, status, note, requested_by
+           quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11, $12)
          RETURNING *`,
         [
           orgId,
@@ -276,6 +270,7 @@ async function syncDraftContractServicesInTx(
           startDateStr,
           prorataAmt,
           cleanNote,
+          cleanVehiclePlates,
           actorId,
         ]
       );
@@ -3971,7 +3966,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
       [id]
     );
     const subRes = await client.query(
-      `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note,
+      `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note, ss.vehicle_plates,
               sc.code AS service_code,
               sc.name AS service_name,
               sc.category AS service_category,
@@ -4031,6 +4026,9 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
 
     const serviceRowsHtml = templateServiceRows.length > 0
       ? templateServiceRows.map((row, idx) => {
+          const platesHtml = Array.isArray(row.vehiclePlates) && row.vehiclePlates.length > 0
+            ? `<div style="font-size:10.5pt; color:#1e293b; margin-top:2px;"><strong>Biển số xe:</strong> ${escapeTemplateHtml(row.vehiclePlates.join(', '))}</div>`
+            : '';
           const noteHtml = row.note
             ? `<div style="font-size:10.5pt; color:#475569; margin-top:2px;">Ghi chú: ${escapeTemplateHtml(row.note)}</div>`
             : '';
@@ -4038,7 +4036,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
           return `
             <tr>
               <td style="text-align:center;">${idx + 1}</td>
-              <td><strong>${escapeTemplateHtml(row.name)}</strong>${codeHtml}${noteHtml}</td>
+              <td><strong>${escapeTemplateHtml(row.name)}</strong>${codeHtml}${platesHtml}${noteHtml}</td>
               <td style="text-align:center;">${escapeTemplateHtml(row.quantityLabel)}</td>
               <td style="text-align:right; font-weight:600;">${fmtMoney(row.unitPrice)}</td>
               <td style="text-align:right;">${escapeTemplateHtml(row.amountLabel)}</td>
