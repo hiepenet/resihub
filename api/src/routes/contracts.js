@@ -11,6 +11,10 @@ import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn, roundVND } from '../services/pricing.js';
 import { buildExpectedInvoiceSchedule } from '../services/invoiceSchedule.js';
 import {
+  escapeTemplateHtml,
+  buildContractTemplateServiceRows,
+} from '../services/contractTemplate.js';
+import {
   getUserRoleCodes,
   getOwnerBuildingIds,
   getManagerBuildingIds,
@@ -3779,19 +3783,49 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     );
     const occupants = occRes.rows;
 
-    // Lấy bảng giá dịch vụ
-    const spRes = await client.query(
-      `SELECT service_code, unit_price, effective_from
-       FROM contract_service_price
-       WHERE contract_id = $1
-       ORDER BY service_code ASC`,
-      [id]
-    );
-    const servicePrices = spRes.rows;
+    // Lấy bảng giá dịch vụ ghi đè, gói dịch vụ đăng ký đi kèm, đồng hồ điện/nước và danh mục chuẩn
+    const [spRes, subRes, meterRes, utilCatRes] = await Promise.all([
+      client.query(
+        `SELECT service_code, unit_price, effective_from
+         FROM contract_service_price
+         WHERE contract_id = $1
+         ORDER BY effective_from ASC, service_code ASC`,
+        [id]
+      ),
+      client.query(
+        `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note,
+                sc.code AS service_code,
+                sc.name AS service_name,
+                sc.category AS service_category,
+                sc.billing_type,
+                sc.unit
+         FROM service_subscription ss
+         JOIN service_catalog sc ON sc.id = ss.service_id
+         WHERE ss.contract_id = $1
+         ORDER BY ss.created_at ASC`,
+        [id]
+      ),
+      client.query(
+        `SELECT meter_type, unit, unit_price
+         FROM meter
+         WHERE apartment_id = $1 AND status = 'ACTIVE'
+         ORDER BY meter_type ASC`,
+        [c.apartment_id]
+      ),
+      client.query(
+        `SELECT code, name, unit, unit_price
+         FROM service_catalog
+         WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
+           AND code IN ('ELECTRICITY', 'WATER')
+           AND is_active = TRUE`,
+        [c.building_id]
+      ),
+    ]);
 
     const fmtDate = (d) => {
       if (!d) return '—';
       const dt = new Date(d);
+      if (Number.isNaN(dt.getTime())) return '—';
       return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
     };
 
@@ -3807,37 +3841,33 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
 
     const contractCode = `HĐ-${c.id.slice(0, 8).toUpperCase()}`;
 
-    const serviceCodeLabels = {
-      ELECTRICITY: { name: 'Điện sinh hoạt', unit: 'kWh' },
-      ELEC: { name: 'Điện sinh hoạt', unit: 'kWh' },
-      WATER: { name: 'Nước sinh hoạt', unit: 'm³' },
-      INTERNET: { name: 'Internet / Wifi', unit: 'tháng' },
-      MOTORBIKE_PARKING: { name: 'Gửi xe máy xăng', unit: 'xe/tháng' },
-      ELECTRICBIKE_PARKING: { name: 'Gửi xe đạp/máy điện', unit: 'xe/tháng' },
-      TRASH: { name: 'Phí thu gom rác', unit: 'tháng' },
-      COMMON_SERVICE: { name: 'Dịch vụ chung', unit: 'tháng' },
-      CLEANING: { name: 'Vệ sinh & Rác thải', unit: 'tháng' },
-      PARKING_MOTO: { name: 'Gửi xe máy', unit: 'xe/tháng' },
-      PARKING_CAR: { name: 'Gửi xe ô tô', unit: 'xe/tháng' },
-      MANAGEMENT: { name: 'Phí quản lý tòa nhà', unit: 'tháng' },
-    };
+    const templateServiceRows = buildContractTemplateServiceRows({
+      contractStartDate: formatContractDateOnly(c.start_date),
+      subscriptions: subRes.rows,
+      servicePrices: spRes.rows,
+      meters: meterRes.rows,
+      utilityCatalog: utilCatRes.rows,
+    });
 
-    const serviceRowsHtml = servicePrices.length > 0
-      ? servicePrices.map((sp, idx) => {
-          const codeKey = sp.service_code;
-          const meta = serviceCodeLabels[codeKey] || { name: codeKey, unit: 'tháng' };
+    const serviceRowsHtml = templateServiceRows.length > 0
+      ? templateServiceRows.map((row, idx) => {
+          const noteHtml = row.note
+            ? `<div style="font-size:10.5pt; color:#475569; margin-top:2px;">Ghi chú: ${escapeTemplateHtml(row.note)}</div>`
+            : '';
+          const codeHtml = row.code ? ` (${escapeTemplateHtml(row.code)})` : '';
           return `
             <tr>
               <td style="text-align:center;">${idx + 1}</td>
-              <td><strong>${meta.name}</strong> (${codeKey})</td>
-              <td style="text-align:center;">${meta.unit}</td>
-              <td style="text-align:right; font-weight:600;">${fmtMoney(sp.unit_price)}</td>
-              <td style="text-align:center;">${fmtDate(sp.effective_from)}</td>
+              <td><strong>${escapeTemplateHtml(row.name)}</strong>${codeHtml}${noteHtml}</td>
+              <td style="text-align:center;">${escapeTemplateHtml(row.quantityLabel)}</td>
+              <td style="text-align:right; font-weight:600;">${fmtMoney(row.unitPrice)}</td>
+              <td style="text-align:right;">${escapeTemplateHtml(row.amountLabel)}</td>
+              <td style="text-align:center;">${fmtDate(row.effectiveFrom)}</td>
             </tr>
           `;
         }).join('')
       : `
-        <tr><td colspan="5" style="text-align:center; color:#666; font-style:italic;">Theo biểu phí tiêu chuẩn của tòa nhà.</td></tr>
+        <tr><td colspan="6" style="text-align:center; color:#666; font-style:italic;">Theo biểu phí tiêu chuẩn của tòa nhà.</td></tr>
       `;
 
     const occupantsHtml = occupants.length > 0
@@ -3857,10 +3887,10 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
             ${occupants.map((occ, i) => `
               <tr>
                 <td style="text-align:center;">${i + 1}</td>
-                <td><strong>${occ.full_name}</strong></td>
-                <td>${occ.relationship || 'Khác'}</td>
-                <td>${occ.phone || '—'}</td>
-                <td>${occ.id_number || '—'}</td>
+                <td><strong>${escapeTemplateHtml(occ.full_name)}</strong></td>
+                <td>${escapeTemplateHtml(occ.relationship || 'Khác')}</td>
+                <td>${escapeTemplateHtml(occ.phone || '—')}</td>
+                <td>${escapeTemplateHtml(occ.id_number || '—')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -3868,11 +3898,24 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
       `
       : '';
 
+    const safeAptCode = escapeTemplateHtml(c.apartment_code);
+    const safeBuildingName = escapeTemplateHtml(c.building_name);
+    const safeBuildingAddress = escapeTemplateHtml(c.building_address);
+    const safeOrgName = escapeTemplateHtml(c.org_name || 'Ban Quản Lý Tòa Nhà');
+    const safeOrgShort = escapeTemplateHtml(c.org_name || 'Ban Quản Lý');
+    const safeTenantName = escapeTemplateHtml(c.tenant_name);
+    const safeTenantIdNumber = escapeTemplateHtml(c.tenant_id_number || '—');
+    const safeTenantPhone = escapeTemplateHtml(c.tenant_phone || '—');
+    const safeTenantEmail = escapeTemplateHtml(c.tenant_email || '—');
+    const contractNoteHtml = c.note
+      ? `<p>6.3. Ghi chú bổ sung: ${escapeTemplateHtml(c.note)}</p>`
+      : '';
+
     const html = `<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
-  <title>Hợp đồng thuê căn hộ - ${c.apartment_code}</title>
+  <title>Hợp đồng thuê căn hộ - ${safeAptCode}</title>
   <style>
     @page {
       size: A4;
@@ -4048,7 +4091,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
 <body>
   <div class="toolbar">
     <div style="font-weight:600; font-size:14px;">
-      Mẫu hợp đồng thuê căn hộ: <strong>${c.apartment_code}</strong> — ${c.building_name} (${contractCode})
+      Mẫu hợp đồng thuê căn hộ: <strong>${safeAptCode}</strong> — ${safeBuildingName} (${contractCode})
     </div>
     <button class="btn-print" onclick="window.print()">
       🖨️ In hợp đồng (Ctrl + P)
@@ -4063,48 +4106,48 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
       <div class="header-motto">Độc lập – Tự do – Hạnh phúc</div>
       <div class="divider"></div>
       <div class="contract-title">HỢP ĐỒNG THUÊ CĂN HỘ</div>
-      <div class="contract-code">Số: ${contractCode} / ${c.building_name}</div>
+      <div class="contract-code">Số: ${contractCode} / ${safeBuildingName}</div>
     </div>
 
-    <p><em>Hôm nay, ngày ${new Date().getDate()} tháng ${new Date().getMonth() + 1} năm ${new Date().getFullYear()}, tại ${c.building_name}, chúng tôi gồm có:</em></p>
+    <p><em>Hôm nay, ngày ${new Date().getDate()} tháng ${new Date().getMonth() + 1} năm ${new Date().getFullYear()}, tại ${safeBuildingName}, chúng tôi gồm có:</em></p>
 
     <h3>BÊN CHO THUÊ (BÊN A)</h3>
     <div class="field-row">
       <div class="field-label">Đơn vị quản lý:</div>
-      <div class="field-value"><strong>${c.org_name || 'Ban Quản Lý Tòa Nhà'}</strong></div>
+      <div class="field-value"><strong>${safeOrgName}</strong></div>
     </div>
     <div class="field-row">
       <div class="field-label">Tòa nhà:</div>
-      <div class="field-value">${c.building_name}</div>
+      <div class="field-value">${safeBuildingName}</div>
     </div>
     <div class="field-row">
       <div class="field-label">Địa chỉ:</div>
-      <div class="field-value">${c.building_address}</div>
+      <div class="field-value">${safeBuildingAddress}</div>
     </div>
 
     <h3>BÊN THUÊ (BÊN B)</h3>
     <div class="field-row">
       <div class="field-label">Họ và tên:</div>
-      <div class="field-value"><strong>${c.tenant_name}</strong></div>
+      <div class="field-value"><strong>${safeTenantName}</strong></div>
     </div>
     <div class="field-row">
       <div class="field-label">Số CCCD / Hộ chiếu:</div>
-      <div class="field-value">${c.tenant_id_number || '—'}</div>
+      <div class="field-value">${safeTenantIdNumber}</div>
     </div>
     <div class="field-row">
       <div class="field-label">Số điện thoại:</div>
-      <div class="field-value">${c.tenant_phone}</div>
+      <div class="field-value">${safeTenantPhone}</div>
     </div>
     <div class="field-row">
       <div class="field-label">Email:</div>
-      <div class="field-value">${c.tenant_email || '—'}</div>
+      <div class="field-value">${safeTenantEmail}</div>
     </div>
 
     ${occupantsHtml}
 
     <h3>ĐIỀU 1: ĐỐI TƯỢNG HỢP ĐỒNG VÀ MỤC ĐÍCH THUÊ</h3>
-    <p>1.1. Bên A đồng ý cho Bên B thuê căn hộ số <strong>${c.apartment_code}</strong>, thuộc tòa nhà <strong>${c.building_name}</strong>, địa chỉ: ${c.building_address}.</p>
-    <p>1.2. Diện tích sàn căn hộ: <strong>${c.area_m2 || '—'} m²</strong>, số phòng ngủ: <strong>${c.bedrooms || 1}</strong>.</p>
+    <p>1.1. Bên A đồng ý cho Bên B thuê căn hộ số <strong>${safeAptCode}</strong>, thuộc tòa nhà <strong>${safeBuildingName}</strong>, địa chỉ: ${safeBuildingAddress}.</p>
+    <p>1.2. Diện tích sàn căn hộ: <strong>${escapeTemplateHtml(c.area_m2 || '—')} m²</strong>, số phòng ngủ: <strong>${escapeTemplateHtml(c.bedrooms || 1)}</strong>.</p>
     <p>1.3. Mục đích thuê: Dùng để ở sinh hoạt hợp pháp, không sử dụng vào mục đích kinh doanh trái phép hoặc làm nơi chứa hàng nguy hiểm.</p>
 
     <h3>ĐIỀU 2: THỜI HẠN THUÊ</h3>
@@ -4129,11 +4172,12 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     <table class="bordered-table">
       <thead>
         <tr>
-          <th style="width:40px; text-align:center;">STT</th>
-          <th>Dịch vụ</th>
-          <th style="width:100px; text-align:center;">Đơn vị</th>
-          <th style="width:140px; text-align:right;">Đơn giá áp dụng</th>
-          <th style="width:120px; text-align:center;">Hiệu lực từ</th>
+          <th style="width:38px; text-align:center;">STT</th>
+          <th>Dịch vụ &amp; Ghi chú</th>
+          <th style="width:110px; text-align:center;">Số lượng / ĐVT</th>
+          <th style="width:125px; text-align:right;">Đơn giá áp dụng</th>
+          <th style="width:145px; text-align:right;">Thành tiền / Cách tính</th>
+          <th style="width:105px; text-align:center;">Hiệu lực từ</th>
         </tr>
       </thead>
       <tbody>
@@ -4144,20 +4188,21 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     <h3>ĐIỀU 6: ĐIỀU KHOẢN THI HÀNH VÀ CAM KẾT CHUNG</h3>
     <p>6.1. Hai bên cam kết thực hiện đúng và đầy đủ các điều khoản đã thỏa thuận trong hợp đồng.</p>
     <p>6.2. Hợp đồng được lập thành 02 (hai) bản có giá trị pháp lý như nhau, mỗi bên giữ 01 bản để thực hiện.</p>
+    ${contractNoteHtml}
 
     <div class="signature-grid">
       <div class="signature-box">
         <strong>ĐẠI DIỆN BÊN A</strong><br>
         <em>(Ký, ghi rõ họ tên và đóng dấu)</em>
         <div class="signature-space"></div>
-        <p><strong>${c.org_name || 'Ban Quản Lý'}</strong></p>
+        <p><strong>${safeOrgShort}</strong></p>
       </div>
 
       <div class="signature-box">
         <strong>ĐẠI DIỆN BÊN B</strong><br>
         <em>(Ký và ghi rõ họ tên)</em>
         <div class="signature-space"></div>
-        <p><strong>${c.tenant_name}</strong></p>
+        <p><strong>${safeTenantName}</strong></p>
       </div>
     </div>
   </div>
