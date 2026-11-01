@@ -9,6 +9,8 @@ import {
   Clock,
   CheckCircle2,
   ArrowRight,
+  Sparkles,
+  Home,
 } from 'lucide-react';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -30,7 +32,7 @@ function getNotificationMeta(type = '') {
       actionLabel: 'Xem hóa đơn',
     };
   }
-  if (upper.includes('CONTRACT') || upper.includes('DEPOSIT')) {
+  if (upper.includes('CONTRACT') || upper.includes('DEPOSIT') || upper.includes('SETTLEMENT')) {
     return {
       icon: FileText,
       color: 'bg-indigo-50 text-indigo-600 border-indigo-100',
@@ -46,6 +48,24 @@ function getNotificationMeta(type = '') {
       label: 'Kỹ thuật & Bảo trì',
       targetTab: 'maintenance',
       actionLabel: 'Xem báo hỏng',
+    };
+  }
+  if (upper.includes('SERVICE_UPDATE') || upper.includes('SUBSCRIPTION')) {
+    return {
+      icon: Sparkles,
+      color: 'bg-emerald-50 text-emerald-600 border-emerald-100',
+      label: 'Dịch vụ tiện ích',
+      targetTab: 'services',
+      actionLabel: 'Xem dịch vụ',
+    };
+  }
+  if (upper.includes('APPLICATION') || upper.includes('ONBOARDING') || upper.includes('RESERVATION')) {
+    return {
+      icon: Home,
+      color: 'bg-sky-50 text-sky-600 border-sky-100',
+      label: 'Hồ sơ & Giữ chỗ',
+      targetTab: 'overview',
+      actionLabel: 'Xem tổng quan',
     };
   }
   return {
@@ -182,6 +202,11 @@ export function NotificationsTab({ onNavigateTab }) {
                             {n.title}
                           </h4>
                           <Badge variant={isUnread ? 'sky' : 'slate'}>{meta.label}</Badge>
+                          {n.payload?.sender_name ? (
+                            <span className="text-[11px] text-slate-500">
+                              • Gửi bởi: <strong className="text-slate-700">{n.payload.sender_name}</strong>
+                            </span>
+                          ) : null}
                         </div>
 
                         <span

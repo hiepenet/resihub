@@ -14,7 +14,7 @@ export function ProfileModal({ open, onClose }) {
   const toast = useToast();
 
   const [tab, setTab] = useState('info');
-  const [form, setForm] = useState({ full_name: '', phone: '', email: '', dob: '' });
+  const [form, setForm] = useState({ full_name: '', phone: '', email: '', dob: '', id_number: '' });
   const [pwdForm, setPwdForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
   const [saving, setSaving] = useState(false);
 
@@ -29,6 +29,7 @@ export function ProfileModal({ open, onClose }) {
           phone: p.phone || user?.phone || '',
           email: p.email || user?.email || '',
           dob: p.dob ? String(p.dob).slice(0, 10) : '',
+          id_number: p.id_number || user?.id_number || '',
         });
       })
       .catch(() => {
@@ -37,6 +38,7 @@ export function ProfileModal({ open, onClose }) {
           phone: user?.phone || '',
           email: user?.email || '',
           dob: '',
+          id_number: user?.id_number || '',
         });
       });
   }, [open, user]);
@@ -112,12 +114,19 @@ export function ProfileModal({ open, onClose }) {
               onChange={(e) => setForm({ ...form, email: e.target.value })}
             />
           </div>
-          <Input
-            label="Ngày sinh"
-            type="date"
-            value={form.dob}
-            onChange={(e) => setForm({ ...form, dob: e.target.value })}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <Input
+              label="Ngày sinh"
+              type="date"
+              value={form.dob}
+              onChange={(e) => setForm({ ...form, dob: e.target.value })}
+            />
+            <Input
+              label="Số CCCD / Hộ chiếu"
+              value={form.id_number || '—'}
+              disabled
+            />
+          </div>
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={onClose}>
               Đóng

@@ -13,6 +13,9 @@ import {
   Package,
   Info,
   CheckCircle2,
+  Zap,
+  Droplets,
+  Building2,
 } from 'lucide-react';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -26,6 +29,7 @@ import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
+import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const CATEGORY_META = {
@@ -35,6 +39,9 @@ const CATEGORY_META = {
   AMENITY: { label: 'Tiện ích nội khu', icon: Dumbbell, color: 'bg-purple-50 text-purple-600' },
   SECURITY: { label: 'Thẻ từ & An ninh', icon: Shield, color: 'bg-amber-50 text-amber-600' },
   UTILITY: { label: 'Điện / Nước / Năng lượng', icon: Sparkles, color: 'bg-sky-50 text-sky-600' },
+  ELECTRICITY: { label: 'Điện sinh hoạt', icon: Zap, color: 'bg-amber-50 text-amber-600' },
+  WATER: { label: 'Nước sinh hoạt', icon: Droplets, color: 'bg-sky-50 text-sky-600' },
+  MANAGEMENT: { label: 'Phí quản lý vận hành', icon: Building2, color: 'bg-indigo-50 text-indigo-600' },
   OTHER: { label: 'Dịch vụ khác', icon: Package, color: 'bg-slate-100 text-slate-600' },
 };
 
@@ -119,6 +126,12 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     loadServices();
   }, [loadServices]);
 
+  const minSubscribeDate = maxDateStr(
+    toInputDate(new Date()),
+    toDateOnlyStr(contract?.start_date)
+  );
+  const maxSubscribeDate = toDateOnlyStr(contract?.end_date);
+
   const openSubscribeModal = useCallback(
     (serviceId = '') => {
       if (!hasActiveContract) {
@@ -129,12 +142,12 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
       setSubForm({
         service_id: serviceId || selectable[0]?.id || catalog[0]?.id || '',
         quantity: 1,
-        start_date: toInputDate(new Date()),
+        start_date: minSubscribeDate || toInputDate(new Date()),
         note: '',
       });
       setSubModalOpen(true);
     },
-    [catalog, hasActiveContract, toast]
+    [catalog, hasActiveContract, minSubscribeDate, toast]
   );
 
   useEffect(() => {
@@ -165,30 +178,57 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     [catalog, subForm.service_id]
   );
 
+  const subscribeDateError = useMemo(() => {
+    if (!subForm.start_date) return '';
+    if (minSubscribeDate && subForm.start_date < minSubscribeDate) {
+      return `Ngày bắt đầu sử dụng không được nhỏ hơn ${formatDateVi(minSubscribeDate)}.`;
+    }
+    if (maxSubscribeDate && subForm.start_date > maxSubscribeDate) {
+      return `Ngày bắt đầu sử dụng không được vượt quá ngày kết thúc hợp đồng (${formatDateVi(maxSubscribeDate)}).`;
+    }
+    return '';
+  }, [subForm.start_date, minSubscribeDate, maxSubscribeDate]);
+
   const subscribeProrata = useMemo(() => {
-    if (!selectedCatalogItem) return null;
+    if (!selectedCatalogItem || subscribeDateError) return null;
     return calculateProrataDetails(
       selectedCatalogItem.unit_price,
       subForm.quantity,
       subForm.start_date,
       'subscribe'
     );
-  }, [selectedCatalogItem, subForm.quantity, subForm.start_date]);
+  }, [selectedCatalogItem, subForm.quantity, subForm.start_date, subscribeDateError]);
+
+  const minCancelEndDate = maxDateStr(
+    toInputDate(new Date()),
+    toDateOnlyStr(cancelTarget?.start_date)
+  );
+  const cancelDateError = cancelTarget
+    ? getDateOrderError(minCancelEndDate, cancelForm.end_date, {
+        strictAfter: false,
+        startLabel: `Mốc tối thiểu (${formatDateVi(minCancelEndDate)})`,
+        endLabel: 'Ngày kết thúc sử dụng',
+      })
+    : '';
 
   const cancelProrata = useMemo(() => {
-    if (!cancelTarget) return null;
+    if (!cancelTarget || cancelDateError) return null;
     return calculateProrataDetails(
       cancelTarget.unit_price,
       cancelTarget.quantity,
       cancelForm.end_date,
       'cancel'
     );
-  }, [cancelTarget, cancelForm.end_date]);
+  }, [cancelTarget, cancelForm.end_date, cancelDateError]);
 
   const handleSubscribeSubmit = async (e) => {
     e.preventDefault();
     if (!subForm.service_id) {
       toast.warning('Vui lòng chọn dịch vụ muốn đăng ký.');
+      return;
+    }
+    if (subscribeDateError) {
+      toast.warning(subscribeDateError);
       return;
     }
     setSubmitting(true);
@@ -215,7 +255,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const openCancelModal = (sub) => {
     setCancelTarget(sub);
     setCancelForm({
-      end_date: toInputDate(new Date()),
+      end_date: maxDateStr(toInputDate(new Date()), toDateOnlyStr(sub?.start_date)),
       note: '',
     });
   };
@@ -223,6 +263,10 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const handleConfirmCancel = async (e) => {
     e.preventDefault();
     if (!cancelTarget) return;
+    if (cancelDateError) {
+      toast.warning(cancelDateError);
+      return;
+    }
     setCancelling(true);
     try {
       const res = await residentService.cancelService(cancelTarget.id, {
@@ -298,7 +342,13 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                         <p className="text-xs text-slate-500 mt-0.5">
                           Số lượng: <strong className="text-slate-700">{sub.quantity}</strong>{' '}
                           {sub.unit || 'gói'} • Đơn giá: {formatMoney(sub.unit_price)}
+                          {sub.apartment_code ? ` • Căn ${sub.apartment_code}` : ''}
                         </p>
+                        {sub.note ? (
+                          <p className="text-xs text-slate-600 mt-1 bg-slate-50 border border-slate-200/70 rounded-lg px-2.5 py-1 whitespace-pre-line break-words">
+                            Ghi chú: {sub.note}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -307,6 +357,11 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                     <div className="space-y-0.5">
                       <p className="text-slate-500">
                         Bắt đầu: <strong className="text-slate-700">{formatDate(sub.start_date)}</strong>
+                        {sub.end_date ? (
+                          <>
+                            {' • '}Kết thúc: <strong className="text-slate-700">{formatDate(sub.end_date)}</strong>
+                          </>
+                        ) : null}
                         {Number(sub.prorata_amount) > 0
                           ? ` • Kỳ đầu (Pro-rata): ${formatMoney(sub.prorata_amount)}`
                           : ''}
@@ -351,15 +406,22 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                 {historySubscriptions.map((h) => (
                   <div
                     key={h.id}
-                    className="px-3.5 py-2.5 rounded-lg bg-slate-50 border border-slate-200/60 flex items-center justify-between gap-2 text-xs text-slate-500"
+                    className="px-3.5 py-2.5 rounded-lg bg-slate-50 border border-slate-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500"
                   >
-                    <div>
-                      <span className="font-semibold text-slate-700">{h.service_name}</span>
-                      <span>
-                        {' '}
-                        (SL: {h.quantity} • Từ {formatDate(h.start_date)}
-                        {h.end_date ? ` đến ${formatDate(h.end_date)}` : ''})
-                      </span>
+                    <div className="space-y-0.5 min-w-0">
+                      <div>
+                        <span className="font-semibold text-slate-700">{h.service_name}</span>
+                        <span>
+                          {' '}
+                          (SL: {h.quantity} • Từ {formatDate(h.start_date)}
+                          {h.end_date ? ` đến ${formatDate(h.end_date)}` : ''})
+                        </span>
+                      </div>
+                      {h.note ? (
+                        <p className="text-slate-600 whitespace-pre-line break-words">
+                          Ghi chú: {h.note}
+                        </p>
+                      ) : null}
                     </div>
                     <StatusBadge status={h.status} domain="subscription" />
                   </div>
@@ -412,7 +474,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                       >
                         <CatIcon className="w-5 h-5" />
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5">
                         {alreadySubscribed ? (
                           <Badge variant="emerald" dot>
                             Đã đăng ký
@@ -423,10 +485,17 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                     </div>
 
                     <div>
-                      <h4 className="text-sm font-bold text-slate-900">{svc.name}</h4>
-                      <p className="text-xs text-slate-500 mt-1 line-clamp-2">
-                        {svc.description || `Mã DV: ${svc.code}`}
-                      </p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="text-sm font-bold text-slate-900">{svc.name}</h4>
+                        {svc.code ? (
+                          <span className="text-[11px] font-mono text-slate-400">#{svc.code}</span>
+                        ) : null}
+                      </div>
+                      {svc.description ? (
+                        <p className="text-xs text-slate-500 mt-1 leading-relaxed break-words">
+                          {svc.description}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
 
@@ -473,7 +542,12 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             <Button variant="outline" onClick={() => setSubModalOpen(false)} disabled={submitting}>
               Hủy
             </Button>
-            <Button icon={CheckCircle2} onClick={handleSubscribeSubmit} loading={submitting}>
+            <Button
+              icon={CheckCircle2}
+              onClick={handleSubscribeSubmit}
+              loading={submitting}
+              disabled={Boolean(subscribeDateError)}
+            >
               Xác nhận đăng ký
             </Button>
           </>
@@ -508,7 +582,9 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
               type="date"
               required
               label="Ngày bắt đầu sử dụng"
-              min={toInputDate(new Date())}
+              min={minSubscribeDate || undefined}
+              max={maxSubscribeDate || undefined}
+              error={subscribeDateError}
               value={subForm.start_date}
               onChange={(e) => setSubForm((s) => ({ ...s, start_date: e.target.value }))}
             />
@@ -570,7 +646,12 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             <Button variant="outline" onClick={() => setCancelTarget(null)} disabled={cancelling}>
               Quay lại
             </Button>
-            <Button variant="danger" onClick={handleConfirmCancel} loading={cancelling}>
+            <Button
+              variant="danger"
+              onClick={handleConfirmCancel}
+              loading={cancelling}
+              disabled={Boolean(cancelDateError)}
+            >
               Xác nhận hủy dịch vụ
             </Button>
           </>
@@ -581,7 +662,8 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             <Input
               type="date"
               label="Ngày kết thúc sử dụng"
-              min={toInputDate(new Date())}
+              min={minCancelEndDate || undefined}
+              error={cancelDateError}
               value={cancelForm.end_date}
               icon={Calendar}
               onChange={(e) => setCancelForm((s) => ({ ...s, end_date: e.target.value }))}

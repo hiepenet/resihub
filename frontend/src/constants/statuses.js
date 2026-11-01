@@ -43,7 +43,7 @@ export const CONTRACT_STATUS = {
   PENDING_APPROVAL: { label: 'Chờ phê duyệt', variant: 'amber' },
   ACTIVE: { label: 'Đang hiệu lực', variant: 'emerald' },
   RENEWAL_PENDING: { label: 'Chờ duyệt gia hạn', variant: 'sky' },
-  TERMINATION_PENDING: { label: 'Chờ duyệt chấm dứt', variant: 'amber' },
+  TERMINATION_PENDING: { label: 'Chờ bàn giao chấm dứt', variant: 'amber' },
   EXPIRED: { label: 'Đã hết hạn', variant: 'slate' },
   TERMINATED: { label: 'Đã thanh lý', variant: 'red' },
   CANCELLED: { label: 'Đã hủy', variant: 'slate' },
@@ -148,14 +148,26 @@ export const SUBSCRIPTION_STATUS = {
 
 export const TENANT_STATUS = {
   ACTIVE: { label: 'Đang thuê', variant: 'emerald' },
-  PENDING: { label: 'Chờ nhận phòng', variant: 'amber' },
+  APPROVED: { label: 'Đã duyệt (Chờ lập HĐ)', variant: 'sky' },
+  PENDING: { label: 'Chờ duyệt / Thiếu giấy tờ', variant: 'amber' },
+  REJECTED: { label: 'Từ chối hồ sơ', variant: 'red' },
   INACTIVE: { label: 'Đã trả phòng', variant: 'slate' },
-  MOVED_OUT: { label: 'Đã chuyển đi', variant: 'slate' },
+  MOVED_OUT: { label: 'Đã trả phòng', variant: 'slate' },
+  MERGED: { label: 'Đã gộp hồ sơ', variant: 'slate' },
 };
 
 export const USER_STATUS = {
   ACTIVE: { label: 'Đang hoạt động', variant: 'emerald' },
   SUSPENDED: { label: 'Tạm khóa', variant: 'red' },
+};
+
+export const RESERVATION_STATUS = {
+  HELD: { label: 'Đang giữ chỗ', variant: 'amber' },
+  CONVERTED: { label: 'Đã lên hợp đồng', variant: 'emerald' },
+  EXPIRED: { label: 'Hết hạn giữ chỗ', variant: 'slate' },
+  CANCELLED: { label: 'Đã hủy giữ chỗ', variant: 'slate' },
+  REFUNDED: { label: 'Đã hoàn cọc giữ chỗ', variant: 'sky' },
+  FORFEITED: { label: 'Thu giữ cọc (Bỏ cọc)', variant: 'red' },
 };
 
 export const ALL_STATUS_MAPS = {
@@ -165,6 +177,7 @@ export const ALL_STATUS_MAPS = {
   invoice: INVOICE_STATUS,
   payment: PAYMENT_STATUS,
   receivable: RECEIVABLE_STATUS,
+  reservation: RESERVATION_STATUS,
   service_request: SERVICE_REQUEST_STATUS,
   priority: SERVICE_REQUEST_PRIORITY,
   subscription: SUBSCRIPTION_STATUS,

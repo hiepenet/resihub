@@ -195,7 +195,7 @@ export function ReportsPage() {
   const agingChartData = useMemo(() => {
     const rows = reportData.aging_by_building || [];
     return {
-      labels: rows.map((r) => `${r.building_code} — ${r.building_name}`),
+      labels: rows.map((r) => r.building_code || r.building_name),
       datasets: [
         {
           label: '0 – 30 ngày',
@@ -321,7 +321,8 @@ export function ReportsPage() {
         <StatsCard
           title="Lũy kế thực thu (12T)"
           value={formatCompactMoney(overviewKpis.totalCollected12m)}
-          subtext={`Hiệu suất thu hồi đạt ${overviewKpis.collectionRate}%`}
+          valueTitle={formatMoney(overviewKpis.totalCollected12m)}
+          subtext={`${formatMoney(overviewKpis.totalCollected12m)} • Thu hồi ${overviewKpis.collectionRate}%`}
           icon={TrendingUp}
           color="emerald"
         />
@@ -603,7 +604,7 @@ export function ReportsPage() {
                 sortable: true,
                 render: (r) => (
                   <div>
-                    <p className="font-semibold text-slate-900">{r.building_name}</p>
+                    <p className="font-semibold text-slate-900 break-words">{r.building_name}</p>
                     <span className="font-mono text-xs text-slate-500">{r.building_code}</span>
                   </div>
                 ),
@@ -611,37 +612,37 @@ export function ReportsPage() {
               {
                 key: 'bucket_0_30',
                 label: '0 – 30 ngày',
-                className: 'text-right font-mono text-sky-700',
-                headerClassName: 'text-right',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-sky-700',
+                headerClassName: 'text-right whitespace-nowrap',
                 render: (r) => formatMoney(r.bucket_0_30),
               },
               {
                 key: 'bucket_31_60',
                 label: '31 – 60 ngày',
-                className: 'text-right font-mono text-amber-700',
-                headerClassName: 'text-right',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-amber-700',
+                headerClassName: 'text-right whitespace-nowrap',
                 render: (r) => formatMoney(r.bucket_31_60),
               },
               {
                 key: 'bucket_61_90',
                 label: '61 – 90 ngày',
-                className: 'text-right font-mono text-orange-700',
-                headerClassName: 'text-right',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-orange-700',
+                headerClassName: 'text-right whitespace-nowrap',
                 render: (r) => formatMoney(r.bucket_61_90),
               },
               {
                 key: 'bucket_over_90',
                 label: '> 90 ngày',
-                className: 'text-right font-mono text-rose-700 font-semibold',
-                headerClassName: 'text-right',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-rose-700 font-semibold',
+                headerClassName: 'text-right whitespace-nowrap',
                 render: (r) => formatMoney(r.bucket_over_90),
               },
               {
                 key: 'total_debt',
                 label: 'Tổng dư nợ',
                 sortable: true,
-                className: 'text-right font-mono font-bold text-slate-900',
-                headerClassName: 'text-right',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap font-bold text-slate-900',
+                headerClassName: 'text-right whitespace-nowrap',
                 render: (r) => formatMoney(r.total_debt),
               },
             ]}

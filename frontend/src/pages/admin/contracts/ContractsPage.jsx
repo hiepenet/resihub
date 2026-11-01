@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   FileText,
@@ -15,12 +15,14 @@ import {
   Calendar,
   Users,
   UserPlus,
+  Trash2,
   ShieldCheck,
   Search,
   Bookmark,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -40,6 +42,18 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, exportToCsv } from '../../../utils/format';
 import {
+  addDaysStr,
+  addMonthsClampedStr,
+  extractApartmentBusyIntervals,
+  findFirstAvailableStartDate,
+  findOverlappingBusyIntervals,
+  formatBusyOverlapError,
+  getDateOrderError,
+  maxDateStr,
+  minDateStr,
+  toDateOnlyStr,
+} from '../../../utils/dateRange';
+import {
   extractErrorMessage,
   isValidPhone,
   normalizePhone,
@@ -49,10 +63,11 @@ import {
 
 const CONTRACT_STATUS_OPTIONS = [
   { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
+  { value: 'PENDING_ALL', label: 'Tất cả chờ phê duyệt (Giá / Gia hạn / Chấm dứt)' },
   { value: 'PENDING_APPROVAL', label: 'Chờ phê duyệt giá (PENDING_APPROVAL)' },
   { value: 'ACTIVE', label: 'Đang hiệu lực (ACTIVE)' },
   { value: 'RENEWAL_PENDING', label: 'Chờ duyệt gia hạn (RENEWAL_PENDING)' },
-  { value: 'TERMINATION_PENDING', label: 'Chờ duyệt chấm dứt (TERMINATION_PENDING)' },
+  { value: 'TERMINATION_PENDING', label: 'Chờ bàn giao chấm dứt (TERMINATION_PENDING)' },
   { value: 'EXPIRED', label: 'Đã hết hạn (EXPIRED)' },
   { value: 'TERMINATED', label: 'Đã thanh lý (TERMINATED)' },
   { value: 'CANCELLED', label: 'Đã hủy (CANCELLED)' },
@@ -78,20 +93,22 @@ const REQUEST_STATUS_BADGE = {
 };
 
 function toDateStr(val) {
-  if (!val) return '';
-  const s = String(val);
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  const d = new Date(val);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toISOString().slice(0, 10);
+  return toDateOnlyStr(val);
 }
 
 function addMonthsStr(dateStr, months) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return '';
-  d.setMonth(d.getMonth() + months);
-  return d.toISOString().slice(0, 10);
+  return addMonthsClampedStr(dateStr, months);
+}
+
+function computeSuggestedContractEndDate(startStr, busyIntervals = [], defaultMonths = 12) {
+  if (!startStr) return '';
+  const targetEnd = addMonthsClampedStr(startStr, defaultMonths);
+  const nextBusy = (busyIntervals || []).find((iv) => iv?.from && iv.from > startStr);
+  if (!nextBusy) return targetEnd;
+  const maxBeforeNext = addDaysStr(nextBusy.from, -1);
+  const minValidEnd = addDaysStr(startStr, 1);
+  if (maxBeforeNext < minValidEnd) return minValidEnd;
+  return minDateStr(targetEnd, maxBeforeNext);
 }
 
 function getAptSelectStatusLabel(status) {
@@ -108,6 +125,15 @@ function getAptSelectStatusLabel(status) {
       return status;
   }
 }
+
+const INLINE_RELATIONSHIP_OPTIONS = [
+  { value: 'family', label: 'Gia đình / Người thân' },
+  { value: 'spouse', label: 'Vợ / Chồng' },
+  { value: 'child', label: 'Con cái' },
+  { value: 'roommate', label: 'Bạn cùng phòng' },
+  { value: 'friend', label: 'Bạn bè' },
+  { value: 'other', label: 'Khác' },
+];
 
 const INITIAL_NEW_TENANT = {
   full_name: '',
@@ -165,8 +191,10 @@ export function ContractsPage() {
     message: '',
   });
   const [dupChecking, setDupChecking] = useState(false);
+  const [inlineOccupants, setInlineOccupants] = useState([]);
+  const userEditedCreateDatesRef = useRef(false);
 
-  const [todayStr] = useState(() => new Date().toISOString().slice(0, 10));
+  const [todayStr] = useState(() => toDateOnlyStr(new Date()));
   const [createForm, setCreateForm] = useState({
     building_id: '',
     apartment_id: '',
@@ -214,6 +242,7 @@ export function ContractsPage() {
   const handleOpenCreate = useCallback(async (preselectAptId = '') => {
     const cleanAptId = typeof preselectAptId === 'string' ? preselectAptId : '';
     const defaultBld = selectedBuildingId || '';
+    userEditedCreateDatesRef.current = false;
     setCreateForm({
       building_id: defaultBld,
       apartment_id: cleanAptId,
@@ -239,6 +268,7 @@ export function ContractsPage() {
       duplicates: [],
       message: '',
     });
+    setInlineOccupants([]);
     setCreateErrors({});
     setCreateOpen(true);
 
@@ -354,7 +384,7 @@ export function ContractsPage() {
             (c) =>
               ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'PENDING_APPROVAL', 'DRAFT'].includes(
                 c.status
-              ) && toDateStr(c.end_date) >= todayStr
+              ) && toDateStr(c.terminated_at || c.end_date) >= todayStr
           )
           .sort((a, b) => toDateStr(a.start_date).localeCompare(toDateStr(b.start_date)));
 
@@ -371,23 +401,43 @@ export function ContractsPage() {
           reservations: activeHeldReservations,
         });
 
-        // Nếu mở trực tiếp từ căn đang OCCUPIED / MAINTENANCE, tự động gợi ý ngày bắt đầu sau HĐ hiện tại
-        if (['OCCUPIED', 'MAINTENANCE'].includes(detail.status) && activeOrScheduledContracts.length > 0) {
-          const latestEnd = activeOrScheduledContracts
-            .map((c) => toDateStr(c.end_date))
-            .filter(Boolean)
-            .sort()
-            .pop();
-          if (latestEnd && latestEnd > todayStr) {
-            setCreateForm((prev) => {
-              if (String(prev.apartment_id) !== String(aptId) || prev.start_date > todayStr) return prev;
-              return {
-                ...prev,
-                start_date: latestEnd,
-                end_date: addMonthsStr(latestEnd, 12),
-              };
-            });
-          }
+        // Tự động chọn ngày bắt đầu nằm ngoài mọi khoảng đã thuê / đang giữ chỗ của căn hộ
+        const busyIntervals = extractApartmentBusyIntervals(
+          { contracts: activeOrScheduledContracts, reservations: activeHeldReservations },
+          { todayStr }
+        );
+        const baseSearchDate = ['OCCUPIED', 'MAINTENANCE'].includes(detail.status)
+          ? addDaysStr(todayStr, 1)
+          : todayStr;
+        const suggestedStart = findFirstAvailableStartDate(baseSearchDate, busyIntervals, {
+          minSpanDays: 2,
+        });
+
+        if (suggestedStart) {
+          setCreateForm((prev) => {
+            if (String(prev.apartment_id) !== String(aptId) || prev.reservation_id) {
+              return prev;
+            }
+            const currentOverlaps = findOverlappingBusyIntervals(
+              prev.start_date,
+              prev.end_date,
+              busyIntervals
+            );
+            const invalidForStatus =
+              ['OCCUPIED', 'MAINTENANCE'].includes(detail.status) && prev.start_date <= todayStr;
+            if (
+              userEditedCreateDatesRef.current &&
+              currentOverlaps.length === 0 &&
+              !invalidForStatus
+            ) {
+              return prev;
+            }
+            return {
+              ...prev,
+              start_date: suggestedStart,
+              end_date: computeSuggestedContractEndDate(suggestedStart, busyIntervals, 12),
+            };
+          });
         }
       })
       .catch(() => {
@@ -441,26 +491,24 @@ export function ContractsPage() {
   }, [selectedApartment, createForm.rent_amount]);
 
   const handleSelectApartment = (aptId) => {
+    userEditedCreateDatesRef.current = false;
     const apt = selectableApartments.find((a) => String(a.id) === String(aptId));
-    let nextStart = '';
-    if (apt && ['OCCUPIED', 'MAINTENANCE'].includes(apt.status)) {
-      const openEnds = contracts
-        .filter(
-          (c) =>
-            String(c.apartment_id) === String(aptId) &&
-            ['ACTIVE', 'RENEWAL_PENDING'].includes(c.status) &&
-            toDateStr(c.end_date) > todayStr
+    const prelimBusy = aptId
+      ? extractApartmentBusyIntervals(
+          {
+            contracts: contracts.filter((c) => String(c.apartment_id) === String(aptId)),
+            reservations: [],
+          },
+          { todayStr }
         )
-        .map((c) => toDateStr(c.end_date))
-        .sort();
-      if (openEnds.length > 0) {
-        nextStart = openEnds[openEnds.length - 1];
-      } else {
-        const tomorrow = new Date(`${todayStr}T00:00:00Z`);
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        nextStart = tomorrow.toISOString().slice(0, 10);
-      }
-    }
+      : [];
+    const baseSearch =
+      apt && ['OCCUPIED', 'MAINTENANCE'].includes(apt.status)
+        ? addDaysStr(todayStr, 1)
+        : todayStr;
+    const nextStart = aptId
+      ? findFirstAvailableStartDate(baseSearch, prelimBusy, { minSpanDays: 2 })
+      : todayStr;
 
     setCreateForm((p) => {
       const startToUse = nextStart || p.start_date;
@@ -471,11 +519,17 @@ export function ContractsPage() {
         building_id: apt?.building_id || p.building_id,
         reservation_id: aptChanged ? '' : p.reservation_id,
         start_date: startToUse,
-        end_date: nextStart ? addMonthsStr(startToUse, 12) : p.end_date,
+        end_date: computeSuggestedContractEndDate(startToUse, prelimBusy, 12),
         rent_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.rent_amount,
         deposit_amount: apt?.base_rent ? String(Math.round(Number(apt.base_rent))) : p.deposit_amount,
       };
     });
+    setCreateErrors((prev) => ({
+      ...prev,
+      apartment_id: undefined,
+      start_date: undefined,
+      end_date: undefined,
+    }));
   };
 
   const handleClearLookedUpTenant = () => {
@@ -597,15 +651,23 @@ export function ContractsPage() {
   };
 
   const handleApplyReservationProspect = async (resItem) => {
+    userEditedCreateDatesRef.current = true;
     const rawPhone = normalizePhone(resItem?.phone || '');
-    const holdStart = toDateStr(resItem?.hold_from || '');
+    const holdStart = maxDateStr(toDateStr(resItem?.hold_from || resItem?.created_at || ''), todayStr);
+    const busyWithoutThisRsv = extractApartmentBusyIntervals(aptSchedule, {
+      excludeReservationId: resItem?.id,
+      todayStr,
+    });
+    const safeStart = findFirstAvailableStartDate(holdStart || todayStr, busyWithoutThisRsv, {
+      minSpanDays: 2,
+    });
     setCreateForm((p) => ({
       ...p,
       reservation_id: resItem?.id || '',
-      ...(holdStart && holdStart >= todayStr
+      ...(safeStart
         ? {
-            start_date: holdStart,
-            end_date: addMonthsStr(holdStart, 12),
+            start_date: safeStart,
+            end_date: computeSuggestedContractEndDate(safeStart, busyWithoutThisRsv, 12),
           }
         : {}),
     }));
@@ -632,17 +694,82 @@ export function ContractsPage() {
     }
   };
 
-  const overlappingScheduleContracts = useMemo(() => {
-    if (!createForm.start_date || !createForm.end_date || createForm.end_date <= createForm.start_date) {
-      return [];
+  const activeBusyIntervals = useMemo(
+    () =>
+      extractApartmentBusyIntervals(aptSchedule, {
+        excludeReservationId: createForm.reservation_id,
+        todayStr,
+      }),
+    [aptSchedule, createForm.reservation_id, todayStr]
+  );
+
+  const earliestContractStart = useMemo(() => {
+    if (!selectedApartment) return '';
+    const baseSearch = ['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status)
+      ? addDaysStr(todayStr, 1)
+      : todayStr;
+    return findFirstAvailableStartDate(baseSearch, activeBusyIntervals, { minSpanDays: 2 });
+  }, [selectedApartment, todayStr, activeBusyIntervals]);
+
+  const minContractStartDate = useMemo(() => {
+    if (!selectedApartment || !earliestContractStart) return undefined;
+    if (
+      ['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status) ||
+      earliestContractStart > todayStr
+    ) {
+      return earliestContractStart;
     }
-    return aptSchedule.contracts.filter((c) => {
-      const s = toDateStr(c.start_date);
-      const e = toDateStr(c.end_date);
-      if (!s || !e) return false;
-      return s < createForm.end_date && e > createForm.start_date;
+    return undefined;
+  }, [selectedApartment, earliestContractStart, todayStr]);
+
+  const liveStartDateError = useMemo(() => {
+    if (!createForm.start_date) return '';
+    if (
+      selectedApartment &&
+      ['OCCUPIED', 'MAINTENANCE'].includes(selectedApartment.status) &&
+      createForm.start_date <= todayStr
+    ) {
+      return 'Căn hộ đang có khách thuê / bảo trì, ngày bắt đầu hợp đồng mới phải sau hôm nay.';
+    }
+    const startHits = findOverlappingBusyIntervals(
+      createForm.start_date,
+      createForm.start_date,
+      activeBusyIntervals
+    );
+    if (startHits.length > 0) {
+      return formatBusyOverlapError(startHits, 'Ngày bắt đầu thuê');
+    }
+    return '';
+  }, [createForm.start_date, selectedApartment, todayStr, activeBusyIntervals]);
+
+  const liveEndDateError = useMemo(() => {
+    const orderErr = getDateOrderError(createForm.start_date, createForm.end_date, {
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu thuê',
+      endLabel: 'Ngày kết thúc thuê',
     });
-  }, [aptSchedule.contracts, createForm.start_date, createForm.end_date]);
+    if (orderErr) return orderErr;
+    if (!liveStartDateError && createForm.start_date && createForm.end_date) {
+      const rangeHits = findOverlappingBusyIntervals(
+        createForm.start_date,
+        createForm.end_date,
+        activeBusyIntervals
+      );
+      if (rangeHits.length > 0) {
+        return formatBusyOverlapError(rangeHits, 'Kỳ hạn hợp đồng');
+      }
+    }
+    return '';
+  }, [createForm.start_date, createForm.end_date, liveStartDateError, activeBusyIntervals]);
+
+  const overlappingScheduleContracts = useMemo(() => {
+    if (!createForm.start_date) return [];
+    return findOverlappingBusyIntervals(
+      createForm.start_date,
+      createForm.end_date,
+      activeBusyIntervals
+    );
+  }, [activeBusyIntervals, createForm.start_date, createForm.end_date]);
 
   const handleCreateSubmit = async (e) => {
     e?.preventDefault();
@@ -691,16 +818,43 @@ export function ContractsPage() {
     }
 
     if (!createForm.start_date) errs.start_date = 'Chọn ngày bắt đầu.';
+    else if (liveStartDateError) errs.start_date = liveStartDateError;
     if (!createForm.end_date) errs.end_date = 'Chọn ngày kết thúc.';
-    if (createForm.start_date && createForm.end_date && createForm.end_date <= createForm.start_date) {
-      errs.end_date = 'Ngày kết thúc phải sau ngày bắt đầu hợp đồng.';
-    }
+    else if (liveEndDateError) errs.end_date = liveEndDateError;
     if (!createForm.rent_amount || Number(createForm.rent_amount) <= 0) {
       errs.rent_amount = 'Giá thuê phải lớn hơn 0.';
     }
     if (createForm.deposit_amount !== '' && Number(createForm.deposit_amount) < 0) {
       errs.deposit_amount = 'Tiền cọc không được âm.';
     }
+
+    const activeOccupants = inlineOccupants.filter(
+      (o) => o.full_name.trim() || o.phone.trim() || o.id_number.trim()
+    );
+    const primaryNormPhone =
+      tenantMode === 'new' ? normalizePhone(newTenantForm.phone) : '';
+    const seenOccPhones = new Set();
+
+    activeOccupants.forEach((occ, idx) => {
+      if (!occ.full_name.trim()) {
+        errs[`occ_name_${idx}`] = 'Nhập họ tên thành viên.';
+      }
+      const normOccPhone = normalizePhone(occ.phone);
+      if (!normOccPhone) {
+        errs[`occ_phone_${idx}`] = 'Nhập SĐT thành viên.';
+      } else if (!isValidPhone(normOccPhone)) {
+        errs[`occ_phone_${idx}`] = 'SĐT phải gồm 10 chữ số.';
+      } else if (primaryNormPhone && normOccPhone === primaryNormPhone) {
+        errs[`occ_phone_${idx}`] = 'Trùng SĐT với khách thuê chính.';
+      } else if (seenOccPhones.has(normOccPhone)) {
+        errs[`occ_phone_${idx}`] = 'Trùng SĐT giữa các thành viên.';
+      } else {
+        seenOccPhones.add(normOccPhone);
+      }
+      if (occ.id_number.trim() && !isValidIdNumber(occ.id_number.trim())) {
+        errs[`occ_id_${idx}`] = 'CCCD/Hộ chiếu không hợp lệ.';
+      }
+    });
 
     setCreateErrors(errs);
     if (Object.keys(errs).length > 0) return;
@@ -725,6 +879,16 @@ export function ContractsPage() {
                 ...(newTenantForm.password ? { password: newTenantForm.password } : {}),
               },
             }),
+        ...(activeOccupants.length > 0
+          ? {
+              occupants: activeOccupants.map((occ) => ({
+                full_name: occ.full_name.trim(),
+                phone: normalizePhone(occ.phone),
+                relationship: occ.relationship || 'family',
+                ...(occ.id_number.trim() ? { id_number: occ.id_number.trim() } : {}),
+              })),
+            }
+          : {}),
         start_date: createForm.start_date,
         end_date: createForm.end_date,
         rent_amount: Math.round(Number(createForm.rent_amount)),
@@ -802,7 +966,13 @@ export function ContractsPage() {
   const filteredContracts = useMemo(() => {
     const q = search.trim().toLowerCase();
     return contracts.filter((c) => {
-      if (statusFilter && c.status !== statusFilter) return false;
+      if (statusFilter === 'PENDING_ALL') {
+        if (!['PENDING_APPROVAL', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].includes(c.status)) {
+          return false;
+        }
+      } else if (statusFilter && c.status !== statusFilter) {
+        return false;
+      }
       if (q) {
         const code = `hđ-${String(c.id || '').slice(0, 8)}`.toLowerCase();
         const haystacks = [
@@ -890,7 +1060,7 @@ export function ContractsPage() {
         render: (row) => (
           <div>
             <p className="font-semibold text-slate-900">{row.apartment_code}</p>
-            <p className="text-xs text-slate-500 truncate max-w-[180px]">{row.building_name}</p>
+            <p className="text-xs text-slate-500 break-words max-w-[230px]">{row.building_name}</p>
           </div>
         ),
       },
@@ -915,6 +1085,11 @@ export function ContractsPage() {
           <div className="text-xs text-slate-700">
             <p>{formatDate(row.start_date)}</p>
             <p className="text-slate-500">→ {formatDate(row.end_date)}</p>
+            {row.status === 'TERMINATION_PENDING' && row.terminated_at ? (
+              <p className="text-[11px] font-medium text-amber-700 mt-0.5">
+                Trả phòng: {formatDate(row.terminated_at)}
+              </p>
+            ) : null}
           </div>
         ),
       },
@@ -999,20 +1174,23 @@ export function ContractsPage() {
       },
       {
         key: 'desired_date',
-        label: 'Ngày mong muốn',
+        label: 'Ngày mong muốn / Ngày gửi',
         align: 'center',
         className: 'whitespace-nowrap',
         render: (row) => (
-          <span className="text-xs font-medium text-slate-700">
-            {formatDate(row.desired_date)}
-          </span>
+          <div className="text-xs">
+            <p className="font-medium text-slate-700">{formatDate(row.desired_date)}</p>
+            {row.created_at ? (
+              <p className="text-[11px] text-slate-400">Gửi: {formatDate(row.created_at)}</p>
+            ) : null}
+          </div>
         ),
       },
       {
         key: 'note',
         label: 'Nội dung / Lý do',
         render: (row) => (
-          <p className="text-xs text-slate-600 max-w-[260px] whitespace-pre-line line-clamp-2">
+          <p className="text-xs text-slate-600 max-w-[300px] whitespace-pre-line break-words">
             {row.note || '—'}
           </p>
         ),
@@ -1138,7 +1316,7 @@ export function ContractsPage() {
           color="amber"
           onClick={() => {
             setActiveTab('list');
-            setStatusFilter('PENDING_APPROVAL');
+            setStatusFilter('PENDING_ALL');
           }}
         />
         <StatsCard
@@ -1238,7 +1416,13 @@ export function ContractsPage() {
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={submittingCreate}>
               Hủy bỏ
             </Button>
-            <Button variant="primary" onClick={handleCreateSubmit} loading={submittingCreate} icon={Plus}>
+            <Button
+              variant="primary"
+              onClick={handleCreateSubmit}
+              loading={submittingCreate}
+              disabled={Boolean(liveStartDateError || liveEndDateError)}
+              icon={Plus}
+            >
               Lưu hợp đồng nháp
             </Button>
           </>
@@ -1335,7 +1519,9 @@ export function ContractsPage() {
                             <div className="space-y-0.5">
                               <p className="font-semibold text-slate-900">
                                 Từ <span className="text-sky-700 font-mono">{formatDate(c.start_date)}</span> → đến{' '}
-                                <span className="text-sky-700 font-mono">{formatDate(c.end_date)}</span>
+                                <span className="text-sky-700 font-mono">
+                                  {formatDate(c.terminated_at || c.end_date)}
+                                </span>
                               </p>
                               <p className="text-[11px] text-slate-600">
                                 Khách thuê: <strong>{c.tenant_name || 'Đang thuê'}</strong>
@@ -1415,13 +1601,17 @@ export function ContractsPage() {
                       <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                       <span>
                         Kỳ hạn bạn đang chọn (<strong>{formatDate(createForm.start_date)}</strong> →{' '}
-                        <strong>{formatDate(createForm.end_date)}</strong>) đang bị chồng lấn với hợp đồng hiện có (
+                        <strong>{formatDate(createForm.end_date)}</strong>) đang bị chồng lấn với lịch bận của căn hộ (
                         {overlappingScheduleContracts
-                          .map((c) => `${formatDate(c.start_date)} → ${formatDate(c.end_date)}`)
-                          .join(', ')}
-                        ). Hãy chọn ngày bắt đầu từ ngày kết thúc của hợp đồng trước trở đi.
+                          .map((iv) => `${iv.label}: ${formatDate(iv.from)} → ${formatDate(iv.to)}`)
+                          .join('; ')}
+                        ). Hãy chọn ngày nằm ngoài các khoảng trên.
                       </span>
                     </div>
+                  ) : earliestContractStart && earliestContractStart > todayStr ? (
+                    <p className="text-[11px] text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-xl px-3 py-1.5">
+                      Đã tự động chọn ngày bắt đầu trống đầu tiên (<strong>{formatDate(earliestContractStart)}</strong>) nằm ngoài các khoảng căn hộ đã thuê / đang giữ chỗ.
+                    </p>
                   ) : null}
                 </div>
               )}
@@ -1715,23 +1905,165 @@ export function ContractsPage() {
             )}
           </div>
 
+          {/* Khối tùy chọn: Thành viên ở cùng (occupants[]) ngay khi lập hợp đồng (FR-011 / FR-014) */}
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <p className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-primary-600" />
+                  Thành viên ở cùng (Tùy chọn)
+                </p>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Khai báo sẵn người ở ghép / gia đình để tự động liên kết định danh và cấp quyền Cổng cư dân
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                icon={UserPlus}
+                onClick={() =>
+                  setInlineOccupants((prev) => [
+                    ...prev,
+                    { full_name: '', phone: '', relationship: 'family', id_number: '' },
+                  ])
+                }
+              >
+                + Thêm thành viên ở cùng
+              </Button>
+            </div>
+
+            {selectedApartment &&
+            1 + inlineOccupants.length >
+              Number(
+                selectedApartment.max_occupants ||
+                  Math.max(2, Number(selectedApartment.bedrooms || 1) * 2 + 1)
+              ) ? (
+              <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span>
+                  Tổng số người lưu trú dự kiến (<strong>{1 + inlineOccupants.length} người</strong>) vượt định mức khuyến nghị của căn{' '}
+                  <strong>{selectedApartment.code}</strong> (
+                  {Number(
+                    selectedApartment.max_occupants ||
+                      Math.max(2, Number(selectedApartment.bedrooms || 1) * 2 + 1)
+                  )}{' '}
+                  người). Vui lòng kiểm tra lại quy định tòa nhà trước khi ký.
+                </span>
+              </div>
+            ) : null}
+
+            {inlineOccupants.length > 0 ? (
+              <div className="space-y-2.5">
+                {inlineOccupants.map((occ, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3 rounded-lg bg-white border border-slate-200 grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-start"
+                  >
+                    <div className="sm:col-span-3">
+                      <Input
+                        label="Họ và tên"
+                        required
+                        placeholder="Nguyễn Văn B"
+                        value={occ.full_name}
+                        onChange={(e) =>
+                          setInlineOccupants((prev) =>
+                            prev.map((item, i) => (i === idx ? { ...item, full_name: e.target.value } : item))
+                          )
+                        }
+                        error={createErrors[`occ_name_${idx}`]}
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <Input
+                        label="Số điện thoại"
+                        required
+                        placeholder="0912345678"
+                        value={occ.phone}
+                        onChange={(e) =>
+                          setInlineOccupants((prev) =>
+                            prev.map((item, i) => (i === idx ? { ...item, phone: e.target.value } : item))
+                          )
+                        }
+                        error={createErrors[`occ_phone_${idx}`]}
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <Select
+                        label="Quan hệ"
+                        value={occ.relationship}
+                        onChange={(e) =>
+                          setInlineOccupants((prev) =>
+                            prev.map((item, i) =>
+                              i === idx ? { ...item, relationship: e.target.value } : item
+                            )
+                          )
+                        }
+                        options={INLINE_RELATIONSHIP_OPTIONS}
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <Input
+                        label="Số CCCD"
+                        placeholder="Tùy chọn"
+                        value={occ.id_number}
+                        onChange={(e) =>
+                          setInlineOccupants((prev) =>
+                            prev.map((item, i) =>
+                              i === idx ? { ...item, id_number: e.target.value } : item
+                            )
+                          )
+                        }
+                        error={createErrors[`occ_id_${idx}`]}
+                      />
+                    </div>
+                    <div className="sm:col-span-1 sm:pt-6 flex justify-end">
+                      <button
+                        type="button"
+                        title="Xóa thành viên này"
+                        onClick={() =>
+                          setInlineOccupants((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        className="p-2 rounded-lg text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <div className="space-y-2">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Input
                 label="Ngày bắt đầu thuê"
                 type="date"
                 required
+                min={minContractStartDate}
                 value={createForm.start_date}
-                onChange={(e) => setCreateForm((p) => ({ ...p, start_date: e.target.value }))}
-                error={createErrors.start_date}
+                onChange={(e) => {
+                  userEditedCreateDatesRef.current = true;
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, start_date: val }));
+                  setCreateErrors((prev) => ({ ...prev, start_date: undefined }));
+                }}
+                error={liveStartDateError || createErrors.start_date}
               />
               <Input
                 label="Ngày kết thúc thuê"
                 type="date"
                 required
+                min={createForm.start_date ? addDaysStr(createForm.start_date, 1) : undefined}
                 value={createForm.end_date}
-                onChange={(e) => setCreateForm((p) => ({ ...p, end_date: e.target.value }))}
-                error={createErrors.end_date}
+                onChange={(e) => {
+                  userEditedCreateDatesRef.current = true;
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, end_date: val }));
+                  setCreateErrors((prev) => ({ ...prev, end_date: undefined }));
+                }}
+                error={liveEndDateError || createErrors.end_date}
               />
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -1742,12 +2074,14 @@ export function ContractsPage() {
                 <button
                   key={m}
                   type="button"
-                  onClick={() =>
+                  onClick={() => {
+                    userEditedCreateDatesRef.current = true;
                     setCreateForm((p) => ({
                       ...p,
                       end_date: addMonthsStr(p.start_date || todayStr, m),
-                    }))
-                  }
+                    }));
+                    setCreateErrors((prev) => ({ ...prev, end_date: undefined }));
+                  }}
                   className="px-2.5 py-1 text-xs font-medium rounded-md bg-slate-100 hover:bg-primary-50 text-slate-700 hover:text-primary-700 border border-slate-200 transition-colors"
                 >
                   {m} tháng
@@ -1757,12 +2091,10 @@ export function ContractsPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Giá thuê hàng tháng (VND)"
-              type="number"
-              min="0"
               required
-              placeholder="VD: 8500000"
+              placeholder="VD: 8.500.000"
               hint={
                 selectedApartment
                   ? `Giá niêm yết của căn ${selectedApartment.code}: ${formatMoney(selectedApartment.base_rent)}`
@@ -1772,11 +2104,9 @@ export function ContractsPage() {
               onChange={(e) => setCreateForm((p) => ({ ...p, rent_amount: e.target.value }))}
               error={createErrors.rent_amount}
             />
-            <Input
+            <MoneyInput
               label="Tiền đặt cọc bảo đảm (VND)"
-              type="number"
-              min="0"
-              placeholder="VD: 8500000"
+              placeholder="VD: 8.500.000"
               hint="Mặc định gợi ý bằng 1 tháng tiền thuê"
               value={createForm.deposit_amount}
               onChange={(e) => setCreateForm((p) => ({ ...p, deposit_amount: e.target.value }))}

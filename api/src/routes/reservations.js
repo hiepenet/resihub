@@ -12,6 +12,7 @@ import {
 } from '../services/ownerScope.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn } from '../services/pricing.js';
+import { normalizeVnPhone, ensureResidentAccount } from '../services/residentAccount.js';
 
 const router = express.Router();
 
@@ -105,10 +106,18 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
   const { apartment_id, prospect_name, phone, hold_amount, hold_from, hold_until, note } = req.body;
   const orgId = req.user.org_id;
 
-  if (!apartment_id || !prospect_name || !phone) {
+  const cleanPhone = normalizeVnPhone(phone);
+  if (!apartment_id || !prospect_name?.trim() || !cleanPhone) {
     return res.status(400).json({
       code: 'VALIDATION_ERROR',
       message: 'Căn hộ, tên khách và số điện thoại là bắt buộc.',
+    });
+  }
+
+  if (!/^0[0-9]{9}$/.test(cleanPhone)) {
+    return res.status(400).json({
+      code: 'INVALID_PHONE',
+      message: 'Số điện thoại không hợp lệ. Vui lòng nhập đúng 10 chữ số (ví dụ: 0912345678).',
     });
   }
 
@@ -182,12 +191,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     // Kiểm tra chồng lấn với các hợp đồng hiệu lực / chờ duyệt của căn hộ
     const overlapContract = await client.query(
-      `SELECT start_date, end_date, status
+      `SELECT start_date, COALESCE(terminated_at, end_date) AS end_date, status
        FROM contract
        WHERE apartment_id = $1
          AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'PENDING_APPROVAL')
          AND start_date <= $2::date
-         AND end_date > $3::date
+         AND COALESCE(terminated_at, end_date) > $3::date
        ORDER BY start_date ASC
        LIMIT 1`,
       [apartment_id, holdUntilStr, holdFromStr]
@@ -232,7 +241,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         apt.building_id,
         apartment_id,
         prospect_name.trim(),
-        phone.trim(),
+        cleanPhone,
         hold_amount || 0,
         holdFromStr,
         holdUntilStr,
@@ -243,6 +252,25 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     const reservation = resResult.rows[0];
 
+    // FR-067 + FR-001 + FR-012: Khởi tạo định danh person sơ bộ (nếu SĐT chưa tồn tại)
+    // để khách giữ chỗ có thể đăng nhập OTP trên Cổng cư dân và tự khai hồ sơ nhận nhà.
+    let prospectPersonId = null;
+    const existingPersonRes = await adminPool.query(
+      'SELECT id FROM person WHERE org_id = $1 AND phone = $2 LIMIT 1',
+      [orgId, cleanPhone]
+    );
+    if (existingPersonRes.rows.length > 0) {
+      prospectPersonId = existingPersonRes.rows[0].id;
+    } else {
+      const insPerson = await client.query(
+        `INSERT INTO person (org_id, full_name, phone, created_by)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [orgId, prospect_name.trim(), cleanPhone, req.user.sub]
+      );
+      prospectPersonId = insPerson.rows[0].id;
+    }
+
     await syncApartmentStatus(client, apartment_id);
 
     await client.query(
@@ -252,6 +280,14 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     );
 
     await client.query('COMMIT');
+
+    if (prospectPersonId) {
+      try {
+        await ensureResidentAccount(prospectPersonId, { phone: cleanPhone });
+      } catch (acctErr) {
+        console.error('[Reservation Ensure Resident Account Warning]:', acctErr);
+      }
+    }
     res.status(201).json({
       message: `Đã đặt cọc giữ chỗ căn ${apt.code} cho khách ${prospect_name} thành công.`,
       data: reservation,

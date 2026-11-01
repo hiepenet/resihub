@@ -21,6 +21,7 @@ import { SearchBar } from '../../../components/common/SearchBar';
 import { auditService } from '../../../services/audit.service';
 import { useToast } from '../../../hooks/useToast';
 import { formatDateTime } from '../../../utils/format';
+import { syncFilterDateRange } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const ENTITY_OPTIONS = [
@@ -278,7 +279,7 @@ export function AuditLogsView() {
   return (
     <div className="space-y-4">
       <Card className="p-4 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3">
           <div className="sm:col-span-2">
             <SearchBar
               value={search}
@@ -314,7 +315,9 @@ export function AuditLogsView() {
             type="date"
             value={fromDate}
             onChange={(e) => {
-              setFromDate(e.target.value);
+              const synced = syncFilterDateRange(e.target.value, toDate);
+              setFromDate(synced.fromDate);
+              setToDate(synced.toDate);
               setPage(1);
             }}
             title="Từ ngày"
@@ -322,9 +325,11 @@ export function AuditLogsView() {
 
           <Input
             type="date"
+            min={fromDate || undefined}
             value={toDate}
             onChange={(e) => {
-              setToDate(e.target.value);
+              const val = e.target.value;
+              setToDate(fromDate && val && val < fromDate ? fromDate : val);
               setPage(1);
             }}
             title="Đến ngày"
@@ -427,11 +432,11 @@ export function AuditLogsView() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
               <div>
                 <p className="text-slate-500">Người thực hiện</p>
-                <p className="font-semibold text-slate-900 mt-0.5">
+                <p className="font-semibold text-slate-900 mt-0.5 break-words">
                   {selectedLog.actor_name || selectedLog.actor_full_name || 'Hệ thống'}
                 </p>
                 {selectedLog.actor_email ? (
-                  <p className="text-slate-500">{selectedLog.actor_email}</p>
+                  <p className="text-slate-500 break-all">{selectedLog.actor_email}</p>
                 ) : null}
               </div>
               <div>
@@ -447,6 +452,18 @@ export function AuditLogsView() {
                 <p className="font-mono font-semibold text-slate-900 mt-0.5 break-all">
                   {selectedLog.entity || selectedLog.entity_type || '—'} /{' '}
                   {selectedLog.entity_id || selectedLog.record_id || '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Địa chỉ IP</p>
+                <p className="font-mono font-medium text-slate-800 mt-0.5 break-all">
+                  {selectedLog.ip || selectedLog.ip_address || '—'}
+                </p>
+              </div>
+              <div className="sm:col-span-2">
+                <p className="text-slate-500">Thiết bị / Trình duyệt (User-Agent)</p>
+                <p className="font-mono text-[11px] text-slate-700 mt-0.5 break-words">
+                  {selectedLog.user_agent || '—'}
                 </p>
               </div>
             </div>

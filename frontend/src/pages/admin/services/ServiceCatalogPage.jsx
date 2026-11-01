@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -359,7 +360,7 @@ export function ServiceCatalogPage() {
                         <IconComp className="w-5 h-5" />
                       </div>
                       <div className="min-w-0">
-                        <h3 className="text-base font-semibold text-slate-900 truncate">
+                        <h3 className="text-base font-semibold text-slate-900 break-words">
                           {svc.name}
                         </h3>
                         <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
@@ -389,7 +390,7 @@ export function ServiceCatalogPage() {
                     </span>
                   </div>
 
-                  <p className="text-xs text-slate-600 line-clamp-2 min-h-[2rem]">
+                  <p className="text-xs text-slate-600 whitespace-pre-line break-words min-h-[2rem]">
                     {svc.description || 'Chưa có mô tả chi tiết cho dịch vụ này.'}
                   </p>
                 </div>
@@ -489,13 +490,10 @@ export function ServiceCatalogPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Đơn giá chuẩn (VNĐ)"
-              type="number"
-              min="0"
-              step="1000"
               required
-              placeholder="220000"
+              placeholder="VD: 220.000"
               value={form.unit_price}
               onChange={(e) => setForm((s) => ({ ...s, unit_price: e.target.value }))}
             />
@@ -519,7 +517,20 @@ export function ServiceCatalogPage() {
                 label: `Riêng tòa ${b.code} — ${b.name}`,
               }))}
             />
-          ) : null}
+          ) : (
+            <Input
+              label="Phạm vi áp dụng"
+              disabled
+              value={
+                editingItem.building_id
+                  ? (() => {
+                      const b = buildings.find((x) => x.id === editingItem.building_id);
+                      return b ? `Riêng tòa ${b.code} — ${b.name}` : 'Riêng theo tòa nhà';
+                    })()
+                  : 'Áp dụng chung toàn bộ tổ chức'
+              }
+            />
+          )}
 
           <Input
             label="Mô tả dịch vụ"

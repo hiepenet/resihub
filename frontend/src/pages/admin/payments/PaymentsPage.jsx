@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -434,20 +435,18 @@ export function PaymentsPage() {
         render: (row) => {
           const hasProof = Array.isArray(row.proof_images) && row.proof_images.length > 0;
           return (
-            <div className="inline-flex items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-              {hasProof || row.status === 'PENDING_CONFIRMATION' ? (
-                <Button
-                  size="xs"
-                  variant={row.status === 'PENDING_CONFIRMATION' ? 'soft' : 'outline'}
-                  icon={Eye}
-                  onClick={() => {
-                    setReviewPayment(row);
-                    setConfirmNote(row.note || '');
-                  }}
-                >
-                  {hasProof ? 'Xem chứng từ' : 'Chi tiết'}
-                </Button>
-              ) : null}
+            <div className="inline-flex flex-wrap items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <Button
+                size="xs"
+                variant={row.status === 'PENDING_CONFIRMATION' ? 'soft' : 'outline'}
+                icon={Eye}
+                onClick={() => {
+                  setReviewPayment(row);
+                  setConfirmNote(row.note || '');
+                }}
+              >
+                {hasProof ? 'Xem chứng từ' : 'Chi tiết'}
+              </Button>
 
               {canManagePayments && row.status === 'PENDING_CONFIRMATION' ? (
                 <>
@@ -514,9 +513,17 @@ export function PaymentsPage() {
                 {row.invoice_code}
               </Link>
             ) : (
-              <span className="text-xs font-medium text-slate-800">{row.type}</span>
+              <span className="text-xs font-medium text-slate-800">
+                {row.type === 'RECEIVABLE_AFTER_MOVE_OUT'
+                  ? 'Công nợ sau trả phòng'
+                  : row.type === 'INVOICE'
+                  ? 'Công nợ hóa đơn'
+                  : row.type || 'Khoản công nợ khác'}
+              </span>
             )}
-            <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{row.description || '—'}</p>
+            <p className="text-xs text-slate-500 mt-0.5 break-words max-w-[260px]">
+              {row.description || '—'}
+            </p>
           </div>
         ),
       },
@@ -735,9 +742,9 @@ export function PaymentsPage() {
                   return (
                     <div
                       key={item.id}
-                      className="bg-white rounded-xl border border-amber-200 p-3.5 shadow-sm flex items-center justify-between gap-3"
+                      className="bg-white rounded-xl border border-amber-200 p-3.5 shadow-sm flex flex-wrap items-center justify-between gap-3"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
                         <button
                           type="button"
                           onClick={() => {
@@ -752,19 +759,20 @@ export function PaymentsPage() {
                             className="w-full h-full object-cover"
                           />
                         </button>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-semibold text-sm text-slate-900">
-                              Căn {item.apartment_code || '—'} ({item.building_code})
+                              Căn {item.apartment_code || '—'} ({item.building_name || item.building_code})
                             </span>
                             <span className="font-mono text-sm font-bold text-emerald-700">
                               {formatMoney(item.amount)}
                             </span>
                           </div>
-                          <p className="text-xs text-slate-600 truncate">
-                            {item.tenant_name || 'Cư dân'} • HĐ: {item.invoice_code || '—'}
+                          <p className="text-xs text-slate-600 break-words mt-0.5">
+                            {item.tenant_name || 'Cư dân'} • HĐ:{' '}
+                            <span className="font-mono font-medium">{item.invoice_code || '—'}</span>
                           </p>
-                          <p className="text-[11px] text-slate-400">
+                          <p className="text-[11px] text-slate-400 break-words">
                             {PAYMENT_METHODS[item.method] || item.method}
                             {item.reference_code ? ` • Ref: ${item.reference_code}` : ''}
                           </p>
@@ -1024,12 +1032,10 @@ export function PaymentsPage() {
           />
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Số tiền thực nhận (VNĐ)"
-              type="number"
-              min="1000"
-              step="1000"
               required
+              placeholder="VD: 8.500.000"
               value={createForm.amount}
               onChange={(e) => setCreateForm((s) => ({ ...s, amount: e.target.value }))}
             />
@@ -1119,7 +1125,7 @@ export function PaymentsPage() {
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs">
               <div>
                 <p className="text-slate-400">Hóa đơn</p>
-                <p className="font-mono font-semibold text-slate-900 mt-0.5">
+                <p className="font-mono font-semibold text-slate-900 mt-0.5 break-all">
                   {reviewPayment.invoice_code || '—'}
                 </p>
               </div>
@@ -1128,11 +1134,34 @@ export function PaymentsPage() {
                 <p className="font-mono font-bold text-emerald-700 mt-0.5">
                   {formatMoney(reviewPayment.amount)}
                 </p>
+                {Number(reviewPayment.overpayment_amount) > 0 ? (
+                  <p className="text-[11px] text-indigo-600 mt-0.5">
+                    Nộp thừa: {formatMoney(reviewPayment.overpayment_amount)}
+                  </p>
+                ) : null}
               </div>
               <div>
                 <p className="text-slate-400">Mã tham chiếu</p>
-                <p className="font-mono font-medium text-slate-800 mt-0.5">
+                <p className="font-mono font-medium text-slate-800 mt-0.5 break-all">
                   {reviewPayment.reference_code || '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-400">Trạng thái</p>
+                <div className="mt-0.5">
+                  <StatusBadge status={reviewPayment.status} domain="payment" />
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-400">Người đối soát</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {reviewPayment.confirmed_by_name || '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-400">Thời điểm xác nhận</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {reviewPayment.confirmed_at ? formatDateTime(reviewPayment.confirmed_at) : '—'}
                 </p>
               </div>
             </div>

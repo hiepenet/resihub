@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   FileText,
@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -38,10 +39,23 @@ import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { contractsService } from '../../../services/contracts.service';
 import { buildingsService } from '../../../services/buildings.service';
+import { tenantsService } from '../../../services/tenants.service';
 import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
+import {
+  addDaysStr,
+  addMonthsClampedStr,
+  extractApartmentBusyIntervals,
+  findFirstAvailableStartDate,
+  findOverlappingBusyIntervals,
+  formatBusyOverlapError,
+  formatDateVi,
+  getDateOrderError,
+  maxDateStr,
+  toDateOnlyStr,
+} from '../../../utils/dateRange';
 import {
   isValidPhone,
   normalizePhone,
@@ -84,11 +98,7 @@ function formatDiffVal(field, val) {
 }
 
 function addMonthsStr(dateStr, months) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return '';
-  d.setMonth(d.getMonth() + months);
-  return d.toISOString().slice(0, 10);
+  return addMonthsClampedStr(dateStr, months);
 }
 
 function ContractTimeline({ status }) {
@@ -97,7 +107,7 @@ function ContractTimeline({ status }) {
       return { id: 'RENEWAL_PENDING', label: 'Chờ duyệt gia hạn', state: 'warning' };
     }
     if (status === 'TERMINATION_PENDING') {
-      return { id: 'TERMINATION_PENDING', label: 'Chờ duyệt chấm dứt', state: 'warning' };
+      return { id: 'TERMINATION_PENDING', label: 'Chờ bàn giao chấm dứt', state: 'warning' };
     }
     if (status === 'TERMINATED') {
       return { id: 'TERMINATED', label: 'Đã thanh lý', state: 'danger' };
@@ -240,6 +250,7 @@ export function ContractDetailPage() {
 
   // Edit Draft Modal
   const [editDraftOpen, setEditDraftOpen] = useState(false);
+  const [draftAptDetail, setDraftAptDetail] = useState(null);
   const [editDraftForm, setEditDraftForm] = useState({
     start_date: '',
     end_date: '',
@@ -287,6 +298,8 @@ export function ContractDetailPage() {
   const [transferOpen, setTransferOpen] = useState(false);
   const [availableApts, setAvailableApts] = useState([]);
   const [loadingApts, setLoadingApts] = useState(false);
+  const [transferAptDetail, setTransferAptDetail] = useState(null);
+  const userEditedTransferDatesRef = useRef(false);
   const [transferForm, setTransferForm] = useState({
     new_apartment_id: '',
     new_start_date: '',
@@ -328,8 +341,64 @@ export function ContractDetailPage() {
   });
   const [occErrors, setOccErrors] = useState({});
   const [submittingOcc, setSubmittingOcc] = useState(false);
+  const [occDupInfo, setOccDupInfo] = useState({
+    isDuplicate: false,
+    inScope: true,
+    duplicates: [],
+    message: '',
+  });
+  const [occDupChecking, setOccDupChecking] = useState(false);
   const [removeOccTarget, setRemoveOccTarget] = useState(null);
   const [removingOcc, setRemovingOcc] = useState(false);
+
+  // Kiểm tra trùng SĐT / CCCD realtime trên Modal Thêm thành viên cùng lưu trú (FR-021)
+  useEffect(() => {
+    if (!occModalOpen) {
+      setOccDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+      setOccDupChecking(false);
+      return undefined;
+    }
+    const cleanPhone = normalizePhone(occForm.phone);
+    const cleanId = String(occForm.id_number || '').trim();
+    const okPhone = isValidPhone(cleanPhone);
+    const okId = isValidIdNumber(cleanId);
+
+    if (!okPhone && !okId) {
+      setOccDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+      setOccDupChecking(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setOccDupChecking(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await tenantsService.checkDup({
+          ...(okPhone ? { phone: cleanPhone } : {}),
+          ...(okId ? { id_number: cleanId } : {}),
+        });
+        if (!cancelled) {
+          setOccDupInfo({
+            isDuplicate: Boolean(res?.isDuplicate),
+            inScope: res?.inScope !== false,
+            duplicates: Array.isArray(res?.duplicates) ? res.duplicates : [],
+            message: res?.message || '',
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setOccDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+        }
+      } finally {
+        if (!cancelled) setOccDupChecking(false);
+      }
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [occModalOpen, occForm.phone, occForm.id_number]);
 
   // Service Prices Modal
   const [spModalOpen, setSpModalOpen] = useState(false);
@@ -452,6 +521,241 @@ export function ContractDetailPage() {
     }
   };
 
+  const todayStr = toDateOnlyStr(new Date());
+  const contractStartStr = toDateOnlyStr(contract?.start_date);
+  const contractEndStr = toDateOnlyStr(contract?.end_date);
+  const minTerminateDate = useMemo(
+    () => (contractStartStr && contractStartStr > todayStr ? todayStr : contractStartStr),
+    [contractStartStr, todayStr]
+  );
+
+  // Tải lịch bận của căn hộ hiện tại khi sửa bản nháp (bỏ qua chính bản nháp đang sửa)
+  useEffect(() => {
+    if (!editDraftOpen || !contract?.apartment_id) {
+      setDraftAptDetail(null);
+      return undefined;
+    }
+    let cancelled = false;
+    buildingsService
+      .getApartment(contract.apartment_id)
+      .then((res) => {
+        if (!cancelled) setDraftAptDetail(res?.data || null);
+      })
+      .catch(() => {
+        if (!cancelled) setDraftAptDetail(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editDraftOpen, contract?.apartment_id]);
+
+  // Tải lịch bận của căn hộ đích khi chuyển phòng & tự gợi ý ngày chuyển nằm ngoài khoảng bận
+  useEffect(() => {
+    if (!transferOpen || !transferForm.new_apartment_id) {
+      setTransferAptDetail(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const targetAptId = transferForm.new_apartment_id;
+    buildingsService
+      .getApartment(targetAptId)
+      .then((res) => {
+        if (cancelled) return;
+        const detail = res?.data || null;
+        setTransferAptDetail(detail);
+        const busy = extractApartmentBusyIntervals(detail || {}, { todayStr });
+        const freeStart = findFirstAvailableStartDate(todayStr, busy, { minSpanDays: 2 });
+        if (freeStart) {
+          setTransferForm((prev) => {
+            if (String(prev.new_apartment_id) !== String(targetAptId)) return prev;
+            const overlaps = findOverlappingBusyIntervals(
+              prev.new_start_date,
+              prev.new_end_date,
+              busy
+            );
+            if (userEditedTransferDatesRef.current && overlaps.length === 0) return prev;
+            const nextEnd =
+              prev.new_end_date && prev.new_end_date > freeStart
+                ? prev.new_end_date
+                : addMonthsStr(freeStart, 12);
+            return {
+              ...prev,
+              new_start_date: freeStart,
+              new_end_date: nextEnd,
+            };
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTransferAptDetail(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [transferOpen, transferForm.new_apartment_id, todayStr]);
+
+  const draftBusyIntervals = useMemo(
+    () =>
+      extractApartmentBusyIntervals(draftAptDetail || {}, {
+        excludeContractId: contract?.id,
+        todayStr,
+      }),
+    [draftAptDetail, contract?.id, todayStr]
+  );
+
+  const draftStartDateError = useMemo(() => {
+    if (!editDraftForm.start_date) return '';
+    const hits = findOverlappingBusyIntervals(
+      editDraftForm.start_date,
+      editDraftForm.start_date,
+      draftBusyIntervals
+    );
+    return hits.length > 0 ? formatBusyOverlapError(hits, 'Ngày bắt đầu') : '';
+  }, [editDraftForm.start_date, draftBusyIntervals]);
+
+  const draftEndDateError = useMemo(() => {
+    const orderErr = getDateOrderError(editDraftForm.start_date, editDraftForm.end_date, {
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu',
+      endLabel: 'Ngày kết thúc',
+    });
+    if (orderErr) return orderErr;
+    if (!draftStartDateError && editDraftForm.start_date && editDraftForm.end_date) {
+      const hits = findOverlappingBusyIntervals(
+        editDraftForm.start_date,
+        editDraftForm.end_date,
+        draftBusyIntervals
+      );
+      if (hits.length > 0) return formatBusyOverlapError(hits, 'Kỳ hạn hợp đồng nháp');
+    }
+    return '';
+  }, [editDraftForm.start_date, editDraftForm.end_date, draftStartDateError, draftBusyIntervals]);
+
+  const renewEndDateError = useMemo(
+    () =>
+      getDateOrderError(contractEndStr, renewForm.new_end_date, {
+        strictAfter: true,
+        startLabel: contractEndStr
+          ? `Ngày kết thúc hiện tại (${formatDateVi(contractEndStr)})`
+          : 'Ngày kết thúc hiện tại',
+        endLabel: 'Ngày kết thúc mới',
+      }),
+    [contractEndStr, renewForm.new_end_date]
+  );
+
+  const amendEffectiveDateError = useMemo(
+    () =>
+      amendForm.effective_from
+        ? getDateOrderError(contractStartStr, amendForm.effective_from, {
+            strictAfter: false,
+            startLabel: contractStartStr
+              ? `Ngày bắt đầu HĐ (${formatDateVi(contractStartStr)})`
+              : 'Ngày bắt đầu HĐ',
+            endLabel: 'Ngày bắt đầu áp dụng phụ lục',
+          })
+        : '',
+    [contractStartStr, amendForm.effective_from]
+  );
+
+  const minAmendEndDate = useMemo(
+    () => maxDateStr(contractStartStr ? addDaysStr(contractStartStr, 1) : '', amendForm.effective_from),
+    [contractStartStr, amendForm.effective_from]
+  );
+
+  const amendEndDateError = useMemo(() => {
+    if (!amendForm.end_date) return '';
+    const vsStart = getDateOrderError(contractStartStr, amendForm.end_date, {
+      strictAfter: true,
+      startLabel: contractStartStr
+        ? `Ngày bắt đầu HĐ (${formatDateVi(contractStartStr)})`
+        : 'Ngày bắt đầu HĐ',
+      endLabel: 'Ngày kết thúc mới',
+    });
+    if (vsStart) return vsStart;
+    if (amendForm.effective_from) {
+      return getDateOrderError(amendForm.effective_from, amendForm.end_date, {
+        strictAfter: false,
+        startLabel: 'Ngày bắt đầu áp dụng phụ lục',
+        endLabel: 'Ngày kết thúc mới',
+      });
+    }
+    return '';
+  }, [contractStartStr, amendForm.end_date, amendForm.effective_from]);
+
+  const transferBusyIntervals = useMemo(
+    () => extractApartmentBusyIntervals(transferAptDetail || {}, { todayStr }),
+    [transferAptDetail, todayStr]
+  );
+
+  const earliestTransferStart = useMemo(
+    () =>
+      transferForm.new_apartment_id
+        ? findFirstAvailableStartDate(todayStr, transferBusyIntervals, { minSpanDays: 2 })
+        : '',
+    [transferForm.new_apartment_id, todayStr, transferBusyIntervals]
+  );
+
+  const transferStartDateError = useMemo(() => {
+    if (!transferForm.new_start_date) return '';
+    if (minTerminateDate && transferForm.new_start_date < minTerminateDate) {
+      return `Ngày chuyển phòng không được nhỏ hơn ${formatDateVi(minTerminateDate)}.`;
+    }
+    const hits = findOverlappingBusyIntervals(
+      transferForm.new_start_date,
+      transferForm.new_start_date,
+      transferBusyIntervals
+    );
+    return hits.length > 0 ? formatBusyOverlapError(hits, 'Ngày chuyển phòng') : '';
+  }, [transferForm.new_start_date, minTerminateDate, transferBusyIntervals]);
+
+  const transferEndDateError = useMemo(() => {
+    const orderErr = getDateOrderError(transferForm.new_start_date, transferForm.new_end_date, {
+      strictAfter: true,
+      startLabel: 'Ngày chuyển phòng',
+      endLabel: 'Ngày kết thúc HĐ mới',
+    });
+    if (orderErr) return orderErr;
+    if (!transferStartDateError && transferForm.new_start_date && transferForm.new_end_date) {
+      const hits = findOverlappingBusyIntervals(
+        transferForm.new_start_date,
+        transferForm.new_end_date,
+        transferBusyIntervals
+      );
+      if (hits.length > 0) return formatBusyOverlapError(hits, 'Kỳ hạn hợp đồng mới');
+    }
+    return '';
+  }, [
+    transferForm.new_start_date,
+    transferForm.new_end_date,
+    transferStartDateError,
+    transferBusyIntervals,
+  ]);
+
+  const terminateDateError = useMemo(() => {
+    if (!terminateForm.terminated_date) return '';
+    if (minTerminateDate && terminateForm.terminated_date < minTerminateDate) {
+      return `Ngày chấm dứt không được nhỏ hơn ${formatDateVi(minTerminateDate)}.`;
+    }
+    if (contractEndStr && terminateForm.terminated_date > contractEndStr) {
+      return `Ngày chấm dứt không được vượt quá ngày kết thúc HĐ (${formatDateVi(contractEndStr)}).`;
+    }
+    return '';
+  }, [terminateForm.terminated_date, minTerminateDate, contractEndStr]);
+
+  const spEffectiveDateError = useMemo(
+    () =>
+      spForm.effective_from
+        ? getDateOrderError(contractStartStr, spForm.effective_from, {
+            strictAfter: false,
+            startLabel: contractStartStr
+              ? `Ngày bắt đầu HĐ (${formatDateVi(contractStartStr)})`
+              : 'Ngày bắt đầu HĐ',
+            endLabel: 'Ngày bắt đầu áp dụng',
+          })
+        : '',
+    [contractStartStr, spForm.effective_from]
+  );
+
   // Sửa bản nháp
   const handleOpenEditDraft = () => {
     if (!contract) return;
@@ -469,6 +773,10 @@ export function ContractDetailPage() {
 
   const handleSaveDraft = async (e) => {
     e?.preventDefault();
+    if (draftStartDateError || draftEndDateError) {
+      toast.warning(draftStartDateError || draftEndDateError);
+      return;
+    }
     if (editDraftForm.end_date <= editDraftForm.start_date) {
       toast.warning('Ngày kết thúc phải sau ngày bắt đầu.');
       return;
@@ -526,6 +834,10 @@ export function ContractDetailPage() {
 
   const handleRenewSubmit = async (e) => {
     e?.preventDefault();
+    if (renewEndDateError) {
+      toast.warning(renewEndDateError);
+      return;
+    }
     const curEnd = toInputDate(contract?.end_date);
     if (!renewForm.new_end_date || renewForm.new_end_date <= curEnd) {
       toast.warning('Ngày kết thúc gia hạn phải sau ngày kết thúc hiện tại của hợp đồng.');
@@ -561,7 +873,7 @@ export function ContractDetailPage() {
       rent_amount: String(Math.round(Number(contract.rent_amount || 0))),
       deposit_amount: String(Math.round(Number(contract.deposit_amount || 0))),
       note: contract.note || '',
-      effective_from: new Date().toISOString().slice(0, 10),
+      effective_from: maxDateStr(todayStr, toInputDate(contract.start_date)),
       reason: '',
     });
     setAmendOpen(true);
@@ -569,6 +881,10 @@ export function ContractDetailPage() {
 
   const handleAmendSubmit = async (e) => {
     e?.preventDefault();
+    if (amendEffectiveDateError || amendEndDateError) {
+      toast.warning(amendEffectiveDateError || amendEndDateError);
+      return;
+    }
     if (!amendForm.reason.trim()) {
       toast.warning('Vui lòng nhập lý do lập phụ lục hợp đồng.');
       return;
@@ -652,11 +968,13 @@ export function ContractDetailPage() {
   // Chuyển phòng atomic (FR-013)
   const handleOpenTransfer = async () => {
     if (!contract) return;
-    const today = new Date().toISOString().slice(0, 10);
+    userEditedTransferDatesRef.current = false;
+    setTransferAptDetail(null);
+    const curEnd = toInputDate(contract.end_date);
     setTransferForm({
       new_apartment_id: '',
-      new_start_date: today,
-      new_end_date: toInputDate(contract.end_date),
+      new_start_date: todayStr,
+      new_end_date: curEnd && curEnd > todayStr ? curEnd : addMonthsStr(todayStr, 12),
       new_rent_amount: String(Math.round(Number(contract.rent_amount || 0))),
       transfer_deposit: true,
       note: '',
@@ -680,6 +998,10 @@ export function ContractDetailPage() {
     e?.preventDefault();
     if (!transferForm.new_apartment_id) {
       toast.warning('Vui lòng chọn căn hộ trống cần chuyển đến.');
+      return;
+    }
+    if (transferStartDateError || transferEndDateError) {
+      toast.warning(transferStartDateError || transferEndDateError);
       return;
     }
     if (transferForm.new_end_date <= transferForm.new_start_date) {
@@ -714,11 +1036,10 @@ export function ContractDetailPage() {
   // Thanh lý / Chấm dứt hợp đồng trực tiếp (MANAGER / SYS_ADMIN)
   const handleOpenTerminate = () => {
     if (!contract) return;
-    const today = new Date().toISOString().slice(0, 10);
     const sDate = toInputDate(contract.start_date);
     const eDate = toInputDate(contract.end_date);
-    const isPreMoveIn = today < sDate;
-    let defaultTermDate = today;
+    const isPreMoveIn = todayStr < sDate;
+    let defaultTermDate = todayStr;
     if (!isPreMoveIn && defaultTermDate < sDate) defaultTermDate = sDate;
     if (defaultTermDate > eDate) defaultTermDate = eDate;
 
@@ -736,6 +1057,10 @@ export function ContractDetailPage() {
     e?.preventDefault();
     if (!terminateForm.terminated_date) {
       toast.warning('Vui lòng chọn ngày chấm dứt hợp đồng.');
+      return;
+    }
+    if (terminateDateError) {
+      toast.warning(terminateDateError);
       return;
     }
     if (!terminateForm.reason.trim()) {
@@ -858,6 +1183,10 @@ export function ContractDetailPage() {
     e?.preventDefault();
     if (spForm.unit_price === '' || Number(spForm.unit_price) < 0) {
       toast.warning('Vui lòng nhập đơn giá dịch vụ hợp lệ (>= 0).');
+      return;
+    }
+    if (spEffectiveDateError) {
+      toast.warning(spEffectiveDateError);
       return;
     }
     setSubmittingSp(true);
@@ -1022,17 +1351,17 @@ export function ContractDetailPage() {
               </>
             ) : null}
 
-            {canApproveContracts && contract.status === 'TERMINATION_PENDING' ? (
+            {canTerminateContracts && contract.status === 'TERMINATION_PENDING' ? (
               <>
                 <Button variant="outline" icon={XCircle} onClick={() => setRejectTermOpen(true)}>
-                  Từ chối chấm dứt
+                  Hủy lịch chấm dứt
                 </Button>
                 <Button
-                  variant="success"
+                  variant="danger"
                   icon={CheckCircle2}
-                  onClick={() => setConfirmState({ open: true, type: 'approve_termination' })}
+                  onClick={handleOpenTerminate}
                 >
-                  Duyệt chấm dứt HĐ
+                  Chốt trả phòng &amp; Chấm dứt ngay
                 </Button>
               </>
             ) : null}
@@ -1061,11 +1390,11 @@ export function ContractDetailPage() {
           <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="leading-relaxed">
             <p className="font-semibold">
-              Hợp đồng đang chờ cấp thẩm quyền nội bộ phê duyệt chấm dứt — Ngày thanh lý dự kiến:{' '}
+              Hợp đồng đang chờ bàn giao chấm dứt — Ngày trả phòng dự kiến:{' '}
               {formatDate(contract.terminated_at)}
             </p>
             <p className="text-amber-800 mt-0.5">
-              Sau khi phê duyệt, căn hộ sẽ được cập nhật trạng thái và sổ cọc được mở hạn hoàn cọc 5 ngày.
+              Đến đúng ngày hẹn hệ thống sẽ tự động chuyển hợp đồng sang <strong>Đã thanh lý (TERMINATED)</strong> và mở hạn hoàn cọc 5 ngày, hoặc Quản lý có thể bấm <strong>Chốt trả phòng &amp; Chấm dứt ngay</strong> khi khách bàn giao phòng sớm.
             </p>
           </div>
         </div>
@@ -1152,13 +1481,20 @@ export function ContractDetailPage() {
               </div>
 
               <div className="p-3 rounded-lg border border-slate-100">
-                <p className="text-xs text-slate-500">Email liên hệ / Ngày thanh lý</p>
-                <p className="font-semibold text-slate-800 mt-0.5 truncate">
-                  {contract.terminated_at
-                    ? `Thanh lý: ${formatDate(contract.terminated_at)}`
-                    : contract.tenant_email || 'Chưa cập nhật email'}
+                <p className="text-xs text-slate-500">Email liên hệ</p>
+                <p className="font-semibold text-slate-800 mt-0.5 break-all">
+                  {contract.tenant_email || 'Chưa cập nhật email'}
                 </p>
               </div>
+
+              {contract.terminated_at ? (
+                <div className="p-3 rounded-lg border border-amber-200 bg-amber-50/50 sm:col-span-2">
+                  <p className="text-xs text-amber-700">Ngày thanh lý / chấm dứt hợp đồng</p>
+                  <p className="font-semibold text-amber-900 mt-0.5">
+                    {formatDate(contract.terminated_at)}
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             {contract.note ? (
@@ -1200,9 +1536,14 @@ export function ContractDetailPage() {
                           className="w-full h-full object-cover"
                         />
                       </div>
-                      <div className="px-2.5 py-1.5 bg-white border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600">
-                        <span className="font-medium truncate">Bản ký #{attachments.length - idx}</span>
-                        <span className="inline-flex items-center gap-0.5 text-primary-600 font-medium">
+                      <div className="px-2.5 py-1.5 bg-white border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-600">
+                        <div className="min-w-0">
+                          <p className="font-medium break-words">Bản ký #{attachments.length - idx}</p>
+                          {att.created_at ? (
+                            <p className="text-[10px] text-slate-400">{formatDate(att.created_at)}</p>
+                          ) : null}
+                        </div>
+                        <span className="inline-flex items-center gap-0.5 text-primary-600 font-medium shrink-0">
                           <ZoomIn className="w-3 h-3" /> Xem
                         </span>
                       </div>
@@ -1286,11 +1627,18 @@ export function ContractDetailPage() {
               },
               {
                 key: 'id_number',
-                label: 'CCCD / Hộ chiếu',
+                label: 'CCCD / Hồ sơ',
                 align: 'center',
                 className: 'whitespace-nowrap',
                 render: (row) => (
-                  <span className="font-mono text-xs">{row.id_number || 'Chưa bổ sung'}</span>
+                  <div className="flex flex-col items-center gap-1">
+                    <span className="font-mono text-xs">{row.id_number || 'Chưa bổ sung'}</span>
+                    {row.status === 'PENDING' || !row.id_number ? (
+                      <Badge variant="amber">Chờ bổ sung CCCD</Badge>
+                    ) : (
+                      <Badge variant="emerald">Đã duyệt</Badge>
+                    )}
+                  </div>
                 ),
               },
               {
@@ -1449,8 +1797,15 @@ export function ContractDetailPage() {
                       ) : null}
 
                       {isRejected && diff.rejection_reason ? (
-                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700">
-                          <strong>Lý do từ chối:</strong> {diff.rejection_reason}
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 space-y-0.5">
+                          <p>
+                            <strong>Lý do từ chối:</strong> {diff.rejection_reason}
+                          </p>
+                          {diff.rejected_at ? (
+                            <p className="text-[11px] text-rose-500">
+                              Thời gian từ chối: {formatDateTime(diff.rejected_at)}
+                            </p>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>
@@ -1618,7 +1973,12 @@ export function ContractDetailPage() {
             <Button variant="outline" onClick={() => setEditDraftOpen(false)} disabled={savingDraft}>
               Hủy
             </Button>
-            <Button variant="primary" onClick={handleSaveDraft} loading={savingDraft}>
+            <Button
+              variant="primary"
+              onClick={handleSaveDraft}
+              loading={savingDraft}
+              disabled={Boolean(draftStartDateError || draftEndDateError)}
+            >
               Lưu cập nhật
             </Button>
           </>
@@ -1632,26 +1992,27 @@ export function ContractDetailPage() {
               required
               value={editDraftForm.start_date}
               onChange={(e) => setEditDraftForm((p) => ({ ...p, start_date: e.target.value }))}
+              error={draftStartDateError}
             />
             <Input
               label="Ngày kết thúc"
               type="date"
               required
+              min={editDraftForm.start_date ? addDaysStr(editDraftForm.start_date, 1) : undefined}
               value={editDraftForm.end_date}
               onChange={(e) => setEditDraftForm((p) => ({ ...p, end_date: e.target.value }))}
+              error={draftEndDateError}
             />
-            <Input
+            <MoneyInput
               label="Giá thuê / tháng (VND)"
-              type="number"
-              min="0"
               required
+              placeholder="VD: 8.500.000"
               value={editDraftForm.rent_amount}
               onChange={(e) => setEditDraftForm((p) => ({ ...p, rent_amount: e.target.value }))}
             />
-            <Input
+            <MoneyInput
               label="Tiền đặt cọc (VND)"
-              type="number"
-              min="0"
+              placeholder="VD: 8.500.000"
               value={editDraftForm.deposit_amount}
               onChange={(e) => setEditDraftForm((p) => ({ ...p, deposit_amount: e.target.value }))}
             />
@@ -1722,7 +2083,13 @@ export function ContractDetailPage() {
             <Button variant="outline" onClick={() => setRenewOpen(false)} disabled={submittingRenew}>
               Hủy bỏ
             </Button>
-            <Button variant="primary" onClick={handleRenewSubmit} loading={submittingRenew} icon={RefreshCw}>
+            <Button
+              variant="primary"
+              onClick={handleRenewSubmit}
+              loading={submittingRenew}
+              disabled={Boolean(renewEndDateError)}
+              icon={RefreshCw}
+            >
               Tạo HĐ gia hạn
             </Button>
           </>
@@ -1733,8 +2100,10 @@ export function ContractDetailPage() {
             label="Ngày kết thúc mới"
             type="date"
             required
+            min={contractEndStr ? addDaysStr(contractEndStr, 1) : undefined}
             value={renewForm.new_end_date}
             onChange={(e) => setRenewForm((p) => ({ ...p, new_end_date: e.target.value }))}
+            error={renewEndDateError}
             hint={`Phải sau ngày kết thúc hiện tại (${formatDate(contract.end_date)})`}
           />
           <div className="flex items-center gap-2">
@@ -1755,18 +2124,16 @@ export function ContractDetailPage() {
             ))}
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Giá thuê kỳ mới (VND)"
-              type="number"
-              min="0"
               required
+              placeholder="VD: 8.500.000"
               value={renewForm.rent_amount}
               onChange={(e) => setRenewForm((p) => ({ ...p, rent_amount: e.target.value }))}
             />
-            <Input
+            <MoneyInput
               label="Tiền cọc kỳ mới (VND)"
-              type="number"
-              min="0"
+              placeholder="VD: 8.500.000"
               value={renewForm.deposit_amount}
               onChange={(e) => setRenewForm((p) => ({ ...p, deposit_amount: e.target.value }))}
             />
@@ -1793,7 +2160,13 @@ export function ContractDetailPage() {
             <Button variant="outline" onClick={() => setAmendOpen(false)} disabled={submittingAmend}>
               Hủy bỏ
             </Button>
-            <Button variant="primary" onClick={handleAmendSubmit} loading={submittingAmend} icon={FilePlus2}>
+            <Button
+              variant="primary"
+              onClick={handleAmendSubmit}
+              loading={submittingAmend}
+              disabled={Boolean(amendEffectiveDateError || amendEndDateError)}
+              icon={FilePlus2}
+            >
               Gửi đề xuất phụ lục
             </Button>
           </>
@@ -1801,35 +2174,37 @@ export function ContractDetailPage() {
       >
         <form onSubmit={handleAmendSubmit} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Giá thuê mới (VND)"
-              type="number"
-              min="0"
+              placeholder="VD: 8.500.000"
               value={amendForm.rent_amount}
               onChange={(e) => setAmendForm((p) => ({ ...p, rent_amount: e.target.value }))}
               hint={`Hiện tại: ${formatMoney(contract.rent_amount)}`}
             />
-            <Input
+            <MoneyInput
               label="Tiền cọc mới (VND)"
-              type="number"
-              min="0"
+              placeholder="VD: 8.500.000"
               value={amendForm.deposit_amount}
               onChange={(e) => setAmendForm((p) => ({ ...p, deposit_amount: e.target.value }))}
               hint={`Hiện tại: ${formatMoney(contract.deposit_amount)}`}
             />
             <Input
-              label="Ngày kết thúc mới"
-              type="date"
-              value={amendForm.end_date}
-              onChange={(e) => setAmendForm((p) => ({ ...p, end_date: e.target.value }))}
-              hint={`Hiện tại: ${formatDate(contract.end_date)}`}
-            />
-            <Input
               label="Ngày bắt đầu áp dụng phụ lục"
               type="date"
               required
+              min={contractStartStr || undefined}
               value={amendForm.effective_from}
               onChange={(e) => setAmendForm((p) => ({ ...p, effective_from: e.target.value }))}
+              error={amendEffectiveDateError}
+            />
+            <Input
+              label="Ngày kết thúc mới"
+              type="date"
+              min={minAmendEndDate || undefined}
+              value={amendForm.end_date}
+              onChange={(e) => setAmendForm((p) => ({ ...p, end_date: e.target.value }))}
+              error={amendEndDateError}
+              hint={`Hiện tại: ${formatDate(contract.end_date)}`}
             />
           </div>
           <Input
@@ -1896,6 +2271,7 @@ export function ContractDetailPage() {
               variant="primary"
               onClick={handleTransferSubmit}
               loading={submittingTransfer}
+              disabled={Boolean(transferStartDateError || transferEndDateError)}
               icon={ArrowRightLeft}
             >
               Thực hiện chuyển phòng
@@ -1916,6 +2292,7 @@ export function ContractDetailPage() {
             }
             value={transferForm.new_apartment_id}
             onChange={(e) => {
+              userEditedTransferDatesRef.current = false;
               const aptId = e.target.value;
               const apt = availableApts.find((a) => String(a.id) === String(aptId));
               setTransferForm((p) => ({
@@ -1932,28 +2309,52 @@ export function ContractDetailPage() {
             }))}
           />
 
+          {earliestTransferStart && earliestTransferStart > todayStr ? (
+            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <span>
+                Căn hộ đích đang có lịch giữ chỗ / hợp đồng dự kiến — hệ thống đã tự gợi ý ngày chuyển phòng trống gần nhất:{' '}
+                <strong>{formatDateVi(earliestTransferStart)}</strong>.
+              </span>
+            </div>
+          ) : null}
+
           <div className="grid grid-cols-2 gap-4">
             <Input
               label="Ngày chuyển phòng"
               type="date"
               required
+              min={
+                maxDateStr(
+                  minTerminateDate,
+                  earliestTransferStart && earliestTransferStart > todayStr ? earliestTransferStart : ''
+                ) || undefined
+              }
               value={transferForm.new_start_date}
-              onChange={(e) => setTransferForm((p) => ({ ...p, new_start_date: e.target.value }))}
+              onChange={(e) => {
+                userEditedTransferDatesRef.current = true;
+                setTransferForm((p) => ({ ...p, new_start_date: e.target.value }));
+              }}
+              error={transferStartDateError}
             />
             <Input
               label="Ngày kết thúc HĐ mới"
               type="date"
               required
+              min={transferForm.new_start_date ? addDaysStr(transferForm.new_start_date, 1) : undefined}
               value={transferForm.new_end_date}
-              onChange={(e) => setTransferForm((p) => ({ ...p, new_end_date: e.target.value }))}
+              onChange={(e) => {
+                userEditedTransferDatesRef.current = true;
+                setTransferForm((p) => ({ ...p, new_end_date: e.target.value }));
+              }}
+              error={transferEndDateError}
             />
           </div>
 
-          <Input
+          <MoneyInput
             label="Giá thuê căn hộ mới (VND / tháng)"
-            type="number"
-            min="0"
             required
+            placeholder="VD: 8.500.000"
             value={transferForm.new_rent_amount}
             onChange={(e) => setTransferForm((p) => ({ ...p, new_rent_amount: e.target.value }))}
           />
@@ -1998,7 +2399,12 @@ export function ContractDetailPage() {
             <Button variant="outline" onClick={() => setTerminateOpen(false)} disabled={submittingTerminate}>
               Hủy bỏ
             </Button>
-            <Button variant="danger" onClick={handleTerminateSubmit} loading={submittingTerminate}>
+            <Button
+              variant="danger"
+              onClick={handleTerminateSubmit}
+              loading={submittingTerminate}
+              disabled={Boolean(terminateDateError)}
+            >
               Xác nhận chấm dứt hợp đồng
             </Button>
           </>
@@ -2009,16 +2415,13 @@ export function ContractDetailPage() {
             label="Ngày chấm dứt hợp đồng"
             type="date"
             required
-            min={
-              toInputDate(contract.start_date) > new Date().toISOString().slice(0, 10)
-                ? new Date().toISOString().slice(0, 10)
-                : toInputDate(contract.start_date)
-            }
-            max={toInputDate(contract.end_date)}
+            min={minTerminateDate || undefined}
+            max={contractEndStr || undefined}
             value={terminateForm.terminated_date}
             onChange={(e) => setTerminateForm((p) => ({ ...p, terminated_date: e.target.value }))}
+            error={terminateDateError}
             hint={
-              toInputDate(contract.start_date) > new Date().toISOString().slice(0, 10)
+              contractStartStr > todayStr
                 ? `Hợp đồng tương lai (chưa nhận phòng): có thể thanh lý từ hôm nay đến ${formatDate(contract.end_date)}`
                 : `Phải nằm trong kỳ hạn hợp đồng (${formatDate(contract.start_date)} – ${formatDate(contract.end_date)})`
             }
@@ -2075,34 +2478,34 @@ export function ContractDetailPage() {
         </form>
       </Modal>
 
-      {/* Modal Từ chối đề xuất chấm dứt (OWNER) */}
+      {/* Modal Hủy lịch chấm dứt hợp đồng (trả về ACTIVE) */}
       <Modal
         open={rejectTermOpen}
         onClose={() => setRejectTermOpen(false)}
-        title="Từ chối đề xuất chấm dứt hợp đồng"
-        subtitle="Hợp đồng sẽ quay trở lại trạng thái Đang hiệu lực (ACTIVE)"
+        title="Hủy lịch chấm dứt hợp đồng"
+        subtitle="Hợp đồng sẽ xóa ngày hẹn trả phòng và quay trở lại trạng thái Đang hiệu lực (ACTIVE)"
         size="sm"
         footer={
           <>
             <Button variant="outline" onClick={() => setRejectTermOpen(false)} disabled={submittingRejectTerm}>
-              Hủy
+              Đóng
             </Button>
             <Button
               variant="danger"
               onClick={handleRejectTerminationSubmit}
               loading={submittingRejectTerm}
             >
-              Xác nhận từ chối
+              Xác nhận hủy lịch chấm dứt
             </Button>
           </>
         }
       >
         <Input
-          label="Lý do từ chối chấm dứt"
+          label="Lý do hủy lịch chấm dứt"
           required
           multiline
           rows={3}
-          placeholder="Nhập lý do từ chối để BQL nắm rõ..."
+          placeholder="VD: Cư dân đề nghị tiếp tục ở lại theo hợp đồng hiện tại..."
           value={rejectTermReason}
           onChange={(e) => setRejectTermReason(e.target.value)}
         />
@@ -2127,6 +2530,59 @@ export function ContractDetailPage() {
         }
       >
         <form onSubmit={handleAddOccupantSubmit} className="space-y-4">
+          {occDupChecking ? (
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-primary-600" />
+              Đang kiểm tra hồ sơ định danh trên hệ thống...
+            </div>
+          ) : occDupInfo.isDuplicate ? (
+            occDupInfo.inScope && occDupInfo.duplicates.length > 0 ? (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-2">
+                <div className="flex items-start gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-semibold">
+                      Phát hiện hồ sơ có sẵn trong phạm vi quản lý:{' '}
+                      {occDupInfo.duplicates[0].full_name || occDupInfo.duplicates[0].masked_name}
+                    </p>
+                    <p className="text-emerald-800 mt-0.5">
+                      SĐT: {occDupInfo.duplicates[0].masked_phone || occDupInfo.duplicates[0].phone || '—'}
+                      {occDupInfo.duplicates[0].masked_id_number
+                        ? ` • CCCD: ${occDupInfo.duplicates[0].masked_id_number}`
+                        : ''}{' '}
+                      — Hệ thống sẽ tự động liên kết định danh khi thêm vào hợp đồng (không tạo bản ghi trùng).
+                    </p>
+                  </div>
+                </div>
+                {occDupInfo.duplicates[0].full_name &&
+                occForm.full_name.trim() !== occDupInfo.duplicates[0].full_name ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOccForm((prev) => ({
+                        ...prev,
+                        full_name: occDupInfo.duplicates[0].full_name || prev.full_name,
+                      }))
+                    }
+                    className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs transition-colors"
+                  >
+                    Điền nhanh tên &ldquo;{occDupInfo.duplicates[0].full_name}&rdquo;
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">Phát hiện SĐT / CCCD đã đăng ký trên hệ thống</p>
+                  <p className="text-amber-800 mt-0.5">
+                    Nếu đúng SĐT của cư dân đã có hồ sơ tại tòa khác, hệ thống sẽ liên kết an toàn mà không ghi đè định danh gốc; nếu số CCCD trùng với một SĐT khác, thao tác sẽ bị chặn (FR-021).
+                  </p>
+                </div>
+              </div>
+            )
+          ) : null}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input
               label="Họ và tên"
@@ -2150,6 +2606,7 @@ export function ContractDetailPage() {
             />
             <Input
               label="Số CCCD / Hộ chiếu"
+              hint="Bỏ trống nếu bổ sung sau (trạng thái PENDING)"
               value={occForm.id_number}
               onChange={(e) => setOccForm((p) => ({ ...p, id_number: e.target.value }))}
               error={occErrors.id_number}
@@ -2164,6 +2621,7 @@ export function ContractDetailPage() {
             <Input
               label="Ngày sinh"
               type="date"
+              max={todayStr}
               value={occForm.dob}
               onChange={(e) => setOccForm((p) => ({ ...p, dob: e.target.value }))}
             />
@@ -2182,7 +2640,12 @@ export function ContractDetailPage() {
             <Button variant="outline" onClick={() => setSpModalOpen(false)} disabled={submittingSp}>
               Hủy
             </Button>
-            <Button variant="primary" onClick={handleAddServicePrice} loading={submittingSp}>
+            <Button
+              variant="primary"
+              onClick={handleAddServicePrice}
+              loading={submittingSp}
+              disabled={Boolean(spEffectiveDateError)}
+            >
               Lưu đơn giá
             </Button>
           </>
@@ -2195,12 +2658,10 @@ export function ContractDetailPage() {
             onChange={(e) => setSpForm((p) => ({ ...p, service_code: e.target.value }))}
             options={SERVICE_CODE_OPTIONS}
           />
-          <Input
+          <MoneyInput
             label="Đơn giá áp dụng (VND)"
-            type="number"
-            min="0"
             required
-            placeholder="VD: 150000"
+            placeholder="VD: 150.000"
             value={spForm.unit_price}
             onChange={(e) => setSpForm((p) => ({ ...p, unit_price: e.target.value }))}
           />
@@ -2208,8 +2669,10 @@ export function ContractDetailPage() {
             label="Ngày bắt đầu áp dụng"
             type="date"
             required
+            min={contractStartStr || undefined}
             value={spForm.effective_from}
             onChange={(e) => setSpForm((p) => ({ ...p, effective_from: e.target.value }))}
+            error={spEffectiveDateError}
           />
         </form>
       </Modal>

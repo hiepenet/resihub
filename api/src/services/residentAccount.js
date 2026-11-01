@@ -81,6 +81,10 @@ export async function checkPersonScopeForActor(personId, { actorId, orgId, roleC
                  WHERE rsv.phone = p.phone AND rsv.building_id = ANY($3::uuid[])
                )
              )
+             OR EXISTS (
+               SELECT 1 FROM tenant td
+               WHERE td.person_id = p.id AND td.desired_building_id = ANY($3::uuid[])
+             )
            )
          )
          OR (
@@ -262,14 +266,20 @@ export async function upsertPersonAndTenantInTx(
   const matchedPerson = existingByPhone.rows[0] || null;
 
   // PRD Mục 7.5 & FR-021 & Bảo mật PII liên tòa:
-  // Nếu thuộc phạm vi quản lý -> trả bản ghi trùng đã che PII để chọn/gộp.
-  // Nếu thuộc tòa nhà khác hoặc tài khoản nội bộ -> chặn 409 nhưng TUYỆT ĐỐI không tiết lộ tên/CCCD/Email.
+  // - Nếu thuộc tòa nhà khác hoặc tài khoản nội bộ -> chặn 409 nhưng TUYỆT ĐỐI không tiết lộ tên/CCCD/Email.
+  // - Nếu thuộc phạm vi quản lý và ĐÃ CÓ hồ sơ tenant hoạt động -> trả bản ghi trùng đã che PII để chọn/gộp.
+  // - Nếu thuộc phạm vi quản lý nhưng mới chỉ là person sơ bộ (VD: sinh tự động từ Phiếu giữ chỗ FR-067, chưa có tenant)
+  //   -> nâng cấp trực tiếp person sơ bộ đó thành hồ sơ tenant chính thức!
+  let upgradingPerson = null;
   if (matchedPerson) {
-    const inScope = await checkPersonScopeForActor(matchedPerson.id, {
-      actorId,
-      orgId,
-      roleCodes: actorRoles,
-    });
+    const internal = await isInternalPerson(matchedPerson.id, orgId);
+    const inScope =
+      !internal &&
+      (await checkPersonScopeForActor(matchedPerson.id, {
+        actorId,
+        orgId,
+        roleCodes: actorRoles,
+      }));
     if (!inScope) {
       const err = new Error(
         `Số điện thoại ${cleanPhone} đã được đăng ký trên hệ thống ngoài phạm vi tòa nhà bạn quản lý. Không thể tạo trùng hồ sơ định danh.`
@@ -280,24 +290,30 @@ export async function upsertPersonAndTenantInTx(
       throw err;
     }
 
-    const err = new Error(
-      `Số điện thoại ${cleanPhone} đã tồn tại trong phạm vi tòa nhà của bạn (Hồ sơ: ${maskName(matchedPerson.full_name)}). Theo quy định FR-021, hệ thống chặn tạo mới bản ghi trùng — vui lòng chọn hồ sơ có sẵn hoặc sử dụng tính năng Gộp hồ sơ.`
-    );
-    err.httpStatus = 409;
-    err.code = 'DUPLICATE_PHONE';
-    err.existing_person = {
-      id: matchedPerson.id,
-      full_name: matchedPerson.full_name,
-      masked_name: maskName(matchedPerson.full_name),
-      phone: maskPhone(matchedPerson.phone),
-      masked_phone: maskPhone(matchedPerson.phone),
-      id_number: maskIdNumber(matchedPerson.id_number),
-      masked_id_number: maskIdNumber(matchedPerson.id_number),
-      tenant_id: matchedPerson.tenant_id || null,
-      in_scope: true,
-    };
-    throw err;
+    if (matchedPerson.tenant_id) {
+      const err = new Error(
+        `Số điện thoại ${cleanPhone} đã tồn tại trong phạm vi tòa nhà của bạn (Hồ sơ: ${maskName(matchedPerson.full_name)}). Theo quy định FR-021, hệ thống chặn tạo mới bản ghi trùng — vui lòng chọn hồ sơ có sẵn hoặc sử dụng tính năng Gộp hồ sơ.`
+      );
+      err.httpStatus = 409;
+      err.code = 'DUPLICATE_PHONE';
+      err.existing_person = {
+        id: matchedPerson.id,
+        full_name: matchedPerson.full_name,
+        masked_name: maskName(matchedPerson.full_name),
+        phone: maskPhone(matchedPerson.phone),
+        masked_phone: maskPhone(matchedPerson.phone),
+        id_number: maskIdNumber(matchedPerson.id_number),
+        masked_id_number: maskIdNumber(matchedPerson.id_number),
+        tenant_id: matchedPerson.tenant_id || null,
+        in_scope: true,
+      };
+      throw err;
+    }
+
+    upgradingPerson = matchedPerson;
   }
+
+  const excludePersonId = upgradingPerson?.id || '00000000-0000-0000-0000-000000000000';
 
   // Kiểm tra trùng CCCD với người khác trong cùng tổ chức
   if (cleanIdNumber) {
@@ -311,8 +327,8 @@ export async function upsertPersonAndTenantInTx(
                 LIMIT 1
               ) AS tenant_id
        FROM person p
-       WHERE p.org_id = $1 AND p.id_number = $2`,
-      [orgId, cleanIdNumber]
+       WHERE p.org_id = $1 AND p.id_number = $2 AND p.id <> $3`,
+      [orgId, cleanIdNumber, excludePersonId]
     );
     if (dupIdRes.rows.length > 0) {
       const dupRow = dupIdRes.rows[0];
@@ -355,8 +371,8 @@ export async function upsertPersonAndTenantInTx(
   if (cleanEmail) {
     const dupEmailRes = await adminPool.query(
       `SELECT id, full_name, phone, email FROM person
-       WHERE org_id = $1 AND LOWER(email) = $2`,
-      [orgId, cleanEmail]
+       WHERE org_id = $1 AND LOWER(email) = $2 AND id <> $3`,
+      [orgId, cleanEmail, excludePersonId]
     );
     if (dupEmailRes.rows.length > 0) {
       const dupRow = dupEmailRes.rows[0];
@@ -392,24 +408,51 @@ export async function upsertPersonAndTenantInTx(
     }
   }
 
-  const newPersonRes = await client.query(
-    `INSERT INTO person (org_id, full_name, phone, email, dob, id_number, address, nationality, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING *`,
-    [
-      orgId,
-      cleanName,
-      cleanPhone,
-      cleanEmail,
-      cleanDob,
-      cleanIdNumber,
-      cleanAddress,
-      cleanNationality,
-      actorId || null,
-    ]
-  );
-  const personId = newPersonRes.rows[0].id;
-  const effectiveIdNumber = cleanIdNumber;
+  let personId;
+  let effectiveIdNumber;
+  if (upgradingPerson) {
+    const upPersonRes = await client.query(
+      `UPDATE person
+       SET full_name = $1,
+           email = COALESCE($2, email),
+           dob = COALESCE($3, dob),
+           id_number = COALESCE($4, id_number),
+           address = COALESCE($5, address),
+           nationality = COALESCE($6, nationality)
+       WHERE id = $7
+       RETURNING *`,
+      [
+        cleanName,
+        cleanEmail,
+        cleanDob,
+        cleanIdNumber,
+        cleanAddress,
+        cleanNationality,
+        upgradingPerson.id,
+      ]
+    );
+    personId = upPersonRes.rows[0].id;
+    effectiveIdNumber = upPersonRes.rows[0].id_number;
+  } else {
+    const newPersonRes = await client.query(
+      `INSERT INTO person (org_id, full_name, phone, email, dob, id_number, address, nationality, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        orgId,
+        cleanName,
+        cleanPhone,
+        cleanEmail,
+        cleanDob,
+        cleanIdNumber,
+        cleanAddress,
+        cleanNationality,
+        actorId || null,
+      ]
+    );
+    personId = newPersonRes.rows[0].id;
+    effectiveIdNumber = cleanIdNumber;
+  }
 
   // Kiểm tra xem đã có bản ghi tenant (chưa bị MERGED/REJECTED) cho person này chưa
   const existingTenantRes = await client.query(

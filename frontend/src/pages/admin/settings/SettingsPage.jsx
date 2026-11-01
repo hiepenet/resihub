@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Save, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { usersService } from '../../../services/users.service';
@@ -243,11 +244,10 @@ export function SettingsPage() {
                 }
               />
               <div className="grid grid-cols-2 gap-3">
-                <Input
+                <MoneyInput
                   label="Giá điện mặc định (₫/kWh)"
-                  type="number"
-                  min="0"
                   disabled={!isSysAdmin}
+                  placeholder="VD: 3.800"
                   value={billingConfig.electricity_default_price}
                   onChange={(e) =>
                     setBillingConfig((s) => ({
@@ -256,11 +256,10 @@ export function SettingsPage() {
                     }))
                   }
                 />
-                <Input
+                <MoneyInput
                   label="Giá nước mặc định (₫/m³)"
-                  type="number"
-                  min="0"
                   disabled={!isSysAdmin}
+                  placeholder="VD: 22.000"
                   value={billingConfig.water_default_price}
                   onChange={(e) =>
                     setBillingConfig((s) => ({

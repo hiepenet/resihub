@@ -7,6 +7,7 @@ export const residentService = {
   getOverview: (contractId) =>
     api.get('/api/v1/resident/overview', withContractParam(contractId)).then((r) => r.data),
   submitRentalApplication: (payload) => api.post('/api/v1/resident/rental-application', payload).then((r) => r.data),
+  uploadIdImage: (payload) => api.post('/api/v1/resident/id-images', payload).then((r) => r.data),
 
   listServiceRequests: (contractId) =>
     api.get('/api/v1/resident/service-requests', withContractParam(contractId)).then((r) => r.data),

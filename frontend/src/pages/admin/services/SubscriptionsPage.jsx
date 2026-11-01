@@ -30,6 +30,7 @@ import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
+import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 function estimateProrata(unitPrice, quantity, dateStr, mode = 'subscribe') {
@@ -53,6 +54,7 @@ const STATUS_FILTER_PILLS = [
   { value: 'ACTIVE', label: 'Đang sử dụng' },
   { value: 'CANCELLATION_PENDING', label: 'Chờ hủy' },
   { value: 'CANCELLED', label: 'Đã hủy' },
+  { value: 'REJECTED', label: 'Đã từ chối' },
 ];
 
 export function SubscriptionsPage() {
@@ -92,7 +94,6 @@ export function SubscriptionsPage() {
     try {
       const res = await servicesService.listSubscriptions({
         building_id: selectedBuildingId || undefined,
-        status: statusFilter || undefined,
       });
       setSubscriptions(res.data || []);
     } catch (err) {
@@ -100,24 +101,27 @@ export function SubscriptionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, statusFilter, toast]);
+  }, [selectedBuildingId, toast]);
 
   useEffect(() => {
     fetchSubscriptions();
   }, [fetchSubscriptions]);
 
   const filteredData = useMemo(() => {
-    if (!search.trim()) return subscriptions;
     const q = search.trim().toLowerCase();
-    return subscriptions.filter(
-      (s) =>
+    return subscriptions.filter((s) => {
+      if (statusFilter && s.status !== statusFilter) return false;
+      if (!q) return true;
+      return (
         s.apartment_code?.toLowerCase().includes(q) ||
         s.building_code?.toLowerCase().includes(q) ||
         s.service_name?.toLowerCase().includes(q) ||
         s.service_code?.toLowerCase().includes(q) ||
-        s.tenant_name?.toLowerCase().includes(q)
-    );
-  }, [subscriptions, search]);
+        s.tenant_name?.toLowerCase().includes(q) ||
+        s.note?.toLowerCase().includes(q)
+      );
+    });
+  }, [subscriptions, statusFilter, search]);
 
   const stats = useMemo(() => {
     const pendingApprove = subscriptions.filter((s) => s.status === 'PENDING_APPROVAL').length;
@@ -223,22 +227,41 @@ export function SubscriptionsPage() {
 
   const openCancelModal = (sub) => {
     setCancelTarget(sub);
-    setCancelEndDate(sub.end_date ? toInputDate(sub.end_date) : toInputDate(new Date()));
+    const subStart = toDateOnlyStr(sub?.start_date);
+    const initialEnd = sub?.end_date
+      ? toInputDate(sub.end_date)
+      : maxDateStr(toInputDate(new Date()), subStart);
+    setCancelEndDate(initialEnd);
     setCancelNote(sub.note || '');
   };
 
+  const cancelStartDateStr = toDateOnlyStr(cancelTarget?.start_date);
+  const cancelEndDateError = cancelTarget
+    ? getDateOrderError(cancelStartDateStr, cancelEndDate, {
+        strictAfter: false,
+        startLabel: cancelStartDateStr
+          ? `Ngày bắt đầu đăng ký (${formatDateVi(cancelStartDateStr)})`
+          : 'Ngày bắt đầu đăng ký',
+        endLabel: 'Ngày kết thúc sử dụng',
+      })
+    : '';
+
   const cancelProrataPreview = useMemo(() => {
-    if (!cancelTarget) return null;
+    if (!cancelTarget || cancelEndDateError) return null;
     return estimateProrata(
       cancelTarget.unit_price,
       cancelTarget.quantity,
       cancelEndDate,
       'cancel'
     );
-  }, [cancelTarget, cancelEndDate]);
+  }, [cancelTarget, cancelEndDate, cancelEndDateError]);
 
   const handleConfirmCancel = async () => {
     if (!cancelTarget) return;
+    if (cancelEndDateError) {
+      toast.warning(cancelEndDateError);
+      return;
+    }
     setSubmittingAction(true);
     try {
       const res = await servicesService.updateSubscription(cancelTarget.id, {
@@ -348,7 +371,10 @@ export function SubscriptionsPage() {
           <div className="inline-flex flex-col items-center">
             <StatusBadge status={row.status} domain="subscription" />
             {row.note ? (
-              <p className="text-[11px] text-slate-500 mt-1 max-w-[180px] truncate" title={row.note}>
+              <p
+                className="text-[11px] text-slate-600 mt-1 max-w-[220px] whitespace-pre-line break-words text-center"
+                title={row.note}
+              >
                 {row.note}
               </p>
             ) : null}
@@ -664,6 +690,7 @@ export function SubscriptionsPage() {
               variant="danger"
               onClick={handleConfirmCancel}
               loading={submittingAction}
+              disabled={Boolean(cancelEndDateError)}
             >
               Xác nhận hủy dịch vụ
             </Button>
@@ -676,6 +703,8 @@ export function SubscriptionsPage() {
               label="Ngày kết thúc sử dụng thực tế"
               type="date"
               required
+              min={cancelStartDateStr || undefined}
+              error={cancelEndDateError}
               value={cancelEndDate}
               onChange={(e) => setCancelEndDate(e.target.value)}
             />

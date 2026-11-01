@@ -31,7 +31,15 @@ import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
 import { contractsService } from '../../../services/contracts.service';
 import { useToast } from '../../../hooks/useToast';
-import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
+import { formatMoney, formatDate, formatDateTime, toInputDate, maskIdNumber } from '../../../utils/format';
+import {
+  addDaysStr,
+  addMonthsClampedStr,
+  formatDateVi,
+  getDateOrderError,
+  maxDateStr,
+  toDateOnlyStr,
+} from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const DIFF_FIELD_LABELS = {
@@ -51,6 +59,14 @@ const DEPOSIT_TX_LABELS = {
   deduct: { label: 'Khấu trừ cọc', sign: '-', variant: 'amber' },
   forfeit: { label: 'Thu hồi cọc vi phạm', sign: '-', variant: 'red' },
 };
+
+function resolveResidentDepositTxMeta(tx) {
+  const desc = String(tx?.description || tx?.note || '').trim();
+  if (tx?.type === 'transfer' && /^chuyển kết dư/i.test(desc)) {
+    return { label: 'Kết chuyển đi', sign: '-', variant: 'amber' };
+  }
+  return DEPOSIT_TX_LABELS[tx?.type] || { label: tx?.type || 'Giao dịch', sign: '', variant: 'slate' };
+}
 
 const REQUEST_STATUS_MAP = {
   SUBMITTED: { label: 'Chờ BQL xử lý', variant: 'amber' },
@@ -75,6 +91,25 @@ const DEDUCT_CATEGORY_LABELS = {
   CLEANING: 'Vệ sinh mặt bằng',
   UTILITY_DEBT: 'Điện / nước / tiện ích',
   OTHER: 'Khấu trừ khác',
+};
+
+const PAYMENT_METHOD_LABELS = {
+  BANK_TRANSFER: 'Chuyển khoản ngân hàng',
+  TRANSFER: 'Chuyển khoản',
+  QR_CODE: 'QR Code',
+  E_WALLET: 'Ví điện tử',
+  EWALLET: 'Ví điện tử',
+  CASH: 'Tiền mặt',
+  CARD: 'Thẻ',
+  OTHER: 'Khác',
+};
+
+const BILLING_CYCLE_LABELS = {
+  MONTHLY: 'hàng tháng',
+  QUARTERLY: 'hàng quý',
+  SEMI_ANNUALLY: '6 tháng/lần',
+  YEARLY: 'hàng năm',
+  ANNUALLY: 'hàng năm',
 };
 
 function formatDiffValue(key, val) {
@@ -188,23 +223,58 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     URL.revokeObjectURL(url);
   };
 
-  const openRequestModal = (type = 'RENEWAL') => {
-    let defaultDate = '';
-    if (type === 'RENEWAL' && contract?.end_date) {
-      const d = new Date(contract.end_date);
-      if (!Number.isNaN(d.getTime())) {
-        d.setFullYear(d.getFullYear() + 1);
-        defaultDate = toInputDate(d);
-      }
-    } else if (type === 'TERMINATION') {
-      const d = new Date();
-      d.setDate(d.getDate() + 30);
-      defaultDate = toInputDate(d);
-    }
+  const contractStartStr = toDateOnlyStr(contract?.start_date);
+  const contractEndStr = toDateOnlyStr(contract?.end_date);
+  const todayDateStr = toInputDate(new Date());
+  const minRenewalDesiredDate = contractEndStr
+    ? addDaysStr(contractEndStr, 1)
+    : todayDateStr;
+  const minTerminationDesiredDate = maxDateStr(todayDateStr, contractStartStr);
+  const maxTerminationDesiredDate =
+    contractEndStr && contractEndStr >= minTerminationDesiredDate ? contractEndStr : '';
 
+  const getDefaultDesiredDateForType = (type) => {
+    if (type === 'RENEWAL') {
+      return contractEndStr
+        ? addMonthsClampedStr(contractEndStr, 12)
+        : addMonthsClampedStr(todayDateStr, 12);
+    }
+    const plus30 = addDaysStr(todayDateStr, 30);
+    if (maxTerminationDesiredDate && plus30 > maxTerminationDesiredDate) {
+      return maxTerminationDesiredDate;
+    }
+    return maxDateStr(plus30, minTerminationDesiredDate);
+  };
+
+  const reqDesiredDateError = (() => {
+    if (!reqForm.desired_date) return '';
+    if (reqForm.type === 'RENEWAL') {
+      if (contractEndStr) {
+        return getDateOrderError(contractEndStr, reqForm.desired_date, {
+          strictAfter: true,
+          startLabel: `Ngày hết hạn HĐ hiện tại (${formatDateVi(contractEndStr)})`,
+          endLabel: 'Ngày kết thúc mới mong muốn',
+        });
+      }
+      return getDateOrderError(todayDateStr, reqForm.desired_date, {
+        strictAfter: false,
+        startLabel: 'Hôm nay',
+        endLabel: 'Ngày kết thúc mới mong muốn',
+      });
+    }
+    if (minTerminationDesiredDate && reqForm.desired_date < minTerminationDesiredDate) {
+      return `Ngày dự kiến bàn giao không được nhỏ hơn ${formatDateVi(minTerminationDesiredDate)}.`;
+    }
+    if (maxTerminationDesiredDate && reqForm.desired_date > maxTerminationDesiredDate) {
+      return `Ngày dự kiến bàn giao không được vượt quá ngày hết hạn HĐ (${formatDateVi(maxTerminationDesiredDate)}).`;
+    }
+    return '';
+  })();
+
+  const openRequestModal = (type = 'RENEWAL') => {
     setReqForm({
       type,
-      desired_date: defaultDate,
+      desired_date: getDefaultDesiredDateForType(type),
       note: '',
     });
     setReqModalOpen(true);
@@ -214,6 +284,10 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     e.preventDefault();
     if (reqForm.type === 'TERMINATION' && !reqForm.desired_date) {
       toast.warning('Vui lòng chọn ngày mong muốn chấm dứt hợp đồng.');
+      return;
+    }
+    if (reqDesiredDateError) {
+      toast.warning(reqDesiredDateError);
       return;
     }
 
@@ -325,7 +399,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
         building_name: contract.building_name,
         amount_held: contract.deposit_held_amount,
         deposit_status: contract.deposit_status,
-        refund_due_date: contract.refund_due_date,
+        refund_due_date: contract.deposit_refund_due_date ?? contract.refund_due_date,
         settlement: contract.deposit_settlement,
       });
     }
@@ -338,7 +412,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
           building_name: ch.building_name,
           amount_held: ch.deposit_held_amount ?? ch.amount_held,
           deposit_status: ch.deposit_status,
-          refund_due_date: ch.refund_due_date,
+          refund_due_date: ch.deposit_refund_due_date ?? ch.refund_due_date,
           settlement: ch.deposit_settlement,
         });
       }
@@ -485,6 +559,21 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
             </div>
           </div>
 
+          {contract.contract_status === 'TERMINATION_PENDING' ? (
+            <div className="mt-4 p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-xs text-amber-900">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">
+                  Đã duyệt lịch chấm dứt hợp đồng — Ngày trả phòng dự kiến:{' '}
+                  {formatDate(contract.terminated_at)}
+                </p>
+                <p className="text-amber-800 mt-0.5">
+                  Vui lòng bàn giao căn hộ và chốt chỉ số điện/nước cùng Ban Quản Lý trước hoặc vào ngày hẹn để tiến hành tất toán tiền cọc.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
           {/* Status Timeline */}
           <div className="py-5 border-b border-slate-100">
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3.5">
@@ -502,17 +591,17 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                       : 'bg-slate-50 border-slate-200/70'
                   }`}
                 >
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-start gap-1.5">
                     {step.done ? (
                       <CheckCircle2
-                        className={`w-4 h-4 shrink-0 ${
+                        className={`w-4 h-4 shrink-0 mt-0.5 ${
                           step.active ? 'text-primary-600' : 'text-emerald-600'
                         }`}
                       />
                     ) : (
-                      <Clock className="w-4 h-4 text-slate-400 shrink-0" />
+                      <Clock className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
                     )}
-                    <span className="text-xs font-semibold text-slate-800 truncate">
+                    <span className="text-xs font-semibold text-slate-800 leading-snug break-words">
                       {step.label}
                     </span>
                   </div>
@@ -523,7 +612,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
           </div>
 
           {/* Key Contract Terms */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 pt-5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-6 gap-4 pt-5">
             <div>
               <p className="text-xs text-slate-500">Ngày bắt đầu</p>
               <p className="text-sm font-semibold text-slate-900 mt-0.5">
@@ -538,20 +627,21 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
             </div>
             <div>
               <p className="text-xs text-slate-500">Giá thuê / tháng</p>
-              <p className="text-sm font-bold text-primary-600 mt-0.5">
+              <p className="text-sm font-bold text-primary-600 mt-0.5 tabular-nums">
                 {formatMoney(contract.rent_amount)}
               </p>
             </div>
             <div>
               <p className="text-xs text-slate-500">Tiền cọc hợp đồng</p>
-              <p className="text-sm font-bold text-indigo-600 mt-0.5">
+              <p className="text-sm font-bold text-indigo-600 mt-0.5 tabular-nums">
                 {formatMoney(contract.deposit_amount)}
               </p>
             </div>
             <div>
               <p className="text-xs text-slate-500">Ngày chốt hóa đơn</p>
               <p className="text-sm font-semibold text-slate-900 mt-0.5">
-                Ngày {contract.billing_day || 1} hàng tháng
+                Ngày {contract.billing_day || 1}{' '}
+                {BILLING_CYCLE_LABELS[String(contract.billing_cycle || 'MONTHLY').toUpperCase()] || 'hàng tháng'}
               </p>
             </div>
             <div>
@@ -563,7 +653,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
           </div>
 
           {contract.contract_note ? (
-            <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200/60 text-xs text-slate-600">
+            <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200/60 text-xs text-slate-600 whitespace-pre-line break-words">
               <span className="font-semibold text-slate-700">Ghi chú hợp đồng: </span>
               {contract.contract_note}
             </div>
@@ -580,13 +670,22 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                 {occupants.map((occ) => (
                   <div
                     key={occ.tenant_id}
-                    className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200/70 flex items-center justify-between text-xs"
+                    className="p-3 rounded-lg bg-slate-50 border border-slate-200/70 flex items-start justify-between gap-2 text-xs"
                   >
-                    <div>
-                      <p className="font-semibold text-slate-800">{occ.full_name}</p>
-                      <p className="text-slate-500">{occ.phone || '—'}</p>
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="font-semibold text-slate-800 break-words">{occ.full_name}</p>
+                      <p className="text-slate-600">{occ.phone || '—'}</p>
+                      {occ.email ? (
+                        <p className="text-slate-500 break-all">{occ.email}</p>
+                      ) : null}
+                      {occ.id_number ? (
+                        <p className="text-[11px] text-slate-400">CCCD: {maskIdNumber(occ.id_number)}</p>
+                      ) : null}
                     </div>
-                    <Badge variant="slate">{occ.relationship || 'Thành viên'}</Badge>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <Badge variant="slate">{occ.relationship || 'Thành viên'}</Badge>
+                      {occ.status ? <StatusBadge status={occ.status} domain="tenant" /> : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -608,9 +707,9 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
               return (
                 <div
                   key={cr.id}
-                  className="p-3.5 rounded-xl border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="p-3.5 rounded-xl border border-slate-200/80 flex flex-col sm:flex-row sm:items-start justify-between gap-3"
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-1.5 min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Badge variant={cr.type === 'RENEWAL' ? 'sky' : 'red'}>
                         {cr.type === 'RENEWAL' ? 'Xin gia hạn HĐ' : 'Xin chấm dứt HĐ trước hạn'}
@@ -618,8 +717,17 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                       <Badge variant={st.variant} dot>
                         {st.label}
                       </Badge>
+                      {cr.apartment_code ? (
+                        <span className="text-xs font-medium text-slate-700">
+                          Căn {cr.apartment_code}
+                          {cr.building_name ? ` — ${cr.building_name}` : ''}
+                        </span>
+                      ) : null}
                       <span className="text-xs text-slate-400">
                         Gửi lúc {formatDateTime(cr.created_at)}
+                        {cr.updated_at && cr.updated_at !== cr.created_at
+                          ? ` • Cập nhật ${formatDateTime(cr.updated_at)}`
+                          : ''}
                       </span>
                     </div>
                     <p className="text-xs text-slate-600">
@@ -627,8 +735,18 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                       <span className="font-semibold text-slate-800">
                         {formatDate(cr.desired_date)}
                       </span>
-                      {cr.note ? ` • Ghi chú: ${cr.note}` : ''}
                     </p>
+                    {cr.note ? (
+                      <div
+                        className={`text-xs rounded-lg px-3 py-2 whitespace-pre-line break-words ${
+                          cr.status === 'REJECTED' || /\[Lý do từ chối\]/i.test(cr.note)
+                            ? 'bg-rose-50/80 border border-rose-200 text-rose-800'
+                            : 'bg-slate-50 border border-slate-200/70 text-slate-700'
+                        }`}
+                      >
+                        {cr.note}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -761,34 +879,91 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                   )}
 
                   {/* Tổng hợp công nợ đối trừ & số tiền hoàn */}
-                  <div className="p-3.5 rounded-xl bg-white border border-indigo-100 space-y-2 text-xs">
-                    {sd.amount_held !== undefined && sd.amount_held !== null ? (
-                      <div className="flex justify-between text-slate-600">
-                        <span>Số dư cọc hiện tại trên sổ:</span>
-                        <strong className="text-slate-900">{formatMoney(sd.amount_held)}</strong>
+                  {(() => {
+                    const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(
+                      sd.deposit_status
+                    );
+                    const heldBefore = Number(
+                      stObj.deposit_held_before_settlement ?? sd.amount_held ?? 0
+                    );
+                    const rentDebt = Math.max(0, Number(stObj.rent_debt || 0));
+                    return (
+                      <div className="p-3.5 rounded-xl bg-white border border-indigo-100 space-y-2 text-xs">
+                        <div className="flex justify-between text-slate-600">
+                          <span>Tiền đặt cọc bảo lưu trước tất toán:</span>
+                          <strong className="text-slate-900">{formatMoney(heldBefore)}</strong>
+                        </div>
+                        <div className="flex justify-between text-slate-600">
+                          <span>Đối trừ nợ dịch vụ / điện nước:</span>
+                          <strong className="text-amber-700">- {formatMoney(serviceDebt)}</strong>
+                        </div>
+                        <div className="flex justify-between text-slate-600">
+                          <span>Tổng khấu trừ hư hỏng / vệ sinh:</span>
+                          <strong className="text-amber-700">- {formatMoney(itemsTotal)}</strong>
+                        </div>
+                        {rentDebt > 0 ? (
+                          <div className="flex justify-between text-slate-500 italic">
+                            <span>Công nợ tiền thuê (KHÔNG trừ vào cọc — thanh toán riêng):</span>
+                            <strong className="text-rose-600">{formatMoney(rentDebt)}</strong>
+                          </div>
+                        ) : null}
+                        <div className="border-t border-slate-100 pt-2 flex justify-between items-center text-sm">
+                          <span className="font-bold text-slate-900">
+                            {isFinalized ? 'Số tiền hoàn trả thực tế:' : 'Số tiền hoàn trả dự kiến:'}
+                          </span>
+                          <span className="text-base font-bold text-emerald-600">
+                            {formatMoney(expectedRefund)}
+                          </span>
+                        </div>
+                        {Number(stObj.shortfall || 0) > 0 ? (
+                          <div className="flex justify-between text-rose-700 font-semibold pt-1">
+                            <span>Khoản phải thu bổ sung sau trả phòng:</span>
+                            <span>{formatMoney(stObj.shortfall)}</span>
+                          </div>
+                        ) : null}
+                        {stObj.refund_method || stObj.bank_info || stObj.approved_at ? (
+                          <div className="pt-2 border-t border-slate-100 space-y-1 text-slate-600">
+                            {stObj.refund_method ? (
+                              <p>
+                                Hình thức hoàn cọc:{' '}
+                                <strong className="text-slate-800">
+                                  {PAYMENT_METHOD_LABELS[String(stObj.refund_method).toUpperCase()] || stObj.refund_method}
+                                </strong>
+                              </p>
+                            ) : null}
+                            {stObj.bank_info ? (
+                              <p className="break-words">
+                                Tài khoản nhận hoàn cọc:{' '}
+                                <strong className="text-slate-800">
+                                  {typeof stObj.bank_info === 'object'
+                                    ? [
+                                        stObj.bank_info.bank_name || stObj.bank_info.bank,
+                                        stObj.bank_info.account_no || stObj.bank_info.account_number,
+                                        stObj.bank_info.account_name || stObj.bank_info.holder_name,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' • ')
+                                    : stObj.bank_info}
+                                </strong>
+                              </p>
+                            ) : null}
+                            {stObj.approved_at ? (
+                              <p>
+                                Xác nhận quyết toán lúc:{' '}
+                                <strong className="text-slate-800">{formatDateTime(stObj.approved_at)}</strong>
+                              </p>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {stObj.rejection_reason ? (
+                          <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 whitespace-pre-line break-words">
+                            <span className="font-semibold">Ghi chú yêu cầu điều chỉnh lại bảng kê: </span>
+                            {stObj.rejection_reason}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
-                    <div className="flex justify-between text-slate-600">
-                      <span>Đối trừ nợ dịch vụ / điện nước:</span>
-                      <strong className="text-amber-700">- {formatMoney(serviceDebt)}</strong>
-                    </div>
-                    <div className="flex justify-between text-slate-600">
-                      <span>Tổng khấu trừ hư hỏng / vệ sinh:</span>
-                      <strong className="text-amber-700">- {formatMoney(itemsTotal)}</strong>
-                    </div>
-                    <div className="border-t border-slate-100 pt-2 flex justify-between items-center text-sm">
-                      <span className="font-bold text-slate-900">Số tiền hoàn trả dự kiến:</span>
-                      <span className="text-base font-bold text-emerald-600">
-                        {formatMoney(expectedRefund)}
-                      </span>
-                    </div>
-                    {Number(stObj.shortfall || 0) > 0 ? (
-                      <div className="flex justify-between text-rose-700 font-semibold pt-1">
-                        <span>Khoản phải thu bổ sung sau trả phòng:</span>
-                        <span>{formatMoney(stObj.shortfall)}</span>
-                      </div>
-                    ) : null}
-                  </div>
+                    );
+                  })()}
 
                   {/* Lịch sử trao đổi khiếu nại */}
                   {stObj.dispute_reason || thread.length > 0 ? (
@@ -870,11 +1045,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
             ) : (
               <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden">
                 {depositTransactions.map((tx) => {
-                  const meta = DEPOSIT_TX_LABELS[tx.type] || {
-                    label: tx.type,
-                    sign: '',
-                    variant: 'slate',
-                  };
+                  const meta = resolveResidentDepositTxMeta(tx);
                   const isPlus = meta.sign === '+';
                   return (
                     <div
@@ -897,15 +1068,40 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-semibold text-slate-900">
+                            <span className="text-xs font-semibold text-slate-900 break-words">
                               {tx.description || tx.note || meta.label}
                             </span>
                             <Badge variant={meta.variant}>{meta.label}</Badge>
+                            {tx.category ? (
+                              <Badge variant="amber">
+                                {DEDUCT_CATEGORY_LABELS[tx.category] || tx.category}
+                              </Badge>
+                            ) : null}
                           </div>
                           <p className="text-[11px] text-slate-500 mt-0.5">
                             {formatDateTime(tx.created_at)}
-                            {tx.method ? ` • Phương thức: ${tx.method}` : ''}
+                            {tx.method
+                              ? ` • Phương thức: ${PAYMENT_METHOD_LABELS[String(tx.method).toUpperCase()] || tx.method}`
+                              : ''}
                           </p>
+                          {Array.isArray(tx.evidence) && tx.evidence.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5 pt-1.5">
+                              {tx.evidence.map((ev, eIdx) => (
+                                <button
+                                  key={eIdx}
+                                  type="button"
+                                  onClick={() => setPreviewEvidenceSrc(ev)}
+                                  className="w-11 h-11 rounded-lg border border-slate-200 overflow-hidden hover:border-primary-400"
+                                >
+                                  <AuthImage
+                                    src={ev}
+                                    alt="Chứng từ giao dịch cọc"
+                                    className="w-full h-full object-cover"
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                       <span
@@ -949,14 +1145,40 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                     key={am.id}
                     className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50 space-y-2"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <Badge variant="indigo">Phụ lục lần #{am.version_no}</Badge>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="indigo">Phụ lục lần #{am.version_no}</Badge>
+                        {diffObj.status ? (
+                          <Badge
+                            variant={
+                              diffObj.status === 'APPROVED'
+                                ? 'emerald'
+                                : diffObj.status === 'REJECTED'
+                                ? 'red'
+                                : 'amber'
+                            }
+                            dot
+                          >
+                            {diffObj.status === 'APPROVED'
+                              ? 'Đã phê duyệt'
+                              : diffObj.status === 'REJECTED'
+                              ? 'Từ chối'
+                              : 'Chờ duyệt'}
+                          </Badge>
+                        ) : null}
+                      </div>
                       <span className="text-xs text-slate-500">
                         Hiệu lực: <strong className="text-slate-700">{formatDate(am.effective_from)}</strong>
+                        {am.created_at ? ` • Lập ${formatDate(am.created_at)}` : ''}
                       </span>
                     </div>
                     {am.reason ? (
-                      <p className="text-xs text-slate-700 font-medium">{am.reason}</p>
+                      <p className="text-xs text-slate-700 font-medium break-words">{am.reason}</p>
+                    ) : null}
+                    {diffObj.rejection_reason ? (
+                      <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 whitespace-pre-line break-words">
+                        Lý do từ chối: {diffObj.rejection_reason}
+                      </p>
                     ) : null}
                     {(() => {
                       const diffEntries = Object.entries(diffObj).filter(
@@ -1049,14 +1271,26 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                   </div>
 
                   <div className="mt-2.5 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
-                    <span className="inline-flex items-center gap-1">
+                    <span className="inline-flex items-center gap-1 flex-wrap">
                       <Calendar className="w-3.5 h-3.5 text-slate-400" />
                       {formatDate(ch.start_date)} → {formatDate(ch.end_date)}
+                      {ch.terminated_at ? ` (Thanh lý: ${formatDate(ch.terminated_at)})` : ''}
                     </span>
                     <span className="font-semibold text-slate-800">
                       {formatMoney(ch.rent_amount)}/tháng
                     </span>
                   </div>
+
+                  {ch.deposit_amount !== undefined || ch.deposit_status ? (
+                    <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                      <span>
+                        Tiền cọc: <strong className="text-slate-700">{formatMoney(ch.deposit_amount || 0)}</strong>
+                      </span>
+                      {ch.deposit_status ? (
+                        <StatusBadge status={ch.deposit_status} domain="deposit" />
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {ch.parent_contract_id ? (
                     <p className="text-[11px] text-indigo-600 font-medium mt-1.5">
@@ -1140,6 +1374,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
               variant={reqForm.type === 'TERMINATION' ? 'danger' : 'primary'}
               onClick={handleSubmitContractRequest}
               loading={reqSubmitting}
+              disabled={Boolean(reqDesiredDateError)}
             >
               Gửi đề nghị tới BQL
             </Button>
@@ -1150,7 +1385,14 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
           <Select
             label="Loại đề nghị"
             value={reqForm.type}
-            onChange={(e) => setReqForm((s) => ({ ...s, type: e.target.value }))}
+            onChange={(e) => {
+              const nextType = e.target.value;
+              setReqForm((s) => ({
+                ...s,
+                type: nextType,
+                desired_date: getDefaultDesiredDateForType(nextType),
+              }));
+            }}
             options={[
               { value: 'RENEWAL', label: 'Xin gia hạn tiếp hợp đồng thuê' },
               { value: 'TERMINATION', label: 'Xin chấm dứt hợp đồng trước hạn' },
@@ -1181,7 +1423,17 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                 ? 'Ngày kết thúc mới mong muốn'
                 : 'Ngày dự kiến bàn giao trả phòng'
             }
-            min={toInputDate(new Date())}
+            min={
+              reqForm.type === 'RENEWAL'
+                ? minRenewalDesiredDate || undefined
+                : minTerminationDesiredDate || undefined
+            }
+            max={
+              reqForm.type === 'TERMINATION'
+                ? maxTerminationDesiredDate || undefined
+                : undefined
+            }
+            error={reqDesiredDateError}
             value={reqForm.desired_date}
             onChange={(e) => setReqForm((s) => ({ ...s, desired_date: e.target.value }))}
           />

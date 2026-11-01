@@ -68,6 +68,13 @@ router.get('/:id/view', authenticateToken, async (req, res) => {
         }
       }
     } else if (att.owner_entity === 'person') {
+      if (isOwner && !isSysAdmin && !isManager) {
+        await logAccessDenied(req, 'attachment', id, 'OWNER attempted raw person CCCD attachment view');
+        return res.status(403).json({
+          code: 'FORBIDDEN_ATTACHMENT',
+          message: 'Theo chính sách bảo mật dữ liệu cá nhân (PRD 13.5), Chủ đầu tư không truy cập trực tiếp ảnh giấy tờ gốc.',
+        });
+      }
       const ok = await pool.query(
         `SELECT 1 FROM person p WHERE p.id = $1 AND p.org_id = $2`,
         [att.owner_id, req.user.org_id]

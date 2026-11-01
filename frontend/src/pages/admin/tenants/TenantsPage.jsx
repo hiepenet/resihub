@@ -24,6 +24,7 @@ import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card } from '../../../components/ui/Card';
+import { FileUpload } from '../../../components/ui/FileUpload';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -52,16 +53,18 @@ function getAvatarLetters(fullName) {
 
 function getTenantDisplayStatus(tenant) {
   if (!tenant) return 'INACTIVE';
-  if (tenant.status === 'MERGED' || tenant.status === 'REJECTED' || tenant.status === 'INACTIVE' || tenant.status === 'MOVED_OUT') {
-    return 'INACTIVE';
-  }
+  if (tenant.status === 'MERGED') return 'MERGED';
+  if (tenant.status === 'REJECTED') return 'REJECTED';
   if (tenant.active_contract || tenant.status === 'ACTIVE') {
     return 'ACTIVE';
   }
   if (tenant.status === 'PENDING') {
     return 'PENDING';
   }
-  return 'INACTIVE';
+  if (tenant.has_past_contract || tenant.status === 'MOVED_OUT' || tenant.status === 'INACTIVE') {
+    return 'MOVED_OUT';
+  }
+  return 'APPROVED';
 }
 
 const INITIAL_FORM = {
@@ -72,13 +75,17 @@ const INITIAL_FORM = {
   dob: '',
   nationality: 'Việt Nam',
   address: '',
+  type: 'primary',
   password: '',
+  privacy_consent: true,
 };
 
 const STATUS_FILTER_OPTIONS = [
   { value: 'ACTIVE', label: 'Đang thuê (ACTIVE)' },
-  { value: 'PENDING', label: 'Chờ nhận phòng / Duyệt hồ sơ (PENDING)' },
-  { value: 'INACTIVE', label: 'Đã trả phòng / Chưa thuê (INACTIVE)' },
+  { value: 'APPROVED', label: 'Đã duyệt — Chờ lập HĐ (APPROVED)' },
+  { value: 'PENDING', label: 'Chờ duyệt / Thiếu giấy tờ (PENDING)' },
+  { value: 'REJECTED', label: 'Từ chối hồ sơ (REJECTED)' },
+  { value: 'MOVED_OUT', label: 'Đã trả phòng (MOVED_OUT)' },
 ];
 
 const TYPE_FILTER_OPTIONS = [
@@ -102,6 +109,7 @@ export function TenantsPage() {
   // Create Modal state
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm, setCreateForm] = useState(INITIAL_FORM);
+  const [createIdImages, setCreateIdImages] = useState({ front: '', back: '' });
   const [createErrors, setCreateErrors] = useState({});
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [dupChecking, setDupChecking] = useState(false);
@@ -182,9 +190,15 @@ export function TenantsPage() {
   const scopedTenants = useMemo(() => {
     return tenants.filter((t) => {
       if (!showMerged && t.status === 'MERGED') return false;
-      if (selectedBuildingId && t.active_contract?.building_id) {
-        if (String(t.active_contract.building_id) !== String(selectedBuildingId)) {
-          return false;
+      if (selectedBuildingId) {
+        if (t.active_contract?.building_id) {
+          if (String(t.active_contract.building_id) !== String(selectedBuildingId)) {
+            return false;
+          }
+        } else if (t.desired_building_id) {
+          if (String(t.desired_building_id) !== String(selectedBuildingId)) {
+            return false;
+          }
         }
       }
       return true;
@@ -192,7 +206,7 @@ export function TenantsPage() {
   }, [tenants, showMerged, selectedBuildingId]);
 
   const stats = useMemo(() => {
-    const activeTenants = tenants.filter((t) => t.status !== 'MERGED');
+    const activeTenants = scopedTenants.filter((t) => t.status !== 'MERGED');
     let activeCount = 0;
     let pendingCount = 0;
     let inactiveCount = 0;
@@ -200,7 +214,7 @@ export function TenantsPage() {
     activeTenants.forEach((t) => {
       const st = getTenantDisplayStatus(t);
       if (st === 'ACTIVE') activeCount += 1;
-      else if (st === 'PENDING') pendingCount += 1;
+      else if (st === 'PENDING' || st === 'REJECTED') pendingCount += 1;
       else inactiveCount += 1;
     });
 
@@ -210,7 +224,7 @@ export function TenantsPage() {
       pendingCount,
       inactiveCount,
     };
-  }, [tenants]);
+  }, [scopedTenants]);
 
   const filteredTenants = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -267,6 +281,7 @@ export function TenantsPage() {
 
   const handleOpenCreate = () => {
     setCreateForm(INITIAL_FORM);
+    setCreateIdImages({ front: '', back: '' });
     setCreateErrors({});
     setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
     setCreateOpen(true);
@@ -294,9 +309,35 @@ export function TenantsPage() {
         dob: createForm.dob || null,
         address: createForm.address.trim() || null,
         nationality: createForm.nationality.trim() || 'Việt Nam',
+        type: createForm.type === 'occupant' ? 'occupant' : 'primary',
+        privacy_consent: Boolean(createForm.privacy_consent),
         ...(createForm.password ? { password: createForm.password } : {}),
       };
       const res = await tenantsService.create(payload);
+      const createdId = res?.data?.id;
+      if (createdId && (createIdImages.front || createIdImages.back)) {
+        try {
+          if (createIdImages.front) {
+            await tenantsService.uploadIdImage(createdId, {
+              side: 'front',
+              image_base64: createIdImages.front,
+            });
+          }
+          if (createIdImages.back) {
+            await tenantsService.uploadIdImage(createdId, {
+              side: 'back',
+              image_base64: createIdImages.back,
+            });
+          }
+        } catch (imgErr) {
+          toast.warning(
+            extractErrorMessage(
+              imgErr,
+              'Đã tạo hồ sơ cư dân nhưng tải ảnh CCCD chưa hoàn tất. Bạn có thể bổ sung trong trang chi tiết.'
+            )
+          );
+        }
+      }
       toast.success(res?.message || 'Tạo hồ sơ cư dân thành công.');
       setCreateOpen(false);
       fetchTenants();
@@ -401,13 +442,15 @@ export function TenantsPage() {
         label: 'Cư dân',
         sortable: true,
         render: (row) => (
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-primary-50 text-primary-700 border border-primary-200 flex items-center justify-center text-xs font-bold shrink-0">
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-full bg-primary-50 text-primary-700 border border-primary-200 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
               {getAvatarLetters(row.full_name)}
             </div>
-            <div className="min-w-0 max-w-[180px]">
+            <div className="min-w-0 max-w-[240px]">
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="font-semibold text-slate-900 truncate">{row.full_name}</span>
+                <span className="font-semibold text-slate-900 break-words" title={row.full_name}>
+                  {row.full_name}
+                </span>
                 {row.type === 'occupant' ? (
                   <Badge variant="indigo" className="text-[10px] px-1.5 py-0">
                     Ở cùng
@@ -424,7 +467,9 @@ export function TenantsPage() {
                   </Badge>
                 ) : null}
               </div>
-              <p className="text-xs text-slate-500 truncate mt-0.5">{row.email || 'Chưa có email'}</p>
+              <p className="text-xs text-slate-500 break-all mt-0.5" title={row.email || ''}>
+                {row.email || 'Chưa có email'}
+              </p>
             </div>
           </div>
         ),
@@ -479,18 +524,33 @@ export function TenantsPage() {
         render: (row) => {
           const ac = row.active_contract;
           if (!ac) {
+            if (row.desired_apartment_code) {
+              return (
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 px-2 py-1 rounded-md border border-amber-200 whitespace-normal text-left">
+                  Đăng ký: Căn {row.desired_apartment_code}
+                  {row.desired_building_name ? ` • ${row.desired_building_name}` : ''}
+                </span>
+              );
+            }
             return <span className="text-xs text-slate-400 italic whitespace-nowrap">Chưa có HĐ hiệu lực</span>;
           }
           return (
             <div onClick={(e) => e.stopPropagation()}>
               <Link
                 to={`/admin/contracts/${ac.contract_id}`}
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50/70 hover:bg-primary-50 px-2 py-1 rounded-lg border border-primary-100 transition-colors whitespace-nowrap"
+                title={`${ac.apartment_code} • ${ac.building_name || ''}`}
+                className="inline-flex items-start gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50/70 hover:bg-primary-50 px-2.5 py-1 rounded-lg border border-primary-100 transition-colors whitespace-normal text-left max-w-[230px]"
               >
-                <Building2 className="w-3.5 h-3.5 shrink-0" />
-                <span>{ac.apartment_code}</span>
-                <span className="text-slate-400">•</span>
-                <span className="truncate max-w-[95px] text-slate-700">{ac.building_name}</span>
+                <Building2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span className="leading-snug break-words">
+                  <span>{ac.apartment_code}</span>
+                  {ac.building_name ? (
+                    <>
+                      <span className="text-slate-400 mx-1">•</span>
+                      <span className="text-slate-700">{ac.building_name}</span>
+                    </>
+                  ) : null}
+                </span>
               </Link>
             </div>
           );
@@ -507,6 +567,14 @@ export function TenantsPage() {
             <StatusBadge status={getTenantDisplayStatus(row)} domain="tenant" />
             {row.status === 'PENDING' ? (
               <span className="text-[11px] text-amber-600 font-medium whitespace-nowrap">Chờ duyệt CCCD</span>
+            ) : null}
+            {row.status === 'REJECTED' && row.rejection_reason ? (
+              <span
+                className="text-[11px] text-rose-600 max-w-[180px] break-words text-center"
+                title={row.rejection_reason}
+              >
+                {row.rejection_reason}
+              </span>
             ) : null}
           </div>
         ),
@@ -609,26 +677,26 @@ export function TenantsPage() {
           onClick={() => setStatusFilter('PENDING')}
         />
         <StatsCard
-          title="Đã trả phòng / Chưa thuê"
+          title="Chờ lập HĐ / Đã trả phòng"
           value={stats.inactiveCount}
-          subtext="Chưa gắn hợp đồng hiệu lực"
+          subtext="Hồ sơ đã duyệt hoặc đã trả phòng"
           icon={UserMinus}
           color="indigo"
-          onClick={() => setStatusFilter('INACTIVE')}
+          onClick={() => setStatusFilter('APPROVED')}
         />
       </div>
 
       {/* Bộ lọc tìm kiếm */}
       <Card className="p-4">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
-          <div className="md:col-span-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3 items-center">
+          <div className="sm:col-span-2 xl:col-span-4">
             <SearchBar
               value={search}
               onChange={setSearch}
               placeholder="Tìm theo họ tên, SĐT, số CCCD, email, mã căn hộ..."
             />
           </div>
-          <div className="md:col-span-3">
+          <div className="xl:col-span-3">
             <Select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
@@ -636,7 +704,7 @@ export function TenantsPage() {
               options={STATUS_FILTER_OPTIONS}
             />
           </div>
-          <div className="md:col-span-2">
+          <div className="xl:col-span-3">
             <Select
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}
@@ -644,7 +712,7 @@ export function TenantsPage() {
               options={TYPE_FILTER_OPTIONS}
             />
           </div>
-          <div className="md:col-span-2 flex items-center justify-between md:justify-end gap-2">
+          <div className="sm:col-span-2 xl:col-span-2 flex items-center justify-between xl:justify-end gap-2">
             <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -825,6 +893,12 @@ export function TenantsPage() {
               value={createForm.nationality}
               onChange={(e) => setCreateForm((p) => ({ ...p, nationality: e.target.value }))}
             />
+            <Select
+              label="Vai trò cư trú"
+              value={createForm.type}
+              onChange={(e) => setCreateForm((p) => ({ ...p, type: e.target.value }))}
+              options={TYPE_FILTER_OPTIONS}
+            />
             <Input
               label="Mật khẩu đăng nhập ban đầu (tùy chọn)"
               type="password"
@@ -844,6 +918,42 @@ export function TenantsPage() {
             value={createForm.address}
             onChange={(e) => setCreateForm((p) => ({ ...p, address: e.target.value }))}
           />
+
+          <div className="space-y-2.5 pt-2 border-t border-slate-100">
+            <p className="text-xs font-semibold text-slate-800">
+              Đính kèm ảnh CCCD / Hộ chiếu (Tùy chọn ngay khi tạo hồ sơ)
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-slate-600">Mặt trước CCCD</span>
+                <FileUpload
+                  value={createIdImages.front}
+                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, front: b64 || '' }))}
+                  hint="Chọn ảnh mặt trước (JPG/PNG ≤ 5MB)"
+                />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-slate-600">Mặt sau CCCD</span>
+                <FileUpload
+                  value={createIdImages.back}
+                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, back: b64 || '' }))}
+                  hint="Chọn ảnh mặt sau (JPG/PNG ≤ 5MB)"
+                />
+              </div>
+            </div>
+          </div>
+
+          <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer text-xs text-slate-700 leading-relaxed">
+            <input
+              type="checkbox"
+              checked={Boolean(createForm.privacy_consent)}
+              onChange={(e) => setCreateForm((p) => ({ ...p, privacy_consent: e.target.checked }))}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+            />
+            <span>
+              Xác nhận Ban Quản Lý đã thông báo mục đích thu thập và nhận sự đồng ý xử lý dữ liệu cá nhân của cư dân theo quy định bảo mật (Mục 17.1).
+            </span>
+          </label>
         </form>
       </Modal>
 

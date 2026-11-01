@@ -4,6 +4,7 @@ import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { roundVND } from '../services/pricing.js';
+import { normalizeVnPhone } from '../services/residentAccount.js';
 
 const router = express.Router();
 
@@ -42,16 +43,54 @@ router.get('/overview', authenticateToken, async (req, res) => {
     const personId = req.user.person_id;
     const orgId = req.user.org_id;
 
-    // 1. Lấy thông tin person
+    // 1. Lấy thông tin person (kèm trạng thái đồng ý dữ liệu cá nhân & ảnh CCCD)
     const personRes = await pool.query(
-      'SELECT id, full_name, phone, email, dob, id_number, address, nationality, avatar_url FROM person WHERE id = $1',
+      'SELECT id, full_name, phone, email, dob, id_number, address, nationality, avatar_url, privacy_consent_at, privacy_policy_version, id_images FROM person WHERE id = $1',
       [personId]
     );
-    const user = personRes.rows[0] || {
-      full_name: req.user.full_name || req.user.name || 'Cư dân',
-      phone: req.user.phone || '',
-      email: req.user.email || '',
-    };
+    const personRow = personRes.rows[0] || null;
+    const user = personRow
+      ? {
+          id: personRow.id,
+          full_name: personRow.full_name,
+          phone: personRow.phone,
+          email: personRow.email,
+          dob: personRow.dob,
+          id_number: personRow.id_number,
+          address: personRow.address,
+          nationality: personRow.nationality,
+          avatar_url: personRow.avatar_url,
+          privacy_consent_at: personRow.privacy_consent_at,
+          privacy_policy_version: personRow.privacy_policy_version,
+        }
+      : {
+          full_name: req.user.full_name || req.user.name || 'Cư dân',
+          phone: req.user.phone || '',
+          email: req.user.email || '',
+        };
+
+    let idImages = [];
+    if (personId) {
+      const attRes = await pool.query(
+        `SELECT id AS attachment_id, mime FROM attachment
+         WHERE owner_entity = 'person' AND owner_id = $1
+         ORDER BY created_at ASC`,
+        [personId]
+      );
+      const markers = (personRow?.id_images || [])
+        .map((m) => {
+          try {
+            return JSON.parse(m);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      idImages = attRes.rows.map((img) => ({
+        attachment_id: img.attachment_id,
+        side: markers.find((m) => m.attachmentId === img.attachment_id)?.side || 'unknown',
+      }));
+    }
 
     const userPhone = user.phone || '';
     const cleanPhone = userPhone.startsWith('+84') ? '0' + userPhone.slice(3) : userPhone;
@@ -201,12 +240,14 @@ router.get('/overview', authenticateToken, async (req, res) => {
       latestInvoice = latestInvRes.rows[0] || null;
     }
 
-    // 3. Đặt cọc giữ chỗ
-    let reservation = null;
+    // 3. Đặt cọc giữ chỗ (trả cả danh sách reservations lẫn bản ghi mới nhất reservation)
+    let reservations = [];
     if (cleanPhone) {
       const reservationRes = await pool.query(
         `SELECT 
            r.id as reservation_id,
+           r.prospect_name,
+           r.hold_from,
            r.hold_amount,
            r.hold_until,
            r.status as reservation_status,
@@ -215,45 +256,76 @@ router.get('/overview', authenticateToken, async (req, res) => {
            a.id as apartment_id,
            a.code as apartment_code,
            a.area_m2,
+           a.bedrooms,
+           a.type as apartment_type,
+           a.amenities,
            a.base_rent,
+           f.name as floor_name,
            b.id as building_id,
            b.name as building_name,
+           b.code as building_code,
            b.address as building_address
          FROM reservation r
          JOIN apartment a ON a.id = r.apartment_id
          JOIN building b ON b.id = r.building_id
-         WHERE (r.phone = $1 OR r.phone = $2) AND r.status = 'HELD'
-         ORDER BY r.created_at DESC
-         LIMIT 1`,
-        [cleanPhone, userPhone]
+         LEFT JOIN floor f ON f.id = a.floor_id
+         WHERE r.org_id = $3
+           AND (r.phone = $1 OR r.phone = $2)
+           AND r.status = 'HELD'
+         ORDER BY r.created_at DESC`,
+        [cleanPhone, userPhone, orgId]
       );
-      reservation = reservationRes.rows[0] || null;
+      reservations = reservationRes.rows;
     }
+    const reservation = reservations[0] || null;
 
-    // 4. Hồ sơ tự khai chờ duyệt
-    const pendingAppRes = await pool.query(
-      `SELECT t.id, t.status, t.created_at
-       FROM tenant t
-       WHERE t.person_id = $1 AND t.status = 'PENDING'
-       ORDER BY t.created_at DESC
-       LIMIT 1`,
-      [personId]
-    );
-    const pendingApplication = pendingAppRes.rows[0] || null;
+    // 4. Hồ sơ tự khai (PENDING / APPROVED chưa lên HĐ / REJECTED)
+    // Dùng adminPool với điều kiện chặt t.person_id = $1 AND t.org_id = $2 để luôn lấy được mã căn/tên tòa mong muốn
+    // ngay cả khi cư dân chưa có phiếu giữ chỗ (RLS chặn đọc trực tiếp bảng apartment/building trống).
+    const onboardingAppRes = personId
+      ? await adminPool.query(
+          `SELECT t.id, t.status, t.desired_apartment_id, t.desired_building_id,
+                  t.application_note, t.rejection_reason, t.created_at, t.updated_at,
+                  da.code AS desired_apartment_code,
+                  db.name AS desired_building_name
+           FROM tenant t
+           LEFT JOIN apartment da ON da.id = t.desired_apartment_id
+           LEFT JOIN building db ON db.id = t.desired_building_id
+           WHERE t.person_id = $1
+             AND t.org_id = $2
+             AND (
+               t.status IN ('PENDING', 'REJECTED')
+               OR (
+                 t.status = 'APPROVED'
+                 AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.primary_tenant_id = t.id)
+               )
+             )
+           ORDER BY (CASE WHEN t.status IN ('PENDING', 'REJECTED') THEN 0 ELSE 1 END) ASC,
+                    t.updated_at DESC NULLS LAST,
+                    t.created_at DESC
+           LIMIT 1`,
+          [personId, orgId]
+        )
+      : { rows: [] };
+    const onboardingApplication = onboardingAppRes.rows[0] || null;
+    const pendingApplication = onboardingApplication?.status === 'PENDING' ? onboardingApplication : null;
 
-    // 5. Danh sách căn hộ trống khả dụng
+    // 5. Danh sách căn hộ trống khả dụng (bao gồm các căn hộ chính khách đang đặt cọc giữ chỗ nếu có)
+    const reservedApartmentIds = reservations.map((r) => r.apartment_id).filter(Boolean);
     const availableAptsRes = await adminPool.query(
       `SELECT 
-         a.id, a.code, a.area_m2, a.type, a.bedrooms, a.base_rent, a.amenities,
+         a.id, a.code, a.area_m2, a.type, a.bedrooms, a.base_rent, a.amenities, a.status,
          b.id as building_id, b.name as building_name, b.address as building_address,
          f.name as floor_name
        FROM apartment a
        JOIN building b ON b.id = a.building_id
        LEFT JOIN floor f ON f.id = a.floor_id
-       WHERE a.status = 'AVAILABLE' AND b.status = 'ACTIVE' AND b.org_id = $1
-       ORDER BY b.name ASC, a.code ASC
-       LIMIT 8`,
-      [orgId]
+       WHERE b.status = 'ACTIVE' AND b.org_id = $1
+         AND (a.status = 'AVAILABLE' OR (CARDINALITY($2::uuid[]) > 0 AND a.id = ANY($2::uuid[])))
+       ORDER BY (CASE WHEN CARDINALITY($2::uuid[]) > 0 AND a.id = ANY($2::uuid[]) THEN 0 ELSE 1 END) ASC,
+                b.name ASC, a.code ASC
+       LIMIT 12`,
+      [orgId, reservedApartmentIds]
     );
 
     // 6. Danh bạ BQL & Cấu hình liên hệ từ system_setting (P7)
@@ -322,7 +394,10 @@ router.get('/overview', authenticateToken, async (req, res) => {
         total_amount_due_all: totalAmountDueAll,
         latest_invoice: latestInvoice,
         reservation,
+        reservations,
         pending_application: pendingApplication,
+        onboarding_application: onboardingApplication,
+        id_images: idImages,
         available_apartments: availableAptsRes.rows,
         manager_contact: managerContact,
       },
@@ -334,16 +409,156 @@ router.get('/overview', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/v1/resident/id-images (FR-012)
+ * Cho phép cư dân tải lên ảnh CCCD mặt trước / mặt sau của chính mình
+ */
+router.post('/id-images', authenticateToken, async (req, res) => {
+  const { image_base64, side } = req.body;
+  const personId = req.user.person_id;
+
+  if (!['front', 'back'].includes(side)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: "Mặt ảnh CCCD phải là 'front' hoặc 'back'." });
+  }
+  if (!personId) {
+    return res.status(403).json({ code: 'FORBIDDEN', message: 'Không xác định được hồ sơ định danh cá nhân.' });
+  }
+
+  try {
+    const saved = await saveBase64Image({
+      imageBase64: image_base64,
+      folder: 'person',
+      entityId: personId,
+      entity: 'person',
+      ownerId: personId,
+      req,
+      query: (sql, params) => pool.query(sql, params),
+    });
+    if (saved.error) {
+      return res.status(400).json(saved.error);
+    }
+
+    const marker = JSON.stringify({ attachmentId: saved.attachment.id, side });
+    await pool.query(
+      `UPDATE person SET id_images = array_append(COALESCE(id_images, '{}'), $1), updated_at = NOW() WHERE id = $2`,
+      [marker, personId]
+    );
+
+    await pool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'UPLOAD', 'attachment', $2, $3)`,
+      [req.user.sub, saved.attachment.id, JSON.stringify({ side, owner: 'person', owner_id: personId, uploaded_by_resident: true })]
+    );
+
+    res.status(201).json({
+      message: `Đã lưu ảnh CCCD mặt ${side === 'front' ? 'trước' : 'sau'}.`,
+      data: { attachment_id: saved.attachment.id, side },
+    });
+  } catch (err) {
+    console.error('[Resident Upload Id Image Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi lưu ảnh CCCD.' });
+  }
+});
+
+/**
  * POST /api/v1/resident/rental-application (FR-012)
  */
 router.post('/rental-application', authenticateToken, async (req, res) => {
-  const { full_name, id_number, dob, desired_apartment_id, note } = req.body;
+  const { full_name, id_number, dob, desired_apartment_id, note, privacy_consent } = req.body;
   const personId = req.user.person_id;
   const orgId = req.user.org_id;
 
   if (!full_name?.trim()) {
     return res.status(400).json({ code: 'INVALID_INPUT', message: 'Vui lòng nhập họ và tên.' });
   }
+
+  if (privacy_consent !== true) {
+    return res.status(400).json({
+      code: 'PRIVACY_CONSENT_REQUIRED',
+      message: 'Vui lòng xác nhận đồng ý với Chính sách bảo vệ dữ liệu cá nhân trước khi gửi hồ sơ.',
+    });
+  }
+
+  const cleanIdNumber = id_number ? String(id_number).trim() : null;
+  if (cleanIdNumber && !/^(?:[0-9]{9}|[0-9]{12}|[A-Za-z][0-9A-Za-z]{5,14})$/.test(cleanIdNumber)) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Số CCCD / Hộ chiếu không hợp lệ (9 hoặc 12 chữ số, hoặc mã hộ chiếu hợp lệ).',
+    });
+  }
+
+  if (cleanIdNumber) {
+    const dupRes = await adminPool.query(
+      'SELECT 1 FROM person WHERE org_id = $1 AND id <> $2 AND id_number = $3 LIMIT 1',
+      [orgId, personId, cleanIdNumber]
+    );
+    if (dupRes.rows.length > 0) {
+      return res.status(409).json({
+        code: 'DUPLICATE_ID_NUMBER',
+        message: 'Số CCCD/Hộ chiếu này đã tồn tại trên một hồ sơ cư dân khác trong hệ thống.',
+      });
+    }
+  }
+
+  let effectiveAptId = desired_apartment_id ? String(desired_apartment_id).trim() : null;
+  let desiredBuildingId = null;
+  let desiredAptCode = null;
+  let desiredBuildingName = null;
+
+  const selfPersonRes = await adminPool.query('SELECT phone FROM person WHERE id = $1 LIMIT 1', [personId]);
+  const selfPhone = selfPersonRes.rows[0]?.phone || null;
+  const cleanSelfPhone = normalizeVnPhone(selfPhone);
+
+  if (!effectiveAptId && cleanSelfPhone) {
+    const rsvRes = await adminPool.query(
+      `SELECT apartment_id FROM reservation
+       WHERE org_id = $1 AND (phone = $2 OR phone = $3) AND status = 'HELD'
+       ORDER BY created_at DESC LIMIT 1`,
+      [orgId, cleanSelfPhone, selfPhone]
+    );
+    effectiveAptId = rsvRes.rows[0]?.apartment_id || null;
+  }
+
+  if (effectiveAptId) {
+    const aptRes = await adminPool.query(
+      `SELECT a.id, a.code, a.status, a.building_id, b.name AS building_name
+       FROM apartment a
+       JOIN building b ON b.id = a.building_id
+       WHERE a.id = $1 AND b.org_id = $2`,
+      [effectiveAptId, orgId]
+    );
+    if (aptRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ đăng ký.' });
+    }
+    const apt = aptRes.rows[0];
+    if (!['AVAILABLE', 'RESERVED'].includes(apt.status)) {
+      return res.status(409).json({
+        code: 'APARTMENT_NOT_AVAILABLE',
+        message: `Căn hộ ${apt.code} hiện không khả dụng để đăng ký thuê.`,
+      });
+    }
+    if (apt.status === 'RESERVED') {
+      const ownRsvRes = cleanSelfPhone
+        ? await adminPool.query(
+            `SELECT 1 FROM reservation
+             WHERE org_id = $1 AND apartment_id = $2 AND status = 'HELD'
+               AND (phone = $3 OR phone = $4)
+             LIMIT 1`,
+            [orgId, apt.id, cleanSelfPhone, selfPhone]
+          )
+        : { rows: [] };
+      if (ownRsvRes.rows.length === 0) {
+        return res.status(409).json({
+          code: 'APARTMENT_RESERVED_BY_OTHER',
+          message: `Căn hộ ${apt.code} hiện đang được giữ chỗ cho khách hàng khác.`,
+        });
+      }
+    }
+    desiredBuildingId = apt.building_id;
+    desiredAptCode = apt.code;
+    desiredBuildingName = apt.building_name;
+  }
+
+  const cleanNote = note !== undefined && note !== null ? String(note).trim() || null : null;
 
   const { client, release } = await getUserClient(req);
   try {
@@ -354,36 +569,124 @@ router.post('/rental-application', authenticateToken, async (req, res) => {
        SET full_name = $1,
            id_number = COALESCE($2, id_number),
            dob = COALESCE($3::date, dob),
+           privacy_consent_at = COALESCE(privacy_consent_at, NOW()),
+           privacy_policy_version = 'v1.0',
            updated_at = NOW()
        WHERE id = $4`,
-      [full_name.trim(), id_number?.trim() || null, dob || null, personId]
+      [full_name.trim(), cleanIdNumber, dob || null, personId]
     );
 
     const tenantRes = await client.query(
-      "SELECT id FROM tenant WHERE person_id = $1 AND status = 'PENDING'",
+      `SELECT id, status FROM tenant
+       WHERE person_id = $1 AND status IN ('PENDING', 'REJECTED')
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC
+       LIMIT 1`,
       [personId]
     );
 
     let tenantId;
+    const isResubmit = tenantRes.rows[0]?.status === 'REJECTED';
     if (tenantRes.rows.length === 0) {
       const newTenant = await client.query(
-        `INSERT INTO tenant (person_id, org_id, type, status)
-         VALUES ($1, $2, 'primary', 'PENDING')
+        `INSERT INTO tenant (
+           person_id, org_id, type, status,
+           desired_apartment_id, desired_building_id, application_note, rejection_reason
+         )
+         VALUES ($1, $2, 'primary', 'PENDING', $3, $4, $5, NULL)
          RETURNING id`,
-        [personId, orgId]
+        [personId, orgId, effectiveAptId, desiredBuildingId, cleanNote]
       );
       tenantId = newTenant.rows[0].id;
     } else {
       tenantId = tenantRes.rows[0].id;
+      await client.query(
+        `UPDATE tenant
+         SET status = 'PENDING',
+             desired_apartment_id = COALESCE($1, desired_apartment_id),
+             desired_building_id = COALESCE($2, desired_building_id),
+             application_note = $3,
+             rejection_reason = NULL,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [effectiveAptId, desiredBuildingId, cleanNote, tenantId]
+      );
     }
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-       VALUES ($1, 'CREATE', 'tenant_application', $2, $3)`,
-      [req.user.sub, tenantId, JSON.stringify({ full_name, id_number, desired_apartment_id, note })]
+       VALUES ($1, $2, 'tenant_application', $3, $4)`,
+      [
+        req.user.sub,
+        isResubmit ? 'RESUBMIT' : 'CREATE',
+        tenantId,
+        JSON.stringify({
+          full_name: full_name.trim(),
+          id_number: cleanIdNumber,
+          desired_apartment_id: effectiveAptId,
+          desired_building_id: desiredBuildingId,
+          note: cleanNote,
+          privacy_consent: true,
+        }),
+      ]
     );
 
     await client.query('COMMIT');
+
+    // Gửi thông báo cho MANAGER phụ trách tòa nhà (hoặc SYS_ADMIN nếu tòa chưa có MANAGER)
+    try {
+      let recipients = [];
+      if (desiredBuildingId) {
+        const mgrRes = await adminPool.query(
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           JOIN app_user au ON au.id = ur.user_id
+           WHERE r.code = 'MANAGER' AND ur.building_id = $1 AND au.status = 'ACTIVE'`,
+          [desiredBuildingId]
+        );
+        recipients = mgrRes.rows.map((r) => r.user_id);
+      }
+      if (recipients.length === 0) {
+        const admRes = await adminPool.query(
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           JOIN app_user au ON au.id = ur.user_id
+           JOIN person p ON p.id = au.person_id
+           WHERE r.code = 'SYS_ADMIN' AND p.org_id = $1 AND au.status = 'ACTIVE'`,
+          [orgId]
+        );
+        recipients = admRes.rows.map((r) => r.user_id);
+      }
+
+      const notifTitle = isResubmit
+        ? `Cư dân ${full_name.trim()} đã bổ sung lại hồ sơ đăng ký thuê`
+        : `Hồ sơ đăng ký thuê mới từ ${full_name.trim()}`;
+      const notifContent = desiredAptCode
+        ? `Ứng viên ${full_name.trim()} vừa gửi hồ sơ đăng ký thuê căn ${desiredAptCode} (${desiredBuildingName || ''}). Vui lòng kiểm tra và phê duyệt.`
+        : `Ứng viên ${full_name.trim()} vừa gửi hồ sơ tự khai trên Cổng cư dân. Vui lòng kiểm tra và phê duyệt.`;
+
+      for (const uid of recipients) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'TENANT_APPLICATION', $5)`,
+          [
+            orgId,
+            uid,
+            notifTitle,
+            notifContent,
+            JSON.stringify({
+              tenant_id: tenantId,
+              desired_apartment_id: effectiveAptId,
+              desired_building_id: desiredBuildingId,
+              sent_by: req.user.sub,
+            }),
+          ]
+        );
+      }
+    } catch (notifErr) {
+      console.error('[Rental Application Notification Warning]:', notifErr);
+    }
 
     res.status(201).json({
       message: 'Hồ sơ nhận nhà đã được gửi thành công. Ban Quản Lý sẽ liên hệ và duyệt hồ sơ trong thời gian sớm nhất!',
@@ -391,6 +694,12 @@ router.post('/rental-application', authenticateToken, async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.code === '23505') {
+      return res.status(409).json({
+        code: 'DUPLICATE_ID_NUMBER',
+        message: 'Số CCCD/Hộ chiếu này đã tồn tại trên một hồ sơ cư dân khác trong hệ thống.',
+      });
+    }
     console.error('Lỗi nộp hồ sơ thuê nhà:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi nộp hồ sơ thuê nhà.' });
   } finally {
@@ -1152,10 +1461,10 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
       if (!desired_date) {
         return res.status(422).json({ code: 'INVALID_DATE', message: 'Vui lòng chọn ngày mong muốn chấm dứt hợp đồng.' });
       }
-      const desired = new Date(desired_date);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      if (desired < today) {
+      const todayRes = await pool.query('SELECT CURRENT_DATE::text AS today');
+      const todayStr = todayRes.rows[0].today;
+      const desiredStr = String(desired_date).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(desiredStr) || desiredStr < todayStr) {
         return res.status(422).json({ code: 'INVALID_DATE', message: 'Ngày mong muốn chấm dứt phải từ hôm nay trở đi.' });
       }
     }

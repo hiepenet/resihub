@@ -39,7 +39,7 @@ export function NotificationBell({ onViewAll }) {
       </button>
 
       {open ? (
-        <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-elevated border border-slate-200 z-50 overflow-hidden">
+        <div className="fixed inset-x-3 top-16 sm:inset-auto sm:absolute sm:right-0 sm:mt-2 sm:w-96 bg-white rounded-2xl shadow-elevated border border-slate-200 z-50 overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-900">Thông báo ({unreadCount} chưa đọc)</span>
             {unreadCount > 0 ? (
@@ -77,8 +77,8 @@ export function NotificationBell({ onViewAll }) {
                     }`}
                   />
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-semibold text-slate-800 truncate">{n.title}</p>
-                    <p className="text-xs text-slate-600 line-clamp-2 mt-0.5">{n.content}</p>
+                    <p className="text-xs font-semibold text-slate-800 break-words leading-snug">{n.title}</p>
+                    <p className="text-xs text-slate-600 line-clamp-3 break-words mt-0.5">{n.content}</p>
                     <p className="text-[11px] text-slate-400 mt-1">{formatRelativeTime(n.created_at)}</p>
                   </div>
                 </button>

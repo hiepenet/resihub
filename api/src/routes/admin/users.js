@@ -240,13 +240,13 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res)
  */
 router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
-  const { full_name, email, phone, status, password, roles } = req.body;
+  const { full_name, email, phone, id_number, status, password, roles } = req.body;
   const orgId = req.user.org_id;
 
   const client = await adminPool.connect();
   try {
     const existing = await client.query(
-      `SELECT au.*, p.full_name, p.email, p.phone, p.org_id
+      `SELECT au.*, p.full_name, p.email, p.phone, p.id_number, p.org_id
        FROM app_user au
        JOIN person p ON p.id = au.person_id
        WHERE au.id = $1 AND p.org_id = $2`,
@@ -267,12 +267,13 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
     const nextName = full_name?.trim() || cur.full_name;
     const nextEmail = email !== undefined ? (email?.trim().toLowerCase() || null) : cur.email;
     const nextPhone = phone !== undefined ? (phone ? normalizePhone(phone) : null) : cur.phone;
+    const nextIdNumber = id_number !== undefined ? (id_number?.trim() || null) : cur.id_number;
 
     await client.query(
       `UPDATE person
-       SET full_name = $1, email = $2, phone = $3, updated_at = NOW()
-       WHERE id = $4`,
-      [nextName, nextEmail, nextPhone, cur.person_id]
+       SET full_name = $1, email = $2, phone = $3, id_number = $4, updated_at = NOW()
+       WHERE id = $5`,
+      [nextName, nextEmail, nextPhone, nextIdNumber, cur.person_id]
     );
 
     // Cập nhật app_user (status, password_hash, tăng token_version nếu khóa hoặc đổi role)

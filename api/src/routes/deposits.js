@@ -75,22 +75,17 @@ async function calculateContractOpenDebts(client, contractId) {
     if (rentGross === 0 && nonRentGross === 0) {
       // Trường hợp hóa đơn không có dòng chi tiết -> coi như dịch vụ/khác
       invServiceUnpaid = remaining;
+    } else if (nonRentGross === 0) {
+      invRentUnpaid = remaining;
+      invServiceUnpaid = 0;
+    } else if (rentGross === 0) {
+      invServiceUnpaid = remaining;
+      invRentUnpaid = 0;
     } else {
-      // Phân bổ phần đã trả ưu tiên cho RENT trước để nợ dịch vụ/điện nước còn lại khớp thực tế
+      // Phân bổ phần đã trả ưu tiên cho RENT trước; đảm bảo invRentUnpaid + invServiceUnpaid === remaining kể cả khi có chiết khấu/điều chỉnh âm
       const paidToRent = Math.min(paid, rentGross);
-      const paidToNonRent = Math.max(0, paid - paidToRent);
       invRentUnpaid = Math.max(0, Math.min(remaining, rentGross - paidToRent));
       invServiceUnpaid = Math.max(0, remaining - invRentUnpaid);
-      if (nonRentGross === 0) {
-        invRentUnpaid = remaining;
-        invServiceUnpaid = 0;
-      } else if (rentGross === 0) {
-        invServiceUnpaid = remaining;
-        invRentUnpaid = 0;
-      } else if (paidToNonRent > 0) {
-        invServiceUnpaid = Math.max(0, nonRentGross - paidToNonRent);
-        invRentUnpaid = Math.max(0, remaining - invServiceUnpaid);
-      }
     }
 
     serviceDebt += invServiceUnpaid;
@@ -539,6 +534,7 @@ router.get(
           tenant_name: row.tenant_name,
           calculated_service_debt: effectiveServiceDebt,
           calculated_rent_debt: effectiveRentDebt,
+          open_invoices: debts.openInvoices || [],
           preconditions,
         },
       });

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -27,6 +28,7 @@ import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
+import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDateTime, getCurrentPeriod } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 
@@ -738,34 +740,51 @@ export function MeterReadingsPage() {
               ) : historyList.length === 0 ? (
                 <p className="text-xs text-slate-400 py-4">Chưa có lịch sử ghi nhận nào.</p>
               ) : (
-                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="border border-slate-200 rounded-xl overflow-hidden max-h-80 overflow-y-auto">
                   <Table>
                     <THead>
                       <tr>
                         <TH className="text-center">Kỳ</TH>
                         <TH className="text-right">Chỉ số cũ</TH>
                         <TH className="text-right">Chỉ số mới</TH>
-                        <TH className="text-right">Tiêu thụ</TH>
+                        <TH className="text-right">Tiêu thụ &amp; Ghi chú</TH>
+                        <TH className="text-center">Ảnh</TH>
                         <TH className="text-center">Người ghi / Thời gian</TH>
                       </tr>
                     </THead>
                     <TBody>
-                      {historyList.slice(0, 8).map((h) => (
+                      {historyList.map((h) => (
                         <tr key={h.id}>
                           <TD className="text-center font-mono font-semibold whitespace-nowrap">{h.period}</TD>
                           <TD className="text-right font-mono tabular-nums whitespace-nowrap">{Number(h.previous_reading)}</TD>
                           <TD className="text-right font-mono tabular-nums font-semibold whitespace-nowrap">
                             {Number(h.current_reading)}
                           </TD>
-                          <TD className="text-right whitespace-nowrap">
-                            <span className="font-mono tabular-nums font-semibold">
-                              {Number(h.consumption)} {selectedMeter.unit}
-                            </span>
-                            {h.is_abnormal ? (
-                              <Badge variant="amber" className="ml-1.5">
-                                Bất thường
-                              </Badge>
+                          <TD className="text-right">
+                            <div className="whitespace-nowrap">
+                              <span className="font-mono tabular-nums font-semibold">
+                                {Number(h.consumption)} {selectedMeter.unit}
+                              </span>
+                              {h.is_abnormal ? (
+                                <Badge variant="amber" className="ml-1.5">
+                                  Bất thường
+                                </Badge>
+                              ) : null}
+                            </div>
+                            {h.abnormal_note ? (
+                              <p className="text-[11px] text-amber-800 whitespace-pre-line break-words mt-0.5 max-w-[220px] ml-auto">
+                                {h.abnormal_note}
+                              </p>
                             ) : null}
+                          </TD>
+                          <TD className="text-center">
+                            {h.image_url ? (
+                              <div className="w-10 h-10 mx-auto rounded-lg border border-slate-200 overflow-hidden bg-slate-100">
+                                <AuthImage src={h.image_url} alt={`Kỳ ${h.period}`} className="w-full h-full object-cover" />
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">—</span>
+                            )}
                           </TD>
                           <TD className="text-center text-xs text-slate-500 whitespace-nowrap">
                             {h.recorded_by_name || 'Hệ thống'} • {formatDateTime(h.recorded_at)}
@@ -808,7 +827,9 @@ export function MeterReadingsPage() {
             placeholder="-- Chọn căn hộ --"
             options={apartments.map((a) => ({
               value: a.id,
-              label: `${a.building_code ? `${a.building_code} - ` : ''}Căn ${a.code} (${a.status})`,
+              label: `${a.building_code ? `${a.building_code} - ` : ''}Căn ${a.code} (${
+                APARTMENT_STATUS[a.status]?.label || a.status
+              })`,
             }))}
           />
 
@@ -838,11 +859,10 @@ export function MeterReadingsPage() {
           />
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label={`Đơn giá (₫ / ${createForm.meter_type === 'ELECTRICITY' ? 'kWh' : 'm³'})`}
-              type="number"
-              min="0"
               required
+              placeholder="VD: 3.800"
               value={createForm.unit_price}
               onChange={(e) => setCreateForm((s) => ({ ...s, unit_price: e.target.value }))}
             />

@@ -96,7 +96,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }) {
                     }
                   >
                     <Icon className="w-4 h-4 shrink-0" />
-                    <span className="truncate">{item.label}</span>
+                    <span className="leading-snug break-words">{item.label}</span>
                   </NavLink>
                 );
               })}
@@ -109,7 +109,7 @@ export function Sidebar({ mobileOpen, onCloseMobile }) {
       <div className="p-3.5 border-t border-slate-800 shrink-0">
         <div className="px-3 py-2.5 rounded-xl bg-slate-800/70 border border-slate-700/60">
           <p className="text-[11px] text-slate-400">Vai trò hiện tại</p>
-          <p className="text-xs font-semibold text-sky-400 mt-0.5 truncate">
+          <p className="text-xs font-semibold text-sky-400 mt-0.5 leading-snug break-words">
             {ROLE_LABELS[roleInfo.code] || roleInfo.name}
           </p>
         </div>

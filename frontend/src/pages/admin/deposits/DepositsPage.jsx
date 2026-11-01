@@ -22,7 +22,9 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
+import { BankSelect } from '../../../components/common/BankSelect';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card } from '../../../components/ui/Card';
@@ -39,9 +41,11 @@ import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { depositsService } from '../../../services/deposits.service';
 import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
+import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, formatDateTime } from '../../../utils/format';
+import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
 
 // Khớp 100% với DEDUCT_CATEGORIES trong api/src/services/depositSettlement.js
@@ -66,10 +70,27 @@ const TXN_TYPE_META = {
   refund: { label: 'Hoàn trả cọc', variant: 'indigo', sign: '-' },
 };
 
+function resolveDepositTxnMeta(tx) {
+  if (tx?.type === 'transfer' && /^chuyển kết dư/i.test(String(tx?.description || '').trim())) {
+    return { label: 'Kết chuyển đi', variant: 'amber', sign: '-' };
+  }
+  return TXN_TYPE_META[tx?.type] || { label: tx?.type || 'Giao dịch', variant: 'slate', sign: '' };
+}
+
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'BANK_TRANSFER', label: 'Chuyển khoản ngân hàng (BANK_TRANSFER)' },
   { value: 'CASH', label: 'Tiền mặt (CASH)' },
 ];
+
+const PAYMENT_METHOD_LABELS = {
+  BANK_TRANSFER: 'Chuyển khoản ngân hàng',
+  TRANSFER: 'Chuyển khoản ngân hàng',
+  QR_CODE: 'Quét mã QR',
+  E_WALLET: 'Ví điện tử',
+  CASH: 'Tiền mặt',
+  CARD: 'Thẻ ngân hàng',
+  OTHER: 'Phương thức khác',
+};
 
 function createEmptyDeductionItem() {
   return {
@@ -84,6 +105,7 @@ export function DepositsPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const { isSysAdmin, isManager, canSettleDeposits, canApproveDepositRefund, user } = usePermission();
+  const { banks } = useVietQrBanks();
   const currentUserId = user?.id || user?.sub;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
@@ -121,6 +143,9 @@ export function DepositsPage() {
   const [refundMethod, setRefundMethod] = useState('BANK_TRANSFER');
   const [bankInfo, setBankInfo] = useState({
     bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
     account_number: '',
     account_holder: '',
   });
@@ -224,10 +249,17 @@ export function DepositsPage() {
   const handleOpenTransactions = useCallback(async (dep, defaultOpenCollect = false) => {
     setSelectedDepositForTxn(dep);
     setShowCollectForm(defaultOpenCollect);
+    const shortage = Math.max(
+      0,
+      Math.round(Number(dep?.deposit_amount || 0) - Number(dep?.amount_held || 0))
+    );
     setCollectForm({
-      amount: '',
+      amount: shortage > 0 ? String(shortage) : '',
       method: 'BANK_TRANSFER',
-      description: 'Thu bổ sung tiền đặt cọc hợp đồng',
+      description:
+        Number(dep?.amount_held || 0) === 0
+          ? 'Thu tiền đặt cọc bảo đảm hợp đồng'
+          : 'Thu bổ sung tiền đặt cọc hợp đồng',
       evidence: [],
     });
     setTxnModalOpen(true);
@@ -319,8 +351,12 @@ export function DepositsPage() {
             : []
         );
         setRefundMethod(existing.refund_method || 'BANK_TRANSFER');
+        const matchedBank = matchVietQrBank(banks, existing.bank_info || {});
         setBankInfo({
-          bank_name: existing.bank_info?.bank_name || '',
+          bank_name: matchedBank ? matchedBank.shortName : existing.bank_info?.bank_name || '',
+          bank_code: existing.bank_info?.bank_code || matchedBank?.code || '',
+          bank_bin: existing.bank_info?.bank_bin || matchedBank?.bin || '',
+          bank_logo: existing.bank_info?.bank_logo || matchedBank?.logo || '',
           account_number: existing.bank_info?.account_number || '',
           account_holder: existing.bank_info?.account_holder || dep.tenant_name || '',
         });
@@ -329,6 +365,9 @@ export function DepositsPage() {
         setRefundMethod('BANK_TRANSFER');
         setBankInfo({
           bank_name: '',
+          bank_code: '',
+          bank_bin: '',
+          bank_logo: '',
           account_number: '',
           account_holder: dep.tenant_name || '',
         });
@@ -338,7 +377,7 @@ export function DepositsPage() {
     } finally {
       setLoadingSettlement(false);
     }
-  }, [toast]);
+  }, [banks, toast]);
 
   // Tính toán tự động số tiền hoàn & công nợ từ DB (R-06: Cọc chỉ trừ nợ dịch vụ, KHÔNG trừ nợ tiền thuê)
   const liveCalc = useMemo(() => {
@@ -436,6 +475,9 @@ export function DepositsPage() {
           refundMethod === 'BANK_TRANSFER'
             ? {
                 bank_name: bankInfo.bank_name.trim(),
+                bank_code: bankInfo.bank_code || undefined,
+                bank_bin: bankInfo.bank_bin || undefined,
+                bank_logo: bankInfo.bank_logo || undefined,
                 account_number: bankInfo.account_number.trim(),
                 account_holder: bankInfo.account_holder.trim(),
               }
@@ -628,10 +670,10 @@ export function DepositsPage() {
         render: (row) => (
           <div>
             <p className="font-semibold text-slate-900 flex items-center gap-1.5">
-              <Building2 className="w-3.5 h-3.5 text-primary-500" />
+              <Building2 className="w-3.5 h-3.5 text-primary-500 shrink-0" />
               {row.apartment_code}
             </p>
-            <p className="text-xs text-slate-500">{row.building_name}</p>
+            <p className="text-xs text-slate-500 break-words max-w-[220px]">{row.building_name}</p>
           </div>
         ),
       },
@@ -641,8 +683,11 @@ export function DepositsPage() {
         sortable: true,
         render: (row) => (
           <div>
-            <p className="font-medium text-slate-800">{row.tenant_name}</p>
-            <div className="flex items-center gap-1.5 mt-0.5">
+            <p className="font-medium text-slate-800 break-words">
+              {row.tenant_name}
+              {row.tenant_phone ? <span className="text-xs font-mono text-slate-500"> ({row.tenant_phone})</span> : null}
+            </p>
+            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
               <Link
                 to={`/admin/contracts/${row.contract_id}`}
                 onClick={(e) => e.stopPropagation()}
@@ -663,21 +708,33 @@ export function DepositsPage() {
         sortable: true,
         sortValue: (row) => Number(row.amount_held || 0),
         className: 'font-mono tabular-nums whitespace-nowrap',
-        render: (row) => (
-          <div>
-            <p className="font-bold text-slate-900">{formatMoney(row.amount_held)}</p>
-            {row.deposit_amount !== undefined && row.deposit_amount !== null ? (
-              <p className="text-[11px] font-sans text-slate-500">
-                Cọc HĐ: {formatMoney(row.deposit_amount)}
-              </p>
-            ) : null}
-            {row.settlement?.refund_amount !== undefined ? (
-              <p className="text-[11px] font-sans text-emerald-600 font-medium">
-                Dự kiến hoàn: {formatMoney(row.settlement.refund_amount)}
-              </p>
-            ) : null}
-          </div>
-        ),
+        render: (row) => {
+          const heldVal = Number(row.amount_held || 0);
+          const reqVal = Number(row.deposit_amount || 0);
+          const shortage = Math.max(0, reqVal - heldVal);
+          const isSettledRow = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(row.status);
+          return (
+            <div>
+              <p className="font-bold text-slate-900">{formatMoney(row.amount_held)}</p>
+              {row.deposit_amount !== undefined && row.deposit_amount !== null ? (
+                <p className="text-[11px] font-sans text-slate-500">
+                  Cọc HĐ: {formatMoney(row.deposit_amount)}
+                </p>
+              ) : null}
+              {['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) && shortage > 0 ? (
+                <p className="text-[11px] font-sans text-amber-600 font-medium">
+                  Còn phải thu: {formatMoney(shortage)}
+                </p>
+              ) : null}
+              {row.settlement?.refund_amount !== undefined ? (
+                <p className="text-[11px] font-sans text-emerald-600 font-medium">
+                  {isSettledRow ? 'Đã hoàn trả' : 'Dự kiến hoàn'}:{' '}
+                  {formatMoney(row.settlement.refund_amount)}
+                </p>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         key: 'refund_due_date',
@@ -714,10 +771,9 @@ export function DepositsPage() {
         key: 'actions',
         label: 'Thao tác',
         align: 'center',
-        className: 'whitespace-nowrap',
         render: (row) => (
           <div
-            className="inline-flex items-center justify-center gap-1.5"
+            className="inline-flex flex-wrap items-center justify-center gap-1.5"
             onClick={(e) => e.stopPropagation()}
           >
             <Button
@@ -1002,12 +1058,10 @@ export function DepositsPage() {
               </h4>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input
+                <MoneyInput
                   label="Số tiền thu thêm (VND)"
-                  type="number"
-                  min="1"
                   required
-                  placeholder="VD: 5000000"
+                  placeholder="VD: 5.000.000"
                   value={collectForm.amount}
                   onChange={(e) => setCollectForm((p) => ({ ...p, amount: e.target.value }))}
                 />
@@ -1064,11 +1118,7 @@ export function DepositsPage() {
           ) : (
             <div className="space-y-3">
               {transactions.map((tx) => {
-                const meta = TXN_TYPE_META[tx.type] || {
-                  label: tx.type,
-                  variant: 'slate',
-                  sign: '',
-                };
+                const meta = resolveDepositTxnMeta(tx);
                 const evList = Array.isArray(tx.evidence) ? tx.evidence.filter(Boolean) : [];
                 return (
                   <div
@@ -1086,13 +1136,16 @@ export function DepositsPage() {
                               {CATEGORY_LABEL_MAP[tx.category] || tx.category}
                             </Badge>
                           ) : null}
-                          <span className="text-xs text-slate-400">• {tx.method || 'OTHER'}</span>
+                          <span className="text-xs text-slate-500">
+                            • {PAYMENT_METHOD_LABELS[tx.method] || tx.method || 'Phương thức khác'}
+                          </span>
                         </div>
-                        <p className="text-xs text-slate-700 mt-1.5 font-medium">
+                        <p className="text-xs text-slate-700 mt-1.5 font-medium whitespace-pre-line break-words">
                           {tx.description || '—'}
                         </p>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          Thực hiện: {tx.created_by_name || 'Hệ thống'} •{' '}
+                          Thực hiện: {tx.created_by_name || 'Hệ thống'}
+                          {tx.approved_by_name ? ` • Phê duyệt: ${tx.approved_by_name}` : ''} •{' '}
                           {formatDateTime(tx.created_at)}
                         </p>
                       </div>
@@ -1391,12 +1444,10 @@ export function DepositsPage() {
                           }
                           options={DEDUCT_CATEGORY_OPTIONS}
                         />
-                        <Input
+                        <MoneyInput
                           label="Số tiền khấu trừ (VND)"
-                          type="number"
-                          min="1"
                           required
-                          placeholder="VD: 500000"
+                          placeholder="VD: 500.000"
                           value={item.amount}
                           onChange={(e) =>
                             handleUpdateDeductionRow(idx, { amount: e.target.value })
@@ -1453,6 +1504,35 @@ export function DepositsPage() {
                   <p className="text-[11px] text-slate-500 pt-0.5">
                     Công nợ được tổng hợp tự động (chỉ đọc) từ các hóa đơn đã phát hành chưa thanh toán.
                   </p>
+                  {Array.isArray(settlementDetail?.open_invoices) && settlementDetail.open_invoices.length > 0 ? (
+                    <div className="pt-2 border-t border-slate-200 space-y-1.5">
+                      <p className="font-semibold text-slate-700">
+                        Chi tiết hóa đơn còn nợ ({settlementDetail.open_invoices.length}):
+                      </p>
+                      {settlementDetail.open_invoices.map((inv) => (
+                        <div
+                          key={inv.id}
+                          className="p-2 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-2 text-[11px]"
+                        >
+                          <div>
+                            <Link
+                              to={`/admin/invoices/${inv.id}`}
+                              onClick={() => setSettlementOpen(false)}
+                              className="font-mono font-semibold text-primary-600 hover:underline"
+                            >
+                              {inv.invoice_code} (Kỳ {inv.period})
+                            </Link>
+                            <p className="text-slate-500">
+                              Dịch vụ: {formatMoney(inv.service_unpaid)} • Thuê: {formatMoney(inv.rent_unpaid)}
+                            </p>
+                          </div>
+                          <span className="font-mono font-bold text-rose-600 shrink-0">
+                            {formatMoney(inv.remaining)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <Select
                   label="Phương thức hoàn trả tiền cọc"
@@ -1462,11 +1542,24 @@ export function DepositsPage() {
                 />
                 {refundMethod === 'BANK_TRANSFER' ? (
                   <div className="grid grid-cols-1 gap-2.5 pt-1">
-                    <Input
-                      label="Ngân hàng thụ hưởng của cư dân"
-                      placeholder="VD: Vietcombank, Techcombank..."
+                    <BankSelect
+                      label="Ngân hàng thụ hưởng của cư dân (VietQR)"
+                      placeholder="-- Chọn ngân hàng thụ hưởng --"
                       value={bankInfo.bank_name}
-                      onChange={(e) => setBankInfo((p) => ({ ...p, bank_name: e.target.value }))}
+                      bankMeta={{
+                        bank_code: bankInfo.bank_code,
+                        bank_bin: bankInfo.bank_bin,
+                        bank_logo: bankInfo.bank_logo,
+                      }}
+                      onBankChange={(val, chosen) =>
+                        setBankInfo((p) => ({
+                          ...p,
+                          bank_name: val,
+                          bank_code: chosen?.code || '',
+                          bank_bin: chosen?.bin || '',
+                          bank_logo: chosen?.logo || '',
+                        }))
+                      }
                     />
                     <div className="grid grid-cols-2 gap-2.5">
                       <Input
@@ -1601,6 +1694,34 @@ export function DepositsPage() {
               />
             ) : (
               <>
+                {readonlySettlementData.rejection_reason ? (
+                  <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                    <p className="font-semibold">Lý do từ chối phê duyệt gần nhất:</p>
+                    <p className="mt-1 whitespace-pre-line">{readonlySettlementData.rejection_reason}</p>
+                  </div>
+                ) : null}
+                {Array.isArray(settlementDetail?.open_invoices) && settlementDetail.open_invoices.length > 0 ? (
+                  <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-1.5 text-xs">
+                    <p className="font-semibold text-amber-900">
+                      Hóa đơn chưa thanh toán của hợp đồng ({settlementDetail.open_invoices.length}):
+                    </p>
+                    {settlementDetail.open_invoices.map((inv) => (
+                      <div key={inv.id} className="flex items-center justify-between gap-2 text-amber-900">
+                        <Link
+                          to={`/admin/invoices/${inv.id}`}
+                          onClick={() => setSettlementOpen(false)}
+                          className="font-mono font-semibold text-primary-700 hover:underline"
+                        >
+                          {inv.invoice_code} (Kỳ {inv.period})
+                        </Link>
+                        <span>
+                          Dịch vụ: <strong>{formatMoney(inv.service_unpaid)}</strong> • Thuê:{' '}
+                          <strong>{formatMoney(inv.rent_unpaid)}</strong>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="space-y-3">
                   <h4 className="text-sm font-semibold text-slate-900">
                     Chi tiết các khoản khấu trừ &amp; Bằng chứng nghiệm thu (
@@ -1651,42 +1772,101 @@ export function DepositsPage() {
                 </div>
 
                 {/* Tổng kết tài chính biên bản */}
-                <div className="p-4 rounded-xl bg-sky-50/60 border border-sky-200 space-y-2 text-xs">
-                  <div className="flex justify-between text-slate-700">
-                    <span>Công nợ dịch vụ tồn đọng (outstanding_debt):</span>
-                    <strong>{formatMoney(readonlySettlementData.outstanding_debt || 0)}</strong>
-                  </div>
-                  <div className="flex justify-between text-slate-700">
-                    <span>Phương thức hoàn trả:</span>
-                    <strong>
-                      {readonlySettlementData.refund_method === 'CASH'
-                        ? 'Tiền mặt (CASH)'
-                        : 'Chuyển khoản ngân hàng (BANK_TRANSFER)'}
-                    </strong>
-                  </div>
-                  {readonlySettlementData.bank_info?.account_number ? (
-                    <div className="flex justify-between text-slate-700">
-                      <span>Tài khoản nhận hoàn cọc:</span>
-                      <strong>
-                        {readonlySettlementData.bank_info.bank_name} •{' '}
-                        {readonlySettlementData.bank_info.account_number} (
-                        {readonlySettlementData.bank_info.account_holder})
-                      </strong>
+                {(() => {
+                  const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(
+                    effectiveDepositStatus
+                  );
+                  const heldBefore = Number(
+                    readonlySettlementData.deposit_held_before_settlement ??
+                      settlementDetail?.amount_held ??
+                      settlementDeposit?.amount_held ??
+                      0
+                  );
+                  const readonlyItemsSum = (readonlySettlementData.items || []).reduce(
+                    (s, it) => s + Math.max(0, Number(it.amount || 0)),
+                    0
+                  );
+                  const readonlyRentDebt = Math.max(
+                    0,
+                    Number(
+                      readonlySettlementData.rent_debt ??
+                        settlementDetail?.calculated_rent_debt ??
+                        0
+                    )
+                  );
+                  return (
+                    <div className="p-4 rounded-xl bg-sky-50/60 border border-sky-200 space-y-2 text-xs">
+                      <div className="flex justify-between text-slate-700">
+                        <span>Tiền đặt cọc bảo lưu trước tất toán:</span>
+                        <strong>{formatMoney(heldBefore)}</strong>
+                      </div>
+                      <div className="flex justify-between text-slate-700">
+                        <span>Tổng khấu trừ biên bản bàn giao:</span>
+                        <strong className="text-amber-700">
+                          - {formatMoney(readonlyItemsSum)}
+                        </strong>
+                      </div>
+                      <div className="flex justify-between text-slate-700">
+                        <span>Công nợ dịch vụ / điện nước (đối trừ vào cọc):</span>
+                        <strong className="text-amber-700">
+                          - {formatMoney(readonlySettlementData.outstanding_debt || 0)}
+                        </strong>
+                      </div>
+                      {readonlyRentDebt > 0 ? (
+                        <div className="flex justify-between text-slate-600 italic">
+                          <span>Công nợ tiền thuê (KHÔNG trừ vào cọc — thanh toán riêng):</span>
+                          <strong className="text-rose-600">
+                            {formatMoney(readonlyRentDebt)}
+                          </strong>
+                        </div>
+                      ) : null}
+                      <div className="flex justify-between text-slate-700 pt-1 border-t border-sky-200/70">
+                        <span>Phương thức hoàn trả:</span>
+                        <strong>
+                          {readonlySettlementData.refund_method === 'CASH'
+                            ? 'Tiền mặt (CASH)'
+                            : 'Chuyển khoản ngân hàng (BANK_TRANSFER)'}
+                        </strong>
+                      </div>
+                      {readonlySettlementData.bank_info?.account_number ? (
+                        <div className="flex justify-between items-center gap-2 text-slate-700">
+                          <span>Tài khoản nhận hoàn cọc:</span>
+                          <strong className="inline-flex items-center gap-1.5 text-right">
+                            {readonlySettlementData.bank_info.bank_logo ? (
+                              <img
+                                src={readonlySettlementData.bank_info.bank_logo}
+                                alt=""
+                                className="w-6 h-4 object-contain rounded bg-white border border-slate-200 shrink-0"
+                              />
+                            ) : null}
+                            <span>
+                              {readonlySettlementData.bank_info.bank_name}
+                              {readonlySettlementData.bank_info.bank_code
+                                ? ` (${readonlySettlementData.bank_info.bank_code})`
+                                : ''}{' '}
+                              • {readonlySettlementData.bank_info.account_number} (
+                              {readonlySettlementData.bank_info.account_holder})
+                            </span>
+                          </strong>
+                        </div>
+                      ) : null}
+                      <div className="border-t border-sky-200 pt-2.5 flex justify-between items-center text-sm">
+                        <span className="font-bold text-slate-900">
+                          {isFinalized ? 'Số tiền hoàn trả thực tế:' : 'Số tiền hoàn trả dự kiến:'}
+                        </span>
+                        <span className="text-lg font-bold text-emerald-700">
+                          {formatMoney(readonlySettlementData.refund_amount || 0)}
+                        </span>
+                      </div>
+                      {Number(readonlySettlementData.shortfall || 0) > 0 ? (
+                        <div className="flex justify-between items-center text-rose-700 font-semibold pt-1">
+                          <span>Khoản phải thu thêm sau trả phòng (Shortfall):</span>
+                          <span>{formatMoney(readonlySettlementData.shortfall)}</span>
+                        </div>
+                      ) : null}
                     </div>
-                  ) : null}
-                  <div className="border-t border-sky-200 pt-2.5 flex justify-between items-center text-sm">
-                    <span className="font-bold text-slate-900">Số tiền hoàn trả thực tế:</span>
-                    <span className="text-lg font-bold text-emerald-700">
-                      {formatMoney(readonlySettlementData.refund_amount || 0)}
-                    </span>
-                  </div>
-                  {Number(readonlySettlementData.shortfall || 0) > 0 ? (
-                    <div className="flex justify-between items-center text-rose-700 font-semibold pt-1">
-                      <span>Khoản phải thu thêm sau trả phòng (Shortfall):</span>
-                      <span>{formatMoney(readonlySettlementData.shortfall)}</span>
-                    </div>
-                  ) : null}
-                </div>
+                  );
+                })()}
               </>
             )}
           </div>

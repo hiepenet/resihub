@@ -316,4 +316,40 @@ test('Security & Privacy Audit — Owner Lookup Confidentiality & Cross-Building
       }
     }
   });
+
+  await t.test('3. Self-Applicant Scope: check-dup returns inScope=true for MANAGER of desired_building_id and false for other MANAGER', async () => {
+    const mgrA = await login('manager.vop.a@resihub.vn', 'Demo@123456');
+    const mgrB = await login('manager.vop.b@resihub.vn', 'Demo@123456');
+
+    const aptARes = await apiFetch('/api/v1/apartments?limit=5', mgrA.token);
+    const aptA = aptARes.body.data[0];
+    assert.ok(aptA);
+
+    const selfPhone = '0961049991';
+    await adminPool.query('DELETE FROM tenant WHERE person_id IN (SELECT id FROM person WHERE phone = $1)', [selfPhone]);
+    await adminPool.query('DELETE FROM person WHERE phone = $1', [selfPhone]);
+
+    const orgRow = await adminPool.query('SELECT org_id FROM building WHERE id = $1', [aptA.building_id]);
+    const pIns = await adminPool.query(
+      `INSERT INTO person (org_id, full_name, phone) VALUES ($1, 'Ứng Viên CheckDup Tòa A', $2) RETURNING id`,
+      [orgRow.rows[0].org_id, selfPhone]
+    );
+    createdPersonIds.push(pIns.rows[0].id);
+
+    await adminPool.query(
+      `INSERT INTO tenant (person_id, org_id, type, status, desired_apartment_id, desired_building_id)
+       VALUES ($1, $2, 'primary', 'PENDING', $3, $4)`,
+      [pIns.rows[0].id, orgRow.rows[0].org_id, aptA.id, aptA.building_id]
+    );
+
+    const dupMgrA = await apiFetch(`/api/v1/tenants/check-dup?phone=${selfPhone}`, mgrA.token);
+    assert.equal(dupMgrA.status, 200);
+    assert.equal(dupMgrA.body.isDuplicate, true);
+    assert.equal(dupMgrA.body.inScope, true, 'Manager A of desired_building_id must get inScope=true on check-dup');
+
+    const dupMgrB = await apiFetch(`/api/v1/tenants/check-dup?phone=${selfPhone}`, mgrB.token);
+    assert.equal(dupMgrB.status, 200);
+    assert.equal(dupMgrB.body.isDuplicate, true);
+    assert.equal(dupMgrB.body.inScope, false, 'Manager B must get inScope=false for Building A applicant');
+  });
 });

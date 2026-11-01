@@ -107,7 +107,7 @@ export function TopBar({ onOpenMobileMenu }) {
 
           {/* Building Filter (Searchable Dropdown) */}
           {buildings.length > 0 ? (
-            <div className="w-56 sm:w-80 min-w-0">
+            <div className="w-56 sm:w-80 lg:w-96 min-w-0">
               <Select
                 size="sm"
                 icon={Building2}
@@ -144,10 +144,16 @@ export function TopBar({ onOpenMobileMenu }) {
               {(user?.full_name || user?.email || 'U').slice(0, 1).toUpperCase()}
             </div>
             <div className="hidden sm:block text-left">
-              <p className="text-xs font-semibold text-slate-800 leading-tight max-w-[140px] truncate">
+              <p
+                title={user?.full_name || 'Người dùng'}
+                className="text-xs font-semibold text-slate-800 leading-tight max-w-[220px] xl:max-w-[280px] truncate"
+              >
                 {user?.full_name || 'Người dùng'}
               </p>
-              <p className="text-[11px] text-slate-400 leading-tight max-w-[140px] truncate">
+              <p
+                title={user?.email || user?.phone || ''}
+                className="text-[11px] text-slate-400 leading-tight max-w-[220px] xl:max-w-[280px] truncate"
+              >
                 {user?.email || user?.phone || ''}
               </p>
             </div>

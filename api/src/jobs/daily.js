@@ -15,7 +15,61 @@ export async function runDailyJobs() {
   const expiredAptIds = new Set();
   const otherAffectedAptIds = new Set();
 
-  // 1. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= CURRENT_DATE là đã kết thúc) (R-02)
+  // 1a. Hợp đồng đang chờ bàn giao chấm dứt (TERMINATION_PENDING) đã đến ngày hẹn trả phòng -> tự động chuyển sang TERMINATED
+  const scheduledTerminated = await adminPool.query(
+    `UPDATE contract
+     SET status = 'TERMINATED',
+         terminated_at = COALESCE(terminated_at, end_date),
+         updated_at = NOW()
+     WHERE status = 'TERMINATION_PENDING'
+       AND COALESCE(terminated_at, end_date) <= CURRENT_DATE
+     RETURNING id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date`
+  );
+  for (const row of scheduledTerminated.rows) {
+    const termStr = row.eff_end_date?.toISOString
+      ? row.eff_end_date.toISOString().slice(0, 10)
+      : String(row.eff_end_date).slice(0, 10);
+    const sDateStr = row.start_date?.toISOString
+      ? row.start_date.toISOString().slice(0, 10)
+      : String(row.start_date).slice(0, 10);
+    const { dueAt } = refundDeadline(termStr);
+    await adminPool.query(
+      `UPDATE deposit
+       SET refund_due_date = $1, updated_at = NOW()
+       WHERE contract_id = $2
+         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED')
+         AND refund_due_date IS NULL`,
+      [dueAt, row.id]
+    );
+
+    if (row.apartment_id) {
+      const movedIn = Boolean(sDateStr && termStr >= sDateStr);
+      if (!movedIn) {
+        otherAffectedAptIds.add(row.apartment_id);
+      } else {
+        const childContinue = await adminPool.query(
+          `SELECT 1 FROM contract
+           WHERE parent_contract_id = $1
+             AND apartment_id = $2
+             AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+             AND start_date <= CURRENT_DATE
+             AND COALESCE(terminated_at, end_date) > CURRENT_DATE
+           LIMIT 1`,
+          [row.id, row.apartment_id]
+        );
+        if (childContinue.rows.length > 0) {
+          otherAffectedAptIds.add(row.apartment_id);
+        } else {
+          expiredAptIds.add(row.apartment_id);
+        }
+      }
+    }
+  }
+  if (scheduledTerminated.rowCount > 0) {
+    console.log(`[DailyJob] scheduled contract terminations finalized: ${scheduledTerminated.rowCount}`);
+  }
+
+  // 1b. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= CURRENT_DATE là đã kết thúc) (R-02)
   const expired = await adminPool.query(
     `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
      WHERE status IN ('ACTIVE', 'RENEWAL_PENDING') AND end_date <= CURRENT_DATE

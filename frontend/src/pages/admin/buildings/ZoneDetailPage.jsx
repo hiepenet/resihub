@@ -83,6 +83,17 @@ export function ZoneDetailPage() {
 
   if (loading) return <PageSkeleton />;
 
+  if (!zone) {
+    return (
+      <div className="p-8 text-center rounded-2xl bg-white border border-slate-200 space-y-3">
+        <p className="text-sm font-semibold text-slate-700">Không tìm thấy phân khu trong tòa nhà này.</p>
+        <Button variant="outline" size="sm" onClick={() => navigate(`/admin/buildings/${id}`)}>
+          Quay lại tòa nhà
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -116,7 +127,13 @@ export function ZoneDetailPage() {
         columns={[
           { key: 'code', label: 'Mã căn hộ', sortable: true, render: (r) => <span className="font-bold text-primary-700">{r.code}</span> },
           { key: 'floor_name', label: 'Tầng', align: 'center', className: 'whitespace-nowrap' },
-          { key: 'type', label: 'Loại căn', align: 'center', className: 'whitespace-nowrap' },
+          {
+            key: 'type',
+            label: 'Loại căn / PN',
+            align: 'center',
+            className: 'whitespace-nowrap',
+            render: (r) => `${r.type || '1PN'} (${r.bedrooms ?? 1} PN)`,
+          },
           { key: 'area_m2', label: 'Diện tích', align: 'right', className: 'font-mono tabular-nums whitespace-nowrap', render: (r) => `${r.area_m2 || 0} m²` },
           { key: 'base_rent', label: 'Giá niêm yết', align: 'right', className: 'font-mono tabular-nums whitespace-nowrap', render: (r) => formatMoney(r.base_rent) },
           { key: 'status', label: 'Trạng thái', align: 'center', render: (r) => <StatusBadge status={r.status} domain="apartment" /> },

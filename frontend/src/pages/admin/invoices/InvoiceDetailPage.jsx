@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -30,6 +31,7 @@ import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
+import { formatDateVi, getDateOrderError, minDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const LINE_TYPE_LABELS = {
@@ -141,9 +143,30 @@ export function InvoiceDetailPage() {
     setAdjustOpen(true);
   };
 
+  const invoiceIssueDateStr = toDateOnlyStr(invoice?.issue_date || invoice?.created_at);
+  const currentInvoiceDueStr = toDateOnlyStr(invoice?.due_date);
+  const minAdjustDueDate =
+    currentInvoiceDueStr && invoiceIssueDateStr
+      ? minDateStr(invoiceIssueDateStr, currentInvoiceDueStr)
+      : invoiceIssueDateStr;
+  const adjustDueDateError =
+    adjustForm.due_date && minAdjustDueDate
+      ? getDateOrderError(minAdjustDueDate, adjustForm.due_date, {
+          strictAfter: false,
+          startLabel: invoiceIssueDateStr
+            ? `Ngày lập hóa đơn (${formatDateVi(invoiceIssueDateStr)})`
+            : 'Ngày lập hóa đơn',
+          endLabel: 'Hạn thanh toán',
+        })
+      : '';
+
   const handleSaveAdjustment = async (e) => {
     e.preventDefault();
     if (!invoice) return;
+    if (adjustDueDateError) {
+      toast.warning(adjustDueDateError);
+      return;
+    }
     const adjNum = Math.round(Number(adjustForm.adjustment_amount || 0));
     if (adjNum !== 0 && !adjustForm.adjustment_reason.trim()) {
       toast.warning('Vui lòng nhập lý do điều chỉnh số tiền.');
@@ -372,7 +395,7 @@ export function InvoiceDetailPage() {
               <span className="col-span-2 text-slate-700">{invoice.tenant_phone || '—'}</span>
 
               <span className="text-slate-500">Email nhận HĐ:</span>
-              <span className="col-span-2 text-slate-700">{invoice.tenant_email || '—'}</span>
+              <span className="col-span-2 text-slate-700 break-all">{invoice.tenant_email || '—'}</span>
             </div>
           </div>
 
@@ -560,8 +583,13 @@ export function InvoiceDetailPage() {
                       {PAYMENT_METHODS[py.method] || py.method}
                     </p>
                     {py.reference_code ? (
-                      <p className="text-[11px] font-mono text-slate-500">
+                      <p className="text-[11px] font-mono text-slate-500 break-all">
                         Ref: {py.reference_code}
+                      </p>
+                    ) : null}
+                    {py.note ? (
+                      <p className="text-[11px] text-slate-600 whitespace-pre-line break-words mt-0.5">
+                        {py.note}
                       </p>
                     ) : null}
                   </TD>
@@ -578,16 +606,23 @@ export function InvoiceDetailPage() {
                   <TD className="text-center">
                     <StatusBadge status={py.status} domain="payment" />
                   </TD>
-                  <TD className="text-center text-xs text-slate-600 whitespace-nowrap">{py.confirmed_by_name || '—'}</TD>
+                  <TD className="text-center text-xs text-slate-600 whitespace-nowrap">
+                    <div>
+                      <p>{py.confirmed_by_name || '—'}</p>
+                      {py.confirmed_at ? (
+                        <p className="text-[11px] text-slate-400">{formatDateTime(py.confirmed_at)}</p>
+                      ) : null}
+                    </div>
+                  </TD>
                   <TD className="w-px whitespace-nowrap text-center">
                     {Array.isArray(py.proof_images) && py.proof_images.length > 0 ? (
                       <Button
                         size="xs"
                         variant="soft"
                         icon={Eye}
-                        onClick={() => setPreviewProof(py.proof_images[0])}
+                        onClick={() => setPreviewProof(py.proof_images)}
                       >
-                        Xem UNC
+                        Xem UNC {py.proof_images.length > 1 ? `(${py.proof_images.length})` : ''}
                       </Button>
                     ) : (
                       <span className="text-xs text-slate-400">—</span>
@@ -612,19 +647,23 @@ export function InvoiceDetailPage() {
             <Button variant="outline" onClick={() => setAdjustOpen(false)} disabled={submitting}>
               Hủy
             </Button>
-            <Button variant="primary" onClick={handleSaveAdjustment} loading={submitting}>
+            <Button
+              variant="primary"
+              onClick={handleSaveAdjustment}
+              loading={submitting}
+              disabled={Boolean(adjustDueDateError)}
+            >
               Lưu điều chỉnh
             </Button>
           </>
         }
       >
         <form onSubmit={handleSaveAdjustment} className="space-y-4">
-          <Input
+          <MoneyInput
             label="Số tiền điều chỉnh (VNĐ)"
-            type="number"
-            step="1000"
+            allowNegative
             required
-            placeholder="VD: -200000 (giảm trừ) hoặc 150000 (phụ thu)"
+            placeholder="VD: -200.000 (giảm trừ) hoặc 150.000 (phụ thu)"
             value={adjustForm.adjustment_amount}
             onChange={(e) =>
               setAdjustForm((s) => ({ ...s, adjustment_amount: e.target.value }))
@@ -651,6 +690,8 @@ export function InvoiceDetailPage() {
           <Input
             label="Gia hạn ngày thanh toán (nếu có)"
             type="date"
+            min={minAdjustDueDate || undefined}
+            error={adjustDueDateError}
             value={adjustForm.due_date}
             onChange={(e) => setAdjustForm((s) => ({ ...s, due_date: e.target.value }))}
           />
@@ -685,12 +726,10 @@ export function InvoiceDetailPage() {
       >
         <form onSubmit={handleQuickPay} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
+            <MoneyInput
               label="Số tiền thực thu (VNĐ)"
-              type="number"
-              min="1000"
-              step="1000"
               required
+              placeholder="VD: 8.500.000"
               value={payForm.amount}
               onChange={(e) => setPayForm((s) => ({ ...s, amount: e.target.value }))}
             />
@@ -740,16 +779,27 @@ export function InvoiceDetailPage() {
       <Modal
         open={Boolean(previewProof)}
         onClose={() => setPreviewProof(null)}
-        title="Ảnh chứng từ thanh toán"
+        title={
+          Array.isArray(previewProof) && previewProof.length > 1
+            ? `Ảnh chứng từ thanh toán (${previewProof.length} ảnh)`
+            : 'Ảnh chứng từ thanh toán'
+        }
         size="lg"
       >
         {previewProof ? (
-          <div className="flex items-center justify-center bg-slate-900 rounded-xl overflow-hidden max-h-[70vh]">
-            <AuthImage
-              src={previewProof}
-              alt="Chứng từ thanh toán"
-              className="max-h-[70vh] w-auto object-contain"
-            />
+          <div className="space-y-3 max-h-[75vh] overflow-y-auto">
+            {(Array.isArray(previewProof) ? previewProof : [previewProof]).map((src, idx) => (
+              <div
+                key={idx}
+                className="flex items-center justify-center bg-slate-900 rounded-xl overflow-hidden"
+              >
+                <AuthImage
+                  src={src}
+                  alt={`Chứng từ thanh toán #${idx + 1}`}
+                  className="max-h-[65vh] w-auto object-contain"
+                />
+              </div>
+            ))}
           </div>
         ) : null}
       </Modal>

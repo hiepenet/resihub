@@ -20,7 +20,7 @@ const DOT_STYLES = {
   slate: 'bg-slate-400',
 };
 
-export function Badge({ children, variant = 'slate', dot = false, className = '' }) {
+export function Badge({ children, variant = 'slate', dot = false, icon: Icon, className = '' }) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border whitespace-nowrap shrink-0 ${
@@ -28,6 +28,7 @@ export function Badge({ children, variant = 'slate', dot = false, className = ''
       } ${className}`}
     >
       {dot ? <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${DOT_STYLES[variant] || DOT_STYLES.slate}`} /> : null}
+      {Icon ? <Icon className="w-3.5 h-3.5 shrink-0" /> : null}
       {children}
     </span>
   );

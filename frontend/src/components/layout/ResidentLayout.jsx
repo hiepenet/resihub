@@ -97,7 +97,7 @@ export function ResidentLayout({
               </span>
             </div>
             {activeContracts.length > 1 ? (
-              <div className="mt-1 w-[210px] sm:w-[300px]">
+              <div className="mt-1 w-[200px] sm:w-[320px] md:w-[420px] max-w-full">
                 <Select
                   size="sm"
                   icon={Building2}
@@ -114,25 +114,31 @@ export function ResidentLayout({
                 />
               </div>
             ) : apartmentBadge ? (
-              <p className="text-xs text-slate-500 flex items-center gap-1 truncate mt-0.5">
+              <p
+                title={apartmentBadge}
+                className="text-xs text-slate-500 flex items-center gap-1 mt-0.5 min-w-0"
+              >
                 <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <span className="truncate">{apartmentBadge}</span>
+                <span className="truncate sm:whitespace-normal sm:break-words leading-snug">
+                  {apartmentBadge}
+                </span>
               </p>
             ) : null}
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <NotificationBell onViewAll={() => onChangeTab?.('notifications')} />
           <button
             type="button"
+            title={user?.full_name || 'Cư dân'}
             onClick={() => onChangeTab?.('profile')}
             className="hidden sm:flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-slate-100 transition-colors"
           >
-            <div className="w-7 h-7 rounded-full bg-primary-100 text-primary-700 font-semibold text-xs flex items-center justify-center">
+            <div className="w-7 h-7 rounded-full bg-primary-100 text-primary-700 font-semibold text-xs flex items-center justify-center shrink-0">
               {(user?.full_name || 'C').slice(0, 1).toUpperCase()}
             </div>
-            <span className="text-xs font-semibold text-slate-700 max-w-[130px] truncate">
+            <span className="text-xs font-semibold text-slate-700 max-w-[200px] lg:max-w-[260px] truncate">
               {user?.full_name || 'Cư dân'}
             </span>
           </button>
@@ -197,12 +203,12 @@ export function ResidentLayout({
               key={t.id}
               type="button"
               onClick={() => onChangeTab?.(t.id)}
-              className={`flex flex-col items-center justify-center px-3 py-1.5 rounded-xl min-w-[68px] shrink-0 text-[11px] font-medium transition-colors ${
+              className={`flex flex-col items-center justify-center px-2 py-1.5 rounded-xl min-w-[64px] shrink-0 text-[11px] font-medium transition-colors ${
                 isActive ? 'text-primary-600 bg-primary-50' : 'text-slate-500'
               }`}
             >
               <Icon className="w-4 h-4 mb-0.5" />
-              <span className="truncate">{t.shortLabel}</span>
+              <span className="whitespace-nowrap">{t.shortLabel}</span>
             </button>
           );
         })}

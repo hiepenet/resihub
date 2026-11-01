@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
@@ -302,6 +303,7 @@ export function UsersPage() {
           full_name: userForm.full_name.trim(),
           email: userForm.email.trim() || null,
           phone: userForm.phone.trim() || null,
+          id_number: userForm.id_number.trim() || null,
           status: userForm.status,
           roles: formattedRoles,
         };
@@ -422,7 +424,7 @@ export function UsersPage() {
         label: 'Liên hệ',
         render: (row) => (
           <div className="text-xs">
-            <p className="text-slate-800 font-medium">{row.email || '—'}</p>
+            <p className="text-slate-800 font-medium break-all">{row.email || '—'}</p>
             <p className="text-slate-500 mt-0.5">{row.phone || '—'}</p>
           </div>
         ),
@@ -728,11 +730,10 @@ export function UsersPage() {
                   }
                 />
                 <div className="grid grid-cols-2 gap-3">
-                  <Input
+                  <MoneyInput
                     label="Giá điện mặc định (₫/kWh)"
-                    type="number"
-                    min="0"
                     disabled={!canManageUsers}
+                    placeholder="VD: 3.800"
                     value={billingConfig.electricity_default_price}
                     onChange={(e) =>
                       setBillingConfig((s) => ({
@@ -741,11 +742,10 @@ export function UsersPage() {
                       }))
                     }
                   />
-                  <Input
+                  <MoneyInput
                     label="Giá nước mặc định (₫/m³)"
-                    type="number"
-                    min="0"
                     disabled={!canManageUsers}
+                    placeholder="VD: 22.000"
                     value={billingConfig.water_default_price}
                     onChange={(e) =>
                       setBillingConfig((s) => ({
@@ -900,25 +900,25 @@ export function UsersPage() {
               value={userForm.full_name}
               onChange={(e) => setUserForm((s) => ({ ...s, full_name: e.target.value }))}
             />
-            {!editingUser ? (
-              <Input
-                label="Số CCCD / Hộ chiếu"
-                placeholder="079099001234"
-                value={userForm.id_number}
-                onChange={(e) => setUserForm((s) => ({ ...s, id_number: e.target.value }))}
-              />
-            ) : (
-              <Select
-                label="Trạng thái tài khoản"
-                value={userForm.status}
-                onChange={(e) => setUserForm((s) => ({ ...s, status: e.target.value }))}
-                options={[
-                  { value: 'ACTIVE', label: 'Đang hoạt động (ACTIVE)' },
-                  { value: 'SUSPENDED', label: 'Tạm khóa (SUSPENDED)' },
-                ]}
-              />
-            )}
+            <Input
+              label="Số CCCD / Hộ chiếu"
+              placeholder="079099001234"
+              value={userForm.id_number}
+              onChange={(e) => setUserForm((s) => ({ ...s, id_number: e.target.value }))}
+            />
           </div>
+
+          {editingUser ? (
+            <Select
+              label="Trạng thái tài khoản"
+              value={userForm.status}
+              onChange={(e) => setUserForm((s) => ({ ...s, status: e.target.value }))}
+              options={[
+                { value: 'ACTIVE', label: 'Đang hoạt động (ACTIVE)' },
+                { value: 'SUSPENDED', label: 'Tạm khóa (SUSPENDED)' },
+              ]}
+            />
+          ) : null}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input

@@ -184,9 +184,14 @@ export function InvoicesPage() {
           <div>
             <p className="font-semibold text-slate-900">
               Căn {row.apartment_code}{' '}
-              <span className="text-xs font-normal text-slate-500">({row.building_code})</span>
+              <span className="text-xs font-normal text-slate-500">
+                ({row.building_name || row.building_code})
+              </span>
             </p>
-            <p className="text-xs text-slate-500 mt-0.5">{row.tenant_name || '—'}</p>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {row.tenant_name || '—'}
+              {row.tenant_phone ? ` • ${row.tenant_phone}` : ''}
+            </p>
           </div>
         ),
       },

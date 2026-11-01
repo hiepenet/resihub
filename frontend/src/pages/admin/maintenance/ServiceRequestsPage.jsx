@@ -35,6 +35,7 @@ import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import {
+  APARTMENT_STATUS,
   SERVICE_REQUEST_STATUS,
   SERVICE_REQUEST_PRIORITY,
   SERVICE_REQUEST_CATEGORY,
@@ -78,6 +79,13 @@ const KANBAN_COLUMNS = [
     accent: 'border-t-slate-400',
     badgeVariant: 'slate',
     bgHeader: 'bg-slate-100/80',
+  },
+  {
+    status: 'CANCELLED',
+    title: 'Đã hủy',
+    accent: 'border-t-rose-400',
+    badgeVariant: 'red',
+    bgHeader: 'bg-rose-50/60',
   },
 ];
 
@@ -197,6 +205,7 @@ export function ServiceRequestsPage() {
       IN_PROGRESS: [],
       RESOLVED: [],
       CLOSED: [],
+      CANCELLED: [],
     };
     for (const item of requests) {
       if (map[item.status]) {
@@ -323,14 +332,20 @@ export function ServiceRequestsPage() {
       },
       {
         key: 'apartment_code',
-        label: 'Căn hộ',
+        label: 'Căn hộ / Người gửi',
         sortable: true,
         render: (row) => (
           <div>
             <p className="font-semibold text-slate-900">Căn {row.apartment_code}</p>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-500 break-words max-w-[200px]">
               {row.building_code} — {row.building_name}
             </p>
+            {row.requester_name ? (
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                {row.requester_name}
+                {row.requester_phone ? ` (${row.requester_phone})` : ''}
+              </p>
+            ) : null}
           </div>
         ),
       },
@@ -340,7 +355,7 @@ export function ServiceRequestsPage() {
         sortable: true,
         render: (row) => (
           <div className="max-w-xs">
-            <p className="font-medium text-slate-900 truncate">{row.title}</p>
+            <p className="font-medium text-slate-900 break-words">{row.title}</p>
             <p className="text-xs text-slate-500 mt-0.5">
               {SERVICE_REQUEST_CATEGORY[row.category] || row.category}
             </p>
@@ -429,7 +444,7 @@ export function ServiceRequestsPage() {
                 }`}
               >
                 <LayoutGrid className="w-3.5 h-3.5" />
-                Kanban 5 cột
+                Bảng Kanban
               </button>
               <button
                 type="button"
@@ -533,13 +548,13 @@ export function ServiceRequestsPage() {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-start">
+          <div className="flex gap-4 overflow-x-auto pb-3 items-start">
             {KANBAN_COLUMNS.map((col) => {
               const items = groupedKanban[col.status] || [];
               return (
                 <div
                   key={col.status}
-                  className={`bg-slate-100/60 rounded-xl border border-slate-200/90 border-t-4 ${col.accent} flex flex-col max-h-[72vh]`}
+                  className={`min-w-[260px] flex-1 bg-slate-100/60 rounded-xl border border-slate-200/90 border-t-4 ${col.accent} flex flex-col max-h-[72vh]`}
                 >
                   <div
                     className={`px-3.5 py-3 border-b border-slate-200/80 ${col.bgHeader} flex items-center justify-between rounded-t-lg`}
@@ -562,15 +577,15 @@ export function ServiceRequestsPage() {
                           onClick={() => openDetailDrawer(sr.id)}
                           className="bg-white rounded-xl border border-slate-200/90 p-3.5 shadow-sm hover:shadow-md hover:border-primary-300 transition-all cursor-pointer space-y-2.5"
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="font-mono text-[11px] font-semibold text-primary-700 bg-primary-50 px-2 py-0.5 rounded border border-primary-100 truncate">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-mono text-[11px] font-semibold text-primary-700 bg-primary-50 px-2 py-0.5 rounded border border-primary-100 break-all">
                               {sr.tracking_code}
                             </span>
                             <StatusBadge status={sr.priority} domain="priority" dot={false} />
                           </div>
 
                           <div>
-                            <h4 className="text-sm font-semibold text-slate-900 line-clamp-2 leading-snug">
+                            <h4 className="text-sm font-semibold text-slate-900 line-clamp-2 leading-snug break-words" title={sr.title}>
                               {sr.title}
                             </h4>
                             <p className="text-xs text-slate-500 mt-1">
@@ -578,19 +593,26 @@ export function ServiceRequestsPage() {
                             </p>
                           </div>
 
-                          <div className="flex items-center justify-between text-xs text-slate-600 pt-1 border-t border-slate-100">
-                            <span className="font-semibold text-slate-800">
-                              Căn {sr.apartment_code}{' '}
-                              <span className="text-slate-400 font-normal">({sr.building_code})</span>
-                            </span>
-                            <span className="text-[11px] text-slate-400">
+                          <div className="flex items-center justify-between gap-2 text-xs text-slate-600 pt-1 border-t border-slate-100">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-slate-800">
+                                Căn {sr.apartment_code}{' '}
+                                <span className="text-slate-400 font-normal">({sr.building_code})</span>
+                              </p>
+                              {sr.requester_name ? (
+                                <p className="text-[11px] text-slate-500 break-words">
+                                  {sr.requester_name}
+                                </p>
+                              ) : null}
+                            </div>
+                            <span className="text-[11px] text-slate-400 shrink-0">
                               {formatRelativeTime(sr.created_at)}
                             </span>
                           </div>
 
-                          <div className="flex items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             {sr.assigned_to_name ? (
-                              <span className="inline-flex items-center gap-1 text-[11px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full font-medium truncate max-w-[150px]">
+                              <span className="inline-flex items-center gap-1 text-[11px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full font-medium break-words">
                                 <UserCheck className="w-3 h-3 shrink-0" />
                                 {sr.assigned_to_name}
                               </span>
@@ -649,7 +671,9 @@ export function ServiceRequestsPage() {
             placeholder="-- Chọn căn hộ --"
             options={apartments.map((a) => ({
               value: a.id,
-              label: `${a.building_code ? `${a.building_code} - ` : ''}Căn ${a.code} (${a.status})`,
+              label: `${a.building_code ? `${a.building_code} - ` : ''}Căn ${a.code} (${
+                APARTMENT_STATUS[a.status]?.label || a.status
+              })`,
             }))}
           />
 

@@ -23,7 +23,11 @@ export function ContactTab({ overview, onNavigateTab }) {
   const [copiedKey, setCopiedKey] = useState('');
 
   const contract = overview?.active_contract || overview?.contract || null;
-  const reservation = overview?.reservation || null;
+  const reservation =
+    (Array.isArray(overview?.reservations) && overview.reservations[0]) ||
+    overview?.reservation ||
+    null;
+  const onboardingApp = overview?.onboarding_application || overview?.pending_application || null;
 
   // Hợp nhất dữ liệu từ manager_contact, building_manager và contact_config (system_setting)
   const rawManager = {
@@ -43,11 +47,13 @@ export function ContactTab({ overview, onNavigateTab }) {
     rawManager.building_name ||
     contract?.building_name ||
     reservation?.building_name ||
+    onboardingApp?.desired_building_name ||
     'Hệ thống Căn hộ Dịch vụ ResiHub';
   const buildingAddress =
     rawManager.building_address ||
     contract?.building_address ||
     reservation?.building_address ||
+    onboardingApp?.desired_building_address ||
     'Văn phòng Ban Quản Lý tại sảnh tầng 1 tòa nhà';
 
   const workingHours =
@@ -325,10 +331,10 @@ export function ContactTab({ overview, onNavigateTab }) {
               <Badge variant="emerald">CSKH</Badge>
             </div>
 
-            <div className="mt-4 p-3.5 rounded-xl bg-slate-50 border border-slate-200/70 flex items-center justify-between gap-2">
+            <div className="mt-4 p-3.5 rounded-xl bg-slate-50 border border-slate-200/70 flex flex-wrap items-center justify-between gap-2">
               <a
                 href={`mailto:${supportEmail}`}
-                className="text-sm sm:text-base font-bold text-slate-900 hover:text-primary-600 truncate transition-colors"
+                className="text-sm sm:text-base font-bold text-slate-900 hover:text-primary-600 break-all transition-colors"
               >
                 {supportEmail}
               </a>

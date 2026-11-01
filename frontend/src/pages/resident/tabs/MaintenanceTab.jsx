@@ -363,6 +363,12 @@ export function MaintenanceTab({
                         </Badge>
                         <StatusBadge status={req.priority} domain="priority" dot={false} />
                         <StatusBadge status={req.status} domain="service_request" />
+                        {req.apartment_code ? (
+                          <span className="text-xs font-medium text-slate-600">
+                            Căn {req.apartment_code}
+                            {req.building_name ? ` — ${req.building_name}` : ''}
+                          </span>
+                        ) : null}
                       </div>
 
                       <span className="text-xs text-slate-400 flex items-center gap-1 shrink-0">
@@ -402,21 +408,28 @@ export function MaintenanceTab({
                     </div>
 
                     {/* Footer: Technician Info / Resolution / Rating */}
-                    <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                      <div className="space-y-1 text-slate-500">
-                        <p className="flex items-center gap-1.5">
-                          <UserCheck className="w-3.5 h-3.5 text-slate-400" />
+                    <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-start justify-between gap-3 text-xs">
+                      <div className="space-y-1 text-slate-500 min-w-0 flex-1">
+                        <p className="flex items-center gap-1.5 flex-wrap">
+                          <UserCheck className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                           <span>
                             Kỹ thuật phụ trách:{' '}
                             <strong className="text-slate-700">
                               {req.assigned_to_name || 'Đang điều phối nhân sự'}
                             </strong>
                           </span>
+                          {req.resolved_at ? (
+                            <span className="text-emerald-700 font-medium">
+                              • Hoàn thành lúc: {formatDateTime(req.resolved_at)}
+                            </span>
+                          ) : null}
                         </p>
-                        {req.resolution_note ? (
-                          <p className="flex items-start gap-1.5 text-emerald-700">
+                        {req.resolution_note || req.internal_note ? (
+                          <p className="flex items-start gap-1.5 text-emerald-700 whitespace-pre-line break-words">
                             <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                            <span>Kết quả xử lý: {req.resolution_note}</span>
+                            <span>
+                              Kết quả / Ghi chú xử lý: {req.resolution_note || req.internal_note}
+                            </span>
                           </p>
                         ) : null}
                       </div>
@@ -432,7 +445,7 @@ export function MaintenanceTab({
                             Đánh giá 1–5 ★
                           </Button>
                         ) : hasRated ? (
-                          <div className="inline-flex flex-col sm:items-end gap-0.5 bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 rounded-xl">
+                          <div className="inline-flex flex-col sm:items-end gap-0.5 bg-amber-50/80 border border-amber-200/80 px-3 py-1.5 rounded-xl max-w-sm">
                             <div className="flex items-center gap-0.5 text-amber-500">
                               {[1, 2, 3, 4, 5].map((s) => (
                                 <Star
@@ -449,7 +462,7 @@ export function MaintenanceTab({
                               </span>
                             </div>
                             {req.rating_note ? (
-                              <span className="text-[11px] text-slate-600 italic max-w-[240px] truncate">
+                              <span className="text-[11px] text-slate-600 italic break-words whitespace-pre-line">
                                 "{req.rating_note}"
                               </span>
                             ) : null}

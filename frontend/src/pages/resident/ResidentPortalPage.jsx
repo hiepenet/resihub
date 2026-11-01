@@ -135,12 +135,26 @@ export function ResidentPortalPage() {
 
   const apartmentBadge = useMemo(() => {
     const c = overview?.active_contract || overview?.contract;
+    const rList = Array.isArray(overview?.reservations)
+      ? overview.reservations
+      : overview?.reservation
+        ? [overview.reservation]
+        : [];
+    const r = rList[0] || null;
+    const extraRsv = rList.length > 1 ? ` (+${rList.length - 1})` : '';
+    const app = overview?.onboarding_application || overview?.pending_application || null;
+
+    if (c?.apartment_code && r?.apartment_code) {
+      return `Căn ${c.apartment_code}${c.building_name ? ` — ${c.building_name}` : ''} • Giữ chỗ Căn ${r.apartment_code}${r.building_name ? ` (${r.building_name})` : ''}${extraRsv}`;
+    }
     if (c?.apartment_code) {
       return `Căn ${c.apartment_code}${c.building_name ? ` — ${c.building_name}` : ''}`;
     }
-    const r = overview?.reservation;
     if (r?.apartment_code) {
-      return `Giữ chỗ Căn ${r.apartment_code}${r.building_name ? ` — ${r.building_name}` : ''}`;
+      return `Giữ chỗ Căn ${r.apartment_code}${r.building_name ? ` — ${r.building_name}` : ''}${extraRsv}`;
+    }
+    if (app?.desired_apartment_code) {
+      return `Đăng ký Căn ${app.desired_apartment_code}${app.desired_building_name ? ` — ${app.desired_building_name}` : ''}`;
     }
     return 'Tài khoản Cư dân';
   }, [overview]);

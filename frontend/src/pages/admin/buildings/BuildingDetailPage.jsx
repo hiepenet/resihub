@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Building2,
   LayoutGrid,
   Layers,
   Users,
@@ -192,10 +191,18 @@ export function BuildingDetailPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             <Card className="lg:col-span-2">
               <CardHeader title="Thông tin định danh tòa nhà" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
                 <div>
-                  <p className="text-xs text-slate-400">Mã tòa nhà</p>
-                  <p className="font-semibold text-slate-800 mt-0.5">{building.code}</p>
+                  <p className="text-xs text-slate-400">Mã &amp; Tên tòa nhà</p>
+                  <p className="font-semibold text-slate-800 mt-0.5 break-words">
+                    {building.code} — {building.name}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-400">Quy mô tầng</p>
+                  <p className="font-semibold text-slate-800 mt-0.5">
+                    {floors.length || building.total_floors || 0} tầng
+                  </p>
                 </div>
                 <div>
                   <p className="text-xs text-slate-400">Trạng thái khai thác</p>
@@ -205,11 +212,11 @@ export function BuildingDetailPage() {
                     </Badge>
                   </div>
                 </div>
-                <div className="sm:col-span-2">
+                <div className="sm:col-span-3">
                   <p className="text-xs text-slate-400">Địa chỉ</p>
-                  <p className="text-slate-700 mt-0.5 flex items-center gap-1.5">
-                    <MapPin className="w-4 h-4 text-slate-400 shrink-0" />
-                    {building.address || '—'}
+                  <p className="text-slate-700 mt-0.5 flex items-start gap-1.5">
+                    <MapPin className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                    <span className="break-words">{building.address || '—'}</span>
                   </p>
                 </div>
               </div>
@@ -217,38 +224,43 @@ export function BuildingDetailPage() {
 
             <Card>
               <CardHeader title="Tài khoản nhận thanh toán" />
-              {building.payment_account?.account_number || building.payment_account?.bank_name ? (
-                <div className="space-y-2.5 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-slate-500 shrink-0">Ngân hàng:</span>
-                    <span className="font-semibold flex items-center gap-2 text-right">
-                      {building.payment_account.bank_logo ? (
-                        <img
-                          src={building.payment_account.bank_logo}
-                          alt=""
-                          className="w-8 h-5 object-contain rounded bg-white border border-slate-200 p-0.5 shrink-0"
-                        />
-                      ) : null}
-                      <span>
-                        {building.payment_account.bank_name || '—'}
-                        {building.payment_account.bank_code ? ` (${building.payment_account.bank_code})` : ''}
+              {(() => {
+                const paymentAccount = building.payment_account || building.lease_terms?.payment_account || {};
+                return paymentAccount.account_number || paymentAccount.bank_name ? (
+                  <div className="space-y-2.5 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-slate-500 shrink-0">Ngân hàng:</span>
+                      <span className="font-semibold flex items-center gap-2 text-right break-words">
+                        {paymentAccount.bank_logo ? (
+                          <img
+                            src={paymentAccount.bank_logo}
+                            alt=""
+                            className="w-8 h-5 object-contain rounded bg-white border border-slate-200 p-0.5 shrink-0"
+                          />
+                        ) : null}
+                        <span>
+                          {paymentAccount.bank_name || '—'}
+                          {paymentAccount.bank_code ? ` (${paymentAccount.bank_code})` : ''}
+                        </span>
                       </span>
-                    </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-500 shrink-0">Số TK:</span>
+                      <span className="font-mono font-semibold text-primary-600 break-all text-right">
+                        {paymentAccount.account_number || '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-slate-500 shrink-0">Chủ TK:</span>
+                      <span className="font-medium text-right break-words">
+                        {paymentAccount.account_holder || '—'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Số TK:</span>
-                    <span className="font-mono font-semibold text-primary-600">
-                      {building.payment_account.account_number || '—'}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Chủ TK:</span>
-                    <span className="font-medium text-right">{building.payment_account.account_holder || '—'}</span>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-slate-400">Chưa thiết lập tài khoản ngân hàng riêng cho tòa này.</p>
-              )}
+                ) : (
+                  <p className="text-xs text-slate-400">Chưa thiết lập tài khoản ngân hàng riêng cho tòa này.</p>
+                );
+              })()}
             </Card>
           </div>
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Building2,
   Maximize2,
@@ -18,6 +18,7 @@ import {
   Send,
   Home,
   AlertCircle,
+  XCircle,
 } from 'lucide-react';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -25,6 +26,7 @@ import { Badge } from '../../../components/ui/Badge';
 import { Input } from '../../../components/ui/Input';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
+import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
@@ -114,22 +116,94 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
   const user = overview?.user || {};
   const currentAmountDue = Number(overview?.current_amount_due || 0);
   const latestInvoice = overview?.latest_invoice || null;
-  const reservation = overview?.reservation || null;
-  const pendingApplication = overview?.pending_application || null;
-  const availableApartments = Array.isArray(overview?.available_apartments)
-    ? overview.available_apartments
-    : [];
+  const reservations = useMemo(() => {
+    if (Array.isArray(overview?.reservations) && overview.reservations.length > 0) {
+      return overview.reservations;
+    }
+    return overview?.reservation ? [overview.reservation] : [];
+  }, [overview?.reservations, overview?.reservation]);
+  const reservation = reservations[0] || null;
+  const onboardingApplication = overview?.onboarding_application || overview?.pending_application || null;
+  const idImages = useMemo(
+    () => (Array.isArray(overview?.id_images) ? overview.id_images : []),
+    [overview?.id_images]
+  );
+  const existingFrontImg = useMemo(
+    () => [...idImages].reverse().find((img) => img.side === 'front') || null,
+    [idImages]
+  );
+  const existingBackImg = useMemo(
+    () => [...idImages].reverse().find((img) => img.side === 'back') || null,
+    [idImages]
+  );
+  const availableApartments = useMemo(
+    () => (Array.isArray(overview?.available_apartments) ? overview.available_apartments : []),
+    [overview?.available_apartments]
+  );
+
+  const apartmentSelectOptions = useMemo(() => {
+    const map = new Map();
+    reservations.forEach((r) => {
+      if (r.apartment_id) {
+        map.set(r.apartment_id, {
+          value: r.apartment_id,
+          label: `Căn ${r.apartment_code} — ${r.building_name} (${r.area_m2 || 0}m² • ${formatMoney(r.base_rent)}/tháng) [Đang giữ chỗ]`,
+        });
+      }
+    });
+    availableApartments.forEach((a) => {
+      if (!map.has(a.id)) {
+        const isRsv = a.status === 'RESERVED';
+        map.set(a.id, {
+          value: a.id,
+          label: `Căn ${a.code} — ${a.building_name} (${a.area_m2 || 0}m² • ${formatMoney(a.base_rent)}/tháng)${isRsv ? ' [Đang giữ chỗ]' : ''}`,
+        });
+      }
+    });
+    return Array.from(map.values());
+  }, [reservations, availableApartments]);
 
   const [applyModalOpen, setApplyModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formErrors, setFormErrors] = useState({});
-  const [appForm, setAppForm] = useState({
-    full_name: '',
-    id_number: '',
-    dob: '',
-    desired_apartment_id: '',
-    note: '',
-  });
+  const [idCardFiles, setIdCardFiles] = useState({ front: '', back: '' });
+  const [appForm, setAppForm] = useState(() => ({
+    full_name: user?.full_name || reservation?.prospect_name || '',
+    id_number: user?.id_number || '',
+    dob: toInputDate(user?.dob) || '',
+    desired_apartment_id:
+      onboardingApplication?.desired_apartment_id ||
+      reservation?.apartment_id ||
+      availableApartments[0]?.id ||
+      '',
+    note: onboardingApplication?.application_note || '',
+    privacy_consent: Boolean(user?.privacy_consent_at),
+  }));
+
+  useEffect(() => {
+    setAppForm((prev) => ({
+      ...prev,
+      full_name: prev.full_name || user?.full_name || reservation?.prospect_name || '',
+      id_number: prev.id_number || user?.id_number || '',
+      dob: prev.dob || toInputDate(user?.dob) || '',
+      desired_apartment_id:
+        prev.desired_apartment_id ||
+        onboardingApplication?.desired_apartment_id ||
+        reservation?.apartment_id ||
+        availableApartments[0]?.id ||
+        '',
+      privacy_consent: prev.privacy_consent || Boolean(user?.privacy_consent_at),
+    }));
+  }, [
+    user?.full_name,
+    user?.id_number,
+    user?.dob,
+    user?.privacy_consent_at,
+    onboardingApplication?.desired_apartment_id,
+    reservation?.prospect_name,
+    reservation?.apartment_id,
+    availableApartments,
+  ]);
 
   const contractAmenities = useMemo(
     () => parseAmenities(contract?.amenities),
@@ -143,18 +217,25 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
 
   const openApplyModal = (aptId = '') => {
     setFormErrors({});
+    setIdCardFiles({ front: '', back: '' });
     setAppForm({
-      full_name: user?.full_name || '',
+      full_name: user?.full_name || reservation?.prospect_name || '',
       id_number: user?.id_number || '',
       dob: toInputDate(user?.dob) || '',
-      desired_apartment_id: aptId || availableApartments[0]?.id || '',
-      note: '',
+      desired_apartment_id:
+        aptId ||
+        onboardingApplication?.desired_apartment_id ||
+        reservation?.apartment_id ||
+        availableApartments[0]?.id ||
+        '',
+      note: onboardingApplication?.application_note || '',
+      privacy_consent: Boolean(user?.privacy_consent_at),
     });
     setApplyModalOpen(true);
   };
 
   const handleSubmitApplication = async (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
     const errs = {};
     if (!appForm.full_name?.trim()) {
       errs.full_name = 'Vui lòng nhập họ và tên đầy đủ.';
@@ -162,32 +243,425 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
     if (appForm.id_number?.trim() && !isValidIdNumber(appForm.id_number)) {
       errs.id_number = 'Số CCCD / Hộ chiếu không hợp lệ (9 hoặc 12 chữ số).';
     }
+    if (!appForm.privacy_consent) {
+      errs.privacy_consent = 'Vui lòng đồng ý với Chính sách bảo vệ dữ liệu cá nhân trước khi gửi hồ sơ.';
+    }
     if (Object.keys(errs).length > 0) {
       setFormErrors(errs);
+      if (errs.privacy_consent) {
+        toast.warning(errs.privacy_consent);
+      }
       return;
     }
 
     setSubmitting(true);
     try {
+      if (idCardFiles.front) {
+        await residentService.uploadIdImage({ side: 'front', image_base64: idCardFiles.front });
+      }
+      if (idCardFiles.back) {
+        await residentService.uploadIdImage({ side: 'back', image_base64: idCardFiles.back });
+      }
       const res = await residentService.submitRentalApplication({
         full_name: appForm.full_name.trim(),
         id_number: appForm.id_number?.trim() || undefined,
         dob: appForm.dob || undefined,
-        desired_apartment_id: appForm.desired_apartment_id || undefined,
+        desired_apartment_id: appForm.desired_apartment_id || reservation?.apartment_id || undefined,
         note: appForm.note?.trim() || undefined,
+        privacy_consent: true,
       });
-      toast.success(res?.message || 'Đã gửi đăng ký thuê căn hộ thành công!');
+      toast.success(res?.message || 'Đã gửi hồ sơ đăng ký nhận nhà thành công!');
+      setIdCardFiles({ front: '', back: '' });
       setApplyModalOpen(false);
       await onRefreshOverview?.();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể gửi đăng ký thuê trực tuyến.'));
+      toast.error(extractErrorMessage(err, 'Không thể gửi hồ sơ đăng ký.'));
     } finally {
       setSubmitting(false);
     }
   };
 
+  const renderApplicationFormFields = () => (
+    <div className="space-y-4">
+      <Select
+        label="Căn hộ đăng ký nhận nhà / thuê"
+        placeholder="-- Chọn căn hộ (hoặc để BQL tư vấn) --"
+        value={appForm.desired_apartment_id}
+        onChange={(e) => setAppForm((s) => ({ ...s, desired_apartment_id: e.target.value }))}
+        options={apartmentSelectOptions}
+      />
+
+      <Input
+        label="Họ và tên người đăng ký"
+        required
+        placeholder="Nhập họ và tên theo CCCD"
+        value={appForm.full_name}
+        error={formErrors.full_name}
+        onChange={(e) => {
+          setAppForm((s) => ({ ...s, full_name: e.target.value }));
+          if (formErrors.full_name) setFormErrors((err) => ({ ...err, full_name: '' }));
+        }}
+      />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Input
+          type="date"
+          label="Ngày sinh"
+          value={appForm.dob}
+          onChange={(e) => setAppForm((s) => ({ ...s, dob: e.target.value }))}
+        />
+        <Input
+          label="Số CCCD / Hộ chiếu"
+          placeholder="001099112233"
+          value={appForm.id_number}
+          error={formErrors.id_number}
+          onChange={(e) => {
+            setAppForm((s) => ({ ...s, id_number: e.target.value }));
+            if (formErrors.id_number) setFormErrors((err) => ({ ...err, id_number: '' }));
+          }}
+        />
+      </div>
+
+      <div className="space-y-3 pt-1 border-t border-slate-100">
+        <div>
+          <p className="text-xs font-semibold text-slate-800">
+            Ảnh chụp CCCD 2 mặt (Khuyến khích tải đủ mặt trước & mặt sau để duyệt nhanh)
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            Ảnh giấy tờ được bảo mật nghiêm ngặt, chỉ Ban Quản Lý tòa nhà được phân quyền mới có thể đối chiếu.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <span className="text-xs font-medium text-slate-700">Ảnh CCCD mặt trước</span>
+            {existingFrontImg && !idCardFiles.front ? (
+              <div className="w-full h-24 rounded-lg border border-slate-200 overflow-hidden bg-slate-50">
+                <AuthImage
+                  src={`/api/v1/attachments/${existingFrontImg.attachment_id}/view`}
+                  alt="CCCD mặt trước đã tải"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            ) : null}
+            <FileUpload
+              value={idCardFiles.front}
+              onChange={(b64) => setIdCardFiles((prev) => ({ ...prev, front: b64 || '' }))}
+              hint={existingFrontImg ? 'Tải ảnh mới để thay mặt trước' : 'Chọn ảnh mặt trước (≤ 5MB)'}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <span className="text-xs font-medium text-slate-700">Ảnh CCCD mặt sau</span>
+            {existingBackImg && !idCardFiles.back ? (
+              <div className="w-full h-24 rounded-lg border border-slate-200 overflow-hidden bg-slate-50">
+                <AuthImage
+                  src={`/api/v1/attachments/${existingBackImg.attachment_id}/view`}
+                  alt="CCCD mặt sau đã tải"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            ) : null}
+            <FileUpload
+              value={idCardFiles.back}
+              onChange={(b64) => setIdCardFiles((prev) => ({ ...prev, back: b64 || '' }))}
+              hint={existingBackImg ? 'Tải ảnh mới để thay mặt sau' : 'Chọn ảnh mặt sau (≤ 5MB)'}
+            />
+          </div>
+        </div>
+      </div>
+
+      <Input
+        multiline
+        rows={2}
+        label="Ghi chú / Nhu cầu nhận phòng"
+        placeholder="Ví dụ: Ngày dự kiến nhận nhà, số người ở cùng, nhu cầu gửi xe..."
+        value={appForm.note}
+        onChange={(e) => setAppForm((s) => ({ ...s, note: e.target.value }))}
+      />
+
+      <div
+        className={`p-3 rounded-xl border space-y-1 ${
+          formErrors.privacy_consent
+            ? 'bg-rose-50/60 border-rose-300'
+            : 'bg-slate-50 border-slate-200/80'
+        }`}
+      >
+        <label className="flex items-start gap-2.5 cursor-pointer text-xs text-slate-700 leading-relaxed">
+          <input
+            type="checkbox"
+            checked={Boolean(appForm.privacy_consent)}
+            onChange={(e) => {
+              const checked = e.target.checked;
+              setAppForm((s) => ({ ...s, privacy_consent: checked }));
+              if (checked && formErrors.privacy_consent) {
+                setFormErrors((err) => ({ ...err, privacy_consent: '' }));
+              }
+            }}
+            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+          />
+          <span>
+            Tôi xác nhận thông tin khai báo là chính xác và{' '}
+            <strong className="text-slate-900">Đồng ý chính sách bảo vệ dữ liệu cá nhân</strong> của ResiHub để phục vụ xác minh hồ sơ, lập hợp đồng thuê và quản lý cư trú.
+          </span>
+        </label>
+        {formErrors.privacy_consent ? (
+          <p className="text-xs font-medium text-rose-600 pl-6">{formErrors.privacy_consent}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const renderApplicationModal = () => (
+    <Modal
+      open={applyModalOpen}
+      onClose={() => setApplyModalOpen(false)}
+      title={reservation ? 'Đăng ký thông tin nhận nhà' : 'Đăng ký thuê căn hộ trực tuyến'}
+      subtitle="Điền thông tin cá nhân và ảnh CCCD 2 mặt để Ban Quản Lý duyệt hồ sơ và liên hệ bàn giao phòng"
+      size="md"
+      footer={
+        <>
+          <Button variant="outline" onClick={() => setApplyModalOpen(false)} disabled={submitting}>
+            Hủy
+          </Button>
+          <Button icon={Send} onClick={handleSubmitApplication} loading={submitting}>
+            Gửi hồ sơ đăng ký
+          </Button>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmitApplication}>{renderApplicationFormFields()}</form>
+    </Modal>
+  );
+
+  const renderOnboardingStatusCard = () => {
+    if (!onboardingApplication) return null;
+    const desiredLabel = onboardingApplication.desired_apartment_code
+      ? `căn hộ ${onboardingApplication.desired_apartment_code}${onboardingApplication.desired_building_name ? ` (${onboardingApplication.desired_building_name})` : ''}`
+      : '';
+
+    if (onboardingApplication.status === 'REJECTED') {
+      return (
+        <Card className="border-rose-200 bg-rose-50/40">
+          <div className="flex items-start gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+              <XCircle className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Hồ sơ đăng ký thuê {desiredLabel ? `cho ${desiredLabel} ` : ''}cần bổ sung thông tin
+                </h3>
+                <Badge variant="red" dot>
+                  Cần chỉnh sửa
+                </Badge>
+              </div>
+              <p className="text-xs text-rose-800 mt-1.5 font-medium bg-white/80 border border-rose-200 rounded-lg px-3 py-2 whitespace-pre-line break-words">
+                Lý do từ Ban Quản Lý:{' '}
+                {onboardingApplication.rejection_reason ||
+                  'Vui lòng kiểm tra và cập nhật lại thông tin giấy tờ tùy thân.'}
+              </p>
+              {onboardingApplication.application_note ? (
+                <p className="text-xs text-slate-600 mt-1.5 whitespace-pre-line break-words">
+                  Ghi chú của bạn: {onboardingApplication.application_note}
+                </p>
+              ) : null}
+              <div className="mt-3">
+                <Button
+                  size="xs"
+                  variant="primary"
+                  onClick={() => openApplyModal(onboardingApplication.desired_apartment_id || '')}
+                >
+                  Chỉnh sửa & Gửi lại hồ sơ
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    if (onboardingApplication.status === 'APPROVED') {
+      return (
+        <Card className="border-emerald-200 bg-emerald-50/30">
+          <div className="flex items-start gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Hồ sơ cư dân đã được phê duyệt
+                </h3>
+                <Badge variant="emerald" dot>
+                  Đã duyệt — Chờ lập HĐ
+                </Badge>
+              </div>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                Ban Quản Lý đã xác thực thông tin định danh của bạn
+                {desiredLabel ? ` cho ${desiredLabel}` : ''} và sẽ liên hệ để ký kết hợp đồng thuê.
+              </p>
+              {onboardingApplication.application_note ? (
+                <p className="text-xs text-slate-600 mt-1.5 whitespace-pre-line break-words">
+                  Ghi chú hồ sơ: {onboardingApplication.application_note}
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    if (onboardingApplication.status === 'PENDING') {
+      return (
+        <Card className="border-amber-200 bg-amber-50/40">
+          <div className="flex items-start gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Hồ sơ đang chờ Ban Quản Lý phê duyệt
+                </h3>
+                <Badge variant="amber" dot>
+                  Chờ phê duyệt
+                </Badge>
+              </div>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                Hồ sơ tự khai của bạn
+                {desiredLabel ? ` cho ${desiredLabel}` : ''}{' '}
+                gửi lúc {formatDateTime(onboardingApplication.updated_at || onboardingApplication.created_at)} đã được ghi nhận. Ban Quản Lý sẽ đối chiếu giấy tờ và hoàn tất hợp đồng thuê.
+              </p>
+              {onboardingApplication.application_note ? (
+                <p className="text-xs text-slate-600 mt-1.5 whitespace-pre-line break-words">
+                  Ghi chú của bạn: {onboardingApplication.application_note}
+                </p>
+              ) : null}
+              <div className="mt-3">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => openApplyModal(onboardingApplication.desired_apartment_id || '')}
+                >
+                  Cập nhật bổ sung thông tin hồ sơ
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    return null;
+  };
+
+  const renderReservationsSection = ({ showActionButton = true } = {}) => {
+    if (reservations.length === 0) return null;
+
+    return (
+      <div className="space-y-3">
+        {reservations.map((r) => {
+          const rAmenities = parseAmenities(r.amenities);
+          return (
+            <Card
+              key={r.reservation_id || r.apartment_id}
+              className="border-sky-200 bg-gradient-to-br from-sky-50/70 via-white to-indigo-50/40 shadow-sm"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                <div className="flex items-start gap-3.5 min-w-0">
+                  <div className="w-11 h-11 rounded-2xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div className="space-y-1.5 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-sky-700">
+                        Thông tin căn hộ đang giữ chỗ
+                      </span>
+                      <Badge variant="sky" dot>
+                        Đang giữ chỗ
+                      </Badge>
+                    </div>
+                    <h3 className="text-lg font-bold text-slate-900">
+                      Căn hộ {r.apartment_code}
+                      {r.floor_name ? ` • ${r.floor_name}` : ''}
+                    </h3>
+                    <p className="text-xs text-slate-600 flex items-start gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span className="break-words">
+                        <strong className="text-slate-800">{r.building_name}</strong>
+                        {r.building_address ? ` — ${r.building_address}` : ''}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                {showActionButton ? (
+                  <Button
+                    size="sm"
+                    icon={Send}
+                    onClick={() => openApplyModal(r.apartment_id)}
+                    className="shrink-0"
+                  >
+                    Đăng ký thông tin nhận nhà
+                  </Button>
+                ) : null}
+              </div>
+
+              <div className="mt-4 pt-3.5 border-t border-sky-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200/70">
+                  <p className="text-[11px] text-slate-500">Thiết kế & Diện tích</p>
+                  <p className="font-semibold text-slate-900 mt-0.5 break-words">
+                    {r.apartment_type || (r.bedrooms ? `${r.bedrooms} PN` : 'Tiêu chuẩn')}
+                    {r.area_m2 ? ` • ${r.area_m2} m²` : ''}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200/70">
+                  <p className="text-[11px] text-slate-500">Giá thuê niêm yết</p>
+                  <p className="font-semibold text-slate-900 mt-0.5 break-words">
+                    {r.base_rent ? `${formatMoney(r.base_rent)}/tháng` : '—'}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200/70">
+                  <p className="text-[11px] text-slate-500">Tiền cọc giữ chỗ</p>
+                  <p className="font-bold text-primary-700 mt-0.5 break-words">{formatMoney(r.hold_amount)}</p>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200/70">
+                  <p className="text-[11px] text-slate-500">Thời hạn giữ chỗ</p>
+                  <p className="font-semibold text-slate-900 mt-0.5 break-words">
+                    {r.hold_from ? `${formatDate(r.hold_from)} → ` : ''}
+                    {formatDate(r.hold_until)}
+                  </p>
+                </div>
+              </div>
+
+              {rAmenities.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {rAmenities.map((am, idx) => (
+                    <span
+                      key={idx}
+                      className="text-[11px] px-2 py-0.5 rounded-md bg-white border border-sky-200/70 text-slate-700"
+                    >
+                      {am}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              {r.reservation_note ? (
+                <p className="mt-2.5 text-xs text-slate-600 italic whitespace-pre-line break-words">
+                  Ghi chú phiếu giữ chỗ: {r.reservation_note}
+                </p>
+              ) : null}
+            </Card>
+          );
+        })}
+      </div>
+    );
+  };
+
   if (contract) {
     const openTotal = unreadCount + openRequestsCount;
+    const totalAmountDueAll = Number(overview?.total_amount_due_all ?? currentAmountDue);
+    const hasMultiContracts = (overview?.active_contracts?.length || 0) > 1;
 
     return (
       <div className="space-y-6">
@@ -201,14 +675,23 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-white/20 backdrop-blur-sm border border-white/25">
                   <Home className="w-3.5 h-3.5" />
-                  Căn hộ đang cư trú
+                  {contract.is_future_contract
+                    ? `Hợp đồng sắp hiệu lực (${formatDate(contract.start_date)})`
+                    : contract.contract_status === 'TERMINATION_PENDING'
+                      ? 'Căn hộ đang chờ bàn giao / thanh lý'
+                      : 'Căn hộ đang cư trú'}
                 </span>
                 <StatusBadge
                   status={contract.contract_status}
                   domain="contract"
                   className="!bg-white/95 !border-white/50 shadow-sm"
                 />
-                {daysRemaining !== null && daysRemaining <= 30 && daysRemaining >= 0 ? (
+                {contract.contract_status === 'TERMINATION_PENDING' && contract.terminated_at ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-400/95 text-slate-900">
+                    <Clock className="w-3.5 h-3.5" />
+                    Dự kiến trả phòng: {formatDate(contract.terminated_at)}
+                  </span>
+                ) : daysRemaining !== null && daysRemaining <= 30 && daysRemaining >= 0 ? (
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-400/95 text-slate-900">
                     <AlertCircle className="w-3.5 h-3.5" />
                     Còn {daysRemaining} ngày hết hạn HĐ
@@ -224,9 +707,9 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   Căn hộ {contract.apartment_code}
                   {contract.floor_name ? ` • ${contract.floor_name}` : ''}
                 </h1>
-                <p className="text-sm text-sky-100 flex items-center gap-1.5 mt-1">
-                  <Building2 className="w-4 h-4 shrink-0 text-sky-200" />
-                  <span>
+                <p className="text-sm text-sky-100 flex items-start gap-1.5 mt-1">
+                  <Building2 className="w-4 h-4 shrink-0 text-sky-200 mt-0.5" />
+                  <span className="break-words">
                     {contract.building_name}
                     {contract.building_address ? ` — ${contract.building_address}` : ''}
                   </span>
@@ -259,14 +742,14 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             </div>
 
             {/* Right Specs Grid */}
-            <div className="grid grid-cols-3 lg:grid-cols-1 gap-2.5 sm:gap-3 lg:min-w-[230px] bg-white/10 backdrop-blur-md rounded-xl p-3.5 sm:p-4 border border-white/15">
+            <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-1 gap-2.5 sm:gap-3 lg:min-w-[230px] bg-white/10 backdrop-blur-md rounded-xl p-3.5 sm:p-4 border border-white/15">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
                   <Maximize2 className="w-4 h-4 text-sky-100" />
                 </div>
                 <div className="min-w-0">
                   <p className="text-[11px] text-sky-200">Diện tích</p>
-                  <p className="text-sm font-bold truncate">
+                  <p className="text-sm font-bold break-words">
                     {contract.area_m2 ? `${contract.area_m2} m²` : '—'}
                   </p>
                 </div>
@@ -278,7 +761,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                 </div>
                 <div className="min-w-0">
                   <p className="text-[11px] text-sky-200">Loại phòng</p>
-                  <p className="text-sm font-bold truncate">
+                  <p className="text-sm font-bold break-words">
                     {contract.apartment_type ||
                       (contract.bedrooms ? `${contract.bedrooms} Phòng ngủ` : 'Tiêu chuẩn')}
                   </p>
@@ -290,50 +773,68 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   <CalendarClock className="w-4 h-4 text-sky-100" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-[11px] text-sky-200">Hết hạn HĐ</p>
-                  <p className="text-sm font-bold truncate">{formatDate(contract.end_date)}</p>
+                  <p className="text-[11px] text-sky-200">Thời hạn HĐ</p>
+                  <p className="text-sm font-bold break-words">
+                    {contract.start_date ? `${formatDate(contract.start_date)} → ` : ''}
+                    {formatDate(contract.end_date)}
+                  </p>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
+        {/* Active Reservation(s) & Onboarding Status alongside existing Contract */}
+        {reservations.length > 0 || onboardingApplication ? (
+          <div className="space-y-4">
+            {renderReservationsSection({ showActionButton: !onboardingApplication })}
+            {renderOnboardingStatusCard()}
+          </div>
+        ) : null}
+
         {/* 4 KPI Cards Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {/* KPI 1: Current Amount Due (AC-002.1) */}
           <Card
-            className={`flex flex-col justify-between transition-all ${
+            padding="none"
+            className={`p-4 sm:p-5 flex flex-col justify-between transition-all ${
               currentAmountDue > 0
                 ? 'border-amber-300 bg-gradient-to-br from-white to-amber-50/40'
                 : 'border-emerald-200/80'
             }`}
           >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+            <div>
+              <div className="flex items-start justify-between gap-2.5">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide leading-snug">
                   Cần thanh toán hiện tại
                 </p>
-                <p
-                  className={`text-2xl font-bold mt-1.5 truncate ${
-                    currentAmountDue > 0 ? 'text-rose-600' : 'text-emerald-600'
+                <div
+                  className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
+                    currentAmountDue > 0
+                      ? 'bg-rose-50 text-rose-600 border-rose-100'
+                      : 'bg-emerald-50 text-emerald-600 border-emerald-100'
                   }`}
                 >
-                  {formatMoney(currentAmountDue)}
-                </p>
+                  <Receipt className="w-4.5 h-4.5" />
+                </div>
               </div>
-              <div
-                className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
-                  currentAmountDue > 0
-                    ? 'bg-rose-50 text-rose-600 border-rose-100'
-                    : 'bg-emerald-50 text-emerald-600 border-emerald-100'
+              <p
+                title={formatMoney(currentAmountDue)}
+                className={`text-xl 2xl:text-2xl font-bold mt-2 break-words leading-tight tabular-nums ${
+                  currentAmountDue > 0 ? 'text-rose-600' : 'text-emerald-600'
                 }`}
               >
-                <Receipt className="w-5 h-5" />
-              </div>
+                {formatMoney(currentAmountDue)}
+              </p>
+              {hasMultiContracts && totalAmountDueAll !== currentAmountDue ? (
+                <p className="text-[11px] font-medium text-slate-600 mt-1 break-words">
+                  Tổng tất cả căn hộ: <span className="font-semibold text-rose-600">{formatMoney(totalAmountDueAll)}</span>
+                </p>
+              ) : null}
             </div>
 
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-              <span className="text-xs text-slate-500 truncate">
+            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+              <span className="text-xs text-slate-500 leading-snug break-words">
                 {currentAmountDue > 0 && latestInvoice
                   ? `Kỳ ${latestInvoice.period} • Hạn ${formatDate(latestInvoice.due_date)}`
                   : 'Không có dư nợ quá hạn'}
@@ -350,47 +851,53 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           </Card>
 
           {/* KPI 2: Monthly Rent */}
-          <Card className="flex flex-col justify-between">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+          <Card padding="none" className="p-4 sm:p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-start justify-between gap-2.5">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide leading-snug">
                   Tiền thuê hàng tháng
                 </p>
-                <p className="text-2xl font-bold text-slate-900 mt-1.5 truncate">
-                  {formatMoney(contract.rent_amount)}
-                </p>
+                <div className="w-9 h-9 rounded-xl border bg-sky-50 text-sky-600 border-sky-100 flex items-center justify-center shrink-0">
+                  <Wallet className="w-4.5 h-4.5" />
+                </div>
               </div>
-              <div className="w-10 h-10 rounded-xl border bg-sky-50 text-sky-600 border-sky-100 flex items-center justify-center shrink-0">
-                <Wallet className="w-5 h-5" />
-              </div>
+              <p
+                title={formatMoney(contract.rent_amount)}
+                className="text-xl 2xl:text-2xl font-bold text-slate-900 mt-2 break-words leading-tight tabular-nums"
+              >
+                {formatMoney(contract.rent_amount)}
+              </p>
             </div>
 
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-              <span>Chốt kỳ ngày {contract.billing_day || 1} hàng tháng</span>
-              <span className="font-medium text-slate-700">
+            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-slate-500">
+              <span className="leading-snug">Chốt kỳ ngày {contract.billing_day || 1} hàng tháng</span>
+              <span className="font-medium text-slate-700 shrink-0">
                 Hạn +{contract.payment_due_days || 5} ngày
               </span>
             </div>
           </Card>
 
           {/* KPI 3: Held Deposit */}
-          <Card className="flex flex-col justify-between">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+          <Card padding="none" className="p-4 sm:p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-start justify-between gap-2.5">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide leading-snug">
                   Tiền cọc đang giữ
                 </p>
-                <p className="text-2xl font-bold text-slate-900 mt-1.5 truncate">
-                  {formatMoney(contract.deposit_held_amount ?? contract.deposit_amount ?? 0)}
-                </p>
+                <div className="w-9 h-9 rounded-xl border bg-indigo-50 text-indigo-600 border-indigo-100 flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-4.5 h-4.5" />
+                </div>
               </div>
-              <div className="w-10 h-10 rounded-xl border bg-indigo-50 text-indigo-600 border-indigo-100 flex items-center justify-center shrink-0">
-                <ShieldCheck className="w-5 h-5" />
-              </div>
+              <p
+                title={formatMoney(contract.deposit_held_amount ?? contract.deposit_amount ?? 0)}
+                className="text-xl 2xl:text-2xl font-bold text-slate-900 mt-2 break-words leading-tight tabular-nums"
+              >
+                {formatMoney(contract.deposit_held_amount ?? contract.deposit_amount ?? 0)}
+              </p>
             </div>
 
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-              <span className="text-xs text-slate-500 truncate">
+            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+              <span className="text-xs text-slate-500 leading-snug break-words">
                 {contract.deposit_status === 'HELD' ? 'Đang bảo lưu theo HĐ' : 'Sổ cọc hợp đồng'}
               </span>
               <button
@@ -405,36 +912,35 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           </Card>
 
           {/* KPI 4: Open Notifications & Requests */}
-          <Card className="flex flex-col justify-between">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+          <Card padding="none" className="p-4 sm:p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-start justify-between gap-2.5">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wide leading-snug">
                   Thông báo & Yêu cầu mở
                 </p>
-                <p className="text-2xl font-bold text-slate-900 mt-1.5 truncate">
-                  {openTotal}
-                </p>
+                <div className="w-9 h-9 rounded-xl border bg-purple-50 text-purple-600 border-purple-100 flex items-center justify-center shrink-0">
+                  <BellRing className="w-4.5 h-4.5" />
+                </div>
               </div>
-              <div className="w-10 h-10 rounded-xl border bg-purple-50 text-purple-600 border-purple-100 flex items-center justify-center shrink-0">
-                <BellRing className="w-5 h-5" />
-              </div>
+              <p className="text-xl 2xl:text-2xl font-bold text-slate-900 mt-2 break-words leading-tight tabular-nums">
+                {openTotal}
+              </p>
             </div>
 
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs">
               <button
                 type="button"
                 onClick={() => onNavigateTab?.('notifications')}
-                className="text-slate-600 hover:text-primary-600 font-medium"
+                className="text-slate-600 hover:text-primary-600 font-medium text-left"
               >
                 {unreadCount} chưa đọc
               </button>
-              <span className="text-slate-300">•</span>
               <button
                 type="button"
                 onClick={() => onNavigateTab?.('maintenance')}
-                className="text-slate-600 hover:text-primary-600 font-medium"
+                className="text-slate-600 hover:text-primary-600 font-medium text-left"
               >
-                {openRequestsCount} báo hỏng đang xử lý
+                {openRequestsCount} báo hỏng mở
               </button>
             </div>
           </Card>
@@ -562,14 +1068,24 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
               subtitle="Liên hệ nhanh khi cần giúp đỡ"
             />
             <div className="space-y-2.5 text-xs">
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 space-y-1">
                 <p className="font-semibold text-slate-900 text-sm">
                   {overview?.manager_contact?.full_name || 'Ban Quản Lý ResiHub'}
                 </p>
-                <p className="text-slate-500 mt-0.5">
+                {overview?.manager_contact?.phone ? (
+                  <p className="text-slate-600">
+                    SĐT Quản lý: <span className="font-semibold text-slate-800">{overview.manager_contact.phone}</span>
+                  </p>
+                ) : null}
+                {overview?.manager_contact?.email ? (
+                  <p className="text-slate-600 break-all">
+                    Email: <span className="font-medium text-slate-800">{overview.manager_contact.email}</span>
+                  </p>
+                ) : null}
+                <p className="text-slate-500">
                   Hotline KT: <span className="font-semibold text-slate-800">{overview?.manager_contact?.technical_hotline || '1900 6868'}</span>
                 </p>
-                <p className="text-slate-500 mt-0.5">
+                <p className="text-slate-500">
                   Giờ làm việc: {overview?.manager_contact?.working_hours || '08:00 – 18:00'}
                 </p>
               </div>
@@ -584,11 +1100,15 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             </div>
           </Card>
         </div>
+
+        {renderApplicationModal()}
       </div>
     );
   }
 
   // Case: Resident DOES NOT have an active contract yet
+  const showInlineOnboardingForm = reservations.length > 0 && !onboardingApplication;
+
   return (
     <div className="space-y-6">
       {/* Welcome Banner */}
@@ -599,82 +1119,57 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
               Chào mừng đến với ResiHub
             </span>
             <h1 className="text-2xl font-bold tracking-tight">
-              Xin chào, {user?.full_name || 'Quý khách'}!
+              Xin chào, {user?.full_name || reservation?.prospect_name || 'Quý khách'}!
             </h1>
             <p className="text-sm text-sky-100 max-w-2xl">
-              Tài khoản của bạn hiện chưa có hợp đồng thuê đang hiệu lực. Bạn có thể theo dõi trạng thái hồ sơ giữ chỗ hoặc chọn căn hộ trống bên dưới để gửi đăng ký thuê trực tuyến.
+              {reservation
+                ? `Bạn đang có phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}). Vui lòng kiểm tra thông tin căn hộ và hoàn tất hồ sơ nhận nhà bên dưới.`
+                : 'Tài khoản của bạn hiện chưa có hợp đồng thuê đang hiệu lực. Bạn có thể theo dõi trạng thái hồ sơ giữ chỗ hoặc chọn căn hộ trống bên dưới để gửi đăng ký thuê trực tuyến.'}
             </p>
           </div>
-          <Button
-            variant="outline"
-            size="lg"
-            icon={Send}
-            onClick={() => openApplyModal('')}
-            className="!bg-white !text-primary-700 hover:!bg-sky-50 !border-white shrink-0 font-semibold"
-          >
-            Đăng ký thuê trực tuyến
-          </Button>
+          {!showInlineOnboardingForm ? (
+            <Button
+              variant="outline"
+              size="lg"
+              icon={Send}
+              onClick={() => openApplyModal(reservation?.apartment_id || '')}
+              className="!bg-white !text-primary-700 hover:!bg-sky-50 !border-white shrink-0 font-semibold"
+            >
+              {reservation ? 'Đăng ký thông tin nhận nhà' : 'Đăng ký thuê trực tuyến'}
+            </Button>
+          ) : null}
         </div>
       </div>
 
-      {/* Existing Pending Application or Reservation Status */}
-      {(pendingApplication || reservation) ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {pendingApplication ? (
-            <Card className="border-amber-200 bg-amber-50/30">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
-                  <Clock className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Hồ sơ đăng ký thuê đang chờ duyệt
-                    </h3>
-                    <Badge variant="amber" dot>
-                      Chờ phê duyệt
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    Hồ sơ tự khai của bạn (gửi lúc {formatDateTime(pendingApplication.created_at)}) đã được ghi nhận. Ban Quản Lý sẽ liên hệ xác minh và hoàn tất hợp đồng thuê.
-                  </p>
-                  <div className="mt-3">
-                    <Button size="xs" variant="outline" onClick={() => openApplyModal('')}>
-                      Cập nhật bổ sung thông tin hồ sơ
-                    </Button>
-                  </div>
-                </div>
+      {/* Scenario 1 Step 3: Reserved Apartment Info + Inline Onboarding Form (when not yet submitted) */}
+      {showInlineOnboardingForm ? (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          <div className="xl:col-span-5">
+            {renderReservationsSection({ showActionButton: false })}
+          </div>
+          <Card className="xl:col-span-7 border-primary-200/80 shadow-card">
+            <CardHeader
+              title="Đăng ký thông tin nhận nhà"
+              subtitle="Khai báo thông tin định danh và tải lên ảnh CCCD 2 mặt để Ban Quản Lý phê duyệt hồ sơ"
+            />
+            <form onSubmit={handleSubmitApplication} className="space-y-4">
+              {renderApplicationFormFields()}
+              <div className="flex justify-end pt-2">
+                <Button type="submit" size="lg" icon={Send} loading={submitting}>
+                  Gửi hồ sơ đăng ký
+                </Button>
               </div>
-            </Card>
-          ) : null}
-
-          {reservation ? (
-            <Card className="border-sky-200 bg-sky-50/30">
-              <div className="flex items-start gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
-                  <ShieldCheck className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Phiếu đặt cọc giữ chỗ: Căn {reservation.apartment_code}
-                    </h3>
-                    <Badge variant="sky" dot>
-                      Đang giữ chỗ
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1">
-                    Tòa nhà: <span className="font-medium text-slate-800">{reservation.building_name}</span>
-                    {reservation.area_m2 ? ` • ${reservation.area_m2} m²` : ''}
-                  </p>
-                  <p className="text-xs text-slate-600 mt-0.5">
-                    Tiền giữ chỗ: <span className="font-bold text-primary-700">{formatMoney(reservation.hold_amount)}</span>
-                    {' • '}Giữ đến: <span className="font-medium">{formatDateTime(reservation.hold_until)}</span>
-                  </p>
-                </div>
-              </div>
-            </Card>
-          ) : null}
+            </form>
+          </Card>
+        </div>
+      ) : reservations.length > 0 || onboardingApplication ? (
+        <div
+          className={`grid grid-cols-1 ${
+            reservations.length > 0 && onboardingApplication ? 'lg:grid-cols-2' : ''
+          } gap-4 items-start`}
+        >
+          {renderOnboardingStatusCard()}
+          {renderReservationsSection({ showActionButton: false })}
         </div>
       ) : null}
 
@@ -697,45 +1192,60 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             }
           />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-4">
             {availableApartments.map((apt) => {
               const aptAmenities = parseAmenities(apt.amenities);
+              const isReservedApt =
+                reservations.some((r) => r.apartment_id === apt.id) || apt.status === 'RESERVED';
               return (
                 <div
                   key={apt.id}
-                  className="rounded-xl border border-slate-200/90 hover:border-primary-400 hover:shadow-md transition-all p-4 flex flex-col justify-between bg-white"
+                  className={`rounded-xl border transition-all p-4 flex flex-col justify-between bg-white ${
+                    isReservedApt
+                      ? 'border-sky-300 bg-sky-50/20 shadow-sm'
+                      : 'border-slate-200/90 hover:border-primary-400 hover:shadow-md'
+                  }`}
                 >
                   <div className="space-y-3">
                     <div className="flex items-start justify-between gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <span className="text-base font-bold text-slate-900">
                           Căn {apt.code}
                         </span>
-                        <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
-                          <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="truncate">{apt.building_name}</span>
+                        <p className="text-xs text-slate-600 flex items-start gap-1 mt-0.5">
+                          <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                          <span className="break-words leading-snug">
+                            <strong className="font-medium text-slate-700">{apt.building_name}</strong>
+                            {apt.building_address ? ` — ${apt.building_address}` : ''}
+                          </span>
                         </p>
                       </div>
-                      <Badge variant="emerald" dot>
-                        Còn trống
-                      </Badge>
+                      {isReservedApt ? (
+                        <Badge variant="sky" dot className="shrink-0">
+                          Đang giữ chỗ
+                        </Badge>
+                      ) : (
+                        <Badge variant="emerald" dot className="shrink-0">
+                          Còn trống
+                        </Badge>
+                      )}
                     </div>
 
-                    <div className="flex items-center gap-3 text-xs text-slate-600 bg-slate-50 px-3 py-2 rounded-lg">
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-600 bg-slate-50 px-3 py-2 rounded-lg">
                       <span>{apt.area_m2 ? `${apt.area_m2} m²` : '—'}</span>
                       <span className="text-slate-300">•</span>
                       <span>{apt.type || `${apt.bedrooms || 1} PN`}</span>
                       {apt.floor_name ? (
                         <>
                           <span className="text-slate-300">•</span>
-                          <span className="truncate">{apt.floor_name}</span>
+                          <span className="break-words">{apt.floor_name}</span>
                         </>
                       ) : null}
                     </div>
 
                     {aptAmenities.length > 0 ? (
                       <div className="flex flex-wrap gap-1">
-                        {aptAmenities.slice(0, 4).map((am, i) => (
+                        {aptAmenities.slice(0, 5).map((am, i) => (
                           <span
                             key={i}
                             className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-600"
@@ -743,25 +1253,28 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                             {am}
                           </span>
                         ))}
-                        {aptAmenities.length > 4 ? (
-                          <span className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-500">
-                            +{aptAmenities.length - 4}
+                        {aptAmenities.length > 5 ? (
+                          <span
+                            title={aptAmenities.slice(5).join(', ')}
+                            className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 cursor-help"
+                          >
+                            +{aptAmenities.length - 5} tiện ích
                           </span>
                         ) : null}
                       </div>
                     ) : null}
                   </div>
 
-                  <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+                  <div className="pt-4 mt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <p className="text-[11px] text-slate-400">Giá thuê niêm yết</p>
-                      <p className="text-sm font-bold text-primary-600">
+                      <p className="text-sm font-bold text-primary-600 tabular-nums">
                         {formatMoney(apt.base_rent)}
                         <span className="text-[11px] font-normal text-slate-500">/tháng</span>
                       </p>
                     </div>
                     <Button size="sm" onClick={() => openApplyModal(apt.id)}>
-                      Đăng ký thuê
+                      {isReservedApt ? 'Đăng ký nhận nhà' : 'Đăng ký thuê'}
                     </Button>
                   </div>
                 </div>
@@ -771,77 +1284,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
         )}
       </Card>
 
-      {/* Online Rental Application Modal */}
-      <Modal
-        open={applyModalOpen}
-        onClose={() => setApplyModalOpen(false)}
-        title="Đăng ký thuê căn hộ trực tuyến"
-        subtitle="Điền thông tin cá nhân để Ban Quản Lý duyệt hồ sơ và liên hệ bàn giao phòng"
-        size="md"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setApplyModalOpen(false)} disabled={submitting}>
-              Hủy
-            </Button>
-            <Button icon={Send} onClick={handleSubmitApplication} loading={submitting}>
-              Gửi hồ sơ đăng ký
-            </Button>
-          </>
-        }
-      >
-        <form onSubmit={handleSubmitApplication} className="space-y-4">
-          <Select
-            label="Căn hộ mong muốn thuê"
-            placeholder="-- Chọn căn hộ trống (hoặc để BQL tư vấn) --"
-            value={appForm.desired_apartment_id}
-            onChange={(e) => setAppForm((s) => ({ ...s, desired_apartment_id: e.target.value }))}
-            options={availableApartments.map((a) => ({
-              value: a.id,
-              label: `Căn ${a.code} — ${a.building_name} (${a.area_m2}m² • ${formatMoney(a.base_rent)}/tháng)`,
-            }))}
-          />
-
-          <Input
-            label="Họ và tên người đăng ký"
-            required
-            placeholder="Nhập họ và tên theo CCCD"
-            value={appForm.full_name}
-            error={formErrors.full_name}
-            onChange={(e) => {
-              setAppForm((s) => ({ ...s, full_name: e.target.value }));
-              if (formErrors.full_name) setFormErrors((err) => ({ ...err, full_name: '' }));
-            }}
-          />
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
-              label="Số CCCD / Hộ chiếu"
-              placeholder="012345678901"
-              value={appForm.id_number}
-              error={formErrors.id_number}
-              onChange={(e) => {
-                setAppForm((s) => ({ ...s, id_number: e.target.value }));
-                if (formErrors.id_number) setFormErrors((err) => ({ ...err, id_number: '' }));
-              }}
-            />
-            <Input
-              type="date"
-              label="Ngày sinh"
-              value={appForm.dob}
-              onChange={(e) => setAppForm((s) => ({ ...s, dob: e.target.value }))}
-            />
-          </div>
-
-          <Input
-            multiline
-            rows={3}
-            label="Ghi chú / Nhu cầu thêm"
-            placeholder="Ví dụ: Ngày dự kiến chuyển vào, số người ở cùng, nhu cầu gửi xe..."
-            value={appForm.note}
-            onChange={(e) => setAppForm((s) => ({ ...s, note: e.target.value }))}
-          />
-        </form>
-      </Modal>
+      {renderApplicationModal()}
     </div>
   );
 }

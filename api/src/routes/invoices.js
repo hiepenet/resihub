@@ -85,7 +85,7 @@ export async function generateInvoicesCore(
              (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
               - GREATEST(c.start_date, ($2 || '-01')::date))::int
              + CASE
-                 WHEN c.status IN ('TERMINATED', 'EXPIRED')
+                 WHEN c.status IN ('TERMINATED', 'EXPIRED', 'TERMINATION_PENDING')
                   AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
                   AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
                  THEN 1

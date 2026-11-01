@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2,
@@ -25,11 +25,13 @@ import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
-import { Select } from '../../../components/ui/Select';
+import { BankSelect } from '../../../components/common/BankSelect';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { buildingsService } from '../../../services/buildings.service';
+import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
+import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import {
   extractErrorMessage,
   isValidEmail,
@@ -45,8 +47,7 @@ export function BuildingsPage() {
   const [buildings, setBuildings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [banks, setBanks] = useState([]);
-  const [banksLoading, setBanksLoading] = useState(false);
+  const { banks } = useVietQrBanks();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -85,51 +86,9 @@ export function BuildingsPage() {
     }
   }, [toast]);
 
-  const loadBanks = useCallback(async () => {
-    setBanksLoading(true);
-    try {
-      const res = await buildingsService.listBanks();
-      setBanks(Array.isArray(res?.data) ? res.data : []);
-    } catch {
-      setBanks([]);
-    } finally {
-      setBanksLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     loadData();
-    loadBanks();
-  }, [loadData, loadBanks]);
-
-  const bankOptions = useMemo(() => {
-    const mapped = banks.map((b) => {
-      const shortName = b.shortName || b.short_name || b.code || b.name;
-      return {
-        value: shortName,
-        label: b.code ? `${shortName} (${b.code})` : shortName,
-        sublabel: b.name || '',
-        badge: b.bin ? `BIN ${b.bin}` : '',
-        logo: b.logo || '',
-        searchText: `${shortName} ${b.code || ''} ${b.bin || ''} ${b.name || ''}`,
-        bank: b,
-      };
-    });
-
-    const cur = String(form.bank_name || '').trim();
-    if (cur && !mapped.some((o) => o.value === cur)) {
-      mapped.unshift({
-        value: cur,
-        label: cur,
-        sublabel: 'Ngân hàng hiện tại',
-        badge: form.bank_bin ? `BIN ${form.bank_bin}` : '',
-        logo: form.bank_logo || '',
-        searchText: cur,
-        bank: null,
-      });
-    }
-    return mapped;
-  }, [banks, form.bank_name, form.bank_bin, form.bank_logo]);
+  }, [loadData]);
 
   const openCreate = () => {
     setEditing(null);
@@ -139,7 +98,7 @@ export function BuildingsPage() {
     setOwnerLookupError('');
     setOwnerChanged(false);
     const defaultBank =
-      banks.find((b) => (b.shortName || '').toLowerCase() === 'vietcombank' || b.code === 'VCB') || null;
+      matchVietQrBank(banks, { bank_code: 'VCB', bank_name: 'Vietcombank' }) || null;
     setForm({
       name: '',
       code: '',
@@ -164,15 +123,7 @@ export function BuildingsPage() {
     setOwnerLookupError('');
     setOwnerChanged(false);
     const pa = b.payment_account || b.lease_terms?.payment_account || {};
-    const matchedBank =
-      banks.find(
-        (bk) =>
-          (pa.bank_code && bk.code === pa.bank_code) ||
-          (pa.bank_bin && bk.bin === pa.bank_bin) ||
-          (pa.bank_name &&
-            ((bk.shortName || '').toLowerCase() === String(pa.bank_name).toLowerCase() ||
-              (bk.code || '').toLowerCase() === String(pa.bank_name).toLowerCase()))
-      ) || null;
+    const matchedBank = matchVietQrBank(banks, pa);
     setForm({
       name: b.name || '',
       code: b.code || '',
@@ -418,14 +369,16 @@ export function BuildingsPage() {
                 className="group bg-white rounded-2xl border border-slate-200/80 shadow-card hover:shadow-elevated hover:border-primary-300 transition-all cursor-pointer overflow-hidden flex flex-col"
               >
                 {/* Decorative Top Banner */}
-                <div className="h-24 bg-gradient-to-r from-sky-600 via-primary-500 to-indigo-600 p-4 flex items-start justify-between text-white relative">
-                  <div>
+                <div className="min-h-[96px] bg-gradient-to-r from-sky-600 via-primary-500 to-indigo-600 p-4 flex items-start justify-between gap-2 text-white relative">
+                  <div className="min-w-0">
                     <span className="inline-block px-2.5 py-0.5 rounded-md bg-white/20 backdrop-blur text-xs font-bold tracking-wide">
                       {b.code}
                     </span>
-                    <h3 className="text-base font-bold mt-1.5 line-clamp-1">{b.name}</h3>
+                    <h3 className="text-base font-bold mt-1.5 line-clamp-2 leading-snug break-words" title={b.name}>
+                      {b.name}
+                    </h3>
                   </div>
-                  <Badge variant={b.status === 'INACTIVE' ? 'slate' : 'emerald'}>
+                  <Badge variant={b.status === 'INACTIVE' ? 'slate' : 'emerald'} className="shrink-0">
                     {b.status === 'INACTIVE' ? 'Tạm ngưng' : 'Hoạt động'}
                   </Badge>
                 </div>
@@ -433,9 +386,9 @@ export function BuildingsPage() {
                 {/* Body */}
                 <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
                   <div className="space-y-3">
-                    <p className="text-xs text-slate-500 flex items-start gap-1.5 line-clamp-2 min-h-[32px]">
+                    <p className="text-xs text-slate-500 flex items-start gap-1.5 min-h-[32px]" title={b.address || ''}>
                       <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                      <span>{b.address || 'Chưa cập nhật địa chỉ'}</span>
+                      <span className="line-clamp-2 break-words">{b.address || 'Chưa cập nhật địa chỉ'}</span>
                     </p>
 
                     <div className="grid grid-cols-3 gap-2 py-2.5 px-3 rounded-xl bg-slate-50 border border-slate-100 text-center">
@@ -662,13 +615,15 @@ export function BuildingsPage() {
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
               <div className="sm:col-span-5">
-                <Select
+                <BankSelect
                   label="Ngân hàng (VietQR.io)"
-                  placeholder={banksLoading ? 'Đang tải ngân hàng VietQR...' : '-- Chọn ngân hàng --'}
-                  searchPlaceholder="Tìm tên NH, mã VCB, TCB, MB, mã BIN..."
                   value={form.bank_name}
-                  onValueChange={(val, rawOpt) => {
-                    const chosen = rawOpt?.bank || null;
+                  bankMeta={{
+                    bank_code: form.bank_code,
+                    bank_bin: form.bank_bin,
+                    bank_logo: form.bank_logo,
+                  }}
+                  onBankChange={(val, chosen) => {
                     setForm((prev) => ({
                       ...prev,
                       bank_name: val,
@@ -677,7 +632,6 @@ export function BuildingsPage() {
                       bank_logo: chosen?.logo || '',
                     }));
                   }}
-                  options={bankOptions}
                 />
               </div>
               <div className="sm:col-span-3">

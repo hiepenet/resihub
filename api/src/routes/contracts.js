@@ -24,6 +24,7 @@ import {
   upsertPersonAndTenantInTx,
   ensureResidentAccount,
 } from '../services/residentAccount.js';
+import { maskIdNumber } from '../utils/piiMask.js';
 
 const router = express.Router();
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -310,13 +311,22 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['SYS_ADMIN'
     await client.query('BEGIN');
 
     const reqRes = await client.query(
-      `SELECT cr.*, c.apartment_id, a.code as apartment_code, b.name as building_name, c.primary_tenant_id
+      `SELECT cr.*,
+              c.status AS contract_status,
+              c.start_date,
+              c.end_date,
+              c.terminated_at,
+              c.note AS contract_note,
+              c.apartment_id,
+              a.code AS apartment_code,
+              b.name AS building_name,
+              c.primary_tenant_id
        FROM contract_request cr
        JOIN contract c ON c.id = cr.contract_id
        JOIN apartment a ON a.id = c.apartment_id
        JOIN building b ON b.id = cr.building_id
        WHERE cr.id = $1
-       FOR UPDATE OF cr`,
+       FOR UPDATE OF cr, c`,
       [id]
     );
 
@@ -340,6 +350,108 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['SYS_ADMIN'
       [id]
     );
 
+    const toDateOnly = (val) =>
+      val instanceof Date ? val.toISOString().slice(0, 10) : String(val || '').slice(0, 10);
+
+    let updatedContract = null;
+    let contractTransitionMode = null; // 'TERMINATED_NOW' | 'SCHEDULED_TERMINATION' | 'RENEWAL_PENDING' | null
+
+    if (
+      requestItem.type === 'TERMINATION' &&
+      ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].includes(requestItem.contract_status)
+    ) {
+      const todayRes = await client.query('SELECT CURRENT_DATE::text AS today');
+      const todayStr = todayRes.rows[0].today;
+      const sDate = toDateOnly(requestItem.start_date);
+      const eDate = toDateOnly(requestItem.end_date);
+      const rawDesired = requestItem.desired_date ? toDateOnly(requestItem.desired_date) : todayStr;
+      const minBound = todayStr < sDate ? todayStr : sDate;
+      let effDate = rawDesired < minBound ? minBound : rawDesired;
+      if (eDate && effDate > eDate) effDate = eDate;
+
+      const reqNoteClean = requestItem.note ? String(requestItem.note).trim() : '';
+
+      if (effDate <= todayStr) {
+        const movedIn = Boolean(sDate && sDate <= todayStr && effDate >= sDate);
+        const tag = movedIn
+          ? `[Chấm dứt theo đề nghị cư dân ngày ${effDate}${reqNoteClean ? `: ${reqNoteClean}` : ''}]`
+          : `[Thanh lý trước ngày nhận phòng theo đề nghị cư dân ngày ${effDate}${reqNoteClean ? `: ${reqNoteClean}` : ''}]`;
+        const nextNote = `${requestItem.contract_note || ''} ${tag}`.trim();
+
+        const cUpd = await client.query(
+          `UPDATE contract
+           SET status = 'TERMINATED', terminated_at = $1, note = $2, updated_at = NOW()
+           WHERE id = $3
+           RETURNING *`,
+          [effDate, nextNote, requestItem.contract_id]
+        );
+        updatedContract = cUpd.rows[0];
+        contractTransitionMode = 'TERMINATED_NOW';
+
+        const nextAptStatus = await syncApartmentStatus(client, requestItem.apartment_id, {
+          enterMaintenance: movedIn,
+        });
+
+        const { dueAt } = refundDeadline(effDate);
+        await client.query(
+          `UPDATE deposit
+           SET refund_due_date = $1, updated_at = NOW()
+           WHERE contract_id = $2 AND status = 'HELD'`,
+          [dueAt, requestItem.contract_id]
+        );
+
+        await client.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+           VALUES ($1, 'TERMINATE', 'contract', $2, $3, $4)`,
+          [
+            req.user.sub,
+            requestItem.contract_id,
+            JSON.stringify({ status: requestItem.contract_status, terminated_at: requestItem.terminated_at }),
+            JSON.stringify({
+              ...updatedContract,
+              source_request_id: id,
+              apartment_status_after: nextAptStatus,
+              refund_due_date: dueAt,
+            }),
+          ]
+        );
+      } else {
+        const tag = `[Đã duyệt lịch trả phòng ngày ${effDate}${reqNoteClean ? `: ${reqNoteClean}` : ''}]`;
+        const nextNote = `${requestItem.contract_note || ''} ${tag}`.trim();
+
+        const cUpd = await client.query(
+          `UPDATE contract
+           SET status = 'TERMINATION_PENDING', terminated_at = $1, note = $2, updated_at = NOW()
+           WHERE id = $3
+           RETURNING *`,
+          [effDate, nextNote, requestItem.contract_id]
+        );
+        updatedContract = cUpd.rows[0];
+        contractTransitionMode = 'SCHEDULED_TERMINATION';
+
+        await client.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+           VALUES ($1, 'SCHEDULE_TERMINATION', 'contract', $2, $3, $4)`,
+          [
+            req.user.sub,
+            requestItem.contract_id,
+            JSON.stringify({ status: requestItem.contract_status, terminated_at: requestItem.terminated_at }),
+            JSON.stringify({ ...updatedContract, source_request_id: id }),
+          ]
+        );
+      }
+    } else if (requestItem.type === 'RENEWAL' && requestItem.contract_status === 'ACTIVE') {
+      const cUpd = await client.query(
+        `UPDATE contract
+         SET status = 'RENEWAL_PENDING', updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [requestItem.contract_id]
+      );
+      updatedContract = cUpd.rows[0];
+      contractTransitionMode = 'RENEWAL_PENDING';
+    }
+
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'APPROVE', 'contract_request', $2, $3, $4)`,
@@ -347,7 +459,11 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['SYS_ADMIN'
         req.user.sub,
         id,
         JSON.stringify({ status: requestItem.status }),
-        JSON.stringify({ status: 'APPROVED' }),
+        JSON.stringify({
+          status: 'APPROVED',
+          contract_status_after: updatedContract?.status || requestItem.contract_status,
+          terminated_at: updatedContract?.terminated_at || null,
+        }),
       ]
     );
 
@@ -366,10 +482,18 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['SYS_ADMIN'
 
     if (targetUserId) {
       const isTerm = requestItem.type === 'TERMINATION';
+      const effDateDisplay = updatedContract?.terminated_at ? toDateOnly(updatedContract.terminated_at) : '';
       const title = isTerm ? 'Phê duyệt đề nghị chấm dứt hợp đồng' : 'Phê duyệt đề nghị gia hạn hợp đồng';
-      const content = isTerm
-        ? `Ban Quản Lý đã phê duyệt đề nghị chấm dứt hợp đồng thuê căn hộ ${requestItem.apartment_code}. Vui lòng liên hệ BQL để thống nhất lịch bàn giao phòng và hoàn tất thủ tục tất toán.`
-        : `Ban Quản Lý đã phê duyệt đề nghị gia hạn hợp đồng thuê căn hộ ${requestItem.apartment_code}. BQL sẽ sớm gửi phụ lục gia hạn hợp đồng đến bạn.`;
+      let content;
+      if (contractTransitionMode === 'TERMINATED_NOW') {
+        content = `Ban Quản Lý đã chấp thuận và chấm dứt hợp đồng thuê căn hộ ${requestItem.apartment_code} từ ngày ${effDateDisplay}. Hồ sơ tất toán tiền cọc sẽ được xử lý trong vòng 5 ngày.`;
+      } else if (contractTransitionMode === 'SCHEDULED_TERMINATION') {
+        content = `Ban Quản Lý đã phê duyệt lịch chấm dứt hợp đồng thuê căn hộ ${requestItem.apartment_code} vào ngày ${effDateDisplay}. Đến ngày hẹn hệ thống sẽ tự động kết thúc hợp đồng (hoặc BQL chốt bàn giao sớm khi bạn trả phòng).`;
+      } else if (isTerm) {
+        content = `Ban Quản Lý đã phê duyệt đề nghị chấm dứt hợp đồng thuê căn hộ ${requestItem.apartment_code}.`;
+      } else {
+        content = `Ban Quản Lý đã phê duyệt đề nghị gia hạn hợp đồng thuê căn hộ ${requestItem.apartment_code}. BQL sẽ sớm gửi phụ lục / hợp đồng gia hạn đến bạn.`;
+      }
 
       await client.query(
         `INSERT INTO notification (org_id, user_id, title, content, type, payload)
@@ -386,9 +510,19 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['SYS_ADMIN'
 
     await client.query('COMMIT');
 
+    let responseMessage = 'Đã phê duyệt đề nghị của cư dân thành công.';
+    if (contractTransitionMode === 'TERMINATED_NOW') {
+      responseMessage = 'Đã phê duyệt đề nghị và chuyển hợp đồng sang Đã thanh lý (TERMINATED), mở hạn hoàn cọc +5 ngày.';
+    } else if (contractTransitionMode === 'SCHEDULED_TERMINATION') {
+      responseMessage = `Đã phê duyệt đề nghị. Hợp đồng chuyển sang Chờ bàn giao chấm dứt (dự kiến kết thúc ngày ${toDateOnly(updatedContract.terminated_at)}).`;
+    } else if (contractTransitionMode === 'RENEWAL_PENDING') {
+      responseMessage = 'Đã phê duyệt đề nghị gia hạn. Hợp đồng chuyển sang Chờ duyệt gia hạn (RENEWAL_PENDING).';
+    }
+
     res.json({
-      message: 'Đã phê duyệt đề nghị của cư dân thành công.',
+      message: responseMessage,
       data: updatedRes.rows[0],
+      contract: updatedContract,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -616,6 +750,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     primary_tenant_id,
     reservation_id,
     new_tenant,
+    occupants,
     start_date,
     end_date,
     rent_amount,
@@ -724,15 +859,15 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     }
 
     // Rule C1 & NV-08: Chống chồng lấn kỳ hạn trên cùng căn hộ
-    // Half-open [start, end) — HĐ kết thúc tại ngày D cho phép HĐ mới bắt đầu D (PRD 13.3)
+    // Half-open [start, effective_end) — tính theo COALESCE(terminated_at, end_date) để bảo vệ cả HĐ đang chờ bàn giao chấm dứt
     const overlapCheck = await client.query(
-      `SELECT c.id, c.start_date, c.end_date, t.id AS tenant_id, p.full_name
+      `SELECT c.id, c.start_date, COALESCE(c.terminated_at, c.end_date) AS end_date, t.id AS tenant_id, p.full_name
        FROM contract c
        LEFT JOIN tenant t ON t.id = c.primary_tenant_id
        LEFT JOIN person p ON p.id = t.person_id
        WHERE c.apartment_id = $1
-         AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
-         AND (c.start_date < $3 AND c.end_date > $2)`,
+         AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         AND (c.start_date < $3 AND COALESCE(c.terminated_at, c.end_date) > $2)`,
       [apartment_id, start_date, end_date]
     );
 
@@ -831,6 +966,21 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     const contract = contractRes.rows[0];
 
+    // Khởi tạo / gắn danh sách thành viên ở cùng (occupants[]) nếu truyền ngay khi lập hợp đồng
+    const attachedOccupants = [];
+    if (Array.isArray(occupants) && occupants.length > 0) {
+      for (const occItem of occupants) {
+        if (!occItem || (!occItem.full_name && !occItem.phone)) continue;
+        const occResult = await attachOccupantInTx(client, {
+          contractId: contract.id,
+          orgId: req.user.org_id,
+          actorId: req.user.sub,
+          occupant: occItem,
+        });
+        attachedOccupants.push(occResult);
+      }
+    }
+
     // Căn hộ và cọc giữ chỗ KHÔNG đổi ở bước DRAFT: căn AVAILABLE/RESERVED giữ nguyên,
     // cọc giữ chỗ vẫn HELD — chỉ kích hoạt khi ACTIVE (Task 8, PRD 485 bước 6).
 
@@ -845,13 +995,14 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
           ...contract,
           ...(reservation_id && UUID_REGEX.test(String(reservation_id)) ? { reservation_id: String(reservation_id) } : {}),
           ...(linkedCrossBuilding ? { cross_building_link: true } : {}),
+          ...(attachedOccupants.length > 0 ? { occupants_count: attachedOccupants.length } : {}),
         }),
       ]
     );
 
     await client.query('COMMIT');
 
-    // Tự động đảm bảo khách thuê đại diện có tài khoản app_user (ACTIVE) + role RESIDENT
+    // Tự động đảm bảo khách thuê đại diện & thành viên ở cùng có tài khoản app_user (ACTIVE) + role RESIDENT
     try {
       if (inlineTenantResult) {
         await ensureResidentAccount(inlineTenantResult.personId, {
@@ -873,6 +1024,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
           });
         }
       }
+      for (const occ of attachedOccupants) {
+        await ensureResidentAccount(occ.personId, {
+          email: occ.cleanEmail,
+          phone: occ.cleanPhone,
+        });
+      }
     } catch (acctErr) {
       console.error('[Contract Ensure Resident Account Warning]:', acctErr);
     }
@@ -883,6 +1040,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         : 'Đã lưu nháp. Tải bản ký, đính kèm bản scan rồi kích hoạt để hoàn tất.',
       data: contract,
       ...(inlineTenantResult ? { created_tenant: inlineTenantResult.tenant } : {}),
+      ...(attachedOccupants.length > 0 ? { created_occupants: attachedOccupants } : {}),
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -905,7 +1063,231 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 });
 
 /**
+ * Helper dùng chung cho thêm thành viên ở cùng (occupant) trong transaction:
+ * - Gán status = 'APPROVED' nếu có id_number hợp lệ, ngược lại 'PENDING' (FR-011 / FR-014)
+ * - Tự nâng cấp 'PENDING' -> 'APPROVED' nếu bổ sung id_number hợp lệ
+ * - Kiểm tra chống trùng id_number / email -> trả 409 thân thiện (FR-021)
+ */
+async function attachOccupantInTx(client, { contractId, orgId, actorId, occupant }) {
+  const cleanName = String(occupant?.full_name || '').trim();
+  const cleanPhone = normalizeVnPhone(occupant?.phone);
+  const cleanEmail = occupant?.email ? String(occupant.email).trim().toLowerCase() : null;
+  const cleanIdNumber = occupant?.id_number ? String(occupant.id_number).trim() : null;
+  const cleanDob = occupant?.dob || null;
+  const cleanRel = String(occupant?.relationship || 'family').trim() || 'family';
+
+  if (!cleanName || !cleanPhone) {
+    const err = new Error('Họ tên và số điện thoại là bắt buộc.');
+    err.httpStatus = 400;
+    err.code = 'VALIDATION_ERROR';
+    throw err;
+  }
+  if (!/^0[0-9]{9}$/.test(cleanPhone)) {
+    const err = new Error('Số điện thoại thành viên ở cùng không hợp lệ (10 chữ số).');
+    err.httpStatus = 400;
+    err.code = 'INVALID_PHONE';
+    throw err;
+  }
+  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    const err = new Error('Địa chỉ email của thành viên ở cùng không hợp lệ.');
+    err.httpStatus = 400;
+    err.code = 'INVALID_EMAIL';
+    throw err;
+  }
+  if (cleanIdNumber && !/^[A-Za-z0-9]{6,20}$/.test(cleanIdNumber)) {
+    const err = new Error('Số CCCD/Hộ chiếu của thành viên ở cùng không đúng định dạng.');
+    err.httpStatus = 400;
+    err.code = 'INVALID_ID_NUMBER';
+    throw err;
+  }
+
+  let existingPerson = null;
+  let foundInCurrentTxOnly = false;
+  const txPersonRes = await client.query(
+    'SELECT * FROM person WHERE org_id = $1 AND phone = $2 LIMIT 1',
+    [orgId, cleanPhone]
+  );
+  if (txPersonRes.rows.length > 0) {
+    existingPerson = txPersonRes.rows[0];
+    const adminCheck = await adminPool.query('SELECT id FROM person WHERE id = $1 LIMIT 1', [existingPerson.id]);
+    foundInCurrentTxOnly = adminCheck.rows.length === 0;
+  } else {
+    const adminPersonRes = await adminPool.query(
+      'SELECT * FROM person WHERE org_id = $1 AND phone = $2 LIMIT 1',
+      [orgId, cleanPhone]
+    );
+    if (adminPersonRes.rows.length > 0) {
+      existingPerson = adminPersonRes.rows[0];
+    }
+  }
+
+  const excludeId = existingPerson?.id || '00000000-0000-0000-0000-000000000000';
+  if (cleanIdNumber) {
+    const [txDupId, adminDupId] = await Promise.all([
+      client.query(
+        'SELECT id FROM person WHERE org_id = $1 AND id_number = $2 AND id <> $3 LIMIT 1',
+        [orgId, cleanIdNumber, excludeId]
+      ),
+      adminPool.query(
+        'SELECT id FROM person WHERE org_id = $1 AND id_number = $2 AND id <> $3 LIMIT 1',
+        [orgId, cleanIdNumber, excludeId]
+      ),
+    ]);
+    if (txDupId.rows.length > 0 || adminDupId.rows.length > 0) {
+      const err = new Error('Số CCCD/Hộ chiếu này đã thuộc về một hồ sơ cư dân khác trong hệ thống.');
+      err.httpStatus = 409;
+      err.code = 'DUPLICATE_ID_NUMBER';
+      throw err;
+    }
+  }
+
+  if (cleanEmail) {
+    const [txDupEmail, adminDupEmail] = await Promise.all([
+      client.query(
+        'SELECT id FROM person WHERE org_id = $1 AND LOWER(email) = $2 AND id <> $3 LIMIT 1',
+        [orgId, cleanEmail, excludeId]
+      ),
+      adminPool.query(
+        'SELECT id FROM person WHERE org_id = $1 AND LOWER(email) = $2 AND id <> $3 LIMIT 1',
+        [orgId, cleanEmail, excludeId]
+      ),
+    ]);
+    if (txDupEmail.rows.length > 0 || adminDupEmail.rows.length > 0) {
+      const err = new Error('Địa chỉ email này đã thuộc về một hồ sơ khác trong hệ thống.');
+      err.httpStatus = 409;
+      err.code = 'DUPLICATE_EMAIL';
+      throw err;
+    }
+  }
+
+  let personId;
+  let effectiveIdNumber = cleanIdNumber;
+  if (!existingPerson) {
+    personId = (
+      await client.query(
+        `INSERT INTO person (org_id, full_name, phone, email, dob, id_number, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [orgId, cleanName, cleanPhone, cleanEmail, cleanDob, cleanIdNumber, actorId]
+      )
+    ).rows[0].id;
+  } else {
+    personId = existingPerson.id;
+    const internal = await isInternalPerson(personId, orgId);
+    if (internal) {
+      const err = new Error(
+        'Số điện thoại này thuộc tài khoản nhân sự nội bộ, không thể thêm làm thành viên lưu trú.'
+      );
+      err.httpStatus = 409;
+      err.code = 'INVALID_OCCUPANT';
+      throw err;
+    }
+    const existingIdNum = existingPerson.id_number ? String(existingPerson.id_number).trim() : null;
+    if (existingIdNum && cleanIdNumber && existingIdNum !== cleanIdNumber) {
+      const err = new Error(
+        'Số điện thoại này đã được đăng ký với một số CCCD/Hộ chiếu khác trên hệ thống. Vui lòng kiểm tra lại.'
+      );
+      err.httpStatus = 409;
+      err.code = 'CONFLICT_ID_NUMBER';
+      throw err;
+    }
+    effectiveIdNumber = existingIdNum || cleanIdNumber || null;
+
+    const dbRunner = foundInCurrentTxOnly ? client : adminPool;
+    await dbRunner.query(
+      `UPDATE person SET
+         email = COALESCE(NULLIF(email, ''), $1),
+         dob = COALESCE(dob, $2),
+         id_number = COALESCE(NULLIF(id_number, ''), $3)
+       WHERE id = $4`,
+      [cleanEmail, cleanDob, cleanIdNumber, personId]
+    );
+  }
+
+  const desiredStatus = effectiveIdNumber ? 'APPROVED' : 'PENDING';
+  let tenantId;
+  if (!existingPerson || foundInCurrentTxOnly) {
+    const existingTxTenant = await client.query(
+      `SELECT id, status FROM tenant
+       WHERE person_id = $1 AND org_id = $2 AND type = 'occupant' AND status NOT IN ('MERGED', 'REJECTED')
+       LIMIT 1`,
+      [personId, orgId]
+    );
+    if (existingTxTenant.rows.length === 0) {
+      tenantId = (
+        await client.query(
+          `INSERT INTO tenant (person_id, org_id, type, status, created_by)
+           VALUES ($1, $2, 'occupant', $3, $4) RETURNING id`,
+          [personId, orgId, desiredStatus, actorId]
+        )
+      ).rows[0].id;
+    } else {
+      tenantId = existingTxTenant.rows[0].id;
+      if (existingTxTenant.rows[0].status === 'PENDING' && desiredStatus === 'APPROVED') {
+        await client.query(`UPDATE tenant SET status = 'APPROVED' WHERE id = $1`, [tenantId]);
+      }
+    }
+  } else {
+    const tenantRes = await adminPool.query(
+      `SELECT id, status FROM tenant
+       WHERE person_id = $1 AND org_id = $2 AND type = 'occupant' AND status NOT IN ('MERGED', 'REJECTED')
+       LIMIT 1`,
+      [personId, orgId]
+    );
+    if (tenantRes.rows.length === 0) {
+      tenantId = (
+        await adminPool.query(
+          `INSERT INTO tenant (person_id, org_id, type, status, created_by)
+           VALUES ($1, $2, 'occupant', $3, $4) RETURNING id`,
+          [personId, orgId, desiredStatus, actorId]
+        )
+      ).rows[0].id;
+    } else {
+      tenantId = tenantRes.rows[0].id;
+      if (tenantRes.rows[0].status === 'PENDING' && desiredStatus === 'APPROVED') {
+        await adminPool.query(`UPDATE tenant SET status = 'APPROVED' WHERE id = $1`, [tenantId]);
+      }
+    }
+  }
+
+  const dup = await client.query(
+    'SELECT 1 FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2',
+    [contractId, tenantId]
+  );
+  if (dup.rows.length > 0) {
+    const err = new Error('Người này đã là thành viên của hợp đồng.');
+    err.httpStatus = 409;
+    err.code = 'OCCUPANT_EXISTS';
+    throw err;
+  }
+
+  await client.query(
+    'INSERT INTO contract_occupant (contract_id, tenant_id, relationship) VALUES ($1, $2, $3)',
+    [contractId, tenantId, cleanRel]
+  );
+
+  await client.query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+     VALUES ($1, 'CREATE', 'contract_occupant', $2, $3)`,
+    [actorId, contractId, JSON.stringify({ contract_id: contractId, tenant_id: tenantId, relationship: cleanRel })]
+  );
+
+  return {
+    contract_id: contractId,
+    tenant_id: tenantId,
+    personId,
+    person_id: personId,
+    cleanPhone,
+    cleanEmail,
+    relationship: cleanRel,
+    status: desiredStatus,
+  };
+}
+
+/**
  * GET /api/v1/contracts/:id/occupants — thành viên cùng ở theo hợp đồng (B6)
+ * Bảo mật PII (PRD 13.5):
+ * - OWNER (không kiêm MANAGER/SYS_ADMIN): che id_number của mọi thành viên.
+ * - RESIDENT (không kiêm MANAGER/SYS_ADMIN): chỉ thấy đầy đủ id_number của chính mình, che các thành viên khác.
  */
 router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
@@ -913,10 +1295,14 @@ router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER
   if (!access.ok) {
     return res.status(access.status).json(access.body);
   }
-  const { client, release } = await getUserClient(req);
+  const userRoles = getUserRoleCodes(req);
+  const isFullPiiRole = userRoles.includes('SYS_ADMIN') || userRoles.includes('MANAGER');
+  const isOwnerOnly = userRoles.includes('OWNER') && !isFullPiiRole;
+  const isResidentOnly = userRoles.includes('RESIDENT') && !isFullPiiRole;
+
   try {
-    const result = await client.query(
-      `SELECT t.id AS tenant_id, p.full_name, p.phone, p.email, p.id_number, co.relationship
+    const result = await adminPool.query(
+      `SELECT t.id AS tenant_id, t.status, p.id AS person_id, p.full_name, p.phone, p.email, p.id_number, co.relationship
        FROM contract_occupant co
        JOIN tenant t ON t.id = co.tenant_id
        JOIN person p ON p.id = t.person_id
@@ -924,22 +1310,34 @@ router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER
        ORDER BY co.created_at ASC`,
       [id]
     );
-    res.json({ data: result.rows });
+    const rows = result.rows.map((row) => {
+      const shouldMaskId =
+        isOwnerOnly ||
+        (isResidentOnly && String(row.person_id) !== String(req.user.person_id || ''));
+      return {
+        tenant_id: row.tenant_id,
+        status: row.status,
+        full_name: row.full_name,
+        phone: row.phone,
+        email: row.email,
+        id_number: shouldMaskId && row.id_number ? maskIdNumber(row.id_number) : row.id_number,
+        relationship: row.relationship,
+      };
+    });
+    res.json({ data: rows });
   } catch (err) {
     console.error('[List Occupants Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải thành viên cùng ở.' });
-  } finally {
-    await release();
   }
 });
 
 /**
  * POST /api/v1/contracts/:id/occupants — thêm thành viên cùng ở (B6): tái dùng person theo SĐT,
- * tạo tenant type='occupant' nếu chưa có, rồi gắn vào contract_occupant.
+ * tạo tenant type='occupant' (APPROVED nếu có CCCD, PENDING nếu thiếu CCCD), rồi gắn vào contract_occupant.
  */
 router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone, relationship, email, dob, id_number } = req.body;
+  const { full_name, phone } = req.body;
 
   if (!full_name || !phone) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Họ tên và số điện thoại là bắt buộc.' });
@@ -954,103 +1352,44 @@ router.post('/:id/occupants', authenticateToken, requireRole(['MANAGER']), async
   try {
     await client.query('BEGIN');
 
-    const cleanPhone = normalizeVnPhone(phone);
-    // Kiểm tra person trùng SĐT trong org (qua adminPool để không va phải unique constraint dưới RLS chéo tòa)
-    const personRes = await adminPool.query(
-      'SELECT * FROM person WHERE org_id = $1 AND phone = $2 LIMIT 1',
-      [req.user.org_id, cleanPhone]
-    );
-    let personId;
-    if (personRes.rows.length === 0) {
-      personId = (await client.query(
-        `INSERT INTO person (org_id, full_name, phone, email, dob, id_number, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [req.user.org_id, full_name, cleanPhone, email || null, dob || null, id_number || null, req.user.sub]
-      )).rows[0].id;
-    } else {
-      personId = personRes.rows[0].id;
-      const internal = await isInternalPerson(personId, req.user.org_id);
-      if (internal) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({
-          code: 'INVALID_OCCUPANT',
-          message: 'Số điện thoại này thuộc tài khoản nhân sự nội bộ, không thể thêm làm thành viên lưu trú.',
-        });
-      }
-      // Chỉ điền bổ sung các trường đang trống, không ghi đè định danh gốc đã có của hồ sơ dùng chung
-      await adminPool.query(
-        `UPDATE person SET
-           email = COALESCE(NULLIF(email, ''), $1),
-           dob = COALESCE(dob, $2),
-           id_number = COALESCE(NULLIF(id_number, ''), $3)
-         WHERE id = $4`,
-        [email || null, dob || null, id_number || null, personId]
-      );
-    }
-
-    // Tìm tenant occupant của person, chưa có thì tạo.
-    // Lưu ý: nếu person vừa được tạo mới trong transaction `client` (chưa commit), phải INSERT tenant trên `client`
-    // để thấy khóa ngoại `person_id`; nếu person đã tồn tại từ trước (có thể thuộc tòa khác), dùng `adminPool` để không bị vướng RLS chéo tòa trước khi gắn contract_occupant.
-    let tenantId;
-    if (personRes.rows.length === 0) {
-      tenantId = (
-        await client.query(
-          `INSERT INTO tenant (person_id, org_id, type, status, created_by)
-           VALUES ($1, $2, 'occupant', 'APPROVED', $3) RETURNING id`,
-          [personId, req.user.org_id, req.user.sub]
-        )
-      ).rows[0].id;
-    } else {
-      const tenantRes = await adminPool.query(
-        `SELECT * FROM tenant WHERE person_id = $1 AND org_id = $2 AND type = 'occupant' AND status NOT IN ('MERGED', 'REJECTED') LIMIT 1`,
-        [personId, req.user.org_id]
-      );
-      if (tenantRes.rows.length === 0) {
-        tenantId = (
-          await adminPool.query(
-            `INSERT INTO tenant (person_id, org_id, type, status, created_by)
-             VALUES ($1, $2, 'occupant', 'APPROVED', $3) RETURNING id`,
-            [personId, req.user.org_id, req.user.sub]
-          )
-        ).rows[0].id;
-      } else {
-        tenantId = tenantRes.rows[0].id;
-      }
-    }
-
-    // Trùng thành viên trong cùng hợp đồng?
-    const dup = await client.query(
-      'SELECT 1 FROM contract_occupant WHERE contract_id = $1 AND tenant_id = $2',
-      [id, tenantId]
-    );
-    if (dup.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ code: 'OCCUPANT_EXISTS', message: 'Người này đã là thành viên của hợp đồng.' });
-    }
-
-    await client.query(
-      'INSERT INTO contract_occupant (contract_id, tenant_id, relationship) VALUES ($1, $2, $3)',
-      [id, tenantId, relationship || 'family']
-    );
-
-    await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-       VALUES ($1, 'CREATE', 'contract_occupant', $2, $3)`,
-      [req.user.sub, id, JSON.stringify({ contract_id: id, tenant_id: tenantId, relationship })]
-    );
+    const occResult = await attachOccupantInTx(client, {
+      contractId: id,
+      orgId: req.user.org_id,
+      actorId: req.user.sub,
+      occupant: req.body,
+    });
 
     await client.query('COMMIT');
     try {
-      await ensureResidentAccount(personId, { email, phone: cleanPhone });
+      await ensureResidentAccount(occResult.personId, {
+        email: occResult.cleanEmail,
+        phone: occResult.cleanPhone,
+      });
     } catch (acctErr) {
       console.error('[Add Occupant Ensure Account Warning]:', acctErr);
     }
     res.status(201).json({
       message: 'Đã thêm thành viên cùng ở.',
-      data: { contract_id: id, tenant_id: tenantId, person_id: personId, relationship: relationship || 'family' },
+      data: {
+        contract_id: id,
+        tenant_id: occResult.tenant_id,
+        person_id: occResult.person_id,
+        relationship: occResult.relationship,
+        status: occResult.status,
+      },
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({
+        code: err.code || 'VALIDATION_ERROR',
+        message: err.message,
+      });
+    }
+    const mapped = mapPgError(err);
+    if (mapped) {
+      return res.status(mapped.status).json({ code: mapped.code, message: mapped.message });
+    }
     console.error('[Add Occupant Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi thêm thành viên.' });
   } finally {
@@ -1630,11 +1969,11 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
 
   // 2. Chồng lấn kỳ hạn (re-check tại thời điểm ACTIVE; DB constraint ghim các HĐ hiệu lực)
   const overlapRes = await client.query(
-    `SELECT c.id, c.start_date, c.end_date
+    `SELECT c.id, c.start_date, COALESCE(c.terminated_at, c.end_date) AS end_date
      FROM contract c
      WHERE c.apartment_id = $1 AND c.id <> $2
-       AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
-       AND (c.start_date < $4 AND c.end_date > $3)`,
+       AND c.status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+       AND (c.start_date < $4 AND COALESCE(c.terminated_at, c.end_date) > $3)`,
     [contract.apartment_id, contract.id, contract.start_date, contract.end_date]
   );
   if (overlapRes.rows.length > 0) {
@@ -1719,47 +2058,65 @@ async function completeActivation(client, contract, res, req, { skipPriceCheck =
     if (existing.rows.length === 0) {
       if (parentDep) {
         const parentHeld = BigInt(parentDep.amount_held);
-        const split = splitDepositOpening({
-          depositAmount: contract.deposit_amount,
-          holdAmount: parentHeld,
-        });
-        remainingCollect = split.remainingCollect;
+        const targetDep = BigInt(contract.deposit_amount ?? 0);
+        const transferAmt = targetDep > 0n ? (parentHeld > targetDep ? targetDep : parentHeld) : 0n;
+        const surplusAmt = parentHeld - transferAmt;
+        remainingCollect = targetDep > transferAmt ? targetDep - transferAmt : 0n;
 
-        await client.query(
-          `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
-          [parentDep.id]
-        );
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-          [
-            parentDep.id,
-            parentHeld.toString(),
-            `Chuyển kết dư tiền cọc sang hợp đồng gia hạn ${contract.id.slice(0, 8).toUpperCase()}`,
-            req.user.sub,
-          ]
-        );
+        if (transferAmt > 0n) {
+          if (surplusAmt > 0n) {
+            const { dueAt: parentDueAt } = refundDeadline(sDateStr);
+            await client.query(
+              `UPDATE deposit
+               SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
+               WHERE id = $3`,
+              [surplusAmt.toString(), parentDueAt, parentDep.id]
+            );
+          } else {
+            await client.query(
+              `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
+              [parentDep.id]
+            );
+          }
 
-        const depRes = await client.query(
-          `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-           VALUES ($1, NULL, $2, 'HELD')
-           RETURNING id`,
-          [contract.id, parentHeld.toString()]
-        );
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-          [
-            depRes.rows[0].id,
-            parentHeld.toString(),
-            `Nhận kết chuyển tiền cọc từ hợp đồng kỳ trước ${contract.parent_contract_id.slice(0, 8).toUpperCase()}`,
-            req.user.sub,
-          ]
-        );
+          await client.query(
+            `INSERT INTO deposit_transaction (
+               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+             )
+             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+            [
+              parentDep.id,
+              transferAmt.toString(),
+              `Chuyển kết dư tiền cọc sang hợp đồng gia hạn ${contract.id.slice(0, 8).toUpperCase()}`,
+              req.user.sub,
+            ]
+          );
+
+          const depRes = await client.query(
+            `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+             VALUES ($1, NULL, $2, 'HELD')
+             RETURNING id`,
+            [contract.id, transferAmt.toString()]
+          );
+          await client.query(
+            `INSERT INTO deposit_transaction (
+               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+             )
+             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+            [
+              depRes.rows[0].id,
+              transferAmt.toString(),
+              `Nhận kết chuyển tiền cọc từ hợp đồng kỳ trước ${contract.parent_contract_id.slice(0, 8).toUpperCase()}`,
+              req.user.sub,
+            ]
+          );
+        } else if (targetDep > 0n) {
+          await client.query(
+            `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+             VALUES ($1, NULL, '0', 'HELD')`,
+            [contract.id]
+          );
+        }
       } else {
         const holdAmount = matchedRsv ? matchedRsv.hold_amount : null;
         const split = splitDepositOpening({
@@ -3398,7 +3755,7 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), a
       [newContract.id, oldContract.id]
     );
 
-    // 3. Chuyển sổ cọc (nếu chọn transfer_deposit)
+    // 3. Chuyển sổ cọc (nếu chọn transfer_deposit) hoặc tách tất toán cọc cũ + mở sổ cọc mới
     let transferredDeposit = null;
     if (transfer_deposit) {
       const oldDepRes = await client.query(
@@ -3407,46 +3764,75 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), a
       );
       if (oldDepRes.rows.length > 0) {
         const oldDep = oldDepRes.rows[0];
-        const heldAmt = oldDep.amount_held;
+        const heldAmt = BigInt(oldDep.amount_held || 0);
 
         await client.query(
           `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
           [oldDep.id]
         );
 
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-          [
-            oldDep.id,
-            heldAmt,
-            `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptLock.rows[0].code} (FR-013)`,
-            req.user.sub,
-          ]
-        );
+        if (heldAmt > 0n) {
+          await client.query(
+            `INSERT INTO deposit_transaction (
+               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+             )
+             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+            [
+              oldDep.id,
+              heldAmt.toString(),
+              `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptLock.rows[0].code} (FR-013)`,
+              req.user.sub,
+            ]
+          );
+        }
 
         const newDepRes = await client.query(
           `INSERT INTO deposit (contract_id, amount_held, status)
            VALUES ($1, $2, 'HELD')
            RETURNING *`,
-          [newContract.id, heldAmt]
+          [newContract.id, heldAmt.toString()]
         );
         transferredDeposit = newDepRes.rows[0];
 
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-          [
-            transferredDeposit.id,
-            heldAmt,
-            `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
-            req.user.sub,
-          ]
+        if (heldAmt > 0n) {
+          await client.query(
+            `INSERT INTO deposit_transaction (
+               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+             )
+             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+            [
+              transferredDeposit.id,
+              heldAmt.toString(),
+              `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
+              req.user.sub,
+            ]
+          );
+        }
+      } else if (Number(newContract.deposit_amount || 0) > 0) {
+        const newDepRes = await client.query(
+          `INSERT INTO deposit (contract_id, amount_held, status)
+           VALUES ($1, 0, 'HELD')
+           RETURNING *`,
+          [newContract.id]
         );
+        transferredDeposit = newDepRes.rows[0];
+      }
+    } else {
+      const { dueAt: oldDueAt } = refundDeadline(transferDate);
+      await client.query(
+        `UPDATE deposit
+         SET refund_due_date = COALESCE(refund_due_date, $1), updated_at = NOW()
+         WHERE contract_id = $2 AND status = 'HELD'`,
+        [oldDueAt, oldContract.id]
+      );
+      if (Number(newContract.deposit_amount || 0) > 0) {
+        const newDepRes = await client.query(
+          `INSERT INTO deposit (contract_id, amount_held, status)
+           VALUES ($1, 0, 'HELD')
+           RETURNING *`,
+          [newContract.id]
+        );
+        transferredDeposit = newDepRes.rows[0];
       }
     }
 

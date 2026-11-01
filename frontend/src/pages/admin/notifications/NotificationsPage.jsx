@@ -24,6 +24,7 @@ import { useNotificationStore } from '../../../stores/notificationStore';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
+import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 
@@ -370,7 +371,7 @@ export function NotificationsPage() {
                   placeholder="-- Chọn căn hộ cụ thể --"
                   options={apartments.map((a) => ({
                     value: a.id,
-                    label: `Căn ${a.code} (${a.status === 'OCCUPIED' ? 'Đang thuê' : a.status})`,
+                    label: `Căn ${a.code} (${APARTMENT_STATUS[a.status]?.label || a.status})`,
                   }))}
                 />
               ) : null}
@@ -432,12 +433,16 @@ export function NotificationsPage() {
                     icon: Inbox,
                     count: unreadCount > 0 ? `${unreadCount} mới` : filteredInbox.length,
                   },
-                  {
-                    id: 'sent_history',
-                    label: 'Lịch sử đã phát hành',
-                    icon: History,
-                    count: filteredSent.length,
-                  },
+                  ...(canSendNotifications
+                    ? [
+                        {
+                          id: 'sent_history',
+                          label: 'Lịch sử đã phát hành',
+                          icon: History,
+                          count: filteredSent.length,
+                        },
+                      ]
+                    : []),
                 ]}
               />
             </div>
@@ -542,7 +547,10 @@ export function NotificationsPage() {
                   };
                   const scopeCode = item.payload?.target_scope || 'BUILDING';
                   const scopeMeta = SCOPE_LABELS[scopeCode] || SCOPE_LABELS.BUILDING;
-                  const bldgLabel = getBuildingLabel(item.payload?.building_id);
+                  const bldgLabel =
+                    (item.building_code && item.building_name
+                      ? `${item.building_code} — ${item.building_name}`
+                      : null) || getBuildingLabel(item.payload?.building_id);
 
                   return (
                     <div key={item.id} className="p-4 sm:px-5 space-y-1.5 hover:bg-slate-50/70">
@@ -550,9 +558,16 @@ export function NotificationsPage() {
                         <div className="flex flex-wrap items-center gap-1.5">
                           <Badge variant={scopeMeta.variant}>{scopeMeta.label}</Badge>
                           <Badge variant={typeInfo.variant}>{typeInfo.label}</Badge>
+                          <Badge variant="slate">
+                            {scopeCode === 'ALL'
+                              ? 'Toàn bộ cư dân'
+                              : `${item.recipient_count || 1} người nhận`}
+                          </Badge>
                           {bldgLabel ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500">
-                              <Building2 className="w-3 h-3" /> {bldgLabel}
+                            <span className="inline-flex items-center gap-1 text-[11px] text-slate-600">
+                              <Building2 className="w-3 h-3 shrink-0" /> {bldgLabel}
+                              {item.floor_name ? ` • ${item.floor_name}` : ''}
+                              {item.apartment_code ? ` • Căn ${item.apartment_code}` : ''}
                             </span>
                           ) : null}
                         </div>

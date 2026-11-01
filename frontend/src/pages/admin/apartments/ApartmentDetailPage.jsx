@@ -18,6 +18,7 @@ import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
@@ -239,7 +240,7 @@ export function ApartmentDetailPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2 space-y-4">
           <CardHeader title="Thông số kỹ thuật & Tiện nghi" />
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 2xl:grid-cols-5 gap-3.5">
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
               <p className="text-xs text-slate-400">Trạng thái</p>
               <div className="mt-1">
@@ -252,10 +253,10 @@ export function ApartmentDetailPage() {
                 {apt.zone_id ? (
                   <Link
                     to={`/admin/buildings/${apt.building_id}/zones/${apt.zone_id}`}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-primary-700 hover:underline"
+                    className="inline-flex items-start gap-1 text-xs font-semibold text-primary-700 hover:underline"
                   >
-                    <Layers className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">
+                    <Layers className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span className="break-words">
                       {apt.zone_code}
                       {apt.zone_name ? ` — ${apt.zone_name}` : ''}
                     </span>
@@ -267,7 +268,9 @@ export function ApartmentDetailPage() {
             </div>
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
               <p className="text-xs text-slate-400">Giá niêm yết</p>
-              <p className="text-sm font-bold text-primary-600 mt-1">{formatMoney(apt.base_rent)}</p>
+              <p className="text-sm font-bold text-primary-600 mt-1 tabular-nums break-words">
+                {formatMoney(apt.base_rent)}
+              </p>
             </div>
             <div className="p-3 rounded-xl bg-slate-50 border border-slate-100">
               <p className="text-xs text-slate-400">Diện tích</p>
@@ -417,7 +420,13 @@ export function ApartmentDetailPage() {
               {
                 key: 'prospect_name',
                 label: 'Khách đặt',
-                render: (r) => <span className="font-medium text-slate-900">{r.prospect_name}</span>,
+                render: (r) => (
+                  <div>
+                    <p className="font-medium text-slate-900">{r.prospect_name}</p>
+                    {r.phone ? <p className="text-xs font-mono text-slate-500">{r.phone}</p> : null}
+                    {r.note ? <p className="text-[11px] text-slate-500 whitespace-pre-line mt-0.5">{r.note}</p> : null}
+                  </div>
+                ),
               },
               {
                 key: 'hold_amount',
@@ -435,24 +444,24 @@ export function ApartmentDetailPage() {
               },
               {
                 key: 'actions',
-                label: 'Xử lý',
+                label: 'Trạng thái / Xử lý',
                 align: 'center',
                 className: 'whitespace-nowrap',
-                render: (r) =>
-                  r.status === 'HELD' && canEditRealEstate ? (
-                    <div className="inline-flex items-center justify-center gap-1">
-                      <Button size="xs" variant="outline" onClick={() => handleReservationAction(r.id, 'refund')}>
-                        Hoàn cọc
-                      </Button>
-                      <Button size="xs" variant="danger" onClick={() => handleReservationAction(r.id, 'forfeit')}>
-                        Tịch thu
-                      </Button>
-                    </div>
-                  ) : (
-                    <Badge variant={r.status === 'HELD' ? 'amber' : r.status === 'CONVERTED' ? 'emerald' : 'slate'}>
-                      {r.status}
-                    </Badge>
-                  ),
+                render: (r) => (
+                  <div className="inline-flex flex-col items-center gap-1.5">
+                    <StatusBadge status={r.status} domain="reservation" />
+                    {r.status === 'HELD' && canEditRealEstate ? (
+                      <div className="inline-flex items-center justify-center gap-1">
+                        <Button size="xs" variant="outline" onClick={() => handleReservationAction(r.id, 'refund')}>
+                          Hoàn cọc
+                        </Button>
+                        <Button size="xs" variant="danger" onClick={() => handleReservationAction(r.id, 'forfeit')}>
+                          Tịch thu
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ),
               },
             ]}
           />
@@ -537,10 +546,10 @@ export function ApartmentDetailPage() {
               value={form.area_m2}
               onChange={(e) => setForm({ ...form, area_m2: e.target.value })}
             />
-            <Input
+            <MoneyInput
               label="Giá thuê niêm yết (VND)"
-              type="number"
               required
+              placeholder="VD: 8.500.000"
               value={form.base_rent}
               onChange={(e) => setForm({ ...form, base_rent: e.target.value })}
             />

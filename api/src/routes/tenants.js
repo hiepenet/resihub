@@ -90,19 +90,23 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
 
     const roleCodes = getUserRoleCodes(req);
     const inScopeRows = [];
-    let hasValidResidentDup = false;
+    let hasCrossBuildingDup = false;
+    let hasInternalConflict = false;
+    let inScopePreliminary = null;
     for (const row of result.rows) {
       const internal = await isInternalPerson(row.id, orgId);
       if (internal) {
+        hasInternalConflict = true;
         continue;
       }
-      hasValidResidentDup = true;
       const allowed = await checkPersonScopeForActor(row.id, {
         actorId: req.user.sub,
         orgId,
         roleCodes,
       });
-      if (allowed && row.tenant_id) {
+      if (!allowed) {
+        hasCrossBuildingDup = true;
+      } else if (row.tenant_id) {
         inScopeRows.push({
           id: row.id,
           full_name: row.full_name,
@@ -114,25 +118,40 @@ router.get('/check-dup', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', '
           email: maskEmail(row.email),
           tenant_id: row.tenant_id,
         });
+      } else {
+        inScopePreliminary = {
+          id: row.id,
+          full_name: row.full_name,
+          masked_name: maskName(row.full_name),
+        };
       }
     }
 
-    if (inScopeRows.length === 0) {
+    if (inScopeRows.length > 0) {
+      return res.json({
+        isDuplicate: true,
+        inScope: true,
+        duplicates: inScopeRows,
+      });
+    }
+
+    if (hasCrossBuildingDup || hasInternalConflict) {
       return res.json({
         isDuplicate: true,
         inScope: false,
-        canLinkCrossBuilding: hasValidResidentDup,
+        canLinkCrossBuilding: hasCrossBuildingDup,
         duplicates: [],
-        message: hasValidResidentDup
+        message: hasCrossBuildingDup
           ? 'Định danh (SĐT/CCCD) này đã tồn tại trên hệ thống. Vui lòng chuyển sang tab "Tra cứu SĐT / CCCD" để xác minh và liên kết hồ sơ có sẵn thay vì tạo trùng.'
           : 'Định danh (SĐT/CCCD) này đã gắn với tài khoản nội bộ trên hệ thống, không thể tạo trùng.',
       });
     }
 
     res.json({
-      isDuplicate: true,
+      isDuplicate: false,
       inScope: true,
-      duplicates: inScopeRows,
+      duplicates: [],
+      ...(inScopePreliminary ? { preliminaryPerson: inScopePreliminary } : {}),
     });
   } catch (err) {
     console.error('[Check Dup Error]:', err);
@@ -313,6 +332,9 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
 
     let sql = `
       SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number, p.address, p.nationality, p.avatar_url,
+             p.privacy_consent_at, p.privacy_policy_version,
+             da.code AS desired_apartment_code,
+             db.name AS desired_building_name,
              (
                SELECT json_build_object(
                  'contract_id', c.id,
@@ -322,16 +344,38 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
                  'building_name', b.name,
                  'rent_amount', c.rent_amount,
                  'end_date', c.end_date,
-                 'status', c.status
+                 'status', c.status,
+                 'member_role', CASE WHEN c.primary_tenant_id = t.id THEN 'primary' ELSE 'occupant' END
                )
                FROM contract c
                JOIN apartment a ON a.id = c.apartment_id
                JOIN building b ON b.id = c.building_id
-               WHERE c.primary_tenant_id = t.id AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-               ORDER BY c.created_at DESC LIMIT 1
-             ) AS active_contract
+               WHERE (
+                 c.primary_tenant_id = t.id
+                 OR EXISTS (
+                   SELECT 1 FROM contract_occupant co
+                   WHERE co.contract_id = c.id AND co.tenant_id = t.id
+                 )
+               )
+               AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+               ORDER BY (CASE WHEN c.primary_tenant_id = t.id THEN 0 ELSE 1 END) ASC, c.created_at DESC
+               LIMIT 1
+             ) AS active_contract,
+             EXISTS (
+               SELECT 1 FROM contract cp
+               WHERE (
+                 cp.primary_tenant_id = t.id
+                 OR EXISTS (
+                   SELECT 1 FROM contract_occupant cop
+                   WHERE cop.contract_id = cp.id AND cop.tenant_id = t.id
+                 )
+               )
+               AND cp.status IN ('EXPIRED', 'TERMINATED')
+             ) AS has_past_contract
       FROM tenant t
       JOIN person p ON p.id = t.person_id
+      LEFT JOIN apartment da ON da.id = t.desired_apartment_id
+      LEFT JOIN building db ON db.id = t.desired_building_id
       WHERE t.org_id = $1
     `;
     const params = [orgId];
@@ -360,6 +404,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
           JOIN reservation r ON r.phone = p2.phone
           WHERE r.building_id = ANY($${params.length}::uuid[])
         )
+        OR t.desired_building_id = ANY($${params.length}::uuid[])
       )`;
     } else if (isManager) {
       const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
@@ -386,6 +431,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
           JOIN reservation r ON r.phone = p2.phone
           WHERE r.building_id = ANY($${idx}::uuid[])
         )
+        OR t.desired_building_id = ANY($${idx}::uuid[])
         OR (
           -- Hồ sơ cư dân chưa lên hợp đồng: CHỈ hiển thị hồ sơ do chính MANAGER này khởi tạo (không lộ sang tòa khác)
           (t.created_by = $${actorIdx}::uuid OR p.created_by = $${actorIdx}::uuid)
@@ -441,6 +487,15 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
       rows = rows.map((r) => ({ ...r, is_shared_profile: false }));
     }
 
+    // PRD Mục 13.5: OWNER chỉ đọc danh sách, số CCCD được che một phần (chỉ SYS_ADMIN / MANAGER đọc đầy đủ)
+    if (isOwner && !isSysAdmin && !isManager) {
+      rows = rows.map((r) => ({
+        ...r,
+        id_number: r.id_number ? maskIdNumber(r.id_number) : null,
+        id_number_masked_for_owner: true,
+      }));
+    }
+
     res.json({ data: rows });
   } catch (err) {
     console.error('[Tenants Error]:', err);
@@ -454,7 +509,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
  * Tự động chuẩn hóa SĐT và cấp tài khoản app_user (ACTIVE) + role RESIDENT.
  */
 router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { full_name, phone, email, dob, id_number, address, nationality, type, password } = req.body;
+  const { full_name, phone, email, dob, id_number, address, nationality, type, password, privacy_consent } = req.body;
   const orgId = req.user.org_id;
 
   if (!full_name || !phone) {
@@ -463,6 +518,8 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
   if (password && String(password).length < 8) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Mật khẩu đăng nhập ban đầu phải từ 8 ký tự trở lên.' });
   }
+
+  const normalizedType = type === 'occupant' ? 'occupant' : 'primary';
 
   const { client, release } = await getUserClient(req);
   try {
@@ -479,8 +536,18 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
       idNumber: id_number,
       address,
       nationality,
-      type: type || 'primary',
+      type: normalizedType,
     });
+
+    if (privacy_consent === true) {
+      await client.query(
+        `UPDATE person
+         SET privacy_consent_at = COALESCE(privacy_consent_at, NOW()),
+             privacy_policy_version = COALESCE(privacy_policy_version, 'v1.0')
+         WHERE id = $1`,
+        [personId]
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -756,9 +823,14 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
   const { id } = req.params;
   try {
     const tRes = await pool.query(
-      `SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number, p.address, p.nationality, p.avatar_url
+      `SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number, p.address, p.nationality, p.avatar_url,
+              p.privacy_consent_at, p.privacy_policy_version,
+              da.code AS desired_apartment_code,
+              db.name AS desired_building_name
        FROM tenant t
        JOIN person p ON p.id = t.person_id
+       LEFT JOIN apartment da ON da.id = t.desired_apartment_id
+       LEFT JOIN building db ON db.id = t.desired_building_id
        WHERE t.id = $1 AND t.org_id = $2`,
       [id, req.user.org_id]
     );
@@ -768,16 +840,23 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
     const tenant = tRes.rows[0];
 
     const contractsRes = await pool.query(
-      `SELECT c.*, a.code as apartment_code, b.name as building_name
+      `SELECT c.*, a.code as apartment_code, b.name as building_name,
+              CASE WHEN c.primary_tenant_id = $1 THEN 'primary' ELSE 'occupant' END AS member_role
        FROM contract c
        JOIN apartment a ON a.id = c.apartment_id
        JOIN building b ON b.id = c.building_id
        WHERE c.primary_tenant_id = $1
+          OR EXISTS (
+            SELECT 1 FROM contract_occupant co
+            WHERE co.contract_id = c.id AND co.tenant_id = $1
+          )
        ORDER BY c.start_date DESC`,
       [id]
     );
 
-    const activeContractId = contractsRes.rows.find((c) => c.status === 'ACTIVE')?.id || contractsRes.rows[0]?.id;
+    const activeContractId =
+      contractsRes.rows.find((c) => ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].includes(c.status))?.id ||
+      contractsRes.rows[0]?.id;
     let occupants = [];
     if (activeContractId) {
       const occRes = await pool.query(
@@ -791,18 +870,33 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
       occupants = occRes.rows;
     }
 
+    const userRoles = getUserRoleCodes(req);
+    const isSysAdmin = userRoles.includes('SYS_ADMIN');
+    const isManager = userRoles.includes('MANAGER');
+    const isOwnerOnly = userRoles.includes('OWNER') && !isSysAdmin && !isManager;
+
     const isSharedProfile = await hasContractOutsideManagerScope(tenant.person_id, {
       actorId: req.user.sub,
       orgId: req.user.org_id,
-      roleCodes: getUserRoleCodes(req),
+      roleCodes: userRoles,
     });
+
+    const hasPastContract = contractsRes.rows.some((c) => ['EXPIRED', 'TERMINATED'].includes(c.status));
 
     res.json({
       data: {
         ...tenant,
+        id_number: isOwnerOnly && tenant.id_number ? maskIdNumber(tenant.id_number) : tenant.id_number,
+        id_number_masked_for_owner: isOwnerOnly,
+        has_past_contract: hasPastContract,
         is_shared_profile: isSharedProfile,
         contracts: contractsRes.rows,
-        occupants,
+        occupants: isOwnerOnly
+          ? occupants.map((o) => ({
+              ...o,
+              id_number: o.id_number ? maskIdNumber(o.id_number) : null,
+            }))
+          : occupants,
       },
     });
   } catch (err) {
@@ -816,7 +910,7 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
  */
 router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
-  const { full_name, phone, email, dob, id_number, address, nationality, action } = req.body;
+  const { full_name, phone, email, dob, id_number, address, nationality, action, reason } = req.body;
   const orgId = req.user.org_id;
   const userRoles = getUserRoleCodes(req);
   const isSysAdmin = userRoles.includes('SYS_ADMIN');
@@ -861,6 +955,14 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
         });
       }
       const nextStatus = action === 'approve' ? 'APPROVED' : 'REJECTED';
+      const cleanRejectReason = action === 'reject' ? String(reason || '').trim() : null;
+      if (action === 'reject' && !cleanRejectReason) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'REASON_REQUIRED',
+          message: 'Vui lòng nhập lý do từ chối hồ sơ cư dân (FR-012).',
+        });
+      }
       const incomingIdNum = id_number !== undefined && id_number !== null ? String(id_number).trim() : null;
       if (
         isSharedProfile &&
@@ -883,8 +985,13 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
         });
       }
       const upd = await client.query(
-        `UPDATE tenant SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-        [nextStatus, id]
+        `UPDATE tenant
+         SET status = $1,
+             rejection_reason = $2,
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING *`,
+        [nextStatus, action === 'reject' ? cleanRejectReason : null, id]
       );
       if (incomingIdNum && !tenant.id_number) {
         await client.query(`UPDATE person SET id_number = $1 WHERE id = $2`, [finalIdNumber, tenant.person_id]);
@@ -894,10 +1001,59 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
          VALUES ($1, $2, 'tenant', $3, $4, $5)`,
-        [req.user.sub, action === 'approve' ? 'APPROVE' : 'REJECT', id, JSON.stringify(tenant), JSON.stringify(upd.rows[0])]
+        [
+          req.user.sub,
+          action === 'approve' ? 'APPROVE' : 'REJECT',
+          id,
+          JSON.stringify(tenant),
+          JSON.stringify({ ...upd.rows[0], ...(cleanRejectReason ? { reason: cleanRejectReason } : {}) }),
+        ]
       );
       await client.query('COMMIT');
-      return res.json({ message: nextStatus === 'APPROVED' ? 'Đã duyệt hồ sơ cư dân.' : 'Đã từ chối hồ sơ cư dân.', data: upd.rows[0] });
+
+      // Thông báo kết quả duyệt / từ chối tới tài khoản Cổng cư dân (FR-012)
+      try {
+        const resUser = await adminPool.query(
+          `SELECT id FROM app_user WHERE person_id = $1 AND status = 'ACTIVE' LIMIT 1`,
+          [tenant.person_id]
+        );
+        const residentUserId = resUser.rows[0]?.id;
+        if (residentUserId) {
+          const notifType = nextStatus === 'APPROVED' ? 'TENANT_APPLICATION_APPROVED' : 'TENANT_APPLICATION_REJECTED';
+          const notifTitle =
+            nextStatus === 'APPROVED'
+              ? 'Hồ sơ cư dân của bạn đã được phê duyệt'
+              : 'Hồ sơ đăng ký cư dân cần bổ sung thông tin';
+          const notifContent =
+            nextStatus === 'APPROVED'
+              ? 'Ban Quản Lý đã phê duyệt hồ sơ định danh của bạn và sẽ liên hệ để hoàn tất hợp đồng thuê.'
+              : `Hồ sơ của bạn chưa được duyệt. Lý do: ${cleanRejectReason}. Bạn có thể cập nhật và gửi lại ngay trên Cổng cư dân.`;
+          await adminPool.query(
+            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              orgId,
+              residentUserId,
+              notifTitle,
+              notifContent,
+              notifType,
+              JSON.stringify({
+                tenant_id: id,
+                status: nextStatus,
+                reason: cleanRejectReason || null,
+                sent_by: req.user.sub,
+              }),
+            ]
+          );
+        }
+      } catch (notifErr) {
+        console.error('[Tenant Approval Notification Warning]:', notifErr);
+      }
+
+      return res.json({
+        message: nextStatus === 'APPROVED' ? 'Đã duyệt hồ sơ cư dân.' : 'Đã từ chối hồ sơ cư dân.',
+        data: upd.rows[0],
+      });
     }
 
     const normDate = (d) => {
@@ -1072,6 +1228,16 @@ router.get('/:id/id-images', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER
     );
     if (tenantRes.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy cư dân.' });
+    }
+    const roleCodes = getUserRoleCodes(req);
+    const isOwnerOnly =
+      roleCodes.includes('OWNER') && !roleCodes.includes('SYS_ADMIN') && !roleCodes.includes('MANAGER');
+    if (isOwnerOnly) {
+      return res.json({
+        data: [],
+        masked_for_owner: true,
+        has_id_images: (tenantRes.rows[0].id_images || []).length > 0,
+      });
     }
     const images = await pool.query(
       `SELECT id AS attachment_id, storage_path, mime FROM attachment

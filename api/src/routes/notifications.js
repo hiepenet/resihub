@@ -29,15 +29,43 @@ router.get('/', authenticateToken, async (req, res) => {
       [orgId, userId]
     );
 
-    // Nếu là SYS_ADMIN / MANAGER, trả thêm lịch sử thông báo đã phát hành (OWNER 100% Read-Only thông báo nhận)
+    // Nếu là SYS_ADMIN / MANAGER, trả thêm lịch sử thông báo đã phát hành (gom theo đợt broadcast)
     const roles = getUserRoleCodes(req);
     let sentHistory = [];
     if (roles.some((r) => ['SYS_ADMIN', 'MANAGER'].includes(r))) {
       const sentRes = await adminPool.query(
-        `SELECT id, title, content, type, payload, created_at
-         FROM notification
-         WHERE org_id = $1 AND (payload->>'sent_by' = $2 OR $3 = TRUE)
-         ORDER BY created_at DESC
+        `SELECT (ARRAY_AGG(n.id ORDER BY n.created_at DESC))[1] AS id,
+                n.title,
+                n.content,
+                n.type,
+                (ARRAY_AGG(n.payload ORDER BY n.created_at DESC))[1] AS payload,
+                MAX(n.created_at) AS created_at,
+                COUNT(*)::int AS recipient_count,
+                b.code AS building_code,
+                b.name AS building_name,
+                f.name AS floor_name,
+                a.code AS apartment_code
+         FROM notification n
+         LEFT JOIN building b ON b.id = NULLIF(n.payload->>'building_id', '')::uuid
+         LEFT JOIN floor f ON f.id = NULLIF(n.payload->>'floor_id', '')::uuid
+         LEFT JOIN apartment a ON a.id = NULLIF(n.payload->>'apartment_id', '')::uuid
+         WHERE n.org_id = $1
+           AND n.payload ? 'target_scope'
+           AND (n.payload->>'sent_by' = $2 OR $3 = TRUE)
+         GROUP BY n.title,
+                  n.content,
+                  n.type,
+                  n.payload->>'target_scope',
+                  n.payload->>'building_id',
+                  n.payload->>'floor_id',
+                  n.payload->>'apartment_id',
+                  n.payload->>'sender_name',
+                  date_trunc('minute', n.created_at),
+                  b.code,
+                  b.name,
+                  f.name,
+                  a.code
+         ORDER BY MAX(n.created_at) DESC
          LIMIT 40`,
         [orgId, userId, roles.includes('SYS_ADMIN')]
       );

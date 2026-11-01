@@ -72,6 +72,7 @@ export function TenantDetailPage() {
 
   const [tenant, setTenant] = useState(null);
   const [idImages, setIdImages] = useState([]);
+  const [idImagesMeta, setIdImagesMeta] = useState({ maskedForOwner: false, hasIdImages: false });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('profile');
 
@@ -95,7 +96,7 @@ export function TenantDetailPage() {
   const [previewTitle, setPreviewTitle] = useState('');
 
   // Approve / Reject pending tenant profile
-  const [approvalDialog, setApprovalDialog] = useState({ open: false, action: 'approve' });
+  const [approvalDialog, setApprovalDialog] = useState({ open: false, action: 'approve', reason: '', error: '' });
   const [processingApproval, setProcessingApproval] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -109,6 +110,10 @@ export function TenantDetailPage() {
       const data = detailRes?.data || null;
       setTenant(data);
       setIdImages(Array.isArray(imgRes?.data) ? imgRes.data : []);
+      setIdImagesMeta({
+        maskedForOwner: Boolean(imgRes?.masked_for_owner),
+        hasIdImages: Boolean(imgRes?.has_id_images),
+      });
       if (data) {
         setForm({
           full_name: data.full_name || '',
@@ -143,9 +148,14 @@ export function TenantDetailPage() {
 
   const displayTenantStatus = useMemo(() => {
     if (!tenant) return 'INACTIVE';
-    if (tenant.status === 'PENDING') return 'PENDING';
+    if (tenant.status === 'MERGED') return 'MERGED';
+    if (tenant.status === 'REJECTED') return 'REJECTED';
     if (activeContract || tenant.status === 'ACTIVE') return 'ACTIVE';
-    return 'INACTIVE';
+    if (tenant.status === 'PENDING') return 'PENDING';
+    if (tenant.has_past_contract || tenant.status === 'MOVED_OUT' || tenant.status === 'INACTIVE') {
+      return 'MOVED_OUT';
+    }
+    return 'APPROVED';
   }, [tenant, activeContract]);
 
   const latestFrontImg = useMemo(
@@ -154,6 +164,10 @@ export function TenantDetailPage() {
   );
   const latestBackImg = useMemo(
     () => [...idImages].reverse().find((img) => img.side === 'back') || null,
+    [idImages]
+  );
+  const otherIdImgs = useMemo(
+    () => idImages.filter((img) => img.side !== 'front' && img.side !== 'back'),
     [idImages]
   );
 
@@ -220,17 +234,27 @@ export function TenantDetailPage() {
   };
 
   const handleConfirmApproval = async () => {
+    if (approvalDialog.action === 'reject' && !String(approvalDialog.reason || '').trim()) {
+      setApprovalDialog((prev) => ({
+        ...prev,
+        error: 'Vui lòng nhập lý do từ chối để cư dân biết cần bổ sung thông tin gì.',
+      }));
+      return;
+    }
     setProcessingApproval(true);
     try {
       const payload = {
         action: approvalDialog.action,
       };
+      if (approvalDialog.action === 'reject') {
+        payload.reason = approvalDialog.reason.trim();
+      }
       if (form.id_number?.trim()) {
         payload.id_number = form.id_number.trim();
       }
       const res = await tenantsService.update(id, payload);
       toast.success(res?.message || 'Đã cập nhật trạng thái duyệt hồ sơ.');
-      setApprovalDialog({ open: false, action: 'approve' });
+      setApprovalDialog({ open: false, action: 'approve', reason: '', error: '' });
       await loadData();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể duyệt hồ sơ cư dân.'));
@@ -245,12 +269,17 @@ export function TenantDetailPage() {
         key: 'code',
         label: 'Mã hợp đồng',
         render: (row) => (
-          <Link
-            to={`/admin/contracts/${row.id}`}
-            className="font-mono text-xs font-semibold text-primary-600 hover:text-primary-700 hover:underline"
-          >
-            HĐ-{String(row.id).slice(0, 8).toUpperCase()}
-          </Link>
+          <div>
+            <Link
+              to={`/admin/contracts/${row.id}`}
+              className="font-mono text-xs font-semibold text-primary-600 hover:text-primary-700 hover:underline"
+            >
+              HĐ-{String(row.id).slice(0, 8).toUpperCase()}
+            </Link>
+            {row.member_role === 'occupant' ? (
+              <p className="text-[11px] text-indigo-600 font-medium mt-0.5">Thành viên ở cùng</p>
+            ) : null}
+          </div>
         ),
       },
       {
@@ -260,7 +289,7 @@ export function TenantDetailPage() {
         render: (row) => (
           <div>
             <p className="font-semibold text-slate-900">{row.apartment_code}</p>
-            <p className="text-xs text-slate-500">{row.building_name}</p>
+            <p className="text-xs text-slate-500 break-words">{row.building_name}</p>
           </div>
         ),
       },
@@ -270,9 +299,16 @@ export function TenantDetailPage() {
         align: 'center',
         className: 'whitespace-nowrap',
         render: (row) => (
-          <span className="text-xs text-slate-700">
-            {formatDate(row.start_date)} → {formatDate(row.end_date)}
-          </span>
+          <div className="text-xs text-slate-700">
+            <p>
+              {formatDate(row.start_date)} → {formatDate(row.end_date)}
+            </p>
+            {row.terminated_at ? (
+              <p className="text-[11px] text-amber-700 font-medium mt-0.5">
+                Thanh lý: {formatDate(row.terminated_at)}
+              </p>
+            ) : null}
+          </div>
         ),
       },
       {
@@ -423,14 +459,14 @@ export function TenantDetailPage() {
                 <Button
                   variant="outline"
                   icon={XCircle}
-                  onClick={() => setApprovalDialog({ open: true, action: 'reject' })}
+                  onClick={() => setApprovalDialog({ open: true, action: 'reject', reason: '', error: '' })}
                 >
                   Từ chối hồ sơ
                 </Button>
                 <Button
                   variant="success"
                   icon={CheckCircle2}
-                  onClick={() => setApprovalDialog({ open: true, action: 'approve' })}
+                  onClick={() => setApprovalDialog({ open: true, action: 'approve', reason: '', error: '' })}
                 >
                   Duyệt hồ sơ cư dân
                 </Button>
@@ -531,6 +567,40 @@ export function TenantDetailPage() {
           ) : null}
         </div>
       </Card>
+
+      {/* Thẻ thông tin nguyện vọng đăng ký thuê trực tuyến / lý do từ chối / đồng ý dữ liệu cá nhân */}
+      {(tenant.desired_apartment_code || tenant.application_note || tenant.rejection_reason || tenant.privacy_consent_at) ? (
+        <Card className="p-4 bg-slate-50/70 border-slate-200/80">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+            <div className="space-y-1">
+              {tenant.desired_apartment_code ? (
+                <p className="text-slate-700">
+                  <span className="font-semibold text-slate-900">Nguyện vọng đăng ký thuê:</span>{' '}
+                  Căn <strong>{tenant.desired_apartment_code}</strong>
+                  {tenant.desired_building_name ? ` — ${tenant.desired_building_name}` : ''}
+                </p>
+              ) : null}
+              {tenant.application_note ? (
+                <p className="text-slate-600">
+                  <span className="font-semibold text-slate-800">Ghi chú từ cư dân:</span> {tenant.application_note}
+                </p>
+              ) : null}
+              {tenant.status === 'REJECTED' && tenant.rejection_reason ? (
+                <p className="text-rose-700 font-medium">
+                  <span className="font-semibold">Lý do từ chối gần nhất:</span> {tenant.rejection_reason}
+                </p>
+              ) : null}
+            </div>
+            {tenant.privacy_consent_at ? (
+              <Badge variant="emerald" icon={ShieldCheck}>
+                Đã đồng ý xử lý DLCN ({formatDate(tenant.privacy_consent_at)})
+              </Badge>
+            ) : (
+              <Badge variant="slate">Chưa ghi nhận đồng ý DLCN trực tuyến</Badge>
+            )}
+          </div>
+        </Card>
+      ) : null}
 
       {/* Tabs điều hướng */}
       <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
@@ -666,7 +736,11 @@ export function TenantDetailPage() {
               title="Ảnh định danh CCCD / Hộ chiếu"
               subtitle="Lưu trữ bảo mật và ghi nhật ký truy cập (PRD 17.1)"
               action={
-                latestFrontImg && latestBackImg ? (
+                idImagesMeta.maskedForOwner ? (
+                  <Badge variant="indigo" icon={ShieldCheck}>
+                    {idImagesMeta.hasIdImages ? 'Đã lưu bảo mật' : 'Ẩn theo quyền CĐT'}
+                  </Badge>
+                ) : latestFrontImg && latestBackImg ? (
                   <Badge variant="emerald" icon={ShieldCheck}>
                     Đủ 2 mặt
                   </Badge>
@@ -676,7 +750,19 @@ export function TenantDetailPage() {
               }
             />
 
-            {!tenant.id_number ? (
+            {idImagesMeta.maskedForOwner ? (
+              <div className="p-4 rounded-xl bg-indigo-50/70 border border-indigo-200/80 text-xs text-indigo-900 space-y-1.5 leading-relaxed">
+                <p className="font-semibold flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+                  Bảo mật giấy tờ tùy thân gốc (PRD Mục 13.5)
+                </p>
+                <p className="text-indigo-800">
+                  {idImagesMeta.hasIdImages
+                    ? 'Hồ sơ này đã có tệp ảnh CCCD/Hộ chiếu được lưu trữ mã hóa. Theo quy định phân quyền, chỉ Ban Quản Lý tòa nhà và Quản trị hệ thống mới có quyền xem ảnh gốc.'
+                    : 'Theo quy định phân quyền, ảnh chụp CCCD/Hộ chiếu gốc chỉ hiển thị với Ban Quản Lý tòa nhà và Quản trị hệ thống.'}
+                </p>
+              </div>
+            ) : !tenant.id_number ? (
               <div className="mb-4 p-3 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-xs text-amber-800">
                 <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <span>
@@ -685,6 +771,7 @@ export function TenantDetailPage() {
               </div>
             ) : null}
 
+            {!idImagesMeta.maskedForOwner ? (
             <div className="space-y-5">
               {/* Mặt trước */}
               <div className="space-y-2">
@@ -793,7 +880,33 @@ export function TenantDetailPage() {
                   />
                 ) : null}
               </div>
+
+              {otherIdImgs.length > 0 ? (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <span className="text-xs font-semibold text-slate-700">
+                    3. Tệp giấy tờ đính kèm khác ({otherIdImgs.length})
+                  </span>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {otherIdImgs.map((img, idx) => {
+                      const src = `/api/v1/attachments/${img.attachment_id}/view`;
+                      return (
+                        <div
+                          key={img.attachment_id || idx}
+                          onClick={() => {
+                            setPreviewTitle(`Giấy tờ #${idx + 1} — ${tenant.full_name}`);
+                            setPreviewSrc(src);
+                          }}
+                          className="h-28 rounded-xl border border-slate-200 overflow-hidden bg-slate-50 cursor-pointer hover:border-primary-400 transition-colors"
+                        >
+                          <AuthImage src={src} alt={`Giấy tờ #${idx + 1}`} className="w-full h-full object-cover" />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
             </div>
+            ) : null}
           </Card>
         </div>
       ) : null}
@@ -880,22 +993,57 @@ export function TenantDetailPage() {
       </Modal>
 
       {/* Xác nhận duyệt / từ chối hồ sơ cư dân PENDING */}
-      <ConfirmDialog
-        open={approvalDialog.open}
-        onClose={() => setApprovalDialog({ open: false, action: 'approve' })}
-        onConfirm={handleConfirmApproval}
-        loading={processingApproval}
-        variant={approvalDialog.action === 'approve' ? 'success' : 'danger'}
-        title={
-          approvalDialog.action === 'approve' ? 'Phê duyệt hồ sơ cư dân' : 'Từ chối hồ sơ cư dân'
-        }
-        confirmLabel={approvalDialog.action === 'approve' ? 'Xác nhận duyệt' : 'Từ chối hồ sơ'}
-        message={
-          approvalDialog.action === 'approve'
-            ? `Xác nhận phê duyệt hồ sơ định danh của cư dân "${tenant.full_name}"? Cư dân cần có số CCCD/Hộ chiếu hợp lệ để được duyệt sang trạng thái APPROVED.`
-            : `Bạn có chắc chắn muốn từ chối hồ sơ của cư dân "${tenant.full_name}"?`
-        }
-      />
+      {approvalDialog.action === 'approve' ? (
+        <ConfirmDialog
+          open={approvalDialog.open}
+          onClose={() => setApprovalDialog({ open: false, action: 'approve', reason: '', error: '' })}
+          onConfirm={handleConfirmApproval}
+          loading={processingApproval}
+          variant="success"
+          title="Phê duyệt hồ sơ cư dân"
+          confirmLabel="Xác nhận duyệt"
+          message={`Xác nhận phê duyệt hồ sơ định danh của cư dân "${tenant.full_name}"? Cư dân cần có số CCCD/Hộ chiếu hợp lệ để được duyệt sang trạng thái APPROVED.`}
+        />
+      ) : (
+        <Modal
+          open={approvalDialog.open}
+          onClose={() =>
+            !processingApproval && setApprovalDialog({ open: false, action: 'approve', reason: '', error: '' })
+          }
+          title="Từ chối hồ sơ cư dân"
+          subtitle={`Nhập lý do từ chối để thông báo cho "${tenant.full_name}" cập nhật lại hồ sơ trên Cổng cư dân`}
+          size="md"
+          footer={
+            <>
+              <Button
+                variant="outline"
+                disabled={processingApproval}
+                onClick={() => setApprovalDialog({ open: false, action: 'approve', reason: '', error: '' })}
+              >
+                Hủy
+              </Button>
+              <Button variant="danger" loading={processingApproval} onClick={handleConfirmApproval}>
+                Xác nhận từ chối
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-3">
+            <Input
+              multiline
+              rows={3}
+              required
+              label="Lý do từ chối / Yêu cầu bổ sung"
+              placeholder="Ví dụ: Ảnh mặt sau CCCD bị lóa sáng, số CCCD chưa khớp với ảnh chụp..."
+              value={approvalDialog.reason}
+              error={approvalDialog.error}
+              onChange={(e) =>
+                setApprovalDialog((prev) => ({ ...prev, reason: e.target.value, error: '' }))
+              }
+            />
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

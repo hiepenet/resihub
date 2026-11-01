@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   DoorOpen,
@@ -16,6 +16,7 @@ import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
@@ -23,7 +24,29 @@ import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
+import {
+  addDaysStr,
+  diffDaysStr,
+  extractApartmentBusyIntervals,
+  findFirstAvailableStartDate,
+  findOverlappingBusyIntervals,
+  formatBusyOverlapError,
+  getDateOrderError,
+  minDateStr,
+  toDateOnlyStr,
+} from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+
+function computeSuggestedHoldUntil(startStr, busyIntervals = []) {
+  if (!startStr) return '';
+  const defaultUntil = addDaysStr(startStr, 5);
+  const nextBusy = (busyIntervals || []).find((iv) => iv?.from && iv.from > startStr);
+  if (!nextBusy) return defaultUntil;
+  const maxBeforeBusy = addDaysStr(nextBusy.from, -1);
+  const minValidUntil = addDaysStr(startStr, 1);
+  if (maxBeforeBusy < minValidUntil) return minValidUntil;
+  return minDateStr(defaultUntil, maxBeforeBusy);
+}
 
 export function FloorPlanView({ buildingId, embedded = false }) {
   const navigate = useNavigate();
@@ -176,9 +199,89 @@ export function FloorPlanView({ buildingId, embedded = false }) {
     }
   };
 
+  const todayStr = toDateOnlyStr(new Date());
+
+  const resBusyIntervals = useMemo(
+    () => extractApartmentBusyIntervals(aptDetail || {}, { todayStr }),
+    [aptDetail, todayStr]
+  );
+
+  const earliestResStart = useMemo(() => {
+    const baseDate =
+      selectedApt?.status === 'MAINTENANCE' ? addDaysStr(todayStr, 1) : todayStr;
+    return findFirstAvailableStartDate(baseDate, resBusyIntervals, { minSpanDays: 2 });
+  }, [selectedApt?.status, todayStr, resBusyIntervals]);
+
+  // Nếu người dùng mở modal giữ chỗ khi chi tiết lịch căn hộ vừa tải xong, tự đẩy qua khoảng bận
+  useEffect(() => {
+    if (!resModalOpen || !earliestResStart) return;
+    setResForm((prev) => {
+      const conflicts = findOverlappingBusyIntervals(
+        prev.hold_from,
+        prev.hold_until,
+        resBusyIntervals
+      );
+      if (prev.hold_from && prev.hold_from >= earliestResStart && conflicts.length === 0) {
+        return prev;
+      }
+      return {
+        ...prev,
+        hold_from: earliestResStart,
+        hold_until: computeSuggestedHoldUntil(earliestResStart, resBusyIntervals),
+      };
+    });
+  }, [resModalOpen, earliestResStart, resBusyIntervals]);
+
+  const resHoldFromError = (() => {
+    if (!resForm.hold_from) return '';
+    if (resForm.hold_from < todayStr) {
+      return 'Ngày bắt đầu giữ chỗ không được nằm trong quá khứ.';
+    }
+    if (selectedApt?.status === 'MAINTENANCE' && resForm.hold_from <= todayStr) {
+      return 'Căn hộ đang bảo trì, vui lòng chọn ngày giữ chỗ sau hôm nay.';
+    }
+    const hits = findOverlappingBusyIntervals(
+      resForm.hold_from,
+      resForm.hold_from,
+      resBusyIntervals
+    );
+    if (hits.length > 0) {
+      return formatBusyOverlapError(hits, 'Ngày bắt đầu giữ chỗ');
+    }
+    return '';
+  })();
+
+  const resHoldUntilError = (() => {
+    const orderErr = getDateOrderError(resForm.hold_from, resForm.hold_until, {
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu giữ chỗ',
+      endLabel: 'Ngày kết thúc giữ chỗ',
+    });
+    if (orderErr) return orderErr;
+    const span = diffDaysStr(resForm.hold_from, resForm.hold_until);
+    if (span !== null && span > 30) {
+      return 'Thời hạn giữ chỗ tối đa không quá 30 ngày theo quy định (FR-067).';
+    }
+    if (!resHoldFromError && resForm.hold_from && resForm.hold_until) {
+      const hits = findOverlappingBusyIntervals(
+        resForm.hold_from,
+        resForm.hold_until,
+        resBusyIntervals
+      );
+      if (hits.length > 0) {
+        return formatBusyOverlapError(hits, 'Khoảng giữ chỗ');
+      }
+    }
+    return '';
+  })();
+
   const handleCreateReservation = async (e) => {
     e.preventDefault();
     if (!selectedApt) return;
+    if (resHoldFromError || resHoldUntilError) {
+      toast.warning(resHoldFromError || resHoldUntilError);
+      return;
+    }
     setSubmitting(true);
     try {
       await buildingsService.createReservation({
@@ -358,7 +461,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                   </div>
                 </div>
 
-                <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2.5">
+                <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6 gap-2.5">
                   {apts.length === 0 ? (
                     <p className="col-span-full text-xs text-slate-400 py-2">
                       Không có căn hộ khớp bộ lọc ở tầng này.
@@ -377,11 +480,11 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                             <span className="text-xs font-bold tracking-tight">{apt.code}</span>
                             <span className={`w-2 h-2 rounded-full shrink-0 ${st.dot}`} />
                           </div>
-                          <p className="text-[11px] opacity-80 mt-1 truncate">
+                          <p className="text-[11px] opacity-80 mt-1 break-words">
                             {apt.type || `${apt.bedrooms || 1}PN`} · {apt.area_m2 || 0}m²
                             {apt.zone_code ? ` · ${apt.zone_code}` : ''}
                           </p>
-                          <p className="text-[11px] font-semibold mt-0.5 truncate">
+                          <p className="text-[11px] font-semibold mt-0.5 tabular-nums break-words">
                             {formatMoney(apt.base_rent)}
                           </p>
                         </button>
@@ -414,19 +517,27 @@ export function FloorPlanView({ buildingId, embedded = false }) {
           ) : null
         }
       >
-        {selectedApt ? (
+        {selectedApt ? (() => {
+          const drawerApt = aptDetail || selectedApt;
+          const amenityKeys =
+            drawerApt.amenities && typeof drawerApt.amenities === 'object'
+              ? Array.isArray(drawerApt.amenities)
+                ? drawerApt.amenities
+                : Object.keys(drawerApt.amenities).filter((k) => drawerApt.amenities[k])
+              : [];
+          return (
           <div className="space-y-5">
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+            <div className="flex items-center justify-between gap-2 p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
               <div>
                 <p className="text-xs text-slate-500">Trạng thái hiện tại</p>
                 <div className="mt-1">
-                  <StatusBadge status={selectedApt.status} domain="apartment" />
+                  <StatusBadge status={drawerApt.status} domain="apartment" />
                 </div>
               </div>
               <div className="text-right">
                 <p className="text-xs text-slate-500">Giá thuê niêm yết</p>
-                <p className="text-base font-bold text-primary-600 mt-0.5">
-                  {formatMoney(selectedApt.base_rent)}/tháng
+                <p className="text-base font-bold text-primary-600 mt-0.5 tabular-nums">
+                  {formatMoney(drawerApt.base_rent)}/tháng
                 </p>
               </div>
             </div>
@@ -434,27 +545,47 @@ export function FloorPlanView({ buildingId, embedded = false }) {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
               <div className="p-3 rounded-xl border border-slate-200">
                 <p className="text-[11px] text-slate-400">Phân khu</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5 truncate">
-                  {selectedApt.zone_code || '—'}
+                <p className="text-sm font-semibold text-slate-800 mt-0.5 break-words">
+                  {drawerApt.zone_code || '—'}
+                  {drawerApt.zone_name ? ` (${drawerApt.zone_name})` : ''}
                 </p>
               </div>
               <div className="p-3 rounded-xl border border-slate-200">
                 <p className="text-[11px] text-slate-400">Loại căn</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{selectedApt.type || '1PN'}</p>
+                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.type || '1PN'}</p>
               </div>
               <div className="p-3 rounded-xl border border-slate-200">
                 <p className="text-[11px] text-slate-400">Diện tích</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{selectedApt.area_m2 || 0} m²</p>
+                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.area_m2 || 0} m²</p>
               </div>
               <div className="p-3 rounded-xl border border-slate-200">
                 <p className="text-[11px] text-slate-400">Phòng ngủ</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{selectedApt.bedrooms || 1} PN</p>
+                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.bedrooms || 1} PN</p>
               </div>
             </div>
 
+            {amenityKeys.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold text-slate-700">Nội thất &amp; tiện nghi</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {amenityKeys.map((k) => (
+                    <Badge key={k} variant="sky">
+                      {k}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {drawerApt.note ? (
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 text-xs text-slate-600 whitespace-pre-line">
+                <strong className="text-slate-700">Ghi chú căn hộ:</strong> {drawerApt.note}
+              </div>
+            ) : null}
+
             {/* Active Contract & Reservation Summary if loaded */}
             {detailLoading ? (
-              <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng & giữ chỗ...</p>
+              <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng &amp; giữ chỗ...</p>
             ) : (
               <>
                 {aptDetail?.contracts?.length > 0 ? (
@@ -464,12 +595,15 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                       <div
                         key={c.id}
                         onClick={() => navigate(`/admin/contracts/${c.id}`)}
-                        className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between"
+                        className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between gap-2"
                       >
-                        <div>
-                          <p className="text-xs font-semibold text-slate-800">{c.tenant_name || 'Cư dân'}</p>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-slate-800 break-words">
+                            {c.tenant_name || 'Cư dân'}
+                            {c.tenant_phone ? <span className="font-mono text-slate-500"> ({c.tenant_phone})</span> : null}
+                          </p>
                           <p className="text-[11px] text-slate-500">
-                            {formatDate(c.start_date)} → {formatDate(c.end_date)}
+                            {formatDate(c.start_date)} → {formatDate(c.end_date)} · {formatMoney(c.rent_amount)}/tháng
                           </p>
                         </div>
                         <StatusBadge status={c.status} domain="contract" />
@@ -518,36 +652,14 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                     variant="warning"
                     icon={BookmarkPlus}
                     onClick={() => {
-                      const baseStart = new Date();
-                      const heldEnds = (aptDetail?.reservations || [])
-                        .filter((r) => r.status === 'HELD' && r.hold_until)
-                        .map((r) => String(r.hold_until).slice(0, 10))
-                        .sort();
-                      const activeContractEnds = (aptDetail?.contracts || [])
-                        .filter((c) => ['ACTIVE', 'RENEWAL_PENDING'].includes(c.status) && c.end_date)
-                        .map((c) => String(c.end_date).slice(0, 10))
-                        .sort();
-
-                      let startStr = baseStart.toISOString().slice(0, 10);
-                      if (heldEnds.length > 0) {
-                        const afterHeld = new Date(`${heldEnds[heldEnds.length - 1]}T00:00:00Z`);
-                        afterHeld.setUTCDate(afterHeld.getUTCDate() + 1);
-                        const candidate = afterHeld.toISOString().slice(0, 10);
-                        if (candidate > startStr) startStr = candidate;
-                      }
-                      if (activeContractEnds.length > 0) {
-                        const afterContract = activeContractEnds[activeContractEnds.length - 1];
-                        if (afterContract > startStr) startStr = afterContract;
-                      }
-
-                      const untilDate = new Date(`${startStr}T00:00:00Z`);
-                      untilDate.setUTCDate(untilDate.getUTCDate() + 7);
+                      const startStr = earliestResStart || todayStr;
+                      const untilStr = computeSuggestedHoldUntil(startStr, resBusyIntervals);
                       setResForm({
                         prospect_name: '',
                         phone: '',
                         hold_amount: 2000000,
                         hold_from: startStr,
-                        hold_until: untilDate.toISOString().slice(0, 10),
+                        hold_until: untilStr,
                         note: '',
                       });
                       setResModalOpen(true);
@@ -593,7 +705,8 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               </div>
             </div>
           </div>
-        ) : null}
+          );
+        })() : null}
       </Modal>
 
       {/* Add Floor Modal */}
@@ -694,11 +807,10 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               onChange={(e) => setAptForm({ ...aptForm, area_m2: e.target.value })}
             />
           </div>
-          <Input
+          <MoneyInput
             label="Giá thuê niêm yết (VND/tháng)"
-            type="number"
-            min="0"
             required
+            placeholder="VD: 8.500.000"
             value={aptForm.base_rent}
             onChange={(e) => setAptForm({ ...aptForm, base_rent: e.target.value })}
           />
@@ -735,20 +847,27 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               value={resForm.phone}
               onChange={(e) => setResForm({ ...resForm, phone: e.target.value })}
             />
-            <Input
+            <MoneyInput
               label="Tiền cọc giữ chỗ (VND)"
-              type="number"
-              min="0"
               required
+              placeholder="VD: 2.000.000"
               value={resForm.hold_amount}
               onChange={(e) => setResForm({ ...resForm, hold_amount: e.target.value })}
             />
           </div>
+          {earliestResStart && earliestResStart > todayStr ? (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+              Căn hộ đang có lịch thuê/giữ chỗ nên hệ thống đã tự gợi ý ngày trống gần nhất từ{' '}
+              <strong>{formatDate(earliestResStart)}</strong>.
+            </p>
+          ) : null}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <Input
               label="Giữ chỗ từ ngày"
               type="date"
               required
+              min={earliestResStart || todayStr}
+              error={resHoldFromError}
               value={resForm.hold_from}
               onChange={(e) => setResForm({ ...resForm, hold_from: e.target.value })}
             />
@@ -756,6 +875,9 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               label="Đến hết ngày (tối đa 30 ngày)"
               type="date"
               required
+              min={addDaysStr(resForm.hold_from || todayStr, 1)}
+              max={resForm.hold_from ? addDaysStr(resForm.hold_from, 30) : undefined}
+              error={resHoldUntilError}
               value={resForm.hold_until}
               onChange={(e) => setResForm({ ...resForm, hold_until: e.target.value })}
             />
@@ -771,7 +893,11 @@ export function FloorPlanView({ buildingId, embedded = false }) {
             <Button variant="outline" onClick={() => setResModalOpen(false)}>
               Hủy
             </Button>
-            <Button type="submit" loading={submitting}>
+            <Button
+              type="submit"
+              loading={submitting}
+              disabled={Boolean(resHoldFromError || resHoldUntilError)}
+            >
               Xác nhận giữ chỗ
             </Button>
           </div>

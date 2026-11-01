@@ -149,8 +149,9 @@ export function DashboardPage() {
         <StatsCard
           title="Doanh thu tháng này"
           value={formatCompactMoney(kpis.monthly_revenue || 0)}
+          valueTitle={formatMoney(kpis.monthly_revenue || 0)}
           trend={kpis.revenue_growth_pct}
-          subtext={`Phát hành: ${formatCompactMoney(kpis.monthly_billed || 0)}`}
+          subtext={`Thực thu: ${formatMoney(kpis.monthly_revenue || 0)} · Phát hành: ${formatMoney(kpis.monthly_billed || 0)}`}
           icon={TrendingUp}
           color="emerald"
           onClick={() => navigate('/admin/invoices')}
@@ -158,7 +159,8 @@ export function DashboardPage() {
         <StatsCard
           title="Công nợ chưa thu"
           value={formatCompactMoney(kpis.unpaid_debt || 0)}
-          subtext="Tổng dư nợ hóa đơn & sau trả phòng"
+          valueTitle={formatMoney(kpis.unpaid_debt || 0)}
+          subtext={`Tổng dư nợ: ${formatMoney(kpis.unpaid_debt || 0)}`}
           icon={AlertCircle}
           color="rose"
           onClick={() => navigate('/admin/payments')}
@@ -262,11 +264,14 @@ export function DashboardPage() {
                   className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50 rounded-lg px-2 -mx-2 cursor-pointer transition-colors"
                 >
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs font-bold text-primary-700 bg-primary-50 px-2 py-0.5 rounded-md">
-                        {c.building_code} · {c.apartment_code}
+                        {c.building_name || c.building_code} · {c.apartment_code}
                       </span>
-                      <span className="text-sm font-medium text-slate-800 truncate">{c.tenant_name}</span>
+                      <span className="text-sm font-medium text-slate-800 break-words">{c.tenant_name}</span>
+                      {c.tenant_phone ? (
+                        <span className="text-xs font-mono text-slate-500">({c.tenant_phone})</span>
+                      ) : null}
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5">
                       Hết hạn: {formatDate(c.end_date)} · Giá thuê: {formatMoney(c.rent_amount)}
@@ -312,15 +317,17 @@ export function DashboardPage() {
                   className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50 rounded-lg px-2 -mx-2 cursor-pointer transition-colors"
                 >
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-[11px] font-mono font-semibold text-slate-500">
                         #{sr.tracking_code}
                       </span>
                       <span className="text-xs font-semibold text-sky-700">
-                        {sr.building_code} · {sr.apartment_code}
+                        {sr.building_name || sr.building_code} · {sr.apartment_code}
                       </span>
                     </div>
-                    <p className="text-sm font-medium text-slate-800 truncate mt-0.5">{sr.title}</p>
+                    <p className="text-sm font-medium text-slate-800 line-clamp-2 break-words mt-0.5" title={sr.title}>
+                      {sr.title}
+                    </p>
                     <p className="text-[11px] text-slate-400">{formatRelativeTime(sr.created_at)}</p>
                   </div>
                   <div className="flex flex-col items-end gap-1 shrink-0">

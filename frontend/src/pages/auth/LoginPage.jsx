@@ -319,11 +319,12 @@ export function LoginPage() {
             <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
               Tài khoản Demo kiểm thử nhanh
             </p>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {DEMO_ACCOUNTS.map((acc) => (
                 <button
                   key={acc.email}
                   type="button"
+                  title={`${acc.label} (${acc.email})`}
                   onClick={() => {
                     setMode('email');
                     setEmail(acc.email);
@@ -331,8 +332,8 @@ export function LoginPage() {
                   }}
                   className="text-left px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary-300 hover:bg-primary-50/40 transition-colors"
                 >
-                  <p className="text-xs font-semibold text-slate-800 truncate">{acc.label}</p>
-                  <p className="text-[11px] text-slate-500 truncate">{acc.email}</p>
+                  <p className="text-xs font-semibold text-slate-800 leading-snug break-words">{acc.label}</p>
+                  <p className="text-[11px] text-slate-500 break-all leading-snug mt-0.5">{acc.email}</p>
                 </button>
               ))}
             </div>

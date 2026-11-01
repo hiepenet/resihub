@@ -50,7 +50,7 @@ export function Modal({
           </div>
           <div className="flex-1 overflow-y-auto p-6">{children}</div>
           {footer ? (
-            <div className="px-6 py-3.5 border-t border-slate-200 bg-slate-50/70 flex items-center justify-end gap-2.5">
+            <div className="px-6 py-3.5 border-t border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-end gap-2.5">
               {footer}
             </div>
           ) : null}
@@ -82,7 +82,7 @@ export function Modal({
         </div>
         <div className="p-6 overflow-y-auto flex-1">{children}</div>
         {footer ? (
-          <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50/80 flex items-center justify-end gap-2.5 shrink-0">
+          <div className="px-6 py-3.5 border-t border-slate-100 bg-slate-50/80 flex flex-wrap items-center justify-end gap-2.5 shrink-0">
             {footer}
           </div>
         ) : null}

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Mail, KeyRound, Lock, ArrowLeft, Home } from 'lucide-react';
+import { Mail, KeyRound, Lock, ArrowLeft, Home, Eye, EyeOff } from 'lucide-react';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { authService } from '../../services/auth.service';
@@ -15,6 +15,7 @@ export function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [devCode, setDevCode] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -106,11 +107,21 @@ export function ForgotPasswordPage() {
             />
             <Input
               label="Mật khẩu mới (tối thiểu 8 ký tự)"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               icon={Lock}
               required
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
+              rightElement={
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  className="text-slate-400 hover:text-slate-600 p-1"
+                  aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              }
             />
             <Button type="submit" size="lg" loading={loading} className="w-full">
               Cập nhật mật khẩu mới

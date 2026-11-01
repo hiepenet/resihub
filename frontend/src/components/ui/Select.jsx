@@ -115,14 +115,30 @@ export function Select({
     [normalizedOptions]
   );
 
+  const maxOptionLength = useMemo(
+    () =>
+      normalizedOptions.reduce(
+        (maxLen, o) => Math.max(maxLen, String(o.label || '').length, String(o.sublabel || '').length),
+        0
+      ),
+    [normalizedOptions]
+  );
+
   const updatePosition = useCallback(() => {
     if (!triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
     const placeAbove = spaceBelow < 260 && rect.top > 280;
+    const minSmartWidth = hasRichOptions
+      ? 360
+      : maxOptionLength > 45
+      ? 420
+      : maxOptionLength > 28
+      ? 320
+      : 250;
     const desiredWidth = Math.min(
       window.innerWidth - 16,
-      Math.max(rect.width, hasRichOptions ? 340 : 250)
+      Math.max(rect.width, minSmartWidth)
     );
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - desiredWidth - 8));
     setCoords({
@@ -131,7 +147,7 @@ export function Select({
       width: desiredWidth,
       placeAbove,
     });
-  }, [hasRichOptions]);
+  }, [hasRichOptions, maxOptionLength]);
 
   const openMenu = useCallback(() => {
     if (disabled) return;
@@ -230,8 +246,8 @@ export function Select({
 
   const sizeClasses =
     size === 'sm'
-      ? 'h-8 pl-2.5 pr-8 text-xs rounded-lg'
-      : 'h-9 pl-3 pr-8 text-sm rounded-lg';
+      ? 'min-h-[32px] py-1 pl-2.5 pr-8 text-xs rounded-lg'
+      : 'min-h-[36px] py-1.5 pl-3 pr-8 text-sm rounded-lg';
 
   const displayLabel = selectedOption
     ? selectedOption.label
@@ -282,7 +298,8 @@ export function Select({
           ) : null}
 
           <span
-            className={`flex-1 truncate ${
+            title={!isMutedPlaceholder && displayLabel ? String(displayLabel) : undefined}
+            className={`flex-1 min-w-0 break-words leading-snug ${
               isMutedPlaceholder ? 'text-slate-500' : 'text-slate-800 font-medium'
             }`}
           >
@@ -388,8 +405,8 @@ export function Select({
                             />
                           ) : null}
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="truncate">{opt.label}</span>
+                            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                              <span className="whitespace-normal break-words leading-snug">{opt.label}</span>
                               {opt.badge ? (
                                 <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-mono font-semibold text-slate-600 shrink-0">
                                   {opt.badge}
@@ -397,7 +414,7 @@ export function Select({
                               ) : null}
                             </div>
                             {opt.sublabel ? (
-                              <p className="text-[11px] text-slate-500 font-normal truncate mt-0.5">
+                              <p className="text-[11px] text-slate-500 font-normal whitespace-normal break-words leading-snug mt-0.5">
                                 {opt.sublabel}
                               </p>
                             ) : null}

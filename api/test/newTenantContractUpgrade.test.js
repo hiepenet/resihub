@@ -195,3 +195,239 @@ test('Integration — Tạo hợp đồng trực tiếp cho cư dân mới (inli
     await adminPool.end();
   }
 });
+
+test('Task 5 — Occupant lifecycle in contracts: PENDING without CCCD, upgrade to APPROVED, 409 duplicate CCCD, inline occupants[] & RESIDENT PII masking', async (t) => {
+  let healthOk = false;
+  try {
+    const h = await fetch(`${API_BASE}/api/health`);
+    healthOk = h.ok;
+  } catch {
+    healthOk = false;
+  }
+  if (!healthOk) {
+    t.skip('API server not reachable');
+    return;
+  }
+
+  const adminPool = new pg.Pool({ connectionString: ADMIN_DB_URL });
+  const primaryPhone = '0961050001';
+  const primaryCccd = '001205050001';
+  const occNoIdPhone = '0961050002';
+  const occNoIdLaterCccd = '001205050002';
+  const occWithIdPhone = '0961050003';
+  const occWithIdCccd = '001205050003';
+  const conflictPhone = '0961050004';
+
+  const allPhones = [primaryPhone, occNoIdPhone, occWithIdPhone, conflictPhone];
+  const allCccds = [primaryCccd, occNoIdLaterCccd, occWithIdCccd];
+  const createdContractIds = [];
+
+  async function cleanup() {
+    for (const cId of createdContractIds) {
+      await adminPool.query('DELETE FROM contract_occupant WHERE contract_id = $1', [cId]);
+      await adminPool.query('DELETE FROM contract WHERE id = $1', [cId]);
+    }
+    const pRes = await adminPool.query(
+      'SELECT id FROM person WHERE phone = ANY($1::text[]) OR id_number = ANY($2::text[])',
+      [allPhones, allCccds]
+    );
+    for (const row of pRes.rows) {
+      await adminPool.query(
+        'DELETE FROM contract_occupant WHERE tenant_id IN (SELECT id FROM tenant WHERE person_id = $1)',
+        [row.id]
+      );
+      await adminPool.query(
+        'DELETE FROM contract WHERE primary_tenant_id IN (SELECT id FROM tenant WHERE person_id = $1)',
+        [row.id]
+      );
+      const uRes = await adminPool.query('SELECT id FROM app_user WHERE person_id = $1', [row.id]);
+      for (const u of uRes.rows) {
+        await adminPool.query('DELETE FROM user_role WHERE user_id = $1', [u.id]);
+        const hasAudit = await adminPool.query('SELECT 1 FROM audit_log WHERE actor_id = $1 LIMIT 1', [u.id]);
+        if (hasAudit.rows.length === 0) {
+          await adminPool.query('DELETE FROM app_user WHERE id = $1', [u.id]);
+        } else {
+          await adminPool.query('UPDATE app_user SET person_id = NULL, auth_uid = $2 WHERE id = $1', [
+            u.id,
+            `archived_${u.id}`,
+          ]);
+        }
+      }
+      await adminPool.query('DELETE FROM tenant WHERE person_id = $1', [row.id]);
+      await adminPool.query('DELETE FROM person WHERE id = $1', [row.id]);
+    }
+  }
+
+  t.after(async () => {
+    await cleanup();
+    await adminPool.end();
+  });
+
+  await cleanup();
+
+  const mgr = await login('manager.vop.a@resihub.vn', 'Demo@123456');
+  const ownerVop = await login('owner.vop@resihub.vn', 'Demo@123456');
+
+  const aptsRes = await apiFetch('/api/v1/apartments?status=AVAILABLE&limit=20', mgr.token);
+  assert.equal(aptsRes.status, 200);
+  const apt1 = aptsRes.body.data[0];
+  const apt2 = aptsRes.body.data[1] || apt1;
+  assert.ok(apt1, 'Need at least 1 AVAILABLE apartment');
+
+  // 1. Create contract WITH inline occupants[] (one WITHOUT id_number -> PENDING, one WITH id_number -> APPROVED)
+  const createContractRes = await apiFetch('/api/v1/contracts', mgr.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      apartment_id: apt1.id,
+      building_id: apt1.building_id,
+      new_tenant: {
+        full_name: 'Khách Chính Task 5',
+        phone: primaryPhone,
+        id_number: primaryCccd,
+      },
+      occupants: [
+        {
+          full_name: 'Thành Viên Chưa Có CCCD',
+          phone: occNoIdPhone,
+          relationship: 'spouse',
+        },
+        {
+          full_name: 'Thành Viên Có Đủ CCCD',
+          phone: occWithIdPhone,
+          relationship: 'roommate',
+          id_number: occWithIdCccd,
+        },
+      ],
+      start_date: '2029-01-01',
+      end_date: '2029-12-31',
+      rent_amount: Number(apt1.base_rent || 8000000),
+      deposit_amount: Number(apt1.base_rent || 8000000),
+    }),
+  });
+  assert.equal(createContractRes.status, 201, `Create contract failed: ${JSON.stringify(createContractRes.body)}`);
+  const contractId = createContractRes.body.data.id;
+  createdContractIds.push(contractId);
+
+  // Verify both inline occupants were created & attached with proper statuses (PENDING vs APPROVED)
+  const occListMgr = await apiFetch(`/api/v1/contracts/${contractId}/occupants`, mgr.token);
+  assert.equal(occListMgr.status, 200);
+  assert.equal(occListMgr.body.data.length, 2, 'POST /contracts with occupants[] must attach 2 occupants');
+
+  const occNoIdRow = occListMgr.body.data.find((o) => o.phone === occNoIdPhone);
+  const occWithIdRow = occListMgr.body.data.find((o) => o.phone === occWithIdPhone);
+  assert.ok(occNoIdRow, 'Occupant without CCCD must be attached');
+  assert.ok(occWithIdRow, 'Occupant with CCCD must be attached');
+
+  const dbStatuses1 = await adminPool.query(
+    `SELECT p.phone, t.status
+     FROM tenant t JOIN person p ON p.id = t.person_id
+     WHERE t.id = ANY($1::uuid[])`,
+    [[occNoIdRow.tenant_id, occWithIdRow.tenant_id]]
+  );
+  const statusMap1 = Object.fromEntries(dbStatuses1.rows.map((r) => [r.phone, r.status]));
+  assert.equal(statusMap1[occNoIdPhone], 'PENDING', 'Occupant without id_number must have status = PENDING');
+  assert.equal(statusMap1[occWithIdPhone], 'APPROVED', 'Occupant with id_number must have status = APPROVED');
+
+  // 2. Adding an occupant via POST /:id/occupants with duplicate id_number of another person -> 409 DUPLICATE_ID_NUMBER (not 500)
+  const dupIdAdd = await apiFetch(`/api/v1/contracts/${contractId}/occupants`, mgr.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      full_name: 'Người Khác Trùng CCCD',
+      phone: conflictPhone,
+      relationship: 'friend',
+      id_number: primaryCccd,
+    }),
+  });
+  assert.equal(dupIdAdd.status, 409, `Expected 409 on duplicate CCCD, got ${dupIdAdd.status}: ${JSON.stringify(dupIdAdd.body)}`);
+  assert.equal(dupIdAdd.body.code, 'DUPLICATE_ID_NUMBER');
+
+  // 3. Adding an occupant via POST /:id/occupants WITHOUT id_number on a second contract -> status = PENDING,
+  //    and re-linking occNoIdPhone WITH id_number upgrades status from PENDING -> APPROVED
+  const createContract2 = await apiFetch('/api/v1/contracts', mgr.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      apartment_id: apt2.id,
+      building_id: apt2.building_id,
+      primary_tenant_id: createContractRes.body.data.primary_tenant_id,
+      start_date: '2030-01-01',
+      end_date: '2030-12-31',
+      rent_amount: Number(apt2.base_rent || 8000000),
+    }),
+  });
+  assert.equal(createContract2.status, 201);
+  const contractId2 = createContract2.body.data.id;
+  createdContractIds.push(contractId2);
+
+  // Add brand-new occupant without id_number via POST /:id/occupants
+  const addNewNoId = await apiFetch(`/api/v1/contracts/${contractId2}/occupants`, mgr.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      full_name: 'Bạn Mới Chưa Đem CCCD',
+      phone: conflictPhone,
+      relationship: 'friend',
+    }),
+  });
+  assert.equal(addNewNoId.status, 201);
+  const dbNewNoId = await adminPool.query('SELECT status FROM tenant WHERE id = $1', [addNewNoId.body.data.tenant_id]);
+  assert.equal(dbNewNoId.rows[0].status, 'PENDING', 'POST /:id/occupants without id_number must set status = PENDING');
+
+  // Re-use occNoIdPhone on contract2 while supplying occNoIdLaterCccd -> upgrades tenant status to APPROVED
+  const upgradeOcc = await apiFetch(`/api/v1/contracts/${contractId2}/occupants`, mgr.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      full_name: 'Thành Viên Chưa Có CCCD',
+      phone: occNoIdPhone,
+      relationship: 'spouse',
+      id_number: occNoIdLaterCccd,
+    }),
+  });
+  assert.equal(upgradeOcc.status, 201);
+  const dbUpgraded = await adminPool.query('SELECT status FROM tenant WHERE id = $1', [occNoIdRow.tenant_id]);
+  assert.equal(dbUpgraded.rows[0].status, 'APPROVED', 'Supplying id_number for PENDING occupant must upgrade status to APPROVED');
+
+  // 4. RESIDENT (and OWNER) calling GET /api/v1/contracts/:id/occupants:
+  //    - Primary resident sees masked id_number for other occupants
+  //    - Occupant resident sees FULL id_number for self, but MASKED id_number for roommate
+  //    - OWNER sees masked id_number for all occupants (PRD 13.5)
+  const otpReqPrimary = await apiFetch('/api/v1/auth/otp/request', null, {
+    method: 'POST',
+    body: JSON.stringify({ phone: primaryPhone }),
+  });
+  const otpVerPrimary = await apiFetch('/api/v1/auth/otp/verify', null, {
+    method: 'POST',
+    body: JSON.stringify({ phone: primaryPhone, otp: otpReqPrimary.body.devOtp }),
+  });
+  assert.equal(otpVerPrimary.status, 200);
+
+  const occListAsPrimary = await apiFetch(`/api/v1/contracts/${contractId}/occupants`, otpVerPrimary.body.accessToken);
+  assert.equal(occListAsPrimary.status, 200);
+  const roommateSeenByPrimary = occListAsPrimary.body.data.find((o) => o.phone === occWithIdPhone);
+  assert.ok(roommateSeenByPrimary);
+  assert.notEqual(roommateSeenByPrimary.id_number, occWithIdCccd, 'Primary resident must NOT see raw id_number of roommate');
+  assert.ok(roommateSeenByPrimary.id_number.endsWith('0003') && roommateSeenByPrimary.id_number.includes('*'));
+
+  const otpReqOcc = await apiFetch('/api/v1/auth/otp/request', null, {
+    method: 'POST',
+    body: JSON.stringify({ phone: occWithIdPhone }),
+  });
+  assert.equal(otpReqOcc.status, 200, 'Inline occupant must also get OTP RESIDENT account');
+  const otpVerOcc = await apiFetch('/api/v1/auth/otp/verify', null, {
+    method: 'POST',
+    body: JSON.stringify({ phone: occWithIdPhone, otp: otpReqOcc.body.devOtp }),
+  });
+  assert.equal(otpVerOcc.status, 200);
+
+  const occListAsOcc = await apiFetch(`/api/v1/contracts/${contractId}/occupants`, otpVerOcc.body.accessToken);
+  assert.equal(occListAsOcc.status, 200);
+  const selfRow = occListAsOcc.body.data.find((o) => o.phone === occWithIdPhone);
+  const otherOccRow = occListAsOcc.body.data.find((o) => o.phone === occNoIdPhone);
+  assert.equal(selfRow.id_number, occWithIdCccd, 'Occupant must see own full id_number');
+  assert.notEqual(otherOccRow.id_number, occNoIdLaterCccd, 'Occupant must NOT see raw id_number of another occupant');
+  assert.ok(otherOccRow.id_number.endsWith('0002') && otherOccRow.id_number.includes('*'));
+
+  const occListAsOwner = await apiFetch(`/api/v1/contracts/${contractId}/occupants`, ownerVop.token);
+  assert.equal(occListAsOwner.status, 200);
+  const occSeenByOwner = occListAsOwner.body.data.find((o) => o.phone === occWithIdPhone);
+  assert.notEqual(occSeenByOwner.id_number, occWithIdCccd, 'OWNER must NOT see raw occupant id_number');
+  assert.ok(occSeenByOwner.id_number.endsWith('0003') && occSeenByOwner.id_number.includes('*'));
+});

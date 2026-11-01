@@ -21,7 +21,7 @@ import { residentService } from '../../../services/resident.service';
 import { authService } from '../../../services/auth.service';
 import { useAuthStore } from '../../../stores/authStore';
 import { useToast } from '../../../hooks/useToast';
-import { toInputDate } from '../../../utils/format';
+import { toInputDate, formatDateTime } from '../../../utils/format';
 import {
   isValidPhone,
   normalizePhone,
@@ -36,6 +36,10 @@ export function ProfileTab({ overview, onRefreshOverview }) {
   const updateUser = useAuthStore((s) => s.updateUser);
 
   const person = overview?.user || authUser || {};
+  const idImages = Array.isArray(overview?.id_images) ? overview.id_images : [];
+  const frontIdImg = [...idImages].reverse().find((img) => img.side === 'front') || null;
+  const backIdImg = [...idImages].reverse().find((img) => img.side === 'back') || null;
+  const [uploadingSide, setUploadingSide] = useState('');
 
   const [profileForm, setProfileForm] = useState({
     full_name: '',
@@ -175,6 +179,20 @@ export function ProfileTab({ overview, onRefreshOverview }) {
 
   const avatarPreviewSrc = profileForm.avatar_base64 || person.avatar_url || null;
 
+  const handleUploadIdSide = async (side, b64) => {
+    if (!b64) return;
+    setUploadingSide(side);
+    try {
+      const res = await residentService.uploadIdImage({ side, image_base64: b64 });
+      toast.success(res?.message || `Đã cập nhật ảnh CCCD mặt ${side === 'front' ? 'trước' : 'sau'}.`);
+      await onRefreshOverview?.();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể tải lên ảnh CCCD.'));
+    } finally {
+      setUploadingSide('');
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
       {/* Left: Personal Profile Form */}
@@ -302,12 +320,73 @@ export function ProfileTab({ overview, onRefreshOverview }) {
               }
             />
 
-            <div className="pt-2 flex items-center justify-end">
+            <div className="pt-2 flex flex-wrap items-center justify-between gap-3">
+              {person.privacy_consent_at ? (
+                <p className="text-xs text-slate-500 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    Đã đồng thuận bảo vệ dữ liệu cá nhân lúc{' '}
+                    <strong className="text-slate-700">{formatDateTime(person.privacy_consent_at)}</strong>
+                    {person.privacy_policy_version ? ` (Phiên bản ${person.privacy_policy_version})` : ''}
+                  </span>
+                </p>
+              ) : <span />}
               <Button type="submit" icon={Save} loading={savingProfile}>
                 Lưu thay đổi hồ sơ
               </Button>
             </div>
           </form>
+
+          {/* CCCD / ID Images Section */}
+          <div className="mt-6 pt-6 border-t border-slate-100 space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Ảnh giấy tờ tùy thân (CCCD / Hộ chiếu)</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Hình ảnh CCCD 2 mặt phục vụ xác thực cư trú và lập hợp đồng thuê
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {[
+                { side: 'front', label: 'CCCD Mặt trước', img: frontIdImg },
+                { side: 'back', label: 'CCCD Mặt sau', img: backIdImg },
+              ].map(({ side, label, img }) => (
+                <div
+                  key={side}
+                  className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 space-y-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-800">{label}</span>
+                    <span className="text-[11px] text-slate-500">
+                      {uploadingSide === side
+                        ? 'Đang tải lên...'
+                        : img
+                        ? 'Đã lưu trữ'
+                        : 'Chưa có ảnh'}
+                    </span>
+                  </div>
+                  {img?.url ? (
+                    <div className="h-36 rounded-lg overflow-hidden border border-slate-200 bg-white flex items-center justify-center">
+                      <AuthImage
+                        src={img.url}
+                        alt={label}
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div className="h-36 rounded-lg border border-dashed border-slate-300 bg-white/70 flex items-center justify-center text-xs text-slate-400">
+                      Chưa tải lên {label.toLowerCase()}
+                    </div>
+                  )}
+                  <FileUpload
+                    label={img?.url ? `Cập nhật lại ${label.toLowerCase()}` : `Tải lên ${label.toLowerCase()}`}
+                    multiple={false}
+                    value=""
+                    onChange={(b64) => handleUploadIdSide(side, b64)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         </Card>
       </div>
 

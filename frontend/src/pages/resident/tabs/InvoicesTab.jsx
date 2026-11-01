@@ -21,6 +21,7 @@ import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Input } from '../../../components/ui/Input';
+import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { Tabs } from '../../../components/ui/Tabs';
@@ -32,7 +33,9 @@ import { residentService } from '../../../services/resident.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { usersService } from '../../../services/users.service';
 import { useToast } from '../../../hooks/useToast';
+import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
+import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const LINE_TYPE_META = {
@@ -75,12 +78,17 @@ const DEFAULT_CORPORATE_ACCOUNT = {
 function normalizePaymentAccount(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const bank = raw.bank || raw.bank_name || raw.bankName || '';
+  const bankCode = raw.bank_code || raw.bankCode || '';
+  const bankLogo = raw.bank_logo || raw.bankLogo || '';
   const accountNo = raw.account_no || raw.account_number || raw.accountNo || '';
-  const accountName = raw.account_name || raw.holder_name || raw.accountName || '';
+  const accountName =
+    raw.account_name || raw.account_holder || raw.holder_name || raw.accountName || '';
   const branch = raw.branch || '';
   if (!bank && !accountNo) return null;
   return {
     bank: bank || 'Ngân hàng đối tác',
+    bank_code: bankCode,
+    bank_logo: bankLogo,
     account_no: accountNo || '—',
     account_name: accountName || 'BAN QUAN LY RESIHUB',
     branch,
@@ -89,10 +97,22 @@ function normalizePaymentAccount(raw) {
 
 export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearActionParam }) {
   const toast = useToast();
+  const { banks } = useVietQrBanks();
   const contract = overview?.active_contract || overview?.contract || null;
 
   const [invoices, setInvoices] = useState([]);
   const [paymentAccount, setPaymentAccount] = useState(DEFAULT_CORPORATE_ACCOUNT);
+
+  const resolvedBankMeta = useMemo(
+    () =>
+      matchVietQrBank(banks, {
+        bank_name: paymentAccount?.bank,
+        bank_code: paymentAccount?.bank_code,
+      }),
+    [banks, paymentAccount?.bank, paymentAccount?.bank_code]
+  );
+  const displayBankLogo = paymentAccount?.bank_logo || resolvedBankMeta?.logo || '';
+  const displayBankCode = paymentAccount?.bank_code || resolvedBankMeta?.code || '';
   const [loading, setLoading] = useState(true);
   const [filterTab, setFilterTab] = useState('all');
   const [expandedId, setExpandedId] = useState(null);
@@ -134,6 +154,11 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
 
       // Resolve payment_account priority: Building lease_terms.payment_account -> Settings -> Overview -> Corporate default
       let resolvedAcc = null;
+      const targetBuildingId =
+        contract?.building_id ||
+        loadedInvoices[0]?.building_id ||
+        overview?.contract_history?.[0]?.building_id ||
+        null;
       if (bldgRes.status === 'fulfilled') {
         const bldgs = Array.isArray(bldgRes.value?.data)
           ? bldgRes.value.data
@@ -141,7 +166,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
           ? bldgRes.value
           : [];
         const matchedBldg =
-          bldgs.find((b) => b.id === contract?.building_id) || bldgs[0] || null;
+          (targetBuildingId && bldgs.find((b) => b.id === targetBuildingId)) || bldgs[0] || null;
         const bldgAcc =
           matchedBldg?.payment_account || matchedBldg?.lease_terms?.payment_account;
         resolvedAcc = normalizePaymentAccount(bldgAcc);
@@ -373,10 +398,20 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
             <div className="mt-4 space-y-2.5">
               <div>
                 <p className="text-[11px] text-slate-400 uppercase tracking-wider">Ngân hàng</p>
-                <p className="text-sm font-semibold text-white">
-                  {paymentAccount.bank}
-                  {paymentAccount.branch ? ` — ${paymentAccount.branch}` : ''}
-                </p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  {displayBankLogo ? (
+                    <img
+                      src={displayBankLogo}
+                      alt=""
+                      className="w-8 h-5 object-contain rounded bg-white p-0.5 shrink-0"
+                    />
+                  ) : null}
+                  <p className="text-sm font-semibold text-white">
+                    {paymentAccount.bank}
+                    {displayBankCode ? ` (${displayBankCode})` : ''}
+                    {paymentAccount.branch ? ` — ${paymentAccount.branch}` : ''}
+                  </p>
+                </div>
               </div>
 
               <div className="flex items-center justify-between gap-2 bg-white/10 rounded-xl px-3.5 py-2.5 border border-white/10">
@@ -409,10 +444,10 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
             </div>
           </div>
 
-          <div className="mt-3 pt-3 border-t border-white/10 flex items-center justify-between gap-2 text-xs">
+          <div className="mt-3 pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs">
             <div className="min-w-0">
               <span className="text-slate-400">Nội dung CK: </span>
-              <code className="font-mono text-amber-300 font-semibold">{transferSyntax}</code>
+              <code className="font-mono text-amber-300 font-semibold break-all">{transferSyntax}</code>
             </div>
             <button
               type="button"
@@ -471,6 +506,9 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                 const canPay = ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status);
                 const lines = Array.isArray(inv.lines) ? inv.lines : [];
                 const payments = Array.isArray(inv.payments) ? inv.payments : [];
+                const hasPendingPayment = payments.some(
+                  (p) => p.status === 'PENDING_CONFIRMATION' || p.status === 'PENDING'
+                );
 
                 return (
                   <div
@@ -497,14 +535,28 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                             #{inv.invoice_code}
                           </span>
                           <StatusBadge status={inv.status} domain="invoice" />
+                          {hasPendingPayment ? (
+                            <Badge variant="amber" dot>
+                              Đang chờ đối soát TT
+                            </Badge>
+                          ) : null}
                         </div>
                         <p className="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
+                          {inv.issue_date ? (
+                            <>
+                              <span>Phát hành: {formatDate(inv.issue_date)}</span>
+                              <span>•</span>
+                            </>
+                          ) : null}
                           <span className="inline-flex items-center gap-1">
                             <Calendar className="w-3.5 h-3.5 text-slate-400" />
                             Hạn TT: <strong className="text-slate-700">{formatDate(inv.due_date)}</strong>
                           </span>
                           <span>•</span>
-                          <span>Căn {inv.apartment_code}</span>
+                          <span>
+                            Căn {inv.apartment_code}
+                            {inv.building_name ? ` — ${inv.building_name}` : ''}
+                          </span>
                         </p>
                       </div>
 
@@ -514,12 +566,17 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                             {remaining > 0 ? 'Còn phải trả' : 'Tổng hóa đơn'}
                           </p>
                           <p
-                            className={`text-base font-bold ${
+                            className={`text-base font-bold tabular-nums ${
                               remaining > 0 ? 'text-rose-600' : 'text-emerald-600'
                             }`}
                           >
                             {formatMoney(remaining > 0 ? remaining : inv.total_amount)}
                           </p>
+                          {remaining > 0 && Number(inv.paid_amount || 0) > 0 ? (
+                            <p className="text-[11px] text-slate-500">
+                              Đã trả {formatMoney(inv.paid_amount)} / {formatMoney(inv.total_amount)}
+                            </p>
+                          ) : null}
                         </div>
 
                         <div
@@ -603,10 +660,16 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                             {/* Totals Footer */}
                             <div className="px-4 py-3 bg-slate-50/80 space-y-1 text-xs">
                               {Number(inv.adjustment_amount || 0) !== 0 ? (
-                                <div className="flex justify-between text-slate-600">
-                                  <span>Điều chỉnh / Giảm trừ:</span>
-                                  <span>{formatMoney(inv.adjustment_amount)}</span>
-                                </div>
+                                <>
+                                  <div className="flex justify-between text-slate-600">
+                                    <span>Tạm tính trước điều chỉnh:</span>
+                                    <span>{formatMoney(inv.subtotal_amount ?? (Number(inv.total_amount || 0) - Number(inv.adjustment_amount || 0)))}</span>
+                                  </div>
+                                  <div className="flex justify-between text-slate-600">
+                                    <span>Điều chỉnh / Giảm trừ:</span>
+                                    <span>{formatMoney(inv.adjustment_amount)}</span>
+                                  </div>
+                                </>
                               ) : null}
                               <div className="flex justify-between font-semibold text-slate-800">
                                 <span>Tổng cộng hóa đơn:</span>
@@ -628,6 +691,12 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                               </div>
                             </div>
                           </div>
+                          {inv.note ? (
+                            <div className="mt-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200/80 text-xs text-slate-700 whitespace-pre-line break-words">
+                              <span className="font-semibold text-slate-800">Ghi chú hóa đơn: </span>
+                              {inv.note}
+                            </div>
+                          ) : null}
                         </div>
 
                         {/* Payment History */}
@@ -645,12 +714,14 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                 const proofs = Array.isArray(p.proof_images)
                                   ? p.proof_images
                                   : [];
+                                const isRejected = p.status === 'REJECTED';
+                                const isConfirmed = p.status === 'CONFIRMED';
                                 return (
                                   <div
                                     key={p.id}
-                                    className="p-3.5 rounded-xl bg-white border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                                    className="p-3.5 rounded-xl bg-white border border-slate-200/80 flex flex-col sm:flex-row sm:items-start justify-between gap-3 text-xs"
                                   >
-                                    <div className="space-y-1">
+                                    <div className="space-y-1 min-w-0 flex-1">
                                       <div className="flex items-center gap-2 flex-wrap">
                                         <span className="font-mono font-semibold text-slate-800">
                                           {p.payment_code}
@@ -660,8 +731,13 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                           <Clock className="w-3 h-3 inline mr-1" />
                                           {formatDateTime(p.paid_at)}
                                         </span>
+                                        {p.confirmed_at ? (
+                                          <span className="text-emerald-700">
+                                            • Đối soát {formatDateTime(p.confirmed_at)}
+                                          </span>
+                                        ) : null}
                                       </div>
-                                      <p className="text-slate-600">
+                                      <p className="text-slate-600 break-words">
                                         Phương thức:{' '}
                                         <strong className="text-slate-800">
                                           {PAYMENT_METHOD_LABELS[p.method] || p.method}
@@ -669,8 +745,23 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                         {p.reference_code
                                           ? ` • Mã GD: ${p.reference_code}`
                                           : ''}
-                                        {p.note ? ` • Ghi chú: ${p.note}` : ''}
                                       </p>
+                                      {Number(p.overpayment_amount || 0) > 0 ? (
+                                        <p className="text-sky-700 font-medium">
+                                          Tiền nộp dư: {formatMoney(p.overpayment_amount)}
+                                        </p>
+                                      ) : null}
+                                      {p.note ? (
+                                        <div
+                                          className={`rounded-lg px-2.5 py-1.5 whitespace-pre-line break-words ${
+                                            isRejected
+                                              ? 'bg-rose-50 border border-rose-200 text-rose-800'
+                                              : 'bg-slate-50 border border-slate-200/60 text-slate-700'
+                                          }`}
+                                        >
+                                          {p.note}
+                                        </div>
+                                      ) : null}
                                       {proofs.length > 0 ? (
                                         <div className="flex flex-wrap gap-2 pt-1">
                                           {proofs.map((imgUrl, idx) => (
@@ -691,7 +782,15 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                       ) : null}
                                     </div>
                                     <div className="text-left sm:text-right shrink-0">
-                                      <span className="text-sm font-bold text-emerald-700">
+                                      <span
+                                        className={`text-sm font-bold tabular-nums ${
+                                          isRejected
+                                            ? 'text-rose-600 line-through'
+                                            : isConfirmed
+                                            ? 'text-emerald-700'
+                                            : 'text-amber-700'
+                                        }`}
+                                      >
                                         {formatMoney(p.amount)}
                                       </span>
                                     </div>
@@ -749,13 +848,10 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
           />
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
-              type="number"
-              min="1000"
-              step="1000"
+            <MoneyInput
               required
               label="Số tiền đã chuyển (VNĐ)"
-              placeholder="Nhập số tiền..."
+              placeholder="VD: 8.500.000"
               value={payForm.amount}
               hint={payForm.amount ? `Bằng số: ${formatMoney(payForm.amount)}` : undefined}
               onChange={(e) => setPayForm((s) => ({ ...s, amount: e.target.value }))}
