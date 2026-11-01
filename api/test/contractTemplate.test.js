@@ -89,3 +89,28 @@ test('escapeTemplateHtml neutralizes XSS payloads in notes and names', () => {
   );
   assert.equal(escapeTemplateHtml(null), '');
 });
+
+test('buildContractTemplateServiceRows scopes utilityCatalog to contractBuildingId and prioritizes building tariff over org-wide default', () => {
+  const rows = buildContractTemplateServiceRows({
+    contractStartDate: '2026-11-01',
+    contractBuildingId: 'bld-A',
+    subscriptions: [],
+    servicePrices: [],
+    meters: [],
+    utilityCatalog: [
+      { code: 'ELECTRICITY', building_id: 'bld-B', name: 'Điện tòa B', unit: 'kWh', unit_price: 99999 },
+      { code: 'ELECTRICITY', building_id: null, name: 'Điện chung', unit: 'kWh', unit_price: 3800 },
+      { code: 'WATER', building_id: null, name: 'Nước chung', unit: 'm³', unit_price: 18000 },
+      { code: 'WATER', building_id: 'bld-A', name: 'Nước tòa A', unit: 'm³', unit_price: 24000 },
+    ],
+  });
+
+  const elec = rows.find((r) => r.code === 'ELECTRICITY');
+  const water = rows.find((r) => r.code === 'WATER');
+  assert.ok(elec, 'Expected ELECTRICITY row from org-wide fallback');
+  assert.equal(elec.unitPrice, 3800, 'Must ignore foreign building bld-B tariff');
+  assert.ok(water, 'Expected WATER row');
+  assert.equal(water.unitPrice, 24000, 'Must prefer contractBuildingId tariff over org-wide default');
+});
+
+

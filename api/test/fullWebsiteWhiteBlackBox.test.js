@@ -704,8 +704,14 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       const updAptByOwner = await rls.query(`UPDATE apartment SET note = 'OwnerHack' WHERE building_id = $1 RETURNING id`, [vopAId]);
       assert.equal(updAptByOwner.rowCount, 0, 'RLS must block OWNER from updating apartment');
 
-      const updCtrByOwner = await rls.query(`UPDATE contract SET note = 'OwnerHack' WHERE building_id = $1 RETURNING id`, [vopAId]);
-      assert.equal(updCtrByOwner.rowCount, 0, 'RLS must block OWNER from updating contract');
+      let updCtrRows = 0;
+      try {
+        const updCtrByOwner = await rls.query(`UPDATE contract SET note = 'OwnerHack' WHERE building_id = $1 RETURNING id`, [vopAId]);
+        updCtrRows = updCtrByOwner.rowCount;
+      } catch (rlsErr) {
+        assert.equal(rlsErr.code, '42501', `Expected RLS WITH CHECK block (42501), got ${rlsErr.code}: ${rlsErr.message}`);
+      }
+      assert.equal(updCtrRows, 0, 'RLS must block OWNER from arbitrarily updating contract');
 
       const updDepByOwner = await rls.query(`UPDATE deposit SET status = 'REFUNDED' RETURNING id`);
       assert.equal(updDepByOwner.rowCount, 0, 'RLS must block OWNER from updating deposit');

@@ -52,6 +52,7 @@ function normalizeDateStr(val, fallback = '') {
  */
 export function buildContractTemplateServiceRows({
   contractStartDate = '',
+  contractBuildingId = '',
   subscriptions = [],
   servicePrices = [],
   meters = [],
@@ -141,7 +142,15 @@ export function buildContractTemplateServiceRows({
   const utilCatMap = new Map();
   for (const uc of utilityCatalog || []) {
     const uCode = String(uc?.code || '').trim().toUpperCase();
-    if (uCode && !utilCatMap.has(uCode)) {
+    if (!uCode) continue;
+    const rowBldId = uc?.building_id ? String(uc.building_id) : '';
+    if (rowBldId && contractBuildingId && rowBldId !== String(contractBuildingId)) {
+      continue;
+    }
+    const existing = utilCatMap.get(uCode);
+    const existingIsBldSpecific = Boolean(existing?.building_id);
+    const currentIsBldSpecific = Boolean(rowBldId);
+    if (!existing || (!existingIsBldSpecific && currentIsBldSpecific)) {
       utilCatMap.set(uCode, uc);
     }
   }
@@ -196,3 +205,4 @@ export function buildContractTemplateServiceRows({
 
   return rows;
 }
+

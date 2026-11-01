@@ -3991,11 +3991,13 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
       [c.apartment_id]
     );
     const utilCatRes = await client.query(
-      `SELECT code, name, unit, unit_price
+      `SELECT code, name, unit, unit_price, building_id
        FROM service_catalog
        WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
+         AND (building_id IS NULL OR building_id = $1)
          AND code IN ('ELECTRICITY', 'WATER')
-         AND is_active = TRUE`,
+         AND is_active = TRUE
+       ORDER BY (building_id IS NOT NULL) DESC`,
       [c.building_id]
     );
 
@@ -4020,6 +4022,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
 
     const templateServiceRows = buildContractTemplateServiceRows({
       contractStartDate: formatContractDateOnly(c.start_date),
+      contractBuildingId: c.building_id,
       subscriptions: subRes.rows,
       servicePrices: spRes.rows,
       meters: meterRes.rows,

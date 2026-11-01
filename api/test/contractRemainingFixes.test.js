@@ -510,4 +510,55 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
     );
     assert.equal(orphanContract.rows.length, 0, 'Must rollback contract row when inline CCCD image validation fails');
   });
+
+  await t.test('Review Fix: GET /:id/template excludes utilityCatalog rows scoped to a different building', async () => {
+    const otherBldRes = await adminPool.query(
+      `SELECT id FROM building WHERE org_id = $1 AND id <> $2 LIMIT 1`,
+      [orgId, vopAId]
+    );
+    assert.ok(otherBldRes.rows.length > 0, 'Expected a second building in org for scope test');
+    const otherBldId = otherBldRes.rows[0].id;
+
+    const apt = await createTestApartment('TPL-SCOPE');
+    const createRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: makeUniqueTenant('TPLSCOPE'),
+        start_date: '2027-04-01',
+        end_date: '2028-04-01',
+        rent_amount: 10000000,
+        deposit_amount: 10000000,
+      }),
+    });
+    assert.equal(createRes.status, 201, JSON.stringify(createRes.body));
+    const contractId = createRes.body.data.id;
+    createdContractIds.push(contractId);
+    await trackTenantPersonByTenantId(createRes.body.data.primary_tenant_id);
+
+    await adminPool.query(
+      `UPDATE service_catalog SET building_id = $1 WHERE org_id = $2 AND code = 'WATER'`,
+      [otherBldId, orgId]
+    );
+    try {
+      const tplRes = await fetch(`${API_BASE}/api/v1/contracts/${contractId}/template`, {
+        headers: { Authorization: `Bearer ${mgrVopA.token}` },
+      });
+      const tplHtml = await tplRes.text();
+      assert.equal(tplRes.status, 200);
+      assert.ok(
+        !tplHtml.includes('(WATER)'),
+        'A4 template must NOT render WATER catalog row belonging exclusively to another building'
+      );
+      assert.ok(
+        tplHtml.includes('(ELECTRICITY)'),
+        'A4 template must still render org-wide ELECTRICITY catalog row'
+      );
+    } finally {
+      await adminPool.query(
+        `UPDATE service_catalog SET building_id = NULL WHERE org_id = $1 AND code = 'WATER'`,
+        [orgId]
+      );
+    }
+  });
 });
