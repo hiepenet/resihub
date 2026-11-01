@@ -129,6 +129,229 @@ async function loadContractSubscriptionsAndSchedule(contract) {
   };
 }
 
+async function syncDraftContractServicesInTx(
+  client,
+  {
+    contractId,
+    orgId,
+    buildingId,
+    apartmentId,
+    startDateStr,
+    actorId,
+    services,
+    servicePrices,
+    replaceExistingSubscriptions = false,
+    allowNullPriceDelete = false,
+  }
+) {
+  const createdServices = [];
+  const createdServicePrices = [];
+
+  if (services !== undefined && !Array.isArray(services)) {
+    const err = new Error('Trường services phải là một mảng danh sách dịch vụ đăng ký.');
+    err.httpStatus = 422;
+    err.code = 'INVALID_SERVICES';
+    throw err;
+  }
+
+  if (servicePrices !== undefined && !Array.isArray(servicePrices)) {
+    const err = new Error('Trường service_prices phải là một mảng cấu hình đơn giá riêng.');
+    err.httpStatus = 422;
+    err.code = 'INVALID_SERVICE_PRICES';
+    throw err;
+  }
+
+  if (replaceExistingSubscriptions && services !== undefined) {
+    const oldSubsRes = await client.query(
+      `SELECT DISTINCT UPPER(TRIM(sc.code)) AS service_code
+       FROM service_subscription ss
+       JOIN service_catalog sc ON sc.id = ss.service_id
+       WHERE ss.contract_id = $1 AND ss.status = 'PENDING_APPROVAL'`,
+      [contractId]
+    );
+    const oldCodes = oldSubsRes.rows.map((r) => r.service_code).filter(Boolean);
+
+    await client.query(
+      `DELETE FROM service_subscription WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
+      [contractId]
+    );
+
+    if (oldCodes.length > 0) {
+      await client.query(
+        `DELETE FROM contract_service_price
+         WHERE contract_id = $1 AND UPPER(service_code) = ANY($2::text[])`,
+        [contractId, oldCodes]
+      );
+    }
+  }
+
+  if (Array.isArray(services) && services.length > 0) {
+    const [sy, sm, sd] = startDateStr.split('-').map(Number);
+    const totalDaysInStartMonth = new Date(Date.UTC(sy, sm, 0)).getUTCDate();
+    const activeStartDays = Math.max(1, totalDaysInStartMonth - sd + 1);
+
+    for (const svcItem of services) {
+      if (!svcItem || !svcItem.service_id || !UUID_REGEX.test(String(svcItem.service_id))) {
+        const err = new Error('Mã định danh dịch vụ (service_id) không hợp lệ.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_SERVICE';
+        throw err;
+      }
+      const catRes = await adminPool.query(
+        `SELECT * FROM service_catalog
+         WHERE id = $1
+           AND org_id = $2
+           AND is_active = TRUE
+           AND (building_id IS NULL OR building_id = $3)
+         LIMIT 1`,
+        [svcItem.service_id, orgId, buildingId]
+      );
+      if (catRes.rows.length === 0) {
+        const err = new Error('Không tìm thấy dịch vụ đang hoạt động thuộc phạm vi tòa nhà.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_SERVICE';
+        throw err;
+      }
+      const cat = catRes.rows[0];
+      const qty = svcItem.quantity === undefined ? 1 : Number(svcItem.quantity);
+      if (!Number.isInteger(qty) || qty < 1) {
+        const err = new Error('Số lượng dịch vụ đăng ký (quantity) phải là số nguyên dương >= 1.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_SERVICE_QUANTITY';
+        throw err;
+      }
+
+      const rawNote =
+        svcItem.note !== undefined && svcItem.note !== null ? String(svcItem.note).trim() : '';
+      if (rawNote.length > 500) {
+        const err = new Error('Ghi chú dịch vụ / biển số xe không được vượt quá 500 ký tự.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_SERVICE_NOTE';
+        throw err;
+      }
+      const cleanNote = rawNote || null;
+
+      const rawCustomPrice = svcItem.custom_unit_price ?? svcItem.unit_price;
+      const hasExplicitPrice =
+        rawCustomPrice !== undefined && rawCustomPrice !== null && rawCustomPrice !== '';
+      const catalogPrice = Math.round(Number(cat.unit_price || 0));
+      let effectivePrice = catalogPrice;
+      if (hasExplicitPrice) {
+        const customNum = Number(rawCustomPrice);
+        if (Number.isNaN(customNum) || customNum < 0) {
+          const err = new Error('Đơn giá dịch vụ riêng (unit_price / custom_unit_price) phải >= 0.');
+          err.httpStatus = 422;
+          err.code = 'INVALID_UNIT_PRICE';
+          throw err;
+        }
+        effectivePrice = Math.round(customNum);
+      }
+      const shouldPersistContractPrice =
+        (svcItem.custom_unit_price !== undefined &&
+          svcItem.custom_unit_price !== null &&
+          svcItem.custom_unit_price !== '') ||
+        effectivePrice !== catalogPrice;
+
+      const prorataAmt =
+        sd > 1 ? roundVND((effectivePrice * qty * activeStartDays) / totalDaysInStartMonth) : 0;
+
+      const subIns = await client.query(
+        `INSERT INTO service_subscription (
+           org_id, building_id, apartment_id, contract_id, service_id,
+           quantity, unit_price, start_date, prorata_amount, status, note, requested_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11)
+         RETURNING *`,
+        [
+          orgId,
+          buildingId,
+          apartmentId,
+          contractId,
+          cat.id,
+          qty,
+          effectivePrice,
+          startDateStr,
+          prorataAmt,
+          cleanNote,
+          actorId,
+        ]
+      );
+      createdServices.push({
+        ...subIns.rows[0],
+        service_code: cat.code,
+        service_name: cat.name,
+      });
+
+      if (shouldPersistContractPrice) {
+        const cspIns = await client.query(
+          `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (contract_id, service_code, effective_from)
+           DO UPDATE SET unit_price = EXCLUDED.unit_price
+           RETURNING *`,
+          [contractId, String(cat.code).trim().toUpperCase(), effectivePrice, startDateStr]
+        );
+        createdServicePrices.push(cspIns.rows[0]);
+      }
+    }
+  }
+
+  if (Array.isArray(servicePrices) && servicePrices.length > 0) {
+    for (const spItem of servicePrices) {
+      const normCode =
+        typeof spItem?.service_code === 'string' ? spItem.service_code.trim().toUpperCase() : '';
+      let validCode = Boolean(normCode) && SERVICE_CODES.includes(normCode);
+      if (!validCode && normCode) {
+        const catCheck = await adminPool.query(
+          'SELECT 1 FROM service_catalog WHERE org_id = $1 AND UPPER(code) = $2 LIMIT 1',
+          [orgId, normCode]
+        );
+        validCode = catCheck.rows.length > 0;
+      }
+      if (!validCode) {
+        const err = new Error(`Mã dịch vụ (${normCode || 'trống'}) không hợp lệ.`);
+        err.httpStatus = 422;
+        err.code = 'INVALID_SERVICE_CODE';
+        throw err;
+      }
+
+      if (allowNullPriceDelete && (spItem?.unit_price === null || spItem?.unit_price === '')) {
+        await client.query(
+          `DELETE FROM contract_service_price WHERE contract_id = $1 AND UPPER(service_code) = $2`,
+          [contractId, normCode]
+        );
+        continue;
+      }
+
+      const priceNum = Number(spItem?.unit_price);
+      if (
+        spItem?.unit_price === undefined ||
+        spItem?.unit_price === null ||
+        spItem?.unit_price === '' ||
+        Number.isNaN(priceNum) ||
+        priceNum < 0
+      ) {
+        const err = new Error('Đơn giá dịch vụ riêng phải >= 0.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_UNIT_PRICE';
+        throw err;
+      }
+      const effDate = spItem.effective_from ? String(spItem.effective_from).slice(0, 10) : startDateStr;
+      const cspIns = await client.query(
+        `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (contract_id, service_code, effective_from)
+         DO UPDATE SET unit_price = EXCLUDED.unit_price
+         RETURNING *`,
+        [contractId, normCode, Math.round(priceNum), effDate]
+      );
+      createdServicePrices.push(cspIns.rows[0]);
+    }
+  }
+
+  return { createdServices, createdServicePrices };
+}
+
 async function notifyContractStakeholders(contract, eventType, extra = {}) {
   if (!contract?.id) return;
   try {
@@ -1282,161 +1505,18 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     // Căn hộ và cọc giữ chỗ KHÔNG đổi ở bước DRAFT: căn AVAILABLE/RESERVED giữ nguyên,
     // cọc giữ chỗ vẫn HELD — chỉ kích hoạt khi ACTIVE (Task 8, PRD 485 bước 6).
     // Tương tự, các gói dịch vụ đi kèm (services[]) lưu ở trạng thái PENDING_APPROVAL cho tới khi hợp đồng ACTIVE.
-    const createdServices = [];
-    const createdServicePrices = [];
-
-    if (services !== undefined && !Array.isArray(services)) {
-      const err = new Error('Trường services phải là một mảng danh sách dịch vụ đăng ký.');
-      err.httpStatus = 422;
-      err.code = 'INVALID_SERVICES';
-      throw err;
-    }
-
-    if (service_prices !== undefined && !Array.isArray(service_prices)) {
-      const err = new Error('Trường service_prices phải là một mảng cấu hình đơn giá riêng.');
-      err.httpStatus = 422;
-      err.code = 'INVALID_SERVICE_PRICES';
-      throw err;
-    }
-
-    if (Array.isArray(services) && services.length > 0) {
-      const [sy, sm, sd] = sDateStr.split('-').map(Number);
-      const totalDaysInStartMonth = new Date(Date.UTC(sy, sm, 0)).getUTCDate();
-      const activeStartDays = Math.max(1, totalDaysInStartMonth - sd + 1);
-
-      for (const svcItem of services) {
-        if (!svcItem || !svcItem.service_id || !UUID_REGEX.test(String(svcItem.service_id))) {
-          const err = new Error('Mã định danh dịch vụ (service_id) không hợp lệ.');
-          err.httpStatus = 422;
-          err.code = 'INVALID_SERVICE';
-          throw err;
-        }
-        const catRes = await adminPool.query(
-          `SELECT * FROM service_catalog
-           WHERE id = $1
-             AND org_id = $2
-             AND is_active = TRUE
-             AND (building_id IS NULL OR building_id = $3)
-           LIMIT 1`,
-          [svcItem.service_id, req.user.org_id, effectiveBuildingId]
-        );
-        if (catRes.rows.length === 0) {
-          const err = new Error('Không tìm thấy dịch vụ đang hoạt động thuộc phạm vi tòa nhà.');
-          err.httpStatus = 422;
-          err.code = 'INVALID_SERVICE';
-          throw err;
-        }
-        const cat = catRes.rows[0];
-        const qty = svcItem.quantity === undefined ? 1 : Number(svcItem.quantity);
-        if (!Number.isInteger(qty) || qty < 1) {
-          const err = new Error('Số lượng dịch vụ đăng ký (quantity) phải là số nguyên dương >= 1.');
-          err.httpStatus = 422;
-          err.code = 'INVALID_SERVICE_QUANTITY';
-          throw err;
-        }
-
-        const rawCustomPrice = svcItem.custom_unit_price ?? svcItem.unit_price;
-        const hasExplicitPrice =
-          rawCustomPrice !== undefined && rawCustomPrice !== null && rawCustomPrice !== '';
-        const catalogPrice = Math.round(Number(cat.unit_price || 0));
-        let effectivePrice = catalogPrice;
-        if (hasExplicitPrice) {
-          const customNum = Number(rawCustomPrice);
-          if (Number.isNaN(customNum) || customNum < 0) {
-            const err = new Error('Đơn giá dịch vụ riêng (unit_price / custom_unit_price) phải >= 0.');
-            err.httpStatus = 422;
-            err.code = 'INVALID_UNIT_PRICE';
-            throw err;
-          }
-          effectivePrice = Math.round(customNum);
-        }
-        const shouldPersistContractPrice =
-          (svcItem.custom_unit_price !== undefined &&
-            svcItem.custom_unit_price !== null &&
-            svcItem.custom_unit_price !== '') ||
-          effectivePrice !== catalogPrice;
-
-        const prorataAmt =
-          sd > 1 ? roundVND((effectivePrice * qty * activeStartDays) / totalDaysInStartMonth) : 0;
-
-        const subIns = await client.query(
-          `INSERT INTO service_subscription (
-             org_id, building_id, apartment_id, contract_id, service_id,
-             quantity, unit_price, start_date, prorata_amount, status, note, requested_by
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11)
-           RETURNING *`,
-          [
-            req.user.org_id,
-            effectiveBuildingId,
-            apartment_id,
-            contract.id,
-            cat.id,
-            qty,
-            effectivePrice,
-            sDateStr,
-            prorataAmt,
-            svcItem.note ? String(svcItem.note).trim() : null,
-            req.user.sub,
-          ]
-        );
-        createdServices.push({
-          ...subIns.rows[0],
-          service_code: cat.code,
-          service_name: cat.name,
-        });
-
-        if (shouldPersistContractPrice) {
-          const cspIns = await client.query(
-            `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (contract_id, service_code, effective_from)
-             DO UPDATE SET unit_price = EXCLUDED.unit_price
-             RETURNING *`,
-            [contract.id, String(cat.code).trim().toUpperCase(), effectivePrice, sDateStr]
-          );
-          createdServicePrices.push(cspIns.rows[0]);
-        }
-      }
-    }
-
-    if (Array.isArray(service_prices) && service_prices.length > 0) {
-      for (const spItem of service_prices) {
-        const normCode =
-          typeof spItem?.service_code === 'string' ? spItem.service_code.trim().toUpperCase() : '';
-        let validCode = Boolean(normCode) && SERVICE_CODES.includes(normCode);
-        if (!validCode && normCode) {
-          const catCheck = await adminPool.query(
-            'SELECT 1 FROM service_catalog WHERE org_id = $1 AND UPPER(code) = $2 LIMIT 1',
-            [req.user.org_id, normCode]
-          );
-          validCode = catCheck.rows.length > 0;
-        }
-        if (!validCode) {
-          const err = new Error(`Mã dịch vụ (${normCode || 'trống'}) không hợp lệ.`);
-          err.httpStatus = 422;
-          err.code = 'INVALID_SERVICE_CODE';
-          throw err;
-        }
-        const priceNum = Number(spItem?.unit_price);
-        if (spItem?.unit_price === undefined || spItem?.unit_price === null || Number.isNaN(priceNum) || priceNum < 0) {
-          const err = new Error('Đơn giá dịch vụ riêng phải >= 0.');
-          err.httpStatus = 422;
-          err.code = 'INVALID_UNIT_PRICE';
-          throw err;
-        }
-        const effDate = spItem.effective_from ? String(spItem.effective_from).slice(0, 10) : sDateStr;
-        const cspIns = await client.query(
-          `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (contract_id, service_code, effective_from)
-           DO UPDATE SET unit_price = EXCLUDED.unit_price
-           RETURNING *`,
-          [contract.id, normCode, Math.round(priceNum), effDate]
-        );
-        createdServicePrices.push(cspIns.rows[0]);
-      }
-    }
+    const { createdServices, createdServicePrices } = await syncDraftContractServicesInTx(client, {
+      contractId: contract.id,
+      orgId: req.user.org_id,
+      buildingId: effectiveBuildingId,
+      apartmentId: apartment_id,
+      startDateStr: sDateStr,
+      actorId: req.user.sub,
+      services,
+      servicePrices: service_prices,
+      replaceExistingSubscriptions: false,
+      allowNullPriceDelete: false,
+    });
 
     // 2. Ghi audit log
     await client.query(
@@ -1905,6 +1985,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
   const {
     start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
     deposit_amount, deposit_months, apartment_id, primary_tenant_id, note,
+    services, service_prices,
   } = req.body;
 
   const billingValidation = validateBillingParams(
@@ -2066,50 +2147,80 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
     const oldStartDateStr = formatContractDateOnly(cur.start_date);
     const newStartDateStr = formatContractDateOnly(updated.rows[0].start_date);
-    if (newStartDateStr !== oldStartDateStr || String(nextApartment) !== String(cur.apartment_id)) {
-      const [nsY, nsM, nsD] = newStartDateStr.split('-').map(Number);
-      const totalDaysInMonth = new Date(Date.UTC(nsY, nsM, 0)).getUTCDate();
-      const activeStartDays = Math.max(1, totalDaysInMonth - nsD + 1);
+    if (services !== undefined) {
+      await syncDraftContractServicesInTx(client, {
+        contractId: id,
+        orgId: req.user.org_id,
+        buildingId: cur.building_id,
+        apartmentId: nextApartment,
+        startDateStr: newStartDateStr,
+        actorId: req.user.sub,
+        services,
+        servicePrices: service_prices,
+        replaceExistingSubscriptions: true,
+        allowNullPriceDelete: true,
+      });
+    } else {
+      if (newStartDateStr !== oldStartDateStr || String(nextApartment) !== String(cur.apartment_id)) {
+        const [nsY, nsM, nsD] = newStartDateStr.split('-').map(Number);
+        const totalDaysInMonth = new Date(Date.UTC(nsY, nsM, 0)).getUTCDate();
+        const activeStartDays = Math.max(1, totalDaysInMonth - nsD + 1);
 
-      const pendingSubsRes = await client.query(
-        `SELECT id, unit_price, quantity
-         FROM service_subscription
-         WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
-        [id]
-      );
-      for (const pSub of pendingSubsRes.rows) {
-        const nextProrata =
-          nsD > 1
-            ? roundVND((Number(pSub.unit_price || 0) * Number(pSub.quantity || 1) * activeStartDays) / totalDaysInMonth)
-            : 0;
-        await client.query(
-          `UPDATE service_subscription
-           SET apartment_id = $1,
-               start_date = $2,
-               prorata_amount = $3,
-               updated_at = NOW()
-           WHERE id = $4`,
-          [nextApartment, newStartDateStr, nextProrata, pSub.id]
+        const pendingSubsRes = await client.query(
+          `SELECT id, unit_price, quantity
+           FROM service_subscription
+           WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
+          [id]
         );
+        for (const pSub of pendingSubsRes.rows) {
+          const nextProrata =
+            nsD > 1
+              ? roundVND((Number(pSub.unit_price || 0) * Number(pSub.quantity || 1) * activeStartDays) / totalDaysInMonth)
+              : 0;
+          await client.query(
+            `UPDATE service_subscription
+             SET apartment_id = $1,
+                 start_date = $2,
+                 prorata_amount = $3,
+                 updated_at = NOW()
+             WHERE id = $4`,
+            [nextApartment, newStartDateStr, nextProrata, pSub.id]
+          );
+        }
+
+        if (newStartDateStr !== oldStartDateStr) {
+          await client.query(
+            `DELETE FROM contract_service_price csp_old
+             USING contract_service_price csp_new
+             WHERE csp_old.contract_id = $1
+               AND csp_old.effective_from = $2
+               AND csp_new.contract_id = $1
+               AND csp_new.service_code = csp_old.service_code
+               AND csp_new.effective_from = $3`,
+            [id, oldStartDateStr, newStartDateStr]
+          );
+          await client.query(
+            `UPDATE contract_service_price
+             SET effective_from = $3
+             WHERE contract_id = $1 AND effective_from = $2`,
+            [id, oldStartDateStr, newStartDateStr]
+          );
+        }
       }
 
-      if (newStartDateStr !== oldStartDateStr) {
-        await client.query(
-          `DELETE FROM contract_service_price csp_old
-           USING contract_service_price csp_new
-           WHERE csp_old.contract_id = $1
-             AND csp_old.effective_from = $2
-             AND csp_new.contract_id = $1
-             AND csp_new.service_code = csp_old.service_code
-             AND csp_new.effective_from = $3`,
-          [id, oldStartDateStr, newStartDateStr]
-        );
-        await client.query(
-          `UPDATE contract_service_price
-           SET effective_from = $3
-           WHERE contract_id = $1 AND effective_from = $2`,
-          [id, oldStartDateStr, newStartDateStr]
-        );
+      if (service_prices !== undefined) {
+        await syncDraftContractServicesInTx(client, {
+          contractId: id,
+          orgId: req.user.org_id,
+          buildingId: cur.building_id,
+          apartmentId: nextApartment,
+          startDateStr: newStartDateStr,
+          actorId: req.user.sub,
+          services: undefined,
+          servicePrices: service_prices,
+          replaceExistingSubscriptions: false,
+          allowNullPriceDelete: true,
+        });
       }
     }
 
@@ -2120,9 +2231,22 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     );
 
     await client.query('COMMIT');
-    res.json({ message: 'Cập nhật hợp đồng nháp thành công.', data: updated.rows[0] });
+    const { service_subscriptions, invoice_schedule } =
+      await loadContractSubscriptionsAndSchedule(updated.rows[0]);
+    res.json({
+      message: 'Cập nhật hợp đồng nháp thành công.',
+      data: updated.rows[0],
+      service_subscriptions,
+      invoice_schedule,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({
+        code: err.code || 'VALIDATION_ERROR',
+        message: err.message,
+      });
+    }
     const mapped = mapPgError(err);
     if (mapped) {
       return res.status(mapped.status).json({ code: mapped.code, message: mapped.message });
@@ -3784,43 +3908,41 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
     const occupants = occRes.rows;
 
     // Lấy bảng giá dịch vụ ghi đè, gói dịch vụ đăng ký đi kèm, đồng hồ điện/nước và danh mục chuẩn
-    const [spRes, subRes, meterRes, utilCatRes] = await Promise.all([
-      client.query(
-        `SELECT service_code, unit_price, effective_from
-         FROM contract_service_price
-         WHERE contract_id = $1
-         ORDER BY effective_from ASC, service_code ASC`,
-        [id]
-      ),
-      client.query(
-        `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note,
-                sc.code AS service_code,
-                sc.name AS service_name,
-                sc.category AS service_category,
-                sc.billing_type,
-                sc.unit
-         FROM service_subscription ss
-         JOIN service_catalog sc ON sc.id = ss.service_id
-         WHERE ss.contract_id = $1
-         ORDER BY ss.created_at ASC`,
-        [id]
-      ),
-      client.query(
-        `SELECT meter_type, unit, unit_price
-         FROM meter
-         WHERE apartment_id = $1 AND status = 'ACTIVE'
-         ORDER BY meter_type ASC`,
-        [c.apartment_id]
-      ),
-      client.query(
-        `SELECT code, name, unit, unit_price
-         FROM service_catalog
-         WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
-           AND code IN ('ELECTRICITY', 'WATER')
-           AND is_active = TRUE`,
-        [c.building_id]
-      ),
-    ]);
+    const spRes = await client.query(
+      `SELECT service_code, unit_price, effective_from
+       FROM contract_service_price
+       WHERE contract_id = $1
+       ORDER BY effective_from ASC, service_code ASC`,
+      [id]
+    );
+    const subRes = await client.query(
+      `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note,
+              sc.code AS service_code,
+              sc.name AS service_name,
+              sc.category AS service_category,
+              sc.billing_type,
+              sc.unit
+       FROM service_subscription ss
+       JOIN service_catalog sc ON sc.id = ss.service_id
+       WHERE ss.contract_id = $1
+       ORDER BY ss.created_at ASC`,
+      [id]
+    );
+    const meterRes = await client.query(
+      `SELECT meter_type, unit, unit_price
+       FROM meter
+       WHERE apartment_id = $1 AND status = 'ACTIVE'
+       ORDER BY meter_type ASC`,
+      [c.apartment_id]
+    );
+    const utilCatRes = await client.query(
+      `SELECT code, name, unit, unit_price
+       FROM service_catalog
+       WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
+         AND code IN ('ELECTRICITY', 'WATER')
+         AND is_active = TRUE`,
+      [c.building_id]
+    );
 
     const fmtDate = (d) => {
       if (!d) return '—';
