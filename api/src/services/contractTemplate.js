@@ -119,9 +119,16 @@ export function buildContractTemplateServiceRows({
       overrideEntry?.effectiveFrom ||
       normalizeDateStr(sub?.start_date, defaultEffectiveFrom);
 
+    const vehiclePlates = Array.isArray(sub?.vehicle_plates)
+      ? sub.vehicle_plates
+          .map((p) => (p !== null && p !== undefined ? String(p).trim() : ''))
+          .filter(Boolean)
+      : [];
+
     rows.push({
       name: String(sub?.service_name || SERVICE_CODE_LABELS[codeKey]?.name || codeKey || 'Dịch vụ'),
       code: codeKey,
+      vehiclePlates,
       note: sub?.note ? String(sub.note).trim() : '',
       quantityLabel: `${qty} ${unit}`,
       unitPrice: effectiveUnitPrice,
@@ -180,6 +187,7 @@ export function buildContractTemplateServiceRows({
     rows.push({
       name: String(catalogEntry?.name || meta.name),
       code: utilCode,
+      vehiclePlates: [],
       note: overrideEntry ? 'Giá thỏa thuận riêng theo hợp đồng' : '',
       quantityLabel: `1 ${unit}`,
       unitPrice,
@@ -195,6 +203,7 @@ export function buildContractTemplateServiceRows({
     rows.push({
       name: meta.name,
       code: codeKey,
+      vehiclePlates: [],
       note: '',
       quantityLabel: `1 ${meta.unit}`,
       unitPrice: Number(entry.unitPrice),

@@ -19,7 +19,8 @@ test('buildContractTemplateServiceRows includes default-priced subscriptions, me
         unit_price: 120000,
         start_date: '2026-11-01',
         status: 'PENDING_APPROVAL',
-        note: '59A1-123.45, 59B2-678.90',
+        vehicle_plates: ['59A1-123.45', '59B2-678.90'],
+        note: 'Thẻ từ hầm B1',
       },
       {
         service_code: 'INTERNET_FIBER',
@@ -67,11 +68,13 @@ test('buildContractTemplateServiceRows includes default-priced subscriptions, me
   assert.equal(rows[0].code, 'MOTORBIKE_PARKING');
   assert.equal(rows[0].quantityLabel, '2 xe/tháng');
   assert.equal(rows[0].unitPrice, 120000);
-  assert.equal(rows[0].note, '59A1-123.45, 59B2-678.90');
+  assert.deepEqual(rows[0].vehiclePlates, ['59A1-123.45', '59B2-678.90']);
+  assert.equal(rows[0].note, 'Thẻ từ hầm B1');
   assert.match(rows[0].amountLabel, /240\.000/);
 
   // Alias INTERNET_FIBER -> INTERNET override should apply
   assert.equal(rows[1].code, 'INTERNET_FIBER');
+  assert.deepEqual(rows[1].vehiclePlates, []);
   assert.equal(rows[1].unitPrice, 180000);
   assert.match(rows[1].amountLabel, /180\.000/);
 
