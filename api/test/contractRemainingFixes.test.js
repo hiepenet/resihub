@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import path from 'node:path';
+import { rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
@@ -46,6 +48,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
   const createdContractIds = [];
   const createdApartmentIds = [];
   const createdPersonIds = [];
+  const createdIdempotencyPrefixes = [];
 
   async function login(email, password) {
     const res = await fetch(`${API_BASE}/api/v1/auth/login`, {
@@ -104,6 +107,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
         }
         await adminPool.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query("DELETE FROM notification WHERE payload->>'contract_id' = $1", [cId]).catch(() => {});
+        await rm(path.join(process.cwd(), 'uploads', 'contract', cId), { recursive: true, force: true }).catch(() => {});
         await adminPool.query('DELETE FROM attachment WHERE owner_entity = $1 AND owner_id = $2', ['contract', cId]);
         await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]);
         await adminPool.query('DELETE FROM contract_request WHERE contract_id = $1', [cId]);
@@ -117,12 +121,16 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
         await adminPool.query('DELETE FROM apartment WHERE id = $1', [aptId]);
       }
       for (const pId of createdPersonIds) {
+        await rm(path.join(process.cwd(), 'uploads', 'person', pId), { recursive: true, force: true }).catch(() => {});
         await adminPool.query('DELETE FROM attachment WHERE owner_entity = $1 AND owner_id = $2', ['person', pId]).catch(() => {});
         await adminPool.query('DELETE FROM notification WHERE user_id IN (SELECT id FROM app_user WHERE person_id = $1)', [pId]).catch(() => {});
         await adminPool.query('DELETE FROM user_role WHERE user_id IN (SELECT id FROM app_user WHERE person_id = $1)', [pId]).catch(() => {});
         await adminPool.query('DELETE FROM app_user WHERE person_id = $1', [pId]).catch(() => {});
         await adminPool.query('DELETE FROM tenant WHERE person_id = $1', [pId]).catch(() => {});
         await adminPool.query('DELETE FROM person WHERE id = $1', [pId]).catch(() => {});
+      }
+      for (const pfx of createdIdempotencyPrefixes) {
+        await adminPool.query('DELETE FROM idempotency_key WHERE idem_key LIKE $1', [`${pfx}%`]).catch(() => {});
       }
     } finally {
       await adminPool.end();
@@ -293,5 +301,124 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
       [contractId]
     );
     assert.equal(dbCsp.rows.length, 0, `Expected all overrides cleared, got: ${JSON.stringify(dbCsp.rows)}`);
+  });
+
+  await t.test('Task 3: Idempotency-Key replay, body conflict, PRICE_NEEDS_APPROVAL replay, length check, and REQUIRE_IDEMPOTENCY_KEY', async () => {
+    const pfx = `idem-test-${Date.now()}`;
+    createdIdempotencyPrefixes.push(pfx);
+
+    const apt = await createTestApartment('T3', 10000000);
+    const tenantPayload = makeUniqueTenant('T3');
+    const createKey = `${pfx}-create-1`;
+
+    // 1. First POST /api/v1/contracts with Idempotency-Key -> 201
+    const firstCreate = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': createKey },
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantPayload,
+        start_date: '2027-01-01',
+        end_date: '2028-01-01',
+        rent_amount: 8000000, // < 90% of 10M base_rent -> discounted!
+        deposit_amount: 8000000,
+      }),
+    });
+    assert.equal(firstCreate.status, 201, JSON.stringify(firstCreate.body));
+    const contractId = firstCreate.body.data.id;
+    createdContractIds.push(contractId);
+    await trackTenantPersonByTenantId(firstCreate.body.data.primary_tenant_id);
+    assert.equal(firstCreate.headers.get('idempotent-replayed'), null);
+
+    // Replay same key + equivalent payload (reordered JSON keys) -> 201 with same id + Idempotent-Replayed: true
+    const replayCreate = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': createKey },
+      body: JSON.stringify({
+        deposit_amount: 8000000,
+        rent_amount: 8000000,
+        end_date: '2028-01-01',
+        start_date: '2027-01-01',
+        new_tenant: tenantPayload,
+        apartment_id: apt.id,
+      }),
+    });
+    assert.equal(replayCreate.status, 201, JSON.stringify(replayCreate.body));
+    assert.equal(replayCreate.body.data.id, contractId);
+    assert.equal(replayCreate.headers.get('idempotent-replayed'), 'true');
+
+    const countContracts = await adminPool.query(
+      'SELECT COUNT(*)::int AS cnt FROM contract WHERE apartment_id = $1',
+      [apt.id]
+    );
+    assert.equal(countContracts.rows[0].cnt, 1, 'Must only create 1 contract on duplicate POST');
+
+    // 2. Same key + mutated rent_amount -> 409 IDEMPOTENCY_KEY_CONFLICT (Review Focus #4)
+    const conflictCreate = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': createKey },
+      body: JSON.stringify({
+        apartment_id: apt.id,
+        new_tenant: tenantPayload,
+        start_date: '2027-01-01',
+        end_date: '2028-01-01',
+        rent_amount: 9500000,
+        deposit_amount: 8000000,
+      }),
+    });
+    assert.equal(conflictCreate.status, 409);
+    assert.equal(conflictCreate.body.code, 'IDEMPOTENCY_KEY_CONFLICT');
+
+    // 3. Attach signed scan, then call POST /:id/activate twice with same Idempotency-Key on discounted contract -> both 409 PRICE_NEEDS_APPROVAL (Review Focus #4)
+    const scanRes = await apiFetch(`/api/v1/contracts/${contractId}/scan`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+    assert.equal(scanRes.status, 201, JSON.stringify(scanRes.body));
+
+    const activateKey = `${pfx}-activate-1`;
+    const act1 = await apiFetch(`/api/v1/contracts/${contractId}/activate`, mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': activateKey },
+      body: JSON.stringify({}),
+    });
+    assert.equal(act1.status, 409);
+    assert.equal(act1.body.code, 'PRICE_NEEDS_APPROVAL');
+
+    const act2 = await apiFetch(`/api/v1/contracts/${contractId}/activate`, mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': activateKey },
+      body: JSON.stringify({}),
+    });
+    assert.equal(act2.status, 409);
+    assert.equal(act2.body.code, 'PRICE_NEEDS_APPROVAL');
+    assert.equal(act2.headers.get('idempotent-replayed'), 'true');
+
+    // 4. Key > 255 chars -> 400 INVALID_IDEMPOTENCY_KEY
+    const tooLongKeyRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': 'K'.repeat(256) },
+      body: JSON.stringify({}),
+    });
+    assert.equal(tooLongKeyRes.status, 400);
+    assert.equal(tooLongKeyRes.body.code, 'INVALID_IDEMPOTENCY_KEY');
+
+    // 5. REQUIRE_IDEMPOTENCY_KEY=true without header -> 400 IDEMPOTENCY_KEY_REQUIRED
+    const prevFlag = process.env.REQUIRE_IDEMPOTENCY_KEY;
+    process.env.REQUIRE_IDEMPOTENCY_KEY = 'true';
+    try {
+      const missingKeyRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      assert.equal(missingKeyRes.status, 400);
+      assert.equal(missingKeyRes.body.code, 'IDEMPOTENCY_KEY_REQUIRED');
+    } finally {
+      if (prevFlag === undefined) {
+        delete process.env.REQUIRE_IDEMPOTENCY_KEY;
+      } else {
+        process.env.REQUIRE_IDEMPOTENCY_KEY = prevFlag;
+      }
+    }
   });
 });

@@ -2,6 +2,7 @@ import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
 import { saveBase64Image, MAX_CONTRACT_SCAN_BYTES } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
@@ -1250,7 +1251,7 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
  * POST /api/v1/contracts (NV-08 — TẠO HỢP ĐỒNG THUÊ)
  * Quyền: Chỉ MANAGER có quyền tạo hợp đồng (CRU)
  */
-router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const {
     apartment_id,
     building_id,
@@ -2267,7 +2268,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
  *   - Thanh lý sớm trước ngày nhận phòng (today < start_date): today <= termDate <= end_date -> bỏ qua MAINTENANCE,
  *     đồng bộ lại trạng thái căn hộ ngay (AVAILABLE / RESERVED / OCCUPIED).
  */
-router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const { terminated_date, reason, note } = req.body;
   const cleanReason = String(reason || note || '').trim();
@@ -2917,7 +2918,7 @@ async function assertActivatable(client, contractId) {
   return cRes.rows[0];
 }
 
-router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -3009,7 +3010,7 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), async 
   }
 });
 
-router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -4345,7 +4346,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
  * POST /api/v1/contracts/:id/renew (FR-015)
  * Gia hạn bằng cách tạo hợp đồng nối tiếp mới có parent_contract_id trỏ về hợp đồng hiện tại
  */
-router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const { new_end_date, rent_amount, deposit_amount, note } = req.body;
 
@@ -4463,7 +4464,7 @@ router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), async (re
  * - Mở hợp đồng mới ACTIVE trên căn mới (gán parent_contract_id = id) & chuyển căn mới sang OCCUPIED
  * - Tùy chọn chuyển sổ cọc sang hợp đồng mới (transfer_deposit = true)
  */
-router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const {
     new_apartment_id,
