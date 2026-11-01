@@ -50,7 +50,13 @@ export function validateAndNormalizeSubscriptionMeta({
     }
   }
 
-  const rawNote = note !== undefined && note !== null ? String(note).trim() : '';
+  if (note !== undefined && note !== null && typeof note !== 'string') {
+    throw makeValidationError(
+      'INVALID_SERVICE_NOTE',
+      'Ghi chú dịch vụ phải là chuỗi ký tự hợp lệ.'
+    );
+  }
+  const rawNote = note !== undefined && note !== null ? note.trim() : '';
   if (rawNote.length > MAX_NOTE_LENGTH) {
     throw makeValidationError(
       'INVALID_SERVICE_NOTE',
@@ -85,9 +91,20 @@ export function validateAndNormalizeSubscriptionMeta({
   const seenKeys = new Set();
 
   for (let i = 0; i < vehiclePlates.length; i += 1) {
-    const rawPlate = vehiclePlates[i] !== undefined && vehiclePlates[i] !== null
-      ? String(vehiclePlates[i]).trim()
-      : '';
+    const item = vehiclePlates[i];
+    if (
+      item !== undefined &&
+      item !== null &&
+      typeof item !== 'string' &&
+      typeof item !== 'number'
+    ) {
+      throw makeValidationError(
+        'INVALID_VEHICLE_PLATES',
+        `Biển số xe${parsedQty > 1 ? ` #${i + 1}` : ''} không hợp lệ.`
+      );
+    }
+
+    const rawPlate = item !== undefined && item !== null ? String(item).trim() : '';
 
     if (!rawPlate) {
       throw makeValidationError(

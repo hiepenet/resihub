@@ -46,6 +46,7 @@ import { contractsService, createIdempotencyKey } from '../../../services/contra
 import {
   MAX_PARKING_QUANTITY,
   isParkingService,
+  allowsMultiQuantity,
   syncVehiclePlatesArray,
   validateServiceMetaInput,
 } from '../../../utils/serviceSubscriptionMeta';
@@ -910,7 +911,11 @@ export function ContractDetailPage() {
             }));
 
     const payload = items.map(({ serviceId, parking, billingType, defaultPrice, cfg }) => {
-      const effQty = billingType === 'QUANTITY' ? cfg.quantity : 1;
+      const multiQty = allowsMultiQuantity({
+        billing_type: billingType,
+        category: parking ? 'PARKING' : 'OTHER',
+      });
+      const effQty = multiQty ? cfg.quantity : 1;
       const meta = validateServiceMetaInput({
         isParking: parking,
         quantity: effQty,
@@ -924,8 +929,7 @@ export function ContractDetailPage() {
             meta.quantityError || meta.plateErrors.find(Boolean) || meta.noteError;
         }
       }
-      const qty =
-        billingType === 'QUANTITY' ? Math.max(1, Math.round(Number(cfg.quantity || 1))) : 1;
+      const qty = multiQty ? Math.max(1, Math.round(Number(cfg.quantity || 1))) : 1;
       const priceVal =
         cfg.unit_price !== undefined && cfg.unit_price !== ''
           ? Math.max(0, Math.round(Number(cfg.unit_price)))
@@ -2486,6 +2490,7 @@ export function ContractDetailPage() {
               <div className="space-y-2">
                 {selectableDraftServices.map((svc) => {
                   const parking = isParkingService(svc);
+                  const multiQty = allowsMultiQuantity(svc);
                   const svcErr = draftServiceErrors[svc.id] || {};
                   const cfg = draftSelectedServices[svc.id] || {
                     checked: false,
@@ -2547,7 +2552,7 @@ export function ContractDetailPage() {
                         {cfg.checked ? (
                           <>
                             <div className="sm:col-span-3">
-                              {svc.billing_type === 'QUANTITY' ? (
+                              {multiQty ? (
                                 <Input
                                   label="Số lượng"
                                   type="number"
@@ -2601,7 +2606,7 @@ export function ContractDetailPage() {
                         <div className="mt-2.5 pt-2.5 border-t border-slate-100">
                           <ServiceSubscriptionMetaFields
                             isParking={parking}
-                            quantity={svc.billing_type === 'QUANTITY' ? cfg.quantity : 1}
+                            quantity={multiQty ? cfg.quantity : 1}
                             vehiclePlates={cfg.vehicle_plates}
                             note={cfg.note || ''}
                             plateErrors={svcErr.plateErrors || []}
@@ -2609,7 +2614,7 @@ export function ContractDetailPage() {
                             onPlateChange={(plateIdx, val) => {
                               const nextPlates = syncVehiclePlatesArray(
                                 cfg.vehicle_plates,
-                                svc.billing_type === 'QUANTITY' ? cfg.quantity : 1
+                                multiQty ? cfg.quantity : 1
                               );
                               nextPlates[plateIdx] = val;
                               setDraftSelectedServices((prev) => ({

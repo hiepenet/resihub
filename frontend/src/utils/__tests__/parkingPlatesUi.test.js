@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_PARKING_QUANTITY,
   isParkingService,
+  allowsMultiQuantity,
   syncVehiclePlatesArray,
   validateServiceMetaInput,
 } from '../serviceSubscriptionMeta.js';
@@ -27,9 +28,16 @@ test('isParkingService detects PARKING category case-insensitively on strings an
   assert.equal(isParkingService({ category: 'INTERNET', code: 'INTERNET_FIBER' }), false);
   assert.equal(isParkingService({ category: 'CLEANING', billing_type: 'QUANTITY' }), false);
   assert.equal(isParkingService(null), false);
+
+  // Review Fix (Important #1): FIXED parking services also allow multi-quantity (1..10)
+  assert.equal(allowsMultiQuantity({ category: 'PARKING', billing_type: 'FIXED' }), true);
+  assert.equal(allowsMultiQuantity({ service_category: 'PARKING', billing_type: 'FIXED' }), true);
+  assert.equal(allowsMultiQuantity({ category: 'CLEANING', billing_type: 'QUANTITY' }), true);
+  assert.equal(allowsMultiQuantity({ category: 'INTERNET', billing_type: 'FIXED' }), false);
+  assert.equal(allowsMultiQuantity(null), false);
 });
 
-test('syncVehiclePlatesArray slices on quantity reduction and pads on expansion up to MAX_PARKING_QUANTITY (Review Focus #5)', () => {
+test('syncVehiclePlatesArray slices on quantity reduction, pads on expansion, and preserves plates during transient empty input (Review Focus #5 & Important #2)', () => {
   assert.deepEqual(
     syncVehiclePlatesArray(['59A1-111.11', '59B2-222.22'], 1),
     ['59A1-111.11']
@@ -38,8 +46,13 @@ test('syncVehiclePlatesArray slices on quantity reduction and pads on expansion 
     syncVehiclePlatesArray(['59A1-111.11', '59B2-222.22'], 3),
     ['59A1-111.11', '59B2-222.22', '']
   );
+  assert.deepEqual(
+    syncVehiclePlatesArray(['59A1-111.11', '59B2-222.22', '59C3-333.33'], ''),
+    ['59A1-111.11', '59B2-222.22', '59C3-333.33']
+  );
   assert.equal(syncVehiclePlatesArray([], 25).length, 10);
   assert.deepEqual(syncVehiclePlatesArray(undefined, 1), ['']);
+  assert.deepEqual(syncVehiclePlatesArray(undefined, ''), ['']);
 });
 
 test('validateServiceMetaInput validates per-vehicle plates, duplicate plates, parking cap, non-parking passthrough, and note length', () => {
@@ -145,6 +158,8 @@ test('ServiceSubscriptionMetaFields component and all 4 screens enforce parking 
     );
   }
 
+  assert.match(readSrc('pages/admin/contracts/ContractsPage.jsx'), /allowsMultiQuantity/);
+  assert.match(readSrc('pages/admin/contracts/ContractDetailPage.jsx'), /allowsMultiQuantity/);
   assert.match(readSrc('pages/admin/contracts/ContractDetailPage.jsx'), /VehiclePlatesBadges/);
   assert.match(readSrc('pages/admin/services/SubscriptionsPage.jsx'), /VehiclePlatesBadges/);
   assert.match(
@@ -152,5 +167,9 @@ test('ServiceSubscriptionMetaFields component and all 4 screens enforce parking 
     /vehicle_plates[\s\S]{0,120}toLowerCase\(\)\.includes\(q\)/,
     'SubscriptionsPage search filter must match vehicle_plates'
   );
-  assert.match(readSrc('pages/resident/tabs/ServicesTab.jsx'), /VehiclePlatesBadges/);
+  assert.match(
+    readSrc('pages/resident/tabs/ServicesTab.jsx'),
+    /cancelTarget[\s\S]{0,400}VehiclePlatesBadges\s+plates=\{cancelTarget\.vehicle_plates\}/,
+    'Resident Cancel Service modal must show VehiclePlatesBadges for cancelTarget'
+  );
 });

@@ -15,12 +15,26 @@ export function isParkingService(svcOrCategory) {
   return false;
 }
 
+export function allowsMultiQuantity(svcOrObj) {
+  if (!svcOrObj || typeof svcOrObj !== 'object') return false;
+  const billingType = String(svcOrObj.billing_type || '').trim().toUpperCase();
+  return billingType === 'QUANTITY' || isParkingService(svcOrObj);
+}
+
 export function syncVehiclePlatesArray(plates, nextQuantity) {
-  const parsed = Math.floor(Number(nextQuantity) || 1);
-  const targetLen = Math.min(MAX_PARKING_QUANTITY, Math.max(1, parsed));
   const base = Array.isArray(plates)
     ? plates.map((p) => (p === undefined || p === null ? '' : String(p)))
     : [];
+  if (
+    nextQuantity === '' ||
+    nextQuantity === null ||
+    nextQuantity === undefined ||
+    String(nextQuantity).trim() === ''
+  ) {
+    return base.length > 0 ? base.slice(0, MAX_PARKING_QUANTITY) : [''];
+  }
+  const parsed = Math.floor(Number(nextQuantity) || 1);
+  const targetLen = Math.min(MAX_PARKING_QUANTITY, Math.max(1, parsed));
   const next = base.slice(0, targetLen);
   while (next.length < targetLen) {
     next.push('');

@@ -421,6 +421,29 @@ test('Parking Vehicle Plates & Optional Service Notes — Full API Sync Suite', 
     assert.deepEqual(mgrOkRes.body.data.vehicle_plates, ['51K-888.88']);
     assert.equal(mgrOkRes.body.data.note, 'Ô B2-09');
 
+    // Review Fix (Important #3): PATCH /api/v1/service-subscriptions/:id must reject changing PARKING quantity out of sync with vehicle_plates or non-integer quantity
+    const mgrBadQtySync = await apiFetch(
+      `/api/v1/service-subscriptions/${mgrOkRes.body.data.id}`,
+      mgrVopA.token,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ quantity: 3 }),
+      }
+    );
+    assert.equal(mgrBadQtySync.status, 422);
+    assert.equal(mgrBadQtySync.body.code, 'INVALID_VEHICLE_PLATES');
+
+    const mgrBadQtyNaN = await apiFetch(
+      `/api/v1/service-subscriptions/${mgrOkRes.body.data.id}`,
+      mgrVopA.token,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ quantity: 'abc' }),
+      }
+    );
+    assert.equal(mgrBadQtyNaN.status, 422);
+    assert.equal(mgrBadQtyNaN.body.code, 'INVALID_SERVICE_QUANTITY');
+
     // Manager cancels standalone subscription with cancellation reason in note -> vehicle_plates stays intact
     const mgrCancelRes = await apiFetch(
       `/api/v1/service-subscriptions/${mgrOkRes.body.data.id}`,

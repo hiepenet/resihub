@@ -744,6 +744,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
       >
         {cancelTarget ? (
           <form onSubmit={handleConfirmCancel} className="space-y-4">
+            <VehiclePlatesBadges plates={cancelTarget.vehicle_plates} />
             <Input
               type="date"
               label="Ngày kết thúc sử dụng"

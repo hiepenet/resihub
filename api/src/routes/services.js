@@ -335,12 +335,12 @@ serviceSubscriptionsRouter.patch(
   requireRole(['SYS_ADMIN', 'MANAGER']),
   async (req, res) => {
     const { id } = req.params;
-    const { status, quantity, note, end_date } = req.body;
+    const { status, quantity, note, end_date, vehicle_plates } = req.body;
     const orgId = req.user.org_id;
 
     try {
       const curRes = await adminPool.query(
-        `SELECT ss.*, sc.name AS service_name
+        `SELECT ss.*, sc.name AS service_name, sc.category AS service_category, sc.billing_type
          FROM service_subscription ss
          JOIN service_catalog sc ON sc.id = ss.service_id
          WHERE ss.id = $1 AND ss.org_id = $2`,
@@ -355,8 +355,32 @@ serviceSubscriptionsRouter.patch(
         return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà này.' });
       }
 
+      let nextQty = sub.quantity;
+      let nextPlates = sub.vehicle_plates || [];
+      let cleanNote = null;
+
+      if (quantity !== undefined || vehicle_plates !== undefined) {
+        const meta = validateAndNormalizeSubscriptionMeta({
+          category: sub.service_category,
+          billingType: sub.billing_type,
+          quantity: quantity !== undefined ? quantity : sub.quantity,
+          vehiclePlates: vehicle_plates !== undefined ? vehicle_plates : sub.vehicle_plates,
+          note,
+        });
+        nextQty = meta.quantity;
+        nextPlates = meta.vehiclePlates;
+        cleanNote = note !== undefined ? meta.note : null;
+      } else if (note !== undefined && note !== null) {
+        const noteMeta = validateAndNormalizeSubscriptionMeta({
+          category: 'OTHER',
+          billingType: 'FIXED',
+          quantity: 1,
+          note,
+        });
+        cleanNote = noteMeta.note;
+      }
+
       const nextStatus = status || sub.status;
-      const nextQty = quantity !== undefined ? Math.max(1, Number(quantity)) : sub.quantity;
       const nextEnd = end_date !== undefined ? end_date : (nextStatus === 'CANCELLED' ? new Date().toISOString().slice(0, 10) : sub.end_date);
       const nextProrata = nextStatus === 'CANCELLED'
         ? computeProrata(sub.unit_price, nextQty, nextEnd, 'cancel')
@@ -369,11 +393,12 @@ serviceSubscriptionsRouter.patch(
              end_date = $3,
              prorata_amount = $4,
              note = COALESCE($5, note),
-             approved_by = $6,
+             vehicle_plates = $6,
+             approved_by = $7,
              updated_at = NOW()
-         WHERE id = $7
+         WHERE id = $8
          RETURNING *`,
-        [nextStatus, nextQty, nextEnd, nextProrata, note, req.user.sub, id]
+        [nextStatus, nextQty, nextEnd, nextProrata, cleanNote, nextPlates, req.user.sub, id]
       );
 
       if (sub.requested_by && nextStatus !== sub.status) {
@@ -393,6 +418,9 @@ serviceSubscriptionsRouter.patch(
 
       res.json({ message: 'Cập nhật đăng ký dịch vụ thành công.', data: up.rows[0] });
     } catch (err) {
+      if (err.httpStatus) {
+        return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+      }
       console.error('[Update Subscription Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật đăng ký dịch vụ.' });
     }

@@ -137,3 +137,52 @@ test('validateAndNormalizeSubscriptionMeta allows quantity > 10 for non-PARKING 
     (err) => err.httpStatus === 422 && err.code === 'INVALID_SERVICE_NOTE'
   );
 });
+
+
+test('validateAndNormalizeSubscriptionMeta allows multi-vehicle quantity for FIXED PARKING services and rejects non-primitive JSON values', () => {
+  const fixedParking = validateAndNormalizeSubscriptionMeta({
+    category: 'PARKING',
+    billingType: 'FIXED',
+    quantity: 2,
+    vehiclePlates: ['59A1-111.11', '59A1-222.22'],
+    note: 'Gói đỗ xe cố định',
+  });
+  assert.deepEqual(fixedParking, {
+    quantity: 2,
+    vehiclePlates: ['59A1-111.11', '59A1-222.22'],
+    note: 'Gói đỗ xe cố định',
+  });
+
+  assert.throws(
+    () =>
+      validateAndNormalizeSubscriptionMeta({
+        category: 'PARKING',
+        billingType: 'QUANTITY',
+        quantity: 1,
+        vehiclePlates: [{}],
+      }),
+    (err) => err.httpStatus === 422 && err.code === 'INVALID_VEHICLE_PLATES'
+  );
+
+  assert.throws(
+    () =>
+      validateAndNormalizeSubscriptionMeta({
+        category: 'PARKING',
+        billingType: 'QUANTITY',
+        quantity: 1,
+        vehiclePlates: [true],
+      }),
+    (err) => err.httpStatus === 422 && err.code === 'INVALID_VEHICLE_PLATES'
+  );
+
+  assert.throws(
+    () =>
+      validateAndNormalizeSubscriptionMeta({
+        category: 'INTERNET',
+        billingType: 'FIXED',
+        quantity: 1,
+        note: { bad: 1 },
+      }),
+    (err) => err.httpStatus === 422 && err.code === 'INVALID_SERVICE_NOTE'
+  );
+});

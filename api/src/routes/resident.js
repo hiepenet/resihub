@@ -1279,6 +1279,16 @@ router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
   const { end_date, note } = req.body;
 
   try {
+    const cleanCancelNote =
+      note !== undefined && note !== null
+        ? validateAndNormalizeSubscriptionMeta({
+            category: 'OTHER',
+            billingType: 'FIXED',
+            quantity: 1,
+            note,
+          }).note
+        : null;
+
     const subRes = await pool.query(
       `SELECT ss.*
        FROM service_subscription ss
@@ -1300,7 +1310,7 @@ router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
        SET status = $1, end_date = $2, prorata_amount = $3, note = COALESCE($4, note), updated_at = NOW()
        WHERE id = $5
        RETURNING *`,
-      [nextStatus, effEnd, prorata, note?.trim() || null, id]
+      [nextStatus, effEnd, prorata, cleanCancelNote, id]
     );
 
     res.json({
@@ -1308,6 +1318,9 @@ router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
       data: upd.rows[0],
     });
   } catch (err) {
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+    }
     console.error('[Resident Cancel Service Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi hủy dịch vụ.' });
   }
