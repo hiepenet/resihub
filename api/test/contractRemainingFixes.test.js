@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
-import { rm } from 'node:fs/promises';
+import { rm, rmdir, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
@@ -82,6 +82,7 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
 
   t.after(async () => {
     try {
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(() => resolve()));
       for (const cId of createdContractIds) {
         await adminPool.query(
@@ -132,6 +133,9 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
       for (const pfx of createdIdempotencyPrefixes) {
         await adminPool.query('DELETE FROM idempotency_key WHERE idem_key LIKE $1', [`${pfx}%`]).catch(() => {});
       }
+      await rmdir(path.join(process.cwd(), 'uploads', 'contract')).catch(() => {});
+      await rmdir(path.join(process.cwd(), 'uploads', 'person')).catch(() => {});
+      await rmdir(path.join(process.cwd(), 'uploads')).catch(() => {});
     } finally {
       await adminPool.end();
       await appPool.end();
@@ -420,5 +424,90 @@ test('M05 Contract Creation Remaining 4-Item Suite', async (t) => {
         process.env.REQUIRE_IDEMPOTENCY_KEY = prevFlag;
       }
     }
+  });
+
+  await t.test('Task 4: Inline CCCD id_image_front/id_image_back upload on new_tenant, OWNER 403 PII guard, and atomic rollback on invalid image', async () => {
+    // 1. Valid front & back CCCD PNGs
+    const aptValid = await createTestApartment('T4A');
+    const tenantValid = makeUniqueTenant('T4A');
+
+    const okRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptValid.id,
+        new_tenant: {
+          ...tenantValid,
+          id_image_front: TINY_PNG_B64,
+          id_image_back: TINY_PNG_B64,
+        },
+        start_date: '2027-02-01',
+        end_date: '2028-02-01',
+        rent_amount: 10000000,
+        deposit_amount: 10000000,
+      }),
+    });
+    assert.equal(okRes.status, 201, JSON.stringify(okRes.body));
+    const contractId = okRes.body.data.id;
+    const primaryTenantId = okRes.body.data.primary_tenant_id;
+    createdContractIds.push(contractId);
+    await trackTenantPersonByTenantId(primaryTenantId);
+
+    const idImgsRes = await apiFetch(`/api/v1/tenants/${primaryTenantId}/id-images`, mgrVopA.token);
+    assert.equal(idImgsRes.status, 200, JSON.stringify(idImgsRes.body));
+    assert.equal(idImgsRes.body.data.length, 2, `Expected 2 CCCD images, got: ${JSON.stringify(idImgsRes.body)}`);
+    const sides = idImgsRes.body.data.map((x) => x.side).sort();
+    assert.deepEqual(sides, ['back', 'front']);
+
+    const frontAttId = idImgsRes.body.data.find((x) => x.side === 'front').attachment_id;
+    const mgrViewRes = await fetch(`${API_BASE}/api/v1/attachments/${frontAttId}/view`, {
+      headers: { Authorization: `Bearer ${mgrVopA.token}` },
+    });
+    const mgrViewBuf = await mgrViewRes.arrayBuffer();
+    assert.equal(mgrViewRes.status, 200);
+    assert.ok(mgrViewBuf.byteLength > 0);
+
+    const ownerViewRes = await apiFetch(`/api/v1/attachments/${frontAttId}/view`, ownerVop.token);
+    assert.equal(ownerViewRes.status, 403, 'OWNER must be blocked from viewing raw person CCCD attachment');
+
+    // 2. Invalid image (front valid PNG, back invalid PDF) -> 400 VALIDATION_ERROR + full DB & disk rollback (Review Focus #5)
+    const aptBad = await createTestApartment('T4B');
+    const tenantBad = makeUniqueTenant('T4B');
+    const personDirsBefore = new Set(
+      await readdir(path.join(process.cwd(), 'uploads', 'person')).catch(() => [])
+    );
+
+    const badRes = await apiFetch('/api/v1/contracts', mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptBad.id,
+        new_tenant: {
+          ...tenantBad,
+          id_image_front: TINY_PNG_B64,
+          id_image_back: 'data:application/pdf;base64,JVBERi0xLjQK',
+        },
+        start_date: '2027-03-01',
+        end_date: '2028-03-01',
+        rent_amount: 10000000,
+        deposit_amount: 10000000,
+      }),
+    });
+    assert.equal(badRes.status, 400, JSON.stringify(badRes.body));
+    assert.equal(badRes.body.code, 'VALIDATION_ERROR');
+
+    const personDirsAfter = await readdir(path.join(process.cwd(), 'uploads', 'person')).catch(() => []);
+    const leakedDirs = personDirsAfter.filter((d) => !personDirsBefore.has(d));
+    assert.deepEqual(leakedDirs, [], 'Must unlink written front CCCD image & empty folder on rollback');
+
+    const orphanPerson = await adminPool.query(
+      'SELECT id FROM person WHERE phone = $1 OR email = $2',
+      [tenantBad.phone, tenantBad.email]
+    );
+    assert.equal(orphanPerson.rows.length, 0, 'Must rollback person row when inline CCCD image validation fails');
+
+    const orphanContract = await adminPool.query(
+      'SELECT id FROM contract WHERE apartment_id = $1',
+      [aptBad.id]
+    );
+    assert.equal(orphanContract.rows.length, 0, 'Must rollback contract row when inline CCCD image validation fails');
   });
 });

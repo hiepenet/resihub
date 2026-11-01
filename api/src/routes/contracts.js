@@ -1,4 +1,6 @@
 import express from 'express';
+import { unlink, rmdir } from 'node:fs/promises';
+import path from 'node:path';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
@@ -389,14 +391,19 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
       );
       const residentUserIds = new Set();
       for (const pRow of personsRes.rows) {
+        let ensuredUserId = null;
         try {
           const acct = await ensureResidentAccount(pRow.person_id, {
             email: pRow.email,
             phone: pRow.phone,
           });
-          if (acct?.userId) residentUserIds.add(String(acct.userId));
+          ensuredUserId = typeof acct === 'string' ? acct : acct?.userId;
         } catch {
           // Fallback query if ensureResidentAccount skips
+        }
+        if (ensuredUserId) {
+          residentUserIds.add(String(ensuredUserId));
+          continue;
         }
         const uRes = await adminPool.query(
           `SELECT id FROM app_user WHERE person_id = $1 AND status = 'ACTIVE' LIMIT 1`,
@@ -1332,6 +1339,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
   }
 
   const { client, release } = await getUserClient(req);
+  const writtenInlineIdImagePaths = [];
   try {
     await client.query('BEGIN');
 
@@ -1453,6 +1461,48 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
         type: 'primary',
       });
       effectiveTenantId = inlineTenantResult.tenant.id;
+
+      const inlineIdImageSides = [
+        { side: 'front', raw: new_tenant?.id_image_front },
+        { side: 'back', raw: new_tenant?.id_image_back },
+      ];
+      for (const item of inlineIdImageSides) {
+        if (item.raw === undefined || item.raw === null || String(item.raw).trim() === '') {
+          continue;
+        }
+        const saved = await saveBase64Image({
+          imageBase64: String(item.raw).trim(),
+          folder: 'person',
+          entityId: inlineTenantResult.personId,
+          entity: 'person',
+          ownerId: inlineTenantResult.personId,
+          req,
+          query: (sql, params) => client.query(sql, params),
+        });
+        if (saved.error) {
+          const imgErr = new Error(saved.error.message);
+          imgErr.httpStatus = 400;
+          imgErr.code = saved.error.code || 'VALIDATION_ERROR';
+          throw imgErr;
+        }
+        if (saved.storagePath) {
+          writtenInlineIdImagePaths.push(path.join(process.cwd(), saved.storagePath));
+        }
+        const marker = JSON.stringify({ attachmentId: saved.attachment.id, side: item.side });
+        await client.query(
+          `UPDATE person SET id_images = array_append(COALESCE(id_images, '{}'), $1) WHERE id = $2`,
+          [marker, inlineTenantResult.personId]
+        );
+        await client.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+           VALUES ($1, 'UPLOAD', 'attachment', $2, $3)`,
+          [
+            req.user.sub,
+            saved.attachment.id,
+            JSON.stringify({ side: item.side, owner: 'person', owner_id: inlineTenantResult.personId }),
+          ]
+        );
+      }
     }
 
     // Tính toán tiền cọc
@@ -1583,6 +1633,10 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    for (const fp of writtenInlineIdImagePaths) {
+      await unlink(fp).catch(() => {});
+      await rmdir(path.dirname(fp)).catch(() => {});
+    }
     if (err.httpStatus) {
       return res.status(err.httpStatus).json({
         code: err.code || 'VALIDATION_ERROR',
