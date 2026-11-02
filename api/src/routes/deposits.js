@@ -2271,7 +2271,12 @@ router.patch(
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
-    const { bank_name, bank_code, bank_bin, account_number, account_holder } = req.body || {};
+    const rawBankPayload =
+      req.body?.bank_info && typeof req.body.bank_info === 'object' && !Array.isArray(req.body.bank_info)
+        ? req.body.bank_info
+        : req.body?.bank_info !== undefined
+          ? {}
+          : req.body || {};
 
     const { client, release } = await getUserClient(req);
     try {
@@ -2305,7 +2310,7 @@ router.patch(
       const vBank = validateRefundBankInfo({
         refundAmount: 1,
         refundMethod: 'BANK_TRANSFER',
-        bankInfo: { bank_name, bank_code, bank_bin, account_number, account_holder },
+        bankInfo: rawBankPayload,
       });
       if (!vBank.ok) {
         return res.status(422).json({ code: vBank.code, message: vBank.message });

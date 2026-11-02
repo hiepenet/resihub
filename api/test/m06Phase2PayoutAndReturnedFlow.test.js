@@ -591,18 +591,54 @@ test('M06 Phase 2 (Task 4) — Separated Payout Execution, UNC Voucher, Pre-Payo
   assert.equal(badBankShort.status, 422);
   assert.equal(badBankShort.body?.code, 'INVALID_ACCOUNT_NUMBER');
 
-  // Primary RESIDENT updates bank account -> 200 + notifies BUILDING_MANAGERS
+  const badBankArray = await apiFetch(`/api/v1/deposits/${depositId}/bank-info`, primaryRes.token, {
+    method: 'PATCH',
+    body: JSON.stringify({ bank_info: [] }),
+  });
+  assert.equal(badBankArray.status, 422);
+  assert.equal(badBankArray.body?.code, 'BANK_INFO_REQUIRED');
+
+  const badBankNull = await apiFetch(`/api/v1/deposits/${depositId}/bank-info`, primaryRes.token, {
+    method: 'PATCH',
+    body: JSON.stringify({ bank_info: null }),
+  });
+  assert.equal(badBankNull.status, 422);
+  assert.equal(badBankNull.body?.code, 'BANK_INFO_REQUIRED');
+
+  // Primary RESIDENT updates bank account using nested { bank_info } UI payload -> 200 + preserves bank_logo + notifies BUILDING_MANAGERS
   const okBankUpdate = await apiFetch(`/api/v1/deposits/${depositId}/bank-info`, primaryRes.token, {
     method: 'PATCH',
     body: JSON.stringify({
-      bank_name: 'Techcombank',
-      bank_code: 'TCB',
-      account_number: '190366688899',
-      account_holder: 'CU DAN P2T4 MOI',
+      bank_info: {
+        bank_name: 'Techcombank',
+        bank_code: 'TCB',
+        bank_bin: '970407',
+        bank_logo: 'https://api.vietqr.io/img/TCB.png',
+        account_number: '190366688899',
+        account_holder: 'CU DAN P2T4 MOI',
+      },
     }),
   });
   assert.equal(okBankUpdate.status, 200, JSON.stringify(okBankUpdate.body));
   assert.equal(okBankUpdate.body.data.settlement.bank_info.account_number, '190366688899');
+  assert.equal(okBankUpdate.body.data.settlement.bank_info.bank_bin, '970407');
+  assert.equal(
+    okBankUpdate.body.data.settlement.bank_info.bank_logo,
+    'https://api.vietqr.io/img/TCB.png'
+  );
+
+  // MANAGER updates bank account using legacy flat payload -> 200 backward-compatible
+  const okFlatBankUpdate = await apiFetch(`/api/v1/deposits/${depositId}/bank-info`, mgrA.token, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      bank_name: 'MBBank',
+      bank_code: 'MB',
+      account_number: '0987654321',
+      account_holder: 'CU DAN P2T4 MOI',
+    }),
+  });
+  assert.equal(okFlatBankUpdate.status, 200, JSON.stringify(okFlatBankUpdate.body));
+  assert.equal(okFlatBankUpdate.body.data.settlement.bank_info.account_number, '0987654321');
 
   const mgrBankNotif = await adminPool.query(
     `SELECT 1 FROM notification
