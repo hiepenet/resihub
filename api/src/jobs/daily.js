@@ -357,6 +357,10 @@ export async function runDailyJobs() {
   }
 
   // 9. FR-068 & R-15: Cảnh báo hạn hoàn cọc cho cả TERMINATED và EXPIRED, và mọi trạng thái chưa tất toán xong
+  await runOverdueDepositSettlementAlerts();
+}
+
+export async function runOverdueDepositSettlementAlerts() {
   const depositAlerts = await adminPool.query(
     `SELECT d.id AS deposit_id,
             d.contract_id,
@@ -365,6 +369,7 @@ export async function runDailyJobs() {
             d.refund_due_date,
             COALESCE(c.terminated_at, c.end_date) AS end_ref,
             c.building_id,
+            building_has_active_owner(c.building_id) AS building_has_active_owner,
             b.org_id,
             a.code AS apartment_code,
             b.name AS building_name,
@@ -394,46 +399,67 @@ export async function runDailyJobs() {
       ? `[QUÁ HẠN] Hoàn cọc căn ${dep.apartment_code} đã quá hạn 5 ngày`
       : `[CẢNH BÁO] Đến hạn hoàn cọc căn ${dep.apartment_code} (còn 2 ngày)`;
     const content = isOverdue
-      ? `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày nhưng chưa hoàn tất thủ tục hoàn cọc (trạng thái: ${dep.deposit_status}, số tiền đang giữ: ${Number(dep.amount_held).toLocaleString('vi-VN')} ₫). Báo cáo khẩn gửi Quản trị hệ thống & Ban Quản Lý (FR-068).`
+      ? `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày nhưng chưa hoàn tất thủ tục hoàn cọc (trạng thái: ${dep.deposit_status}, số tiền đang giữ: ${Number(dep.amount_held).toLocaleString('vi-VN')} ₫). Báo cáo khẩn gửi Chủ sở hữu tòa nhà & Ban Quản Lý (FR-068).`
       : `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày. Vui lòng hoàn tất hồ sơ tất toán và hoàn cọc cho cư dân đúng hạn 5 ngày.`;
 
-    const notifyUsers = isOverdue
-      ? await adminPool.query(
-          `SELECT DISTINCT ur.user_id
-           FROM user_role ur
-           JOIN role r ON r.id = ur.role_id
-           JOIN app_user au ON au.id = ur.user_id
-           JOIN person p ON p.id = au.person_id
-           WHERE p.org_id = $1
-             AND (r.code = 'SYS_ADMIN' OR (r.code = 'MANAGER' AND ur.building_id = $2))`,
-          [dep.org_id, dep.building_id]
-        )
-      : await adminPool.query(
-          `SELECT DISTINCT ur.user_id
-           FROM user_role ur
-           JOIN role r ON r.id = ur.role_id
-           JOIN app_user au ON au.id = ur.user_id
-           JOIN person p ON p.id = au.person_id
-           WHERE p.org_id = $1
-             AND r.code = 'MANAGER'
-             AND ur.building_id = $2`,
-          [dep.org_id, dep.building_id]
-        );
+    const recipientSet = new Set();
 
-    for (const u of notifyUsers.rows) {
+    const mgrUsers = await adminPool.query(
+      `SELECT DISTINCT ur.user_id
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       JOIN app_user au ON au.id = ur.user_id
+       JOIN person p ON p.id = au.person_id
+       WHERE p.org_id = $1
+         AND au.status = 'ACTIVE'
+         AND r.code = 'MANAGER'
+         AND ur.building_id = $2`,
+      [dep.org_id, dep.building_id]
+    );
+    mgrUsers.rows.forEach((r) => recipientSet.add(r.user_id));
+
+    if (isOverdue) {
+      const ownerUsers = await adminPool.query(
+        `SELECT DISTINCT au.id AS user_id
+         FROM building b
+         JOIN owner o ON o.id = b.owner_id
+         JOIN app_user au ON au.person_id = o.person_id
+         WHERE b.id = $1
+           AND au.status = 'ACTIVE'`,
+        [dep.building_id]
+      );
+      ownerUsers.rows.forEach((r) => recipientSet.add(r.user_id));
+
+      if (!dep.building_has_active_owner) {
+        const sysUsers = await adminPool.query(
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           JOIN app_user au ON au.id = ur.user_id
+           JOIN person p ON p.id = au.person_id
+           WHERE p.org_id = $1
+             AND au.status = 'ACTIVE'
+             AND r.code = 'SYS_ADMIN'`,
+          [dep.org_id]
+        );
+        sysUsers.rows.forEach((r) => recipientSet.add(r.user_id));
+      }
+    }
+
+    for (const userId of recipientSet) {
       await adminPool.query(
         `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-         SELECT $1, $2, $3, $4, $5, $6
+         SELECT $1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::jsonb
          WHERE NOT EXISTS (
            SELECT 1 FROM notification n
-           WHERE n.user_id = $2
-             AND n.type = $5
+           WHERE n.user_id = $2::uuid
+             AND n.type = $5::text
              AND (n.payload->>'deposit_id')::uuid = $7::uuid
              AND n.created_at::date = CURRENT_DATE
          )`,
         [
           dep.org_id,
-          u.user_id,
+          userId,
           title,
           content,
           isOverdue ? 'DEPOSIT_OVERDUE_5D' : 'DEPOSIT_WARNING_3D',

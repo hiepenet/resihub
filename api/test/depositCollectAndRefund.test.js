@@ -223,8 +223,8 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(selfRefundRsv.status, 403);
   assert.equal(selfRefundRsv.body.code, 'FOUR_EYES_VIOLATION');
 
-  // SYS_ADMIN duyệt hoàn cọc giữ chỗ -> 200 REFUNDED
-  const okRefundRsv = await apiFetch(`/api/v1/reservations/${rsv1Id}/refund`, sysAdmin.token, {
+  // OWNER duyệt hoàn cọc giữ chỗ -> 200 REFUNDED
+  const okRefundRsv = await apiFetch(`/api/v1/reservations/${rsv1Id}/refund`, owner.token, {
     method: 'PATCH',
     body: JSON.stringify({ reason: 'Hoàn cọc giữ chỗ theo thỏa thuận' }),
   });
@@ -253,7 +253,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(selfForfeitRsv.status, 403);
   assert.equal(selfForfeitRsv.body.code, 'FOUR_EYES_VIOLATION');
 
-  const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv2Res.body.data.id}/forfeit`, sysAdmin.token, {
+  const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv2Res.body.data.id}/forfeit`, owner.token, {
     method: 'PATCH',
     body: JSON.stringify({ reason: 'Khách hủy giữ chỗ quá hạn ký HĐ' }),
   });
@@ -513,8 +513,8 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(selfReject.status, 403);
   assert.equal(selfReject.body.code, 'SELF_APPROVAL');
 
-  // SYS_ADMIN từ chối -> về SETTLEMENT_DRAFT -> MANAGER trình lại
-  const sysReject = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/reject`, sysAdmin.token, {
+  // OWNER từ chối -> về SETTLEMENT_DRAFT -> MANAGER trình lại
+  const sysReject = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/reject`, owner.token, {
     method: 'POST',
     body: JSON.stringify({ reason: 'Kiểm tra lại ghi chú số tài khoản khách thuê' }),
   });
@@ -551,14 +551,14 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(resDispute1.status, 200);
   assert.equal(resDispute1.body.data.status, 'DISPUTED');
 
-  const blockedApprove = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/approve`, sysAdmin.token, {
+  const blockedApprove = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/approve`, owner.token, {
     method: 'POST',
     body: JSON.stringify({}),
   });
   assert.equal(blockedApprove.status, 409);
   assert.equal(blockedApprove.body.code, 'SETTLEMENT_DISPUTED');
 
-  // Quản lý giải quyết CONFIRM -> quay về PENDING_APPROVAL -> SYS_ADMIN phê duyệt
+  // Quản lý giải quyết CONFIRM -> quay về PENDING_APPROVAL -> OWNER phê duyệt
   const resolveConfirm1 = await apiFetch(`/api/v1/deposits/${dep1.id}/resolve-dispute`, manager.token, {
     method: 'POST',
     body: JSON.stringify({
@@ -569,7 +569,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(resolveConfirm1.status, 200);
   assert.equal(resolveConfirm1.body.data.status, 'PENDING_APPROVAL');
 
-  const approve1 = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/approve`, sysAdmin.token, {
+  const approve1 = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement/approve`, owner.token, {
     method: 'POST',
     body: JSON.stringify({}),
   });
@@ -613,7 +613,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(postAdjust.status, 409);
   assert.equal(postAdjust.body.code, 'ALREADY_PAID_OUT');
 
-  const postConfirm = await apiFetch(`/api/v1/deposits/${dep1.id}/resolve-dispute`, manager.token, {
+  const postConfirm = await apiFetch(`/api/v1/deposits/${dep1.id}/resolve-dispute`, owner.token, {
     method: 'POST',
     body: JSON.stringify({
       resolution: 'CONFIRM',
@@ -717,7 +717,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(sfSubmit.body.data.settlement.refund_amount, 0);
   assert.equal(sfSubmit.body.data.settlement.shortfall, 1500000);
 
-  const sfApprove = await apiFetch(`/api/v1/deposits/${dep2.id}/settlement/approve`, sysAdmin.token, {
+  const sfApprove = await apiFetch(`/api/v1/deposits/${dep2.id}/settlement/approve`, owner.token, {
     method: 'POST',
     body: JSON.stringify({}),
   });

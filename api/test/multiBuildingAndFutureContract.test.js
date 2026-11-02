@@ -651,12 +651,12 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(settleSubmit.status, 200, `Submit settlement failed: ${JSON.stringify(settleSubmit.body)}`);
 
-    // OWNER blocked from approving settlement (403)
-    const ownerSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, ownerVop.token, {
+    // SYS_ADMIN blocked from approving settlement on VOP-A when active OWNER exists (403)
+    const sysSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, sysAdmin.token, {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    assert.equal(ownerSettleApprove.status, 403, 'OWNER must be blocked (403) from approving deposit settlement');
+    assert.equal(sysSettleApprove.status, 403, 'SYS_ADMIN must be blocked (403) from approving deposit settlement on owned building');
 
     // Creator (Manager A) blocked by Four-eyes self-approval (403)
     const mgrSelfSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, mgrA.token, {
@@ -665,13 +665,13 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(mgrSelfSettleApprove.status, 403, 'Settlement creator must be blocked by Four-eyes');
 
-    // SYS_ADMIN approves settlement -> 200 PARTIALLY_REFUNDED (7,500,000 refunded)
-    const adminSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, sysAdmin.token, {
+    // Active building OWNER approves settlement -> 200
+    const ownerSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, ownerVop.token, {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    assert.equal(adminSettleApprove.status, 200, `SYS_ADMIN settlement approve failed: ${JSON.stringify(adminSettleApprove.body)}`);
-    assert.equal(adminSettleApprove.body.data.status, 'PARTIALLY_REFUNDED');
+    assert.equal(ownerSettleApprove.status, 200, `OWNER settlement approve failed: ${JSON.stringify(ownerSettleApprove.body)}`);
+    assert.equal(ownerSettleApprove.body.data.status, 'PARTIALLY_REFUNDED');
   });
 });
 

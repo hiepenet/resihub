@@ -51,6 +51,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
 
     let sql = `
       SELECT r.*, 
+        building_has_active_owner(r.building_id) AS building_has_active_owner,
         a.code as apartment_code, 
         a.area_m2 as apartment_area,
         b.name as building_name,
@@ -325,13 +326,51 @@ router.patch('/:id/convert', authenticateToken, requireRole(['MANAGER']), async 
   });
 });
 
+async function canActAsReservationApprover(req, rsvRow, actionLabel) {
+  const userRoles = getUserRoleCodes(req);
+  if (userRoles.includes('OWNER')) {
+    const ownedIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (ownedIds.includes(rsvRow.building_id)) {
+      return { ok: true };
+    }
+  }
+  if (userRoles.includes('MANAGER')) {
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (mgrIds.includes(rsvRow.building_id)) {
+      return { ok: true };
+    }
+  }
+  if (userRoles.includes('SYS_ADMIN')) {
+    if (!rsvRow.building_has_active_owner) {
+      return { ok: true };
+    }
+    await logAccessDenied(
+      req,
+      'reservation',
+      rsvRow.id,
+      `SYS_ADMIN attempted ${actionLabel} on building with active OWNER`
+    );
+    return {
+      ok: false,
+      code: 'SYS_ADMIN_READ_ONLY_ON_OWNED_BUILDING',
+      message: 'Tòa nhà đã có Chủ sở hữu (OWNER) hoạt động; Quản trị hệ thống chỉ có quyền Xem (R) theo PRD Mục 6.2.',
+    };
+  }
+  await logAccessDenied(req, 'reservation', rsvRow.id, `Unauthorized ${actionLabel} on unassigned building`);
+  return {
+    ok: false,
+    code: 'FORBIDDEN_BUILDING',
+    message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+  };
+}
+
 /**
  * PATCH /api/v1/reservations/:id/forfeit
  */
 router.patch(
   '/:id/forfeit',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -345,20 +384,21 @@ router.patch(
 
     const { client, release } = await getUserClient(req);
     try {
-      const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
+      const rsvExist = await adminPool.query(
+        `SELECT r.*, building_has_active_owner(r.building_id) AS building_has_active_owner
+         FROM reservation r
+         WHERE r.id = $1 AND r.org_id = $2`,
+        [id, req.user.org_id]
+      );
       if (rsvExist.rows.length === 0) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
       }
-      const userRoles = getUserRoleCodes(req);
-      if (!userRoles.includes('SYS_ADMIN')) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-          await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation forfeit on unassigned building');
-          return res.status(403).json({
-            code: 'FORBIDDEN_BUILDING',
-            message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-          });
-        }
+      const approverAccess = await canActAsReservationApprover(req, rsvExist.rows[0], 'reservation forfeit');
+      if (!approverAccess.ok) {
+        return res.status(403).json({
+          code: approverAccess.code,
+          message: approverAccess.message,
+        });
       }
 
       await client.query('BEGIN');
@@ -412,7 +452,7 @@ router.patch(
         [id, `[Tịch thu cọc]: ${trimmedReason}`]
       );
 
-      await syncApartmentStatus(client, currentRes.apartment_id);
+      await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -449,7 +489,7 @@ router.patch(
 router.patch(
   '/:id/refund',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -463,20 +503,21 @@ router.patch(
 
     const { client, release } = await getUserClient(req);
     try {
-      const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
+      const rsvExist = await adminPool.query(
+        `SELECT r.*, building_has_active_owner(r.building_id) AS building_has_active_owner
+         FROM reservation r
+         WHERE r.id = $1 AND r.org_id = $2`,
+        [id, req.user.org_id]
+      );
       if (rsvExist.rows.length === 0) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
       }
-      const userRoles = getUserRoleCodes(req);
-      if (!userRoles.includes('SYS_ADMIN')) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-          await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation refund on unassigned building');
-          return res.status(403).json({
-            code: 'FORBIDDEN_BUILDING',
-            message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-          });
-        }
+      const approverAccess = await canActAsReservationApprover(req, rsvExist.rows[0], 'reservation refund');
+      if (!approverAccess.ok) {
+        return res.status(403).json({
+          code: approverAccess.code,
+          message: approverAccess.message,
+        });
       }
 
       await client.query('BEGIN');
@@ -516,7 +557,7 @@ router.patch(
         await client.query('ROLLBACK');
         return res.status(403).json({
           code: 'FOUR_EYES_VIOLATION',
-          message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (Quản lý khác hoặc SYS_ADMIN).',
+          message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (Chủ sở hữu, Quản lý khác hoặc SYS_ADMIN dự phòng).',
         });
       }
 
@@ -530,7 +571,7 @@ router.patch(
         [id, `[Hoàn cọc giữ chỗ]: ${trimmedReason}`]
       );
 
-      await syncApartmentStatus(client, currentRes.apartment_id);
+      await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)

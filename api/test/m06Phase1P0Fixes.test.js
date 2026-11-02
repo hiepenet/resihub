@@ -181,6 +181,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
   const floorId = bRes.rows[0].floor_id;
 
   const sysAdmin = await loginEmail('admin@resihub.vn', 'Admin@123456');
+  const owner = await loginEmail('owner.vop@resihub.vn', 'Demo@123456');
   const manager = await loginEmail('manager.vop.a@resihub.vn', 'Demo@123456');
 
   async function createApt(prefix, baseRent = 10000000) {
@@ -645,14 +646,14 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     const getStaleA = await apiFetch(`/api/v1/deposits/${depId}/settlement`, manager.token);
     assert.equal(getStaleA.body.data.snapshot_stale, true);
 
-    const appStaleA = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, sysAdmin.token, { method: 'POST' });
+    const appStaleA = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appStaleA.status, 409);
     assert.equal(appStaleA.body.code, 'SETTLEMENT_SNAPSHOT_STALE');
 
     // Revert inv2, test 8b) Partial payment on inv1 -> 409 SETTLEMENT_SNAPSHOT_STALE
     await adminPool.query(`UPDATE invoice SET status = 'CANCELLED' WHERE id = $1`, [inv2Id]);
     await adminPool.query(`UPDATE invoice SET paid_amount = 200000, status = 'PARTIALLY_PAID' WHERE id = $1`, [inv1Id]);
-    const appStaleB = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, sysAdmin.token, { method: 'POST' });
+    const appStaleB = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appStaleB.status, 409);
     assert.equal(appStaleB.body.code, 'SETTLEMENT_SNAPSHOT_STALE');
 
@@ -675,12 +676,12 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
       [inv3Id]
     );
 
-    const appStaleC = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, sysAdmin.token, { method: 'POST' });
+    const appStaleC = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appStaleC.status, 409);
     assert.equal(appStaleC.body.code, 'SETTLEMENT_SNAPSHOT_STALE');
 
     // Reject -> SETTLEMENT_DRAFT -> verify 4) collect on SETTLEMENT_DRAFT returns 409 DEPOSIT_NOT_COLLECTIBLE
-    const rej = await apiFetch(`/api/v1/deposits/${depId}/settlement/reject`, sysAdmin.token, {
+    const rej = await apiFetch(`/api/v1/deposits/${depId}/settlement/reject`, owner.token, {
       method: 'POST',
       body: JSON.stringify({ reason: 'Cập nhật lại hóa đơn mở mới nhất' }),
     });
@@ -711,7 +712,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
       }),
     });
     assert.equal(resub.status, 200);
-    const appOk = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, sysAdmin.token, { method: 'POST' });
+    const appOk = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appOk.status, 200);
     assert.equal(appOk.body.data.status, 'PARTIALLY_REFUNDED');
 
@@ -771,7 +772,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
       }),
     });
     assert.equal(subD.status, 200);
-    const appD = await apiFetch(`/api/v1/deposits/${depDId}/settlement/approve`, sysAdmin.token, { method: 'POST' });
+    const appD = await apiFetch(`/api/v1/deposits/${depDId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appD.status, 200);
     assert.equal(appD.body.data.status, 'DEDUCTED_FULL');
 
@@ -814,7 +815,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(adjD.status, 409);
     assert.equal(adjD.body.code, 'ALREADY_PAID_OUT');
 
-    const confD = await apiFetch(`/api/v1/deposits/${depDId}/resolve-dispute`, manager.token, {
+    const confD = await apiFetch(`/api/v1/deposits/${depDId}/resolve-dispute`, owner.token, {
       method: 'POST',
       body: JSON.stringify({ resolution: 'CONFIRM', reason: 'Đã cung cấp hóa đơn nhà thầu sửa chữa' }),
     });
@@ -893,8 +894,8 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     const stillHeld = await adminPool.query('SELECT status FROM reservation WHERE id = $1', [rsv1Id]);
     assert.equal(stillHeld.rows[0].status, 'HELD');
 
-    // 3) Missing reason -> 400 REASON_REQUIRED; creator self-approve -> 403 FOUR_EYES_VIOLATION; SYS_ADMIN + reason -> 200 preserving original note
-    const noReasonForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, sysAdmin.token, {
+    // 3) Missing reason -> 400 REASON_REQUIRED; creator self-approve -> 403 FOUR_EYES_VIOLATION; OWNER + reason -> 200 preserving original note
+    const noReasonForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, owner.token, {
       method: 'PATCH',
       body: JSON.stringify({}),
     });
@@ -908,7 +909,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(selfForfeit.status, 403);
     assert.equal(selfForfeit.body.code, 'FOUR_EYES_VIOLATION');
 
-    const okForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, sysAdmin.token, {
+    const okForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, owner.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Khách báo không thuê nữa' }),
     });
@@ -944,7 +945,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     const expRow = await adminPool.query('SELECT status FROM reservation WHERE id = $1', [rsvExpRefundId]);
     assert.equal(expRow.rows[0].status, 'EXPIRED');
 
-    const noReasonRefund = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, sysAdmin.token, {
+    const noReasonRefund = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, owner.token, {
       method: 'PATCH',
       body: JSON.stringify({}),
     });
@@ -958,7 +959,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(selfRefundExp.status, 403);
     assert.equal(selfRefundExp.body.code, 'FOUR_EYES_VIOLATION');
 
-    const okRefundExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, sysAdmin.token, {
+    const okRefundExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, owner.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Hoàn thiện chí do chủ nhà chậm bàn giao' }),
     });
@@ -989,7 +990,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     );
     await runDailyJobs();
 
-    const okForfeitExp = await apiFetch(`/api/v1/reservations/${rsvExpForfeitId}/forfeit`, sysAdmin.token, {
+    const okForfeitExp = await apiFetch(`/api/v1/reservations/${rsvExpForfeitId}/forfeit`, owner.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Quá hạn giữ chỗ khách không ký HĐ' }),
     });

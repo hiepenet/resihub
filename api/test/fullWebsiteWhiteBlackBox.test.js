@@ -1754,17 +1754,42 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     const pdfHtml = await pdfRes.text();
     assert.match(pdfHtml, /BIÊN BẢN TẤT TOÁN/i);
 
-    // OWNER phê duyệt bị chặn 403 (Phương án 2)
+    // SYS_ADMIN phê duyệt bị chặn 403 trên tòa VOP-A đã có OWNER hoạt động (PRD 6.2)
+    const sysAppDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, sysAdmin.token, {
+      method: 'POST',
+    });
+    assert.equal(sysAppDep.status, 403);
+
+    // MANAGER thứ 2 (mgrVopA) từ chối hồ sơ do mgr2VopA lập -> SETTLEMENT_DRAFT, mgr2VopA nộp lại -> OWNER phê duyệt (Four-eyes hợp lệ)
+    const mgrRejDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/reject`, mgrVopA.token, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Rà soát lại câu chữ biên bản khấu trừ' }),
+    });
+    assert.equal(mgrRejDep.status, 200, `Reject settlement failed: ${JSON.stringify(mgrRejDep.body)}`);
+    assert.equal(mgrRejDep.body.data.status, 'SETTLEMENT_DRAFT');
+
+    const settleResubmit = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgr2VopA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [
+          {
+            category: 'DAMAGE',
+            amount: 10000000,
+            description: 'Hư hỏng sàn gỗ & điều hòa theo biên bản bàn giao (đã rà soát)',
+            evidence: [TINY_PNG_BASE64],
+          },
+        ],
+        refund_method: 'BANK_TRANSFER',
+        bank_info: { bank_name: 'Vietcombank', account_number: '0011009999999', account_holder: 'CU DAN TEST' },
+      }),
+    });
+    assert.equal(settleResubmit.status, 200, `Resubmit settlement failed: ${JSON.stringify(settleResubmit.body)}`);
+
     const ownerAppDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, ownerVop.token, {
       method: 'POST',
     });
-    assert.equal(ownerAppDep.status, 403);
-
-    // MANAGER (mgrVopA) phê duyệt hồ sơ do mgr2VopA lập -> Four-eyes hợp lệ
-    const mgrAppDep = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, mgrVopA.token, {
-      method: 'POST',
-    });
-    assert.equal(mgrAppDep.status, 200, `Approve settlement failed: ${JSON.stringify(mgrAppDep.body)}`);
+    assert.equal(ownerAppDep.status, 200, `Approve settlement failed: ${JSON.stringify(ownerAppDep.body)}`);
+    assert.equal(ownerAppDep.body.data.status, 'DEDUCTED_FULL');
 
     // R-15: Sau khi tất toán (REFUNDED), chặn ghi nhận thu bổ sung vào sổ cọc đã đóng
     const postSettleCollect = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrVopA.token, {

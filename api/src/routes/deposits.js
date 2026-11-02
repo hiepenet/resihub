@@ -408,7 +408,7 @@ router.get(
 router.post(
   '/:id/transactions',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -879,7 +879,7 @@ router.get(
 router.post(
   '/:id/settlement',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -1036,6 +1036,23 @@ router.post(
           'Bảng kê tất toán tiền cọc đã được lập',
           `Ban Quản Lý đã lập bảng kê tất toán tiền cọc cho căn ${dep.apartment_code}. Vui lòng kiểm tra chi tiết bảng kê và gửi phản hồi nếu có thắc mắc trước khi chi hoàn cọc.`,
           JSON.stringify({ deposit_id: id, contract_id: dep.contract_id, settlement: settlementPayload }),
+        ]
+      );
+
+      const approverAudience = meta.building_has_active_owner ? 'BUILDING_OWNERS' : 'BUILDING_MANAGERS';
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, $2, 'SETTLEMENT_PENDING_APPROVAL', $3, $4, $5::jsonb, NULL)`,
+        [
+          id,
+          approverAudience,
+          `Chờ phê duyệt hoàn cọc — Căn ${dep.apartment_code}`,
+          `Ban Quản Lý đã trình hồ sơ tất toán tiền cọc căn ${dep.apartment_code} (hoàn trả dự kiến: ${Number(refund).toLocaleString('vi-VN')} ₫). Vui lòng xem xét và phê duyệt.`,
+          JSON.stringify({
+            deposit_id: id,
+            contract_id: dep.contract_id,
+            refund_amount: Number(refund),
+            link: '/admin/deposits',
+          }),
         ]
       );
 
