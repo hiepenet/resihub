@@ -33,8 +33,22 @@ export const buildingsService = {
     api.patch(`/api/v1/apartments/${id}/handover`, payload).then((r) => r.data),
 
   listReservations: (params) => api.get('/api/v1/reservations', { params }).then((r) => r.data),
+  getReservationCancelPolicy: () =>
+    api.get('/api/v1/reservations/cancel-policy').then((r) => r.data),
   createReservation: (payload, options = {}) =>
     api.post('/api/v1/reservations', payload, withIdempotency(options)).then((r) => r.data),
+  confirmReservationPayment: (id, payload = {}, options = {}) =>
+    api
+      .patch(`/api/v1/reservations/${id}/confirm-payment`, payload, withIdempotency(options))
+      .then((r) => r.data),
+  rejectReservationPayment: (id, payload, options = {}) =>
+    api
+      .patch(`/api/v1/reservations/${id}/reject-payment`, payload, withIdempotency(options))
+      .then((r) => r.data),
+  cancelSettleReservation: (id, payload, options = {}) =>
+    api
+      .patch(`/api/v1/reservations/${id}/cancel-settle`, payload, withIdempotency(options))
+      .then((r) => r.data),
   forfeitReservation: (id, payload, options = {}) =>
     api.patch(`/api/v1/reservations/${id}/forfeit`, payload, withIdempotency(options)).then((r) => r.data),
   refundReservation: (id, payload, options = {}) =>

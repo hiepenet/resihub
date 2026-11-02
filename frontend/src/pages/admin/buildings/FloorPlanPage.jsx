@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   DoorOpen,
   Plus,
@@ -8,18 +8,26 @@ import {
   BookmarkPlus,
   Wrench,
   Layers,
+  XCircle,
+  Clock,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { Card } from '../../../components/ui/Card';
+import { Badge } from '../../../components/ui/Badge';
 import { Button } from '../../../components/ui/Button';
 import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
+import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
-import { APARTMENT_STATUS } from '../../../constants/statuses';
+import {
+  APARTMENT_STATUS,
+  PAYMENT_METHOD_OPTIONS,
+  PAYMENT_METHOD_LABELS,
+} from '../../../constants/statuses';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
@@ -37,10 +45,15 @@ import {
 } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
+import {
+  DEFAULT_RESERVATION_CANCEL_POLICY,
+  canManagerConfirmReservationPayment,
+} from '../../../utils/depositUiHelpers';
 
-function computeSuggestedHoldUntil(startStr, busyIntervals = []) {
+function computeSuggestedHoldUntil(startStr, busyIntervals = [], maxHoldDays = 30) {
   if (!startStr) return '';
-  const defaultUntil = addDaysStr(startStr, 5);
+  const defaultSpan = Math.min(5, Math.max(1, Number(maxHoldDays || 30)));
+  const defaultUntil = addDaysStr(startStr, defaultSpan);
   const nextBusy = (busyIntervals || []).find((iv) => iv?.from && iv.from > startStr);
   if (!nextBusy) return defaultUntil;
   const maxBeforeBusy = addDaysStr(nextBusy.from, -1);
@@ -49,7 +62,12 @@ function computeSuggestedHoldUntil(startStr, busyIntervals = []) {
   return minDateStr(defaultUntil, maxBeforeBusy);
 }
 
-export function FloorPlanView({ buildingId, embedded = false }) {
+export function FloorPlanView({
+  buildingId,
+  embedded = false,
+  highlightPendingConfirm = false,
+  buildingSelector = null,
+}) {
   const navigate = useNavigate();
   const toast = useToast();
   const { canEditRealEstate, isManager } = usePermission();
@@ -57,6 +75,8 @@ export function FloorPlanView({ buildingId, embedded = false }) {
   const [building, setBuilding] = useState(null);
   const [floorMap, setFloorMap] = useState([]);
   const [zones, setZones] = useState([]);
+  const [pendingConfirms, setPendingConfirms] = useState([]);
+  const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [zoneFilter, setZoneFilter] = useState('ALL');
   const [loading, setLoading] = useState(true);
@@ -66,7 +86,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
   const [aptDetail, setAptDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Modals: Add Floor, Add Apartment, Create Reservation
+  // Modals: Add Floor, Add Apartment, Create Reservation, Reject Payment
   const [floorModalOpen, setFloorModalOpen] = useState(false);
   const [floorForm, setFloorForm] = useState({ level: '', name: '' });
 
@@ -85,26 +105,49 @@ export function FloorPlanView({ buildingId, embedded = false }) {
   const [resForm, setResForm] = useState({
     prospect_name: '',
     phone: '',
-    hold_amount: 2000000,
+    hold_amount: DEFAULT_RESERVATION_CANCEL_POLICY.default_hold_amount,
+    method: 'BANK_TRANSFER',
     hold_from: '',
     hold_until: '',
+    evidence: [],
     note: '',
+  });
+  const [rejectModal, setRejectModal] = useState({
+    open: false,
+    reservation: null,
+    reason: '',
   });
   const [submitting, setSubmitting] = useState(false);
   const resIdemKeyRef = useRef(createIdempotencyKey());
+  const actionIdemKeyRef = useRef(createIdempotencyKey());
+
+  useEffect(() => {
+    buildingsService
+      .getReservationCancelPolicy()
+      .then((res) => {
+        if (res?.data) {
+          setCancelPolicy((prev) => ({ ...prev, ...res.data }));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const loadFloorPlan = useCallback(async () => {
     if (!buildingId) return;
     setLoading(true);
     try {
-      const [bRes, fmRes, zRes] = await Promise.all([
+      const [bRes, fmRes, zRes, pendRes] = await Promise.all([
         buildingsService.getById(buildingId),
         buildingsService.getFloorMap(buildingId),
         buildingsService.listZones(buildingId).catch(() => ({ data: [] })),
+        buildingsService
+          .listReservations({ building_id: buildingId, status: 'PENDING_CONFIRM', limit: 50 })
+          .catch(() => ({ data: [] })),
       ]);
       setBuilding(bRes.data);
       setFloorMap(fmRes.data || []);
       setZones(zRes.data || []);
+      setPendingConfirms(pendRes.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err));
     } finally {
@@ -127,6 +170,63 @@ export function FloorPlanView({ buildingId, embedded = false }) {
       setAptDetail(apt);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const handleConfirmPayment = async (rsv) => {
+    if (!rsv?.id) return;
+    setSubmitting(true);
+    try {
+      const res = await buildingsService.confirmReservationPayment(
+        rsv.id,
+        {},
+        { idempotencyKey: createIdempotencyKey() }
+      );
+      toast.success(res?.message || 'Đã xác nhận tiền về và khóa giữ chỗ căn hộ.');
+      if (selectedApt?.id) {
+        const refreshed = await buildingsService.getApartment(selectedApt.id).catch(() => null);
+        if (refreshed?.data) setAptDetail(refreshed.data);
+      }
+      loadFloorPlan();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleOpenRejectModal = (rsv) => {
+    actionIdemKeyRef.current = createIdempotencyKey();
+    setRejectModal({ open: true, reservation: rsv, reason: '' });
+  };
+
+  const handleRejectPayment = async (e) => {
+    e?.preventDefault();
+    const rsv = rejectModal.reservation;
+    const trimmed = String(rejectModal.reason || '').trim();
+    if (!rsv?.id) return;
+    if (!trimmed) {
+      toast.warning('Vui lòng nhập lý do từ chối biên lai chuyển khoản.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await buildingsService.rejectReservationPayment(
+        rsv.id,
+        { reason: trimmed },
+        { idempotencyKey: actionIdemKeyRef.current }
+      );
+      toast.success(res?.message || 'Đã từ chối yêu cầu giữ chỗ.');
+      setRejectModal({ open: false, reservation: null, reason: '' });
+      if (selectedApt?.id) {
+        const refreshed = await buildingsService.getApartment(selectedApt.id).catch(() => null);
+        if (refreshed?.data) setAptDetail(refreshed.data);
+      }
+      loadFloorPlan();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -202,6 +302,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
   };
 
   const todayStr = toDateOnlyStr(new Date());
+  const maxInternalHoldDays = Number(cancelPolicy.max_hold_days || 30);
 
   const resBusyIntervals = useMemo(
     () => extractApartmentBusyIntervals(aptDetail || {}, { todayStr }),
@@ -214,7 +315,6 @@ export function FloorPlanView({ buildingId, embedded = false }) {
     return findFirstAvailableStartDate(baseDate, resBusyIntervals, { minSpanDays: 2 });
   }, [selectedApt?.status, todayStr, resBusyIntervals]);
 
-  // Nếu người dùng mở modal giữ chỗ khi chi tiết lịch căn hộ vừa tải xong, tự đẩy qua khoảng bận
   useEffect(() => {
     if (!resModalOpen || !earliestResStart) return;
     setResForm((prev) => {
@@ -229,10 +329,14 @@ export function FloorPlanView({ buildingId, embedded = false }) {
       return {
         ...prev,
         hold_from: earliestResStart,
-        hold_until: computeSuggestedHoldUntil(earliestResStart, resBusyIntervals),
+        hold_until: computeSuggestedHoldUntil(
+          earliestResStart,
+          resBusyIntervals,
+          maxInternalHoldDays
+        ),
       };
     });
-  }, [resModalOpen, earliestResStart, resBusyIntervals]);
+  }, [resModalOpen, earliestResStart, resBusyIntervals, maxInternalHoldDays]);
 
   const resHoldFromError = (() => {
     if (!resForm.hold_from) return '';
@@ -261,8 +365,8 @@ export function FloorPlanView({ buildingId, embedded = false }) {
     });
     if (orderErr) return orderErr;
     const span = diffDaysStr(resForm.hold_from, resForm.hold_until);
-    if (span !== null && span > 30) {
-      return 'Thời hạn giữ chỗ tối đa không quá 30 ngày theo quy định (FR-067).';
+    if (span !== null && span > maxInternalHoldDays) {
+      return `Thời hạn giữ chỗ tối đa không quá ${maxInternalHoldDays} ngày theo quy định (FR-067).`;
     }
     if (!resHoldFromError && resForm.hold_from && resForm.hold_until) {
       const hits = findOverlappingBusyIntervals(
@@ -297,8 +401,10 @@ export function FloorPlanView({ buildingId, embedded = false }) {
           prospect_name: resForm.prospect_name.trim(),
           phone: resForm.phone.trim(),
           hold_amount: holdAmt,
+          method: resForm.method || 'BANK_TRANSFER',
           hold_from: resForm.hold_from || undefined,
           hold_until: resForm.hold_until,
+          evidence: Array.isArray(resForm.evidence) ? resForm.evidence : [],
           note: resForm.note.trim(),
         },
         { idempotencyKey: resIdemKeyRef.current }
@@ -329,32 +435,131 @@ export function FloorPlanView({ buildingId, embedded = false }) {
       {!embedded ? (
         <PageHeader
           title={`Sơ đồ tầng — ${building?.name || ''}`}
-          subtitle="Nhấn vào từng ô căn hộ để xem thông tin nhanh, giữ chỗ, bảo trì hoặc bàn giao phòng"
+          subtitle="Nhấn vào từng ô căn hộ để xem thông tin nhanh, đối chiếu sao kê giữ chỗ, bảo trì hoặc bàn giao phòng"
           breadcrumbs={[
             { label: 'Bất động sản', to: '/admin/buildings' },
-            { label: building?.code || 'Tòa nhà', to: `/admin/buildings/${buildingId}` },
+            ...(building?.id
+              ? [{ label: building?.code || 'Tòa nhà', to: `/admin/buildings/${building.id}` }]
+              : []),
             { label: 'Sơ đồ tầng' },
           ]}
           actions={
-            canEditRealEstate ? (
-              <>
-                <Button variant="outline" size="sm" icon={Layers} onClick={() => setFloorModalOpen(true)}>
-                  Thêm tầng
-                </Button>
-                <Button
-                  size="sm"
-                  icon={Plus}
-                  onClick={() => {
-                    setAptForm((f) => ({ ...f, floor_id: floorMap[0]?.id || '', code: '' }));
-                    setAptModalOpen(true);
-                  }}
-                >
-                  Thêm căn hộ
-                </Button>
-              </>
-            ) : null
+            <div className="flex flex-wrap items-center gap-2">
+              {buildingSelector}
+              {canEditRealEstate ? (
+                <>
+                  <Button variant="outline" size="sm" icon={Layers} onClick={() => setFloorModalOpen(true)}>
+                    Thêm tầng
+                  </Button>
+                  <Button
+                    size="sm"
+                    icon={Plus}
+                    onClick={() => {
+                      setAptForm((f) => ({ ...f, floor_id: floorMap[0]?.id || '', code: '' }));
+                      setAptModalOpen(true);
+                    }}
+                  >
+                    Thêm căn hộ
+                  </Button>
+                </>
+              ) : null}
+            </div>
           }
         />
+      ) : null}
+
+      {/* Hàng đợi đối chiếu sao kê giữ chỗ Online (PENDING_CONFIRM) */}
+      {(pendingConfirms.length > 0 || highlightPendingConfirm) ? (
+        <Card className="p-4 border-amber-200 bg-amber-50/40 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-amber-600" />
+              <h3 className="text-sm font-semibold text-slate-900">
+                Yêu cầu Giữ chỗ Online chờ đối chiếu sao kê ({pendingConfirms.length})
+              </h3>
+            </div>
+            <span className="text-xs text-amber-800">
+              Căn hộ vẫn mở trống cho tới khi Quản lý xác nhận tiền đã về tài khoản ngân hàng
+            </span>
+          </div>
+
+          {pendingConfirms.length === 0 ? (
+            <p className="text-xs text-slate-600">
+              Không có yêu cầu giữ chỗ chờ xác nhận sao kê tại tòa nhà này.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {pendingConfirms.map((r) => (
+                <div
+                  key={r.id}
+                  className="p-3.5 rounded-xl bg-white border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-primary-700">
+                        Căn {r.apartment_code}
+                      </span>
+                      <StatusBadge status={r.status} domain="reservation" />
+                      <span className="text-xs font-mono font-bold text-slate-900">
+                        {formatMoney(r.hold_amount)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-800 font-medium">
+                      {r.prospect_name} <span className="font-mono text-slate-500">({r.phone})</span>
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      Giữ đến: {formatDate(r.hold_until)}
+                    </p>
+                    {Array.isArray(r.evidence) && r.evidence.length > 0 ? (
+                      <div className="flex items-center gap-1.5 pt-1">
+                        {r.evidence.map((url, idx) => (
+                          <AuthImage
+                            key={`${r.id}-ev-${idx}`}
+                            src={url}
+                            alt="Biên lai UNC"
+                            className="w-10 h-10 rounded-lg object-cover border border-slate-200"
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {canManagerConfirmReservationPayment(r, { isManager }) ? (
+                      <>
+                        <Button
+                          size="xs"
+                          variant="success"
+                          icon={CheckCircle2}
+                          loading={submitting}
+                          onClick={() => handleConfirmPayment(r)}
+                        >
+                          Xác nhận tiền về
+                        </Button>
+                        <Button
+                          size="xs"
+                          variant="danger"
+                          icon={XCircle}
+                          disabled={submitting}
+                          onClick={() => handleOpenRejectModal(r)}
+                        >
+                          Từ chối
+                        </Button>
+                      </>
+                    ) : null}
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => navigate(`/admin/apartments/${r.apartment_id}`)}
+                    >
+                      Chi tiết căn
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
       ) : null}
 
       {/* Legend & Filter Bar */}
@@ -479,6 +684,9 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                   ) : (
                     apts.map((apt) => {
                       const st = APARTMENT_STATUS[apt.status] || APARTMENT_STATUS.AVAILABLE;
+                      const aptPendingCount = pendingConfirms.filter(
+                        (p) => p.apartment_id === apt.id
+                      ).length;
                       return (
                         <button
                           key={apt.id}
@@ -497,6 +705,11 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                           <p className="text-[11px] font-semibold mt-0.5 tabular-nums break-words">
                             {formatMoney(apt.base_rent)}
                           </p>
+                          {aptPendingCount > 0 ? (
+                            <p className="text-[10px] font-semibold text-amber-800 bg-amber-100/90 rounded px-1.5 py-0.5 mt-1 inline-block">
+                              {aptPendingCount} chờ sao kê
+                            </p>
+                          ) : null}
                         </button>
                       );
                     })
@@ -535,101 +748,169 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                 ? drawerApt.amenities
                 : Object.keys(drawerApt.amenities).filter((k) => drawerApt.amenities[k])
               : [];
+          const aptPendingList = (aptDetail?.reservations || []).filter(
+            (r) => r.status === 'PENDING_CONFIRM'
+          );
+          const aptHeldList = (aptDetail?.reservations || []).filter(
+            (r) => r.status === 'HELD'
+          );
+
           return (
-          <div className="space-y-5">
-            <div className="flex items-center justify-between gap-2 p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-              <div>
-                <p className="text-xs text-slate-500">Trạng thái hiện tại</p>
-                <div className="mt-1">
-                  <StatusBadge status={drawerApt.status} domain="apartment" />
+            <div className="space-y-5">
+              <div className="flex items-center justify-between gap-2 p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                <div>
+                  <p className="text-xs text-slate-500">Trạng thái hiện tại</p>
+                  <div className="mt-1">
+                    <StatusBadge status={drawerApt.status} domain="apartment" />
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-slate-500">Giá thuê niêm yết</p>
+                  <p className="text-base font-bold text-primary-600 mt-0.5 tabular-nums">
+                    {formatMoney(drawerApt.base_rent)}/tháng
+                  </p>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="text-xs text-slate-500">Giá thuê niêm yết</p>
-                <p className="text-base font-bold text-primary-600 mt-0.5 tabular-nums">
-                  {formatMoney(drawerApt.base_rent)}/tháng
-                </p>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-              <div className="p-3 rounded-xl border border-slate-200">
-                <p className="text-[11px] text-slate-400">Phân khu</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5 break-words">
-                  {drawerApt.zone_code || '—'}
-                  {drawerApt.zone_name ? ` (${drawerApt.zone_name})` : ''}
-                </p>
-              </div>
-              <div className="p-3 rounded-xl border border-slate-200">
-                <p className="text-[11px] text-slate-400">Loại căn</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.type || '1PN'}</p>
-              </div>
-              <div className="p-3 rounded-xl border border-slate-200">
-                <p className="text-[11px] text-slate-400">Diện tích</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.area_m2 || 0} m²</p>
-              </div>
-              <div className="p-3 rounded-xl border border-slate-200">
-                <p className="text-[11px] text-slate-400">Phòng ngủ</p>
-                <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.bedrooms || 1} PN</p>
-              </div>
-            </div>
-
-            {amenityKeys.length > 0 ? (
-              <div className="space-y-1.5">
-                <p className="text-xs font-semibold text-slate-700">Nội thất &amp; tiện nghi</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {amenityKeys.map((k) => (
-                    <Badge key={k} variant="sky">
-                      {k}
-                    </Badge>
-                  ))}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                <div className="p-3 rounded-xl border border-slate-200">
+                  <p className="text-[11px] text-slate-400">Phân khu</p>
+                  <p className="text-sm font-semibold text-slate-800 mt-0.5 break-words">
+                    {drawerApt.zone_code || '—'}
+                    {drawerApt.zone_name ? ` (${drawerApt.zone_name})` : ''}
+                  </p>
+                </div>
+                <div className="p-3 rounded-xl border border-slate-200">
+                  <p className="text-[11px] text-slate-400">Loại căn</p>
+                  <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.type || '1PN'}</p>
+                </div>
+                <div className="p-3 rounded-xl border border-slate-200">
+                  <p className="text-[11px] text-slate-400">Diện tích</p>
+                  <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.area_m2 || 0} m²</p>
+                </div>
+                <div className="p-3 rounded-xl border border-slate-200">
+                  <p className="text-[11px] text-slate-400">Phòng ngủ</p>
+                  <p className="text-sm font-semibold text-slate-800 mt-0.5">{drawerApt.bedrooms || 1} PN</p>
                 </div>
               </div>
-            ) : null}
 
-            {drawerApt.note ? (
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 text-xs text-slate-600 whitespace-pre-line">
-                <strong className="text-slate-700">Ghi chú căn hộ:</strong> {drawerApt.note}
-              </div>
-            ) : null}
-
-            {/* Active Contract & Reservation Summary if loaded */}
-            {detailLoading ? (
-              <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng &amp; giữ chỗ...</p>
-            ) : (
-              <>
-                {aptDetail?.contracts?.length > 0 ? (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold text-slate-700">Hợp đồng gần nhất</p>
-                    {aptDetail.contracts.slice(0, 3).map((c) => (
-                      <div
-                        key={c.id}
-                        onClick={() => navigate(`/admin/contracts/${c.id}`)}
-                        className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-slate-800 break-words">
-                            {c.tenant_name || 'Cư dân'}
-                            {c.tenant_phone ? <span className="font-mono text-slate-500"> ({c.tenant_phone})</span> : null}
-                          </p>
-                          <p className="text-[11px] text-slate-500">
-                            {formatDate(c.start_date)} → {formatDate(c.end_date)} · {formatMoney(c.rent_amount)}/tháng
-                          </p>
-                        </div>
-                        <StatusBadge status={c.status} domain="contract" />
-                      </div>
+              {amenityKeys.length > 0 ? (
+                <div className="space-y-1.5">
+                  <p className="text-xs font-semibold text-slate-700">Nội thất &amp; tiện nghi</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {amenityKeys.map((k) => (
+                      <Badge key={k} variant="sky">
+                        {k}
+                      </Badge>
                     ))}
                   </div>
-                ) : null}
+                </div>
+              ) : null}
 
-                {(aptDetail?.reservations || []).filter((r) => r.status === 'HELD').length > 0 ? (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold text-amber-800">
-                      Đang giữ chỗ ({(aptDetail?.reservations || []).filter((r) => r.status === 'HELD').length} lượt)
-                    </p>
-                    {(aptDetail?.reservations || [])
-                      .filter((r) => r.status === 'HELD')
-                      .map((r) => (
+              {drawerApt.note ? (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/70 text-xs text-slate-600 whitespace-pre-line">
+                  <strong className="text-slate-700">Ghi chú căn hộ:</strong> {drawerApt.note}
+                </div>
+              ) : null}
+
+              {/* Active Contract & Reservation Summary if loaded */}
+              {detailLoading ? (
+                <p className="text-xs text-slate-400">Đang tải chi tiết hợp đồng &amp; giữ chỗ...</p>
+              ) : (
+                <>
+                  {aptPendingList.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-amber-800">
+                        Chờ xác nhận chuyển khoản ({aptPendingList.length} yêu cầu)
+                      </p>
+                      {aptPendingList.map((r) => (
+                        <div
+                          key={r.id}
+                          className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <p className="text-xs font-semibold text-slate-900">
+                                {r.prospect_name}{' '}
+                                <span className="font-mono text-slate-500">({r.phone})</span>
+                              </p>
+                              <p className="text-[11px] text-amber-800">
+                                {formatDate(r.hold_from || r.created_at)} → {formatDate(r.hold_until)}
+                              </p>
+                            </div>
+                            <span className="text-xs font-mono font-bold text-amber-900">
+                              {formatMoney(r.hold_amount)}
+                            </span>
+                          </div>
+                          {Array.isArray(r.evidence) && r.evidence.length > 0 ? (
+                            <div className="flex flex-wrap gap-2">
+                              {r.evidence.map((url, idx) => (
+                                <AuthImage
+                                  key={`${r.id}-d-${idx}`}
+                                  src={url}
+                                  alt="Biên lai UNC"
+                                  className="w-14 h-14 rounded-lg object-cover border border-amber-200"
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {canManagerConfirmReservationPayment(r, { isManager }) ? (
+                            <div className="flex items-center gap-2 pt-1">
+                              <Button
+                                size="xs"
+                                variant="success"
+                                icon={CheckCircle2}
+                                loading={submitting}
+                                onClick={() => handleConfirmPayment(r)}
+                              >
+                                Xác nhận tiền về (Giữ phòng)
+                              </Button>
+                              <Button
+                                size="xs"
+                                variant="danger"
+                                icon={XCircle}
+                                disabled={submitting}
+                                onClick={() => handleOpenRejectModal(r)}
+                              >
+                                Từ chối biên lai
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {aptDetail?.contracts?.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-slate-700">Hợp đồng gần nhất</p>
+                      {aptDetail.contracts.slice(0, 3).map((c) => (
+                        <div
+                          key={c.id}
+                          onClick={() => navigate(`/admin/contracts/${c.id}`)}
+                          className="p-3 rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-slate-800 break-words">
+                              {c.tenant_name || 'Cư dân'}
+                              {c.tenant_phone ? <span className="font-mono text-slate-500"> ({c.tenant_phone})</span> : null}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              {formatDate(c.start_date)} → {formatDate(c.end_date)} · {formatMoney(c.rent_amount)}/tháng
+                            </p>
+                          </div>
+                          <StatusBadge status={c.status} domain="contract" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {aptHeldList.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-amber-800">
+                        Đang giữ chỗ ({aptHeldList.length} lượt)
+                      </p>
+                      {aptHeldList.map((r) => (
                         <div
                           key={r.id}
                           className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 flex items-center justify-between gap-2"
@@ -640,6 +921,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                             </p>
                             <p className="text-[11px] text-amber-800 font-medium">
                               {formatDate(r.hold_from || r.created_at)} → {formatDate(r.hold_until)}
+                              {r.method ? ` · ${PAYMENT_METHOD_LABELS[r.method] || r.method}` : ''}
                             </p>
                           </div>
                           <span className="text-xs font-mono font-bold text-amber-900">
@@ -647,77 +929,126 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                           </span>
                         </div>
                       ))}
-                  </div>
-                ) : null}
-              </>
-            )}
+                    </div>
+                  ) : null}
+                </>
+              )}
 
-            {/* Quick Actions */}
-            <div className="space-y-2.5 pt-2 border-t border-slate-100">
-              <p className="text-xs font-semibold text-slate-700">Thao tác nhanh</p>
-              <div className="flex flex-wrap gap-2">
-                {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
-                  <Button
-                    size="sm"
-                    variant="warning"
-                    icon={BookmarkPlus}
-                    onClick={() => {
-                      const startStr = earliestResStart || todayStr;
-                      const untilStr = computeSuggestedHoldUntil(startStr, resBusyIntervals);
-                      resIdemKeyRef.current = createIdempotencyKey();
-                      setResForm({
-                        prospect_name: '',
-                        phone: '',
-                        hold_amount: 2000000,
-                        hold_from: startStr,
-                        hold_until: untilStr,
-                        note: '',
-                      });
-                      setResModalOpen(true);
-                    }}
-                  >
-                    Đặt cọc giữ chỗ
-                  </Button>
-                ) : null}
+              {/* Quick Actions */}
+              <div className="space-y-2.5 pt-2 border-t border-slate-100">
+                <p className="text-xs font-semibold text-slate-700">Thao tác nhanh</p>
+                <div className="flex flex-wrap gap-2">
+                  {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
+                    <Button
+                      size="sm"
+                      variant="warning"
+                      icon={BookmarkPlus}
+                      onClick={() => {
+                        const startStr = earliestResStart || todayStr;
+                        const untilStr = computeSuggestedHoldUntil(
+                          startStr,
+                          resBusyIntervals,
+                          maxInternalHoldDays
+                        );
+                        resIdemKeyRef.current = createIdempotencyKey();
+                        setResForm({
+                          prospect_name: '',
+                          phone: '',
+                          hold_amount:
+                            Number(cancelPolicy.default_hold_amount) ||
+                            DEFAULT_RESERVATION_CANCEL_POLICY.default_hold_amount,
+                          method: 'BANK_TRANSFER',
+                          hold_from: startStr,
+                          hold_until: untilStr,
+                          evidence: [],
+                          note: '',
+                        });
+                        setResModalOpen(true);
+                      }}
+                    >
+                      Đặt cọc giữ chỗ
+                    </Button>
+                  ) : null}
 
-                {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
-                  <Button
-                    size="sm"
-                    icon={Plus}
-                    onClick={() => navigate(`/admin/contracts?apartment_id=${selectedApt.id}`)}
-                  >
-                    Tạo hợp đồng thuê
-                  </Button>
-                ) : null}
+                  {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(selectedApt.status) ? (
+                    <Button
+                      size="sm"
+                      icon={Plus}
+                      onClick={() => navigate(`/admin/contracts?apartment_id=${selectedApt.id}`)}
+                    >
+                      Tạo hợp đồng thuê
+                    </Button>
+                  ) : null}
 
-                {canEditRealEstate && selectedApt.status === 'MAINTENANCE' ? (
-                  <Button
-                    size="sm"
-                    variant="success"
-                    icon={CheckCircle2}
-                    loading={submitting}
-                    onClick={() => handleHandover(selectedApt.id)}
-                  >
-                    Nghiệm thu & Bàn giao (Về Còn trống)
-                  </Button>
-                ) : null}
+                  {canEditRealEstate && selectedApt.status === 'MAINTENANCE' ? (
+                    <Button
+                      size="sm"
+                      variant="success"
+                      icon={CheckCircle2}
+                      loading={submitting}
+                      onClick={() => handleHandover(selectedApt.id)}
+                    >
+                      Nghiệm thu &amp; Bàn giao (Về Còn trống)
+                    </Button>
+                  ) : null}
 
-                {canEditRealEstate && ['AVAILABLE', 'OCCUPIED'].includes(selectedApt.status) ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    icon={Wrench}
-                    loading={submitting}
-                    onClick={() => handleChangeStatus(selectedApt.id, 'MAINTENANCE')}
-                  >
-                    Chuyển sang Bảo trì
-                  </Button>
-                ) : null}
+                  {canEditRealEstate && ['AVAILABLE', 'OCCUPIED'].includes(selectedApt.status) ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon={Wrench}
+                      loading={submitting}
+                      onClick={() => handleChangeStatus(selectedApt.id, 'MAINTENANCE')}
+                    >
+                      Chuyển sang Bảo trì
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
-          </div>
           );
         })() : null}
+      </Modal>
+
+      {/* Reject Payment Modal */}
+      <Modal
+        open={rejectModal.open}
+        onClose={() => {
+          if (!submitting) setRejectModal({ open: false, reservation: null, reason: '' });
+        }}
+        title="Từ chối xác nhận biên lai giữ chỗ"
+        subtitle={
+          rejectModal.reservation
+            ? `Khách: ${rejectModal.reservation.prospect_name} • ${formatMoney(
+                rejectModal.reservation.hold_amount
+              )}`
+            : ''
+        }
+        size="sm"
+      >
+        <form onSubmit={handleRejectPayment} className="space-y-4">
+          <Input
+            label="Lý do từ chối biên lai (bắt buộc)"
+            required
+            multiline
+            rows={3}
+            placeholder="VD: Sao kê ngân hàng chưa ghi nhận khoản tiền hoặc biên lai không hợp lệ..."
+            value={rejectModal.reason}
+            onChange={(e) => setRejectModal((p) => ({ ...p, reason: e.target.value }))}
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              disabled={submitting}
+              onClick={() => setRejectModal({ open: false, reservation: null, reason: '' })}
+            >
+              Hủy
+            </Button>
+            <Button type="submit" variant="danger" loading={submitting}>
+              Xác nhận từ chối
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       {/* Add Floor Modal */}
@@ -841,16 +1172,16 @@ export function FloorPlanView({ buildingId, embedded = false }) {
         open={resModalOpen}
         onClose={() => setResModalOpen(false)}
         title={`Đặt cọc giữ chỗ — Căn ${selectedApt?.code || ''}`}
-        subtitle="Giữ chỗ tối đa 30 ngày theo quy định FR-067"
+        subtitle={`Giữ chỗ nội bộ tối đa ${maxInternalHoldDays} ngày theo chính sách FR-067`}
       >
         <form onSubmit={handleCreateReservation} className="space-y-4">
-          <Input
-            label="Họ tên khách đặt giữ chỗ"
-            required
-            value={resForm.prospect_name}
-            onChange={(e) => setResForm({ ...resForm, prospect_name: e.target.value })}
-          />
-          <div className="grid grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <Input
+              label="Họ tên khách đặt giữ chỗ"
+              required
+              value={resForm.prospect_name}
+              onChange={(e) => setResForm({ ...resForm, prospect_name: e.target.value })}
+            />
             <Input
               label="Số điện thoại"
               required
@@ -858,12 +1189,20 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               value={resForm.phone}
               onChange={(e) => setResForm({ ...resForm, phone: e.target.value })}
             />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <MoneyInput
               label="Tiền cọc giữ chỗ (VND)"
               required
               placeholder="VD: 2.000.000"
               value={resForm.hold_amount}
               onChange={(e) => setResForm({ ...resForm, hold_amount: e.target.value })}
+            />
+            <Select
+              label="Phương thức thu tiền"
+              value={resForm.method}
+              onChange={(e) => setResForm({ ...resForm, method: e.target.value })}
+              options={PAYMENT_METHOD_OPTIONS}
             />
           </div>
           {earliestResStart && earliestResStart > todayStr ? (
@@ -883,16 +1222,23 @@ export function FloorPlanView({ buildingId, embedded = false }) {
               onChange={(e) => setResForm({ ...resForm, hold_from: e.target.value })}
             />
             <Input
-              label="Đến hết ngày (tối đa 30 ngày)"
+              label={`Đến hết ngày (tối đa ${maxInternalHoldDays} ngày)`}
               type="date"
               required
               min={addDaysStr(resForm.hold_from || todayStr, 1)}
-              max={resForm.hold_from ? addDaysStr(resForm.hold_from, 30) : undefined}
+              max={resForm.hold_from ? addDaysStr(resForm.hold_from, maxInternalHoldDays) : undefined}
               error={resHoldUntilError}
               value={resForm.hold_until}
               onChange={(e) => setResForm({ ...resForm, hold_until: e.target.value })}
             />
           </div>
+          <FileUpload
+            label="Ảnh biên lai / phiếu thu giữ chỗ (tùy chọn, tối đa 5 ảnh)"
+            multiple
+            maxFiles={5}
+            value={resForm.evidence}
+            onChange={(vals) => setResForm((p) => ({ ...p, evidence: vals }))}
+          />
           <Input
             label="Ghi chú"
             multiline
@@ -920,8 +1266,89 @@ export function FloorPlanView({ buildingId, embedded = false }) {
 
 export function FloorPlanPage() {
   const { id } = useParams();
-  return <FloorPlanView buildingId={id} embedded={false} />;
+  const [searchParams] = useSearchParams();
+  const toast = useToast();
+  const highlightPendingConfirm = searchParams.get('pending_confirm') === '1';
+
+  const [buildings, setBuildings] = useState([]);
+  const [selectedBuildingId, setSelectedBuildingId] = useState(id || '');
+  const [resolving, setResolving] = useState(!id);
+
+  useEffect(() => {
+    if (id) {
+      setSelectedBuildingId(id);
+      setResolving(false);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setResolving(true);
+      try {
+        const [bRes, pendRes] = await Promise.all([
+          buildingsService.list(),
+          buildingsService
+            .listReservations({ status: 'PENDING_CONFIRM', limit: 50 })
+            .catch(() => ({ data: [] })),
+        ]);
+        if (cancelled) return;
+        const bList = bRes?.data || [];
+        setBuildings(bList);
+        const firstPendingBld = (pendRes?.data || [])[0]?.building_id;
+        const targetId =
+          (firstPendingBld && bList.some((b) => b.id === firstPendingBld)
+            ? firstPendingBld
+            : bList[0]?.id) || '';
+        setSelectedBuildingId(targetId);
+      } catch (err) {
+        if (!cancelled) toast.error(extractErrorMessage(err));
+      } finally {
+        if (!cancelled) setResolving(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, toast]);
+
+  if (resolving) return <PageSkeleton />;
+  if (!selectedBuildingId) {
+    return (
+      <Card>
+        <EmptyState
+          icon={DoorOpen}
+          title="Chưa có tòa nhà nào"
+          description="Vui lòng tạo tòa nhà trước khi xem sơ đồ tầng."
+        />
+      </Card>
+    );
+  }
+
+  const selectorNode =
+    !id && buildings.length > 1 ? (
+      <div className="w-64">
+        <Select
+          size="sm"
+          aria-label="Chọn tòa nhà"
+          value={selectedBuildingId}
+          onChange={(e) => setSelectedBuildingId(e.target.value)}
+          options={buildings.map((b) => ({
+            value: b.id,
+            label: `${b.code} — ${b.name}`,
+          }))}
+        />
+      </div>
+    ) : null;
+
+  return (
+    <FloorPlanView
+      buildingId={selectedBuildingId}
+      embedded={false}
+      highlightPendingConfirm={highlightPendingConfirm}
+      buildingSelector={selectorNode}
+    />
+  );
 }
 
 export default FloorPlanPage;
-

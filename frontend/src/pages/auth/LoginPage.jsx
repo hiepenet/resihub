@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Home,
   Mail,
@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Sparkles,
   ArrowRight,
+  Compass,
 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Input } from '../../components/ui/Input';
@@ -30,17 +31,21 @@ const DEMO_ACCOUNTS = [
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const toast = useToast();
   const setAuthData = useAuthStore((s) => s.setAuthData);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const user = useAuthStore((s) => s.user);
 
-  const [mode, setMode] = useState('email'); // 'email' | 'otp'
+  const initialMode = searchParams.get('mode') === 'otp' ? 'otp' : 'email';
+  const initialPhone = searchParams.get('phone') || '';
+
+  const [mode, setMode] = useState(initialMode); // 'email' | 'otp'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  const [phone, setPhone] = useState('');
+  const [phone, setPhone] = useState(initialPhone);
   const [otp, setOtp] = useState('');
   const [otpStep, setOtpStep] = useState('request'); // 'request' | 'verify'
   const [countdown, setCountdown] = useState(0);
@@ -129,14 +134,25 @@ export function LoginPage() {
         <div className="absolute -top-24 -right-24 w-96 h-96 rounded-full bg-primary-500/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 left-0 w-80 h-80 rounded-full bg-secondary-500/20 blur-3xl pointer-events-none" />
 
-        <div className="relative z-10 flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-primary-400 to-secondary-500 flex items-center justify-center shadow-lg">
-            <Home className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">ResiHub</h1>
-            <p className="text-xs text-sky-300">Nền tảng Quản lý Căn hộ & Nhà cho thuê v2.0</p>
-          </div>
+        <div className="relative z-10 flex items-center justify-between gap-3">
+          <Link to="/explore" className="flex items-center gap-3 group">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-primary-400 to-secondary-500 flex items-center justify-center shadow-lg">
+              <Home className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight group-hover:text-sky-200 transition-colors">
+                ResiHub
+              </h1>
+              <p className="text-xs text-sky-300">Nền tảng Quản lý Căn hộ & Nhà cho thuê v2.0</p>
+            </div>
+          </Link>
+          <Link
+            to="/explore"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-medium text-white transition-colors"
+          >
+            <Compass className="w-4 h-4 text-sky-300" />
+            Xem căn hộ trống
+          </Link>
         </div>
 
         <div className="relative z-10 max-w-xl space-y-6">
@@ -173,11 +189,20 @@ export function LoginPage() {
       {/* Right Form Panel */}
       <div className="lg:col-span-6 xl:col-span-5 flex items-center justify-center p-6 sm:p-10">
         <div className="w-full max-w-md space-y-6">
-          <div className="lg:hidden flex items-center gap-2.5 mb-2">
-            <div className="w-9 h-9 rounded-xl bg-primary-500 flex items-center justify-center text-white">
-              <Home className="w-5 h-5" />
-            </div>
-            <span className="text-lg font-bold text-slate-900">ResiHub</span>
+          <div className="flex items-center justify-between gap-2">
+            <Link to="/explore" className="lg:hidden flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-primary-500 flex items-center justify-center text-white">
+                <Home className="w-5 h-5" />
+              </div>
+              <span className="text-lg font-bold text-slate-900">ResiHub</span>
+            </Link>
+            <Link
+              to="/explore"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-600 hover:text-primary-700"
+            >
+              <Compass className="w-3.5 h-3.5" />
+              Khám phá căn hộ trống & Đặt giữ chỗ online
+            </Link>
           </div>
 
           <div>
@@ -254,11 +279,11 @@ export function LoginPage() {
               {otpStep === 'request' ? (
                 <form onSubmit={handleRequestOtp} className="space-y-4">
                   <Input
-                    label="Số điện thoại đã đăng ký"
+                    label="Số điện thoại đã đăng ký / đặt giữ chỗ"
                     icon={Phone}
                     required
                     placeholder="0912345678"
-                    hint="Chỉ các số điện thoại đã được Ban quản lý đăng ký hồ sơ mới nhận được mã OTP."
+                    hint="Số điện thoại cư dân hoặc khách vừa đặt giữ chỗ trực tuyến có thể nhận OTP đăng nhập theo dõi hồ sơ."
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                   />
@@ -345,4 +370,3 @@ export function LoginPage() {
 }
 
 export default LoginPage;
-

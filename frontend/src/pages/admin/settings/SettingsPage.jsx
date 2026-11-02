@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Save, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { Save, ShieldCheck, AlertTriangle, BookmarkCheck } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
@@ -9,6 +9,7 @@ import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { extractErrorMessage } from '../../../utils/validation';
+import { DEFAULT_RESERVATION_CANCEL_POLICY } from '../../../utils/depositUiHelpers';
 
 const DEFAULT_BILLING_CONFIG = {
   billing_day: 1,
@@ -48,6 +49,9 @@ export function SettingsPage() {
   const [slaConfig, setSlaConfig] = useState(DEFAULT_SLA_CONFIG);
   const [contactConfig, setContactConfig] = useState(DEFAULT_CONTACT_CONFIG);
   const [approvalConfig, setApprovalConfig] = useState(DEFAULT_APPROVAL_CONFIG);
+  const [reservationCancelPolicy, setReservationCancelPolicy] = useState(
+    DEFAULT_RESERVATION_CANCEL_POLICY
+  );
 
   const fetchSettings = useCallback(async () => {
     setLoading(true);
@@ -76,6 +80,24 @@ export function SettingsPage() {
       if (data.approval_config) {
         setApprovalConfig({
           allow_self_approval: Boolean(data.approval_config.allow_self_approval),
+        });
+      }
+      if (data.reservation_cancel_policy) {
+        const rcp = data.reservation_cancel_policy;
+        setReservationCancelPolicy({
+          max_hold_days:
+            rcp.max_hold_days ?? DEFAULT_RESERVATION_CANCEL_POLICY.max_hold_days,
+          public_max_hold_days:
+            rcp.public_max_hold_days ??
+            DEFAULT_RESERVATION_CANCEL_POLICY.public_max_hold_days,
+          full_refund_before_days:
+            rcp.full_refund_before_days ??
+            DEFAULT_RESERVATION_CANCEL_POLICY.full_refund_before_days,
+          partial_refund_pct:
+            rcp.partial_refund_pct ?? DEFAULT_RESERVATION_CANCEL_POLICY.partial_refund_pct,
+          default_hold_amount:
+            rcp.default_hold_amount ??
+            DEFAULT_RESERVATION_CANCEL_POLICY.default_hold_amount,
         });
       }
     } catch (err) {
@@ -126,6 +148,28 @@ export function SettingsPage() {
         approval_config: {
           allow_self_approval: Boolean(approvalConfig.allow_self_approval),
         },
+        reservation_cancel_policy: {
+          max_hold_days: Math.min(
+            90,
+            Math.max(1, Math.round(Number(reservationCancelPolicy.max_hold_days) || 30))
+          ),
+          public_max_hold_days: Math.min(
+            30,
+            Math.max(1, Math.round(Number(reservationCancelPolicy.public_max_hold_days) || 7))
+          ),
+          full_refund_before_days: Math.min(
+            30,
+            Math.max(0, Math.round(Number(reservationCancelPolicy.full_refund_before_days) ?? 3))
+          ),
+          partial_refund_pct: Math.min(
+            100,
+            Math.max(0, Math.round(Number(reservationCancelPolicy.partial_refund_pct) ?? 50))
+          ),
+          default_hold_amount: Math.max(
+            0,
+            Math.round(Number(reservationCancelPolicy.default_hold_amount) || 2000000)
+          ),
+        },
       });
       toast.success(res?.message || 'Đã lưu cấu hình hệ thống thành công.');
     } catch (err) {
@@ -139,7 +183,7 @@ export function SettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Cấu hình Hệ thống"
-        subtitle="Thiết lập quy tắc phê duyệt nội bộ (Four-eyes), chu kỳ hóa đơn, SLA kỹ thuật và thông tin liên hệ Ban Quản Lý."
+        subtitle="Thiết lập quy tắc phê duyệt nội bộ (Four-eyes), chính sách giữ chỗ, chu kỳ hóa đơn, SLA kỹ thuật và thông tin liên hệ Ban Quản Lý."
         actions={
           isSysAdmin ? (
             <Button variant="primary" icon={Save} loading={saving} onClick={handleSave}>
@@ -204,6 +248,96 @@ export function SettingsPage() {
                 </span>
               </div>
             ) : null}
+          </Card>
+
+          {/* Chính sách Đặt cọc Giữ chỗ — FR-005 / FR-067 */}
+          <Card className="space-y-4">
+            <CardHeader
+              title="Chính sách Đặt cọc Giữ chỗ (FR-005 / FR-067)"
+              subtitle="Khóa cấu hình: reservation_cancel_policy"
+            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              <MoneyInput
+                label="Mức cọc giữ chỗ mặc định (VND)"
+                disabled={!isSysAdmin}
+                placeholder="VD: 2.000.000"
+                value={reservationCancelPolicy.default_hold_amount}
+                onChange={(e) =>
+                  setReservationCancelPolicy((s) => ({
+                    ...s,
+                    default_hold_amount: e.target.value,
+                  }))
+                }
+              />
+              <Input
+                label="Tối đa giữ chỗ nội bộ (ngày)"
+                type="number"
+                min="1"
+                max="90"
+                disabled={!isSysAdmin}
+                value={reservationCancelPolicy.max_hold_days}
+                onChange={(e) =>
+                  setReservationCancelPolicy((s) => ({
+                    ...s,
+                    max_hold_days: e.target.value,
+                  }))
+                }
+              />
+              <Input
+                label="Tối đa giữ chỗ Online (ngày)"
+                type="number"
+                min="1"
+                max="30"
+                disabled={!isSysAdmin}
+                value={reservationCancelPolicy.public_max_hold_days}
+                onChange={(e) =>
+                  setReservationCancelPolicy((s) => ({
+                    ...s,
+                    public_max_hold_days: e.target.value,
+                  }))
+                }
+              />
+              <Input
+                label="Mốc hủy hoàn 100% (trước ≥ X ngày)"
+                type="number"
+                min="0"
+                max="30"
+                disabled={!isSysAdmin}
+                value={reservationCancelPolicy.full_refund_before_days}
+                onChange={(e) =>
+                  setReservationCancelPolicy((s) => ({
+                    ...s,
+                    full_refund_before_days: e.target.value,
+                  }))
+                }
+              />
+              <Input
+                label="Tỷ lệ hoàn sát hạn (%)"
+                type="number"
+                min="0"
+                max="100"
+                disabled={!isSysAdmin}
+                value={reservationCancelPolicy.partial_refund_pct}
+                onChange={(e) =>
+                  setReservationCancelPolicy((s) => ({
+                    ...s,
+                    partial_refund_pct: e.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="p-3 rounded-xl bg-sky-50/70 border border-sky-200 flex items-start gap-2.5 text-xs text-sky-900">
+              <BookmarkCheck className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Quy tắc làm tròn tiền tệ Việt Nam (PRD 10.3):</strong> Khi khách hủy sát hạn (còn dưới{' '}
+                <strong>{reservationCancelPolicy.full_refund_before_days}</strong> ngày trước hạn giữ chỗ), số tiền hoàn theo tỷ lệ{' '}
+                <strong>{reservationCancelPolicy.partial_refund_pct}%</strong> sẽ được làm tròn đến hàng nghìn VND gần nhất (
+                <code className="px-1 py-0.5 rounded bg-sky-100 text-sky-900 font-mono text-[11px]">
+                  ROUND(x, -3)
+                </code>
+                ), phần còn lại ghi nhận thu giữ cọc sao cho tổng hoàn + phạt luôn khớp 100% tiền giữ chỗ. Quá hạn không ký HĐ mặc định tịch thu 100%.
+              </span>
+            </div>
           </Card>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

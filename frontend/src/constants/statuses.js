@@ -165,12 +165,15 @@ export const USER_STATUS = {
 };
 
 export const RESERVATION_STATUS = {
+  PENDING_CONFIRM: { label: 'Chờ xác nhận chuyển khoản', variant: 'amber' },
   HELD: { label: 'Đang giữ chỗ', variant: 'amber' },
   CONVERTED: { label: 'Đã lên hợp đồng', variant: 'emerald' },
   EXPIRED: { label: 'Hết hạn giữ chỗ', variant: 'slate' },
   CANCELLED: { label: 'Đã hủy giữ chỗ', variant: 'slate' },
+  PARTIALLY_REFUNDED: { label: 'Hoàn một phần', variant: 'amber' },
   REFUNDED: { label: 'Đã hoàn cọc giữ chỗ', variant: 'sky' },
   FORFEITED: { label: 'Thu giữ cọc (Bỏ cọc)', variant: 'red' },
+  REJECTED: { label: 'Từ chối xác nhận', variant: 'red' },
 };
 
 export const ALL_STATUS_MAPS = {
@@ -187,4 +190,3 @@ export const ALL_STATUS_MAPS = {
   tenant: TENANT_STATUS,
   user: USER_STATUS,
 };
-

@@ -8,6 +8,7 @@ import { useAuthStore } from '../stores/authStore';
 import { ROLES, ADMIN_PORTAL_ROLES } from '../constants/roles';
 
 // Lazy-loaded pages (Sprint 6 optimization)
+const PublicExplorePage = lazy(() => import('../pages/public/PublicExplorePage'));
 const LoginPage = lazy(() => import('../pages/auth/LoginPage'));
 const ForgotPasswordPage = lazy(() => import('../pages/auth/ForgotPasswordPage'));
 
@@ -52,7 +53,7 @@ function withSuspense(Component, fullScreen = false) {
 function RootRedirect() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const isAdminPortal = useAuthStore((s) => s.isAdminPortal);
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (!isAuthenticated) return withSuspense(PublicExplorePage, true);
   return <Navigate to={isAdminPortal() ? '/admin/dashboard' : '/resident'} replace />;
 }
 
@@ -86,6 +87,10 @@ export const router = createBrowserRouter([
     element: <RootRedirect />,
   },
   {
+    path: '/explore',
+    element: withSuspense(PublicExplorePage, true),
+  },
+  {
     path: '/login',
     element: withSuspense(LoginPage, true),
   },
@@ -110,6 +115,14 @@ export const router = createBrowserRouter([
         element: (
           <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
             {withSuspense(BuildingsPage)}
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'buildings/floor-plan',
+        element: (
+          <RoleGuard allowedRoles={[ROLES.SYS_ADMIN, ROLES.OWNER, ROLES.MANAGER]}>
+            {withSuspense(FloorPlanPage)}
           </RoleGuard>
         ),
       },

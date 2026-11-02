@@ -8,11 +8,15 @@ import {
   Wrench,
   FileSignature,
   Bookmark,
+  BookmarkPlus,
   Layers,
+  XCircle,
+  Scale,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
+import { BankSelect } from '../../../components/common/BankSelect';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
@@ -20,16 +24,27 @@ import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
-import { FileUpload } from '../../../components/ui/FileUpload';
+import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
-import { APARTMENT_STATUS } from '../../../constants/statuses';
+import {
+  APARTMENT_STATUS,
+  PAYMENT_METHOD_OPTIONS,
+  PAYMENT_METHOD_LABELS,
+} from '../../../constants/statuses';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
+import { addDaysStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
-import { canActorApproveReservationRow } from '../../../utils/depositUiHelpers';
+import {
+  DEFAULT_RESERVATION_CANCEL_POLICY,
+  canActorApproveReservationRow,
+  canManagerConfirmReservationPayment,
+  canSettleReservationCancel,
+  computeSuggestedCancelSplit,
+} from '../../../utils/depositUiHelpers';
 
 const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
 
@@ -39,9 +54,11 @@ export function ApartmentDetailPage() {
   const toast = useToast();
   const { canEditRealEstate, isOwner, isManager, isSysAdmin, user } = usePermission();
   const currentUserId = user?.id || user?.sub;
+  const todayStr = toDateOnlyStr(new Date());
 
   const [apt, setApt] = useState(null);
   const [zones, setZones] = useState([]);
+  const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
   const [loading, setLoading] = useState(true);
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -54,6 +71,17 @@ export function ApartmentDetailPage() {
     note: '',
     amenitiesText: '',
   });
+
+  useEffect(() => {
+    buildingsService
+      .getReservationCancelPolicy()
+      .then((res) => {
+        if (res?.data) {
+          setCancelPolicy((prev) => ({ ...prev, ...res.data }));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const loadApartment = useCallback(async () => {
     setLoading(true);
@@ -195,43 +223,233 @@ export function ApartmentDetailPage() {
     }
   };
 
-  const [rsvActionModal, setRsvActionModal] = useState({
-    open: false,
-    reservation: null,
-    action: 'refund',
-    reason: '',
+  // Internal Create Reservation Modal
+  const [createRsvOpen, setCreateRsvOpen] = useState(false);
+  const [createRsvForm, setCreateRsvForm] = useState({
+    prospect_name: '',
+    phone: '',
+    hold_amount: DEFAULT_RESERVATION_CANCEL_POLICY.default_hold_amount,
+    method: 'BANK_TRANSFER',
+    hold_from: todayStr,
+    hold_until: addDaysStr(todayStr, 5),
+    evidence: [],
+    note: '',
   });
-  const rsvActionIdemKeyRef = useRef(createIdempotencyKey());
+  const createRsvIdemRef = useRef(createIdempotencyKey());
 
-  const handleOpenReservationAction = (reservation, action) => {
-    rsvActionIdemKeyRef.current = createIdempotencyKey();
-    setRsvActionModal({
-      open: true,
-      reservation,
-      action,
-      reason: '',
+  const handleOpenCreateReservation = () => {
+    createRsvIdemRef.current = createIdempotencyKey();
+    setCreateRsvForm({
+      prospect_name: '',
+      phone: '',
+      hold_amount:
+        Number(cancelPolicy.default_hold_amount) ||
+        DEFAULT_RESERVATION_CANCEL_POLICY.default_hold_amount,
+      method: 'BANK_TRANSFER',
+      hold_from: todayStr,
+      hold_until: addDaysStr(todayStr, Math.min(5, Number(cancelPolicy.max_hold_days || 30))),
+      evidence: [],
+      note: '',
     });
+    setCreateRsvOpen(true);
   };
 
-  const handleSubmitReservationAction = async (e) => {
-    e?.preventDefault();
-    const { reservation, action, reason } = rsvActionModal;
-    if (!reservation?.id) return;
-    const trimmedReason = String(reason || '').trim();
-    if (!trimmedReason) {
-      toast.warning('Vui lòng nhập lý do xử lý cọc giữ chỗ.');
+  const handleSubmitCreateReservation = async (e) => {
+    e.preventDefault();
+    const holdAmt = Number(String(createRsvForm.hold_amount ?? '').trim());
+    if (!Number.isInteger(holdAmt) || holdAmt <= 0) {
+      toast.warning('Tiền đặt cọc giữ chỗ phải là số nguyên dương VND.');
       return;
     }
     setSaving(true);
     try {
-      const opts = { idempotencyKey: rsvActionIdemKeyRef.current };
-      if (action === 'refund') {
-        await buildingsService.refundReservation(reservation.id, { reason: trimmedReason }, opts);
-      } else if (action === 'forfeit') {
-        await buildingsService.forfeitReservation(reservation.id, { reason: trimmedReason }, opts);
+      await buildingsService.createReservation(
+        {
+          apartment_id: id,
+          prospect_name: createRsvForm.prospect_name.trim(),
+          phone: createRsvForm.phone.trim(),
+          hold_amount: holdAmt,
+          method: createRsvForm.method || 'BANK_TRANSFER',
+          hold_from: createRsvForm.hold_from || undefined,
+          hold_until: createRsvForm.hold_until,
+          evidence: Array.isArray(createRsvForm.evidence) ? createRsvForm.evidence : [],
+          note: createRsvForm.note.trim(),
+        },
+        { idempotencyKey: createRsvIdemRef.current }
+      );
+      toast.success('Đã ghi nhận đặt cọc giữ chỗ thành công.');
+      setCreateRsvOpen(false);
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Confirm / Reject PENDING_CONFIRM payment
+  const rejectIdemKeyRef = useRef(createIdempotencyKey());
+  const [rejectModal, setRejectModal] = useState({
+    open: false,
+    reservation: null,
+    reason: '',
+  });
+
+  const handleConfirmPayment = async (reservation) => {
+    if (!reservation?.id) return;
+    setSaving(true);
+    try {
+      const res = await buildingsService.confirmReservationPayment(
+        reservation.id,
+        {},
+        { idempotencyKey: createIdempotencyKey() }
+      );
+      toast.success(res?.message || 'Đã xác nhận tiền về và khóa giữ chỗ căn hộ.');
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleOpenRejectModal = (reservation) => {
+    rejectIdemKeyRef.current = createIdempotencyKey();
+    setRejectModal({ open: true, reservation, reason: '' });
+  };
+
+  const handleSubmitRejectPayment = async (e) => {
+    e?.preventDefault();
+    const { reservation, reason } = rejectModal;
+    const trimmed = String(reason || '').trim();
+    if (!reservation?.id) return;
+    if (!trimmed) {
+      toast.warning('Vui lòng nhập lý do từ chối biên lai chuyển khoản.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await buildingsService.rejectReservationPayment(
+        reservation.id,
+        { reason: trimmed },
+        { idempotencyKey: rejectIdemKeyRef.current }
+      );
+      toast.success(res?.message || 'Đã từ chối yêu cầu giữ chỗ.');
+      setRejectModal({ open: false, reservation: null, reason: '' });
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Policy-based Cancel Settlement Modal (Four-Eyes + ROUND(x, -3) + BankSelect)
+  const settleIdemKeyRef = useRef(createIdempotencyKey());
+  const [settleModal, setSettleModal] = useState({
+    open: false,
+    reservation: null,
+    suggested: { refunded_amount: 0, forfeited_amount: 0 },
+    refunded_amount: 0,
+    forfeited_amount: 0,
+    refund_method: 'BANK_TRANSFER',
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    account_number: '',
+    account_holder: '',
+    refund_evidence: [],
+    reason: '',
+  });
+
+  const handleOpenCancelSettleModal = (reservation) => {
+    settleIdemKeyRef.current = createIdempotencyKey();
+    const suggested = computeSuggestedCancelSplit({
+      holdAmount: Number(reservation.hold_amount || 0),
+      holdUntil: reservation.hold_until,
+      todayStr,
+      policy: cancelPolicy,
+    });
+    const existingBank = reservation.refund_bank_info || {};
+    setSettleModal({
+      open: true,
+      reservation,
+      suggested,
+      refunded_amount: suggested.refunded_amount,
+      forfeited_amount: suggested.forfeited_amount,
+      refund_method: reservation.refund_method || 'BANK_TRANSFER',
+      bank_name: existingBank.bank_name || '',
+      bank_code: existingBank.bank_code || '',
+      bank_bin: existingBank.bank_bin || '',
+      account_number: existingBank.account_number || '',
+      account_holder: existingBank.account_holder || reservation.prospect_name || '',
+      refund_evidence: [],
+      reason: '',
+    });
+  };
+
+  const handleChangeSettleRefunded = (rawVal) => {
+    const total = Number(settleModal.reservation?.hold_amount || 0);
+    const num = Math.min(total, Math.max(0, Math.round(Number(rawVal || 0))));
+    setSettleModal((p) => ({
+      ...p,
+      refunded_amount: num,
+      forfeited_amount: Math.max(0, total - num),
+    }));
+  };
+
+  const handleSubmitCancelSettle = async (e) => {
+    e?.preventDefault();
+    const rsv = settleModal.reservation;
+    if (!rsv?.id) return;
+    const total = Number(rsv.hold_amount || 0);
+    const refAmt = Math.round(Number(settleModal.refunded_amount || 0));
+    const forfAmt = Math.round(Number(settleModal.forfeited_amount || 0));
+    if (refAmt < 0 || forfAmt < 0 || refAmt + forfAmt !== total) {
+      toast.warning(`Tổng tiền hoàn + tiền phạt phải bằng đúng ${formatMoney(total)}.`);
+      return;
+    }
+    const trimmedReason = String(settleModal.reason || '').trim();
+    if (!trimmedReason) {
+      toast.warning('Vui lòng nhập lý do thanh lý hủy giữ chỗ.');
+      return;
+    }
+    if (refAmt > 0 && settleModal.refund_method === 'BANK_TRANSFER') {
+      if (
+        !String(settleModal.bank_name || '').trim() ||
+        !String(settleModal.account_number || '').trim() ||
+        !String(settleModal.account_holder || '').trim()
+      ) {
+        toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn.');
+        return;
       }
-      toast.success('Đã xử lý hồ sơ giữ chỗ.');
-      setRsvActionModal({ open: false, reservation: null, action: 'refund', reason: '' });
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        refunded_amount: refAmt,
+        forfeited_amount: forfAmt,
+        reason: trimmedReason,
+        refund_method: settleModal.refund_method,
+        refund_evidence: Array.isArray(settleModal.refund_evidence)
+          ? settleModal.refund_evidence
+          : [],
+      };
+      if (refAmt > 0 && settleModal.refund_method === 'BANK_TRANSFER') {
+        payload.refund_bank_info = {
+          bank_name: String(settleModal.bank_name).trim(),
+          bank_code: settleModal.bank_code || undefined,
+          bank_bin: settleModal.bank_bin || undefined,
+          account_number: String(settleModal.account_number).trim(),
+          account_holder: String(settleModal.account_holder).trim(),
+        };
+      }
+      const res = await buildingsService.cancelSettleReservation(rsv.id, payload, {
+        idempotencyKey: settleIdemKeyRef.current,
+      });
+      toast.success(res?.message || 'Đã thanh lý hủy giữ chỗ thành công.');
+      setSettleModal((p) => ({ ...p, open: false, reservation: null }));
       loadApartment();
     } catch (err) {
       toast.error(extractErrorMessage(err));
@@ -252,6 +470,7 @@ export function ApartmentDetailPage() {
           .filter(([, v]) => Boolean(v))
           .map(([k, v]) => (typeof v === 'string' ? `${k}: ${v}` : k))
       : [];
+  const maxInternalHoldDays = Number(cancelPolicy.max_hold_days || 30);
 
   return (
     <div className="space-y-6">
@@ -270,7 +489,17 @@ export function ApartmentDetailPage() {
           <>
             {canEditRealEstate && apt.status === 'MAINTENANCE' ? (
               <Button variant="success" size="sm" icon={CheckCircle2} onClick={handleOpenHandoverModal} loading={saving}>
-                Nghiệm thu & Bàn giao
+                Nghiệm thu &amp; Bàn giao
+              </Button>
+            ) : null}
+            {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(apt.status) ? (
+              <Button
+                variant="warning"
+                size="sm"
+                icon={BookmarkPlus}
+                onClick={handleOpenCreateReservation}
+              >
+                Đặt cọc giữ chỗ
               </Button>
             ) : null}
             {isManager && ['AVAILABLE', 'RESERVED', 'OCCUPIED'].includes(apt.status) ? (
@@ -463,9 +692,11 @@ export function ApartmentDetailPage() {
         </Card>
 
         <Card padding={false} className="overflow-hidden min-w-0">
-          <div className="p-5 pb-3 flex items-center gap-2">
-            <Bookmark className="w-4 h-4 text-amber-500" />
-            <h3 className="text-sm font-semibold text-slate-900">Hồ sơ Đặt cọc Giữ chỗ</h3>
+          <div className="p-5 pb-3 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Bookmark className="w-4 h-4 text-amber-500" />
+              <h3 className="text-sm font-semibold text-slate-900">Hồ sơ Đặt cọc Giữ chỗ</h3>
+            </div>
           </div>
           <DataTable
             embedded
@@ -474,12 +705,44 @@ export function ApartmentDetailPage() {
             columns={[
               {
                 key: 'prospect_name',
-                label: 'Khách đặt',
+                label: 'Khách đặt / Chứng từ',
                 render: (r) => (
-                  <div>
-                    <p className="font-medium text-slate-900">{r.prospect_name}</p>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-medium text-slate-900">{r.prospect_name}</span>
+                      <Badge variant={r.source === 'PUBLIC' ? 'sky' : 'slate'}>
+                        {r.source === 'PUBLIC' ? 'Online' : 'Nội bộ'}
+                      </Badge>
+                    </div>
                     {r.phone ? <p className="text-xs font-mono text-slate-500">{r.phone}</p> : null}
-                    {r.note ? <p className="text-[11px] text-slate-500 whitespace-pre-line mt-0.5">{r.note}</p> : null}
+                    {r.method ? (
+                      <p className="text-[11px] text-slate-500">
+                        Phương thức: {PAYMENT_METHOD_LABELS[r.method] || r.method}
+                      </p>
+                    ) : null}
+                    {r.note ? <p className="text-[11px] text-slate-500 whitespace-pre-line">{r.note}</p> : null}
+                    {r.rejected_reason ? (
+                      <p className="text-[11px] text-rose-600">
+                        Lý do từ chối: {r.rejected_reason}
+                      </p>
+                    ) : null}
+                    {r.cancel_reason ? (
+                      <p className="text-[11px] text-amber-700">
+                        Lý do thanh lý: {r.cancel_reason}
+                      </p>
+                    ) : null}
+                    {Array.isArray(r.evidence) && r.evidence.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {r.evidence.map((url, idx) => (
+                          <AuthImage
+                            key={`${r.id}-ev-${idx}`}
+                            src={url}
+                            alt="Biên lai giữ chỗ"
+                            className="w-10 h-10 rounded-lg object-cover border border-slate-200"
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 ),
               },
@@ -488,7 +751,17 @@ export function ApartmentDetailPage() {
                 label: 'Tiền giữ chỗ',
                 align: 'right',
                 className: 'font-mono tabular-nums whitespace-nowrap',
-                render: (r) => formatMoney(r.hold_amount),
+                render: (r) => (
+                  <div className="space-y-0.5">
+                    <div>{formatMoney(r.hold_amount)}</div>
+                    {Number(r.refunded_amount || 0) + Number(r.forfeited_amount || 0) > 0 ? (
+                      <div className="text-[10px] text-slate-500">
+                        Hoàn {formatMoney(r.refunded_amount || 0)} • Phạt{' '}
+                        {formatMoney(r.forfeited_amount || 0)}
+                      </div>
+                    ) : null}
+                  </div>
+                ),
               },
               {
                 key: 'hold_until',
@@ -502,40 +775,61 @@ export function ApartmentDetailPage() {
                 label: 'Trạng thái / Xử lý',
                 align: 'center',
                 className: 'whitespace-nowrap',
-                render: (r) => (
-                  <div className="inline-flex flex-col items-center gap-1.5">
-                    <StatusBadge status={r.status} domain="reservation" />
-                    {['HELD', 'EXPIRED'].includes(r.status) &&
+                render: (r) => {
+                  const canConfirm = canManagerConfirmReservationPayment(r, { isManager });
+                  const canSettle =
+                    canSettleReservationCancel(r) &&
                     Number(r.hold_amount || 0) > 0 &&
                     canActorApproveReservationRow({
                       isOwner,
                       isManager,
                       isSysAdmin,
                       currentUserId,
-                      createdBy: r.created_by,
+                      createdBy: r.confirmed_by || r.created_by,
                       buildingHasActiveOwner: Boolean(
                         r.building_has_active_owner ?? apt.building_has_active_owner
                       ),
-                    }) ? (
-                      <div className="inline-flex items-center justify-center gap-1">
+                    });
+
+                  return (
+                    <div className="inline-flex flex-col items-center gap-1.5">
+                      <StatusBadge status={r.status} domain="reservation" />
+                      {canConfirm ? (
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <Button
+                            size="xs"
+                            variant="success"
+                            icon={CheckCircle2}
+                            loading={saving}
+                            onClick={() => handleConfirmPayment(r)}
+                          >
+                            Xác nhận tiền về
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="danger"
+                            icon={XCircle}
+                            disabled={saving}
+                            onClick={() => handleOpenRejectModal(r)}
+                          >
+                            Từ chối biên lai
+                          </Button>
+                        </div>
+                      ) : null}
+
+                      {canSettle ? (
                         <Button
                           size="xs"
                           variant="outline"
-                          onClick={() => handleOpenReservationAction(r, 'refund')}
+                          icon={Scale}
+                          onClick={() => handleOpenCancelSettleModal(r)}
                         >
-                          Hoàn cọc
+                          Thanh lý hủy theo chính sách
                         </Button>
-                        <Button
-                          size="xs"
-                          variant="danger"
-                          onClick={() => handleOpenReservationAction(r, 'forfeit')}
-                        >
-                          Tịch thu
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                ),
+                      ) : null}
+                    </div>
+                  );
+                },
               },
             ]}
           />
@@ -635,57 +929,322 @@ export function ApartmentDetailPage() {
         </form>
       </Modal>
 
-      {/* Reservation Refund / Forfeit Reason Modal */}
+      {/* Internal Create Reservation Modal */}
       <Modal
-        open={rsvActionModal.open}
+        open={createRsvOpen}
         onClose={() => {
-          if (!saving) setRsvActionModal((p) => ({ ...p, open: false }));
+          if (!saving) setCreateRsvOpen(false);
         }}
-        title={
-          rsvActionModal.action === 'refund'
-            ? 'Xác nhận hoàn cọc giữ chỗ (Four-Eyes)'
-            : 'Xác nhận tịch thu cọc giữ chỗ (Four-Eyes)'
-        }
+        title={`Đặt cọc giữ chỗ — Căn ${apt.code}`}
+        subtitle={`Giữ chỗ nội bộ tối đa ${maxInternalHoldDays} ngày theo chính sách FR-067`}
+      >
+        <form onSubmit={handleSubmitCreateReservation} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <Input
+              label="Họ tên khách đặt giữ chỗ"
+              required
+              value={createRsvForm.prospect_name}
+              onChange={(e) =>
+                setCreateRsvForm((p) => ({ ...p, prospect_name: e.target.value }))
+              }
+            />
+            <Input
+              label="Số điện thoại"
+              required
+              placeholder="0912345678"
+              value={createRsvForm.phone}
+              onChange={(e) => setCreateRsvForm((p) => ({ ...p, phone: e.target.value }))}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <MoneyInput
+              label="Tiền cọc giữ chỗ (VND)"
+              required
+              value={createRsvForm.hold_amount}
+              onChange={(e) =>
+                setCreateRsvForm((p) => ({ ...p, hold_amount: e.target.value }))
+              }
+            />
+            <Select
+              label="Phương thức thu tiền"
+              value={createRsvForm.method}
+              onChange={(e) => setCreateRsvForm((p) => ({ ...p, method: e.target.value }))}
+              options={PAYMENT_METHOD_OPTIONS}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <Input
+              label="Giữ chỗ từ ngày"
+              type="date"
+              required
+              min={todayStr}
+              value={createRsvForm.hold_from}
+              onChange={(e) => setCreateRsvForm((p) => ({ ...p, hold_from: e.target.value }))}
+            />
+            <Input
+              label={`Đến hết ngày (tối đa ${maxInternalHoldDays} ngày)`}
+              type="date"
+              required
+              min={addDaysStr(createRsvForm.hold_from || todayStr, 1)}
+              max={
+                createRsvForm.hold_from
+                  ? addDaysStr(createRsvForm.hold_from, maxInternalHoldDays)
+                  : undefined
+              }
+              value={createRsvForm.hold_until}
+              onChange={(e) =>
+                setCreateRsvForm((p) => ({ ...p, hold_until: e.target.value }))
+              }
+            />
+          </div>
+          <FileUpload
+            label="Ảnh biên lai / phiếu thu giữ chỗ (tùy chọn, tối đa 5 ảnh)"
+            multiple
+            maxFiles={5}
+            value={createRsvForm.evidence}
+            onChange={(vals) => setCreateRsvForm((p) => ({ ...p, evidence: vals }))}
+          />
+          <Input
+            label="Ghi chú"
+            multiline
+            rows={2}
+            value={createRsvForm.note}
+            onChange={(e) => setCreateRsvForm((p) => ({ ...p, note: e.target.value }))}
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              disabled={saving}
+              onClick={() => setCreateRsvOpen(false)}
+            >
+              Hủy
+            </Button>
+            <Button type="submit" loading={saving}>
+              Xác nhận giữ chỗ
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Reject Payment Modal */}
+      <Modal
+        open={rejectModal.open}
+        onClose={() => {
+          if (!saving) setRejectModal({ open: false, reservation: null, reason: '' });
+        }}
+        title="Từ chối xác nhận biên lai giữ chỗ"
         subtitle={
-          rsvActionModal.reservation
-            ? `Khách: ${rsvActionModal.reservation.prospect_name} • Tiền cọc: ${formatMoney(
-                rsvActionModal.reservation.hold_amount
+          rejectModal.reservation
+            ? `Khách: ${rejectModal.reservation.prospect_name} • ${formatMoney(
+                rejectModal.reservation.hold_amount
               )}`
             : ''
         }
         size="sm"
       >
-        <form onSubmit={handleSubmitReservationAction} className="space-y-4">
+        <form onSubmit={handleSubmitRejectPayment} className="space-y-4">
           <Input
-            label="Lý do xử lý (bắt buộc lưu vết kiểm toán)"
+            label="Lý do từ chối biên lai (bắt buộc)"
             required
             multiline
             rows={3}
-            placeholder={
-              rsvActionModal.action === 'refund'
-                ? 'VD: Hoàn cọc theo thỏa thuận do thay đổi kế hoạch bàn giao...'
-                : 'VD: Khách báo hủy hoặc quá hạn giữ chỗ không ký hợp đồng...'
-            }
-            value={rsvActionModal.reason}
-            onChange={(e) => setRsvActionModal((p) => ({ ...p, reason: e.target.value }))}
+            placeholder="VD: Sao kê ngân hàng chưa ghi nhận khoản tiền..."
+            value={rejectModal.reason}
+            onChange={(e) => setRejectModal((p) => ({ ...p, reason: e.target.value }))}
           />
           <div className="flex justify-end gap-2 pt-2">
             <Button
               variant="outline"
-              onClick={() => setRsvActionModal((p) => ({ ...p, open: false }))}
               disabled={saving}
+              onClick={() => setRejectModal({ open: false, reservation: null, reason: '' })}
             >
               Hủy
             </Button>
-            <Button
-              type="submit"
-              variant={rsvActionModal.action === 'refund' ? 'primary' : 'danger'}
-              loading={saving}
-            >
-              {rsvActionModal.action === 'refund' ? 'Xác nhận hoàn cọc' : 'Xác nhận tịch thu'}
+            <Button type="submit" variant="danger" loading={saving}>
+              Xác nhận từ chối
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Policy-Based Cancel Settlement Modal (Four-Eyes + ROUND(x, -3)) */}
+      <Modal
+        open={settleModal.open}
+        onClose={() => {
+          if (!saving) setSettleModal((p) => ({ ...p, open: false }));
+        }}
+        title="Thanh lý hủy giữ chỗ theo chính sách (Four-Eyes)"
+        subtitle={
+          settleModal.reservation
+            ? `Khách: ${settleModal.reservation.prospect_name} • Tiền giữ chỗ: ${formatMoney(
+                settleModal.reservation.hold_amount
+              )} • Hạn: ${formatDate(settleModal.reservation.hold_until)}`
+            : ''
+        }
+        size="md"
+      >
+        {settleModal.reservation ? (
+          <form onSubmit={handleSubmitCancelSettle} className="space-y-4">
+            <div className="p-3.5 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 space-y-2">
+              <p>
+                <strong>Gợi ý tự động theo chính sách tổ chức (làm tròn 1.000đ — PRD 10.3):</strong>{' '}
+                Hoàn khách <strong>{formatMoney(settleModal.suggested.refunded_amount)}</strong> • Thu giữ phạt{' '}
+                <strong>{formatMoney(settleModal.suggested.forfeited_amount)}</strong>.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setSettleModal((p) => ({
+                      ...p,
+                      refunded_amount: p.suggested.refunded_amount,
+                      forfeited_amount: p.suggested.forfeited_amount,
+                    }))
+                  }
+                >
+                  Áp dụng gợi ý chính sách
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setSettleModal((p) => ({
+                      ...p,
+                      refunded_amount: Number(p.reservation.hold_amount || 0),
+                      forfeited_amount: 0,
+                    }))
+                  }
+                >
+                  Hoàn 100%
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setSettleModal((p) => ({
+                      ...p,
+                      refunded_amount: 0,
+                      forfeited_amount: Number(p.reservation.hold_amount || 0),
+                    }))
+                  }
+                >
+                  Tịch thu 100%
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <MoneyInput
+                label="Số tiền hoàn lại khách (VND)"
+                required
+                value={settleModal.refunded_amount}
+                onChange={(e) => handleChangeSettleRefunded(e.target.value)}
+              />
+              <MoneyInput
+                label="Số tiền thu giữ / phạt cọc (VND)"
+                disabled
+                value={settleModal.forfeited_amount}
+              />
+            </div>
+
+            {Number(settleModal.refunded_amount || 0) > 0 ? (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3.5">
+                <Select
+                  label="Phương thức hoàn tiền giữ chỗ"
+                  value={settleModal.refund_method}
+                  onChange={(e) =>
+                    setSettleModal((p) => ({ ...p, refund_method: e.target.value }))
+                  }
+                  options={[
+                    { value: 'BANK_TRANSFER', label: 'Chuyển khoản ngân hàng' },
+                    { value: 'CASH', label: 'Tiền mặt tại quầy' },
+                    { value: 'QR_CODE', label: 'QR Code' },
+                    { value: 'E_WALLET', label: 'Ví điện tử' },
+                  ]}
+                />
+
+                {settleModal.refund_method === 'BANK_TRANSFER' ? (
+                  <>
+                    <BankSelect
+                      label="Ngân hàng nhận hoàn (bắt buộc)"
+                      required
+                      value={settleModal.bank_name}
+                      bankMeta={{
+                        bank_code: settleModal.bank_code,
+                        bank_bin: settleModal.bank_bin,
+                      }}
+                      onBankChange={(bank, rawVal) =>
+                        setSettleModal((p) => ({
+                          ...p,
+                          bank_name: bank?.shortName || bank?.short_name || rawVal || '',
+                          bank_code: bank?.code || '',
+                          bank_bin: bank?.bin || '',
+                        }))
+                      }
+                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Input
+                        label="Số tài khoản nhận hoàn"
+                        required
+                        placeholder="Nhập STK ngân hàng"
+                        value={settleModal.account_number}
+                        onChange={(e) =>
+                          setSettleModal((p) => ({ ...p, account_number: e.target.value }))
+                        }
+                      />
+                      <Input
+                        label="Chủ tài khoản (IN HOA)"
+                        required
+                        placeholder="NGUYEN VAN A"
+                        value={settleModal.account_holder}
+                        onChange={(e) =>
+                          setSettleModal((p) => ({
+                            ...p,
+                            account_holder: e.target.value.toUpperCase(),
+                          }))
+                        }
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                <FileUpload
+                  label="Chứng từ hoàn tiền / biên nhận (tùy chọn)"
+                  multiple
+                  maxFiles={3}
+                  value={settleModal.refund_evidence}
+                  onChange={(vals) =>
+                    setSettleModal((p) => ({ ...p, refund_evidence: vals }))
+                  }
+                />
+              </div>
+            ) : null}
+
+            <Input
+              label="Lý do xử lý (bắt buộc lưu vết kiểm toán)"
+              required
+              multiline
+              rows={3}
+              placeholder="VD: Khách báo hủy sát hạn hoàn 50% theo chính sách giữ chỗ..."
+              value={settleModal.reason}
+              onChange={(e) => setSettleModal((p) => ({ ...p, reason: e.target.value }))}
+            />
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => setSettleModal((p) => ({ ...p, open: false }))}
+                disabled={saving}
+              >
+                Hủy
+              </Button>
+              <Button type="submit" variant="primary" loading={saving}>
+                Xác nhận thanh lý giữ chỗ
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </Modal>
 
       {/* Edit Apartment Modal */}
