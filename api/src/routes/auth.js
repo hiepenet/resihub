@@ -6,6 +6,7 @@ import { adminPool as pool } from '../db/client.js';
 import { otpRequestLimiter, generalLimiter } from '../middleware/rateLimiter.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { JWT_SECRET, JWT_REFRESH_SECRET } from '../config/env.js';
+import { requestPhoneOtp, storePhoneOtp, verifyPhoneOtp } from '../services/otpService.js';
 
 const router = express.Router();
 
@@ -19,12 +20,6 @@ function normalizePhone(phone) {
   }
   return clean;
 }
-
-// In-memory OTP storage: { phone: { otp, expiresAt, attempts, lockedUntil } }
-const otpStore = new Map();
-
-// In-memory phone rate limit tracker: { phone: [timestamps] }
-const phoneRequestTracker = new Map();
 
 // In-memory email failed login tracker: { email: { attempts: number, lockedUntil: number } }
 export const emailLoginTracker = new Map();
@@ -62,30 +57,12 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     });
   }
 
-  // Kiểm tra số lần request trên SĐT trong 1 giờ qua (Rate-limit: 3 lần/giờ/SĐT theo AC-001)
-  const now = Date.now();
-  const oneHourAgo = now - 60 * 60 * 1000;
-  const history = phoneRequestTracker.get(cleanPhone) || [];
-  const recentHistory = history.filter((ts) => ts > oneHourAgo);
-  const maxReqPerHour = 3; // Giới hạn nghiêm ngặt 3 lần / giờ / SĐT
-
-  if (recentHistory.length >= maxReqPerHour) {
-    return res.status(429).json({
-      code: 'RATE_LIMIT_EXCEEDED',
-      message: 'Bạn đã yêu cầu gửi OTP quá 3 lần trong 1 giờ. Vui lòng đợi thêm hoặc liên hệ quản trị viên.',
-    });
-  }
-
-  recentHistory.push(now);
-  phoneRequestTracker.set(cleanPhone, recentHistory);
-
-  // Kiểm tra xem SĐT có đang bị lock do nhập sai quá 5 lần không (AC-001.2: Khóa 15 phút)
-  const existingRecord = otpStore.get(cleanPhone);
-  if (existingRecord && existingRecord.lockedUntil && existingRecord.lockedUntil > now) {
-    const minutesLeft = Math.ceil((existingRecord.lockedUntil - now) / 60000);
-    return res.status(429).json({
-      code: 'ACCOUNT_LOCKED',
-      message: `Số điện thoại này đang bị tạm khóa do nhập sai quá 5 lần. Vui lòng thử lại sau ${minutesLeft} phút.`,
+  // Kiểm tra giới hạn gửi OTP dùng chung (3 lần/giờ/SĐT + khóa 15 phút AC-001.2)
+  const otpCheck = requestPhoneOtp(cleanPhone, { store: false });
+  if (!otpCheck.ok) {
+    return res.status(otpCheck.status).json({
+      code: otpCheck.code,
+      message: otpCheck.message,
     });
   }
 
@@ -130,16 +107,9 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
     }
   }
 
-  // Sinh mã OTP 6 số ngẫu nhiên
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = now + 5 * 60 * 1000; // TTL: 5 phút
-
-  otpStore.set(cleanPhone, {
-    otp,
-    expiresAt,
-    attempts: 0,
-    lockedUntil: null,
-  });
+  // Lưu mã OTP 6 số vào kho dùng chung (TTL: 5 phút)
+  const { otp, expiresAt } = otpCheck;
+  storePhoneOtp(cleanPhone, otp, expiresAt);
 
   if (process.env.NODE_ENV !== 'production') {
     console.log(`\n=============================================`);
@@ -168,66 +138,16 @@ router.post('/otp/verify', async (req, res) => {
   }
 
   const cleanPhone = normalizePhone(phone);
-  const now = Date.now();
-  const record = otpStore.get(cleanPhone);
-
-  // Mặc định hỗ trợ OTP test 123456 trong môi trường dev
-  const isDevMasterOtp = process.env.NODE_ENV !== 'production' && otp === '123456';
-
-  if (!record && !isDevMasterOtp) {
-    return res.status(400).json({
-      code: 'OTP_NOT_FOUND',
-      message: 'Mã OTP không tồn tại hoặc đã hết hạn. Vui lòng gửi lại yêu cầu.',
+  const otpVerify = await verifyPhoneOtp(cleanPhone, otp, {
+    allowDevMasterOtp: true,
+    lockAuditAction: 'AUTH_LOCK',
+    dbPool: pool,
+  });
+  if (!otpVerify.ok) {
+    return res.status(otpVerify.status).json({
+      code: otpVerify.code,
+      message: otpVerify.message,
     });
-  }
-
-  if (record && !isDevMasterOtp) {
-    // Kiểm tra lock
-    if (record.lockedUntil && record.lockedUntil > now) {
-      const minutesLeft = Math.ceil((record.lockedUntil - now) / 60000);
-      return res.status(429).json({
-        code: 'TOO_MANY_ATTEMPTS',
-        message: `Quá nhiều lần thử sai. Vui lòng thử lại sau ${minutesLeft} phút.`,
-      });
-    }
-
-    // Kiểm tra hết hạn 5 phút
-    if (now > record.expiresAt) {
-      otpStore.delete(cleanPhone);
-      return res.status(400).json({
-        code: 'OTP_EXPIRED',
-        message: 'Mã OTP đã hết hiệu lực (quá 5 phút). Vui lòng gửi lại mã mới.',
-      });
-    }
-
-    // Kiểm tra max 5 lần thử sai
-    if (record.otp !== otp) {
-      record.attempts += 1;
-      if (record.attempts >= 5) {
-        record.lockedUntil = now + 15 * 60 * 1000; // Khóa 15 phút
-        try {
-          await pool.query(
-            `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-             VALUES ($1, 'AUTH_LOCK', 'phone', gen_random_uuid(), $2)`,
-            [null, JSON.stringify({ phone: cleanPhone })]
-          );
-        } catch (auditErr) {
-          console.error('[Audit Lock Error]:', auditErr);
-        }
-        return res.status(429).json({
-          code: 'TOO_MANY_ATTEMPTS',
-          message: 'Bạn đã nhập sai quá 5 lần. Số điện thoại bị tạm khóa 15 phút.',
-        });
-      }
-
-      return res.status(400).json({
-        code: 'OTP_INVALID',
-        message: `Mã OTP không chính xác. Bạn còn ${5 - record.attempts} lần thử.`,
-      });
-    }
-
-    // Nhập đúng -> xóa OTP khỏi store
-    otpStore.delete(cleanPhone);
   }
 
   try {

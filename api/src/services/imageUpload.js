@@ -78,7 +78,7 @@ export async function saveBase64Image({
     `INSERT INTO attachment (owner_entity, owner_id, storage_path, mime, size_bytes, uploaded_by)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id, storage_path, mime`,
-    [entity, ownerId, storagePath, mime, bytes.length, req.user.sub]
+    [entity, ownerId, storagePath, mime, bytes.length, req?.user?.sub || null]
   );
   return { attachment: attRes.rows[0], bytes, storagePath };
 }

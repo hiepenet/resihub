@@ -68,6 +68,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
   const { default: auditLogsRoute } = await import('../src/routes/admin/audit-logs.js');
   const { default: residentRoute } = await import('../src/routes/resident.js');
   const { default: attachmentsRoute } = await import('../src/routes/attachments.js');
+  const publicModule = await import('../src/routes/public.js').catch(() => null);
   const dailyModule = await import('../src/jobs/daily.js');
 
   const app = express();
@@ -89,6 +90,9 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
   app.use('/api/v1/audit-logs', auditLogsRoute);
   app.use('/api/v1/resident', residentRoute);
   app.use('/api/v1/attachments', attachmentsRoute);
+  if (publicModule?.default) {
+    app.use('/api/v1/public', publicModule.default);
+  }
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -146,6 +150,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     tenantIds: [],
     userIds: [],
     personIds: [],
+    publicPhones: [],
   };
 
   t.after(async () => {
@@ -207,6 +212,32 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
       await adminPool
         .query(`DELETE FROM app_user WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM audit_log WHERE actor_id = $1)`, [uId])
         .catch(() => {});
+    }
+    for (const ph of cleanup.publicPhones) {
+      await adminPool.query('DELETE FROM idempotency_key WHERE scope_key = $1', [`public:${ph}`]).catch(() => {});
+      await adminPool
+        .query(
+          `DELETE FROM attachment WHERE owner_entity = 'reservation' AND owner_id IN (SELECT id FROM reservation WHERE phone = $1)`,
+          [ph]
+        )
+        .catch(() => {});
+      await adminPool.query('DELETE FROM reservation WHERE phone = $1', [ph]).catch(() => {});
+      const pRows = await adminPool.query('SELECT id FROM person WHERE org_id = $1 AND phone = $2', [orgId, ph]).catch(() => ({ rows: [] }));
+      for (const pr of pRows.rows) {
+        await adminPool.query('DELETE FROM tenant WHERE person_id = $1', [pr.id]).catch(() => {});
+        await adminPool
+          .query('DELETE FROM notification WHERE user_id IN (SELECT id FROM app_user WHERE person_id = $1)', [pr.id])
+          .catch(() => {});
+        await adminPool
+          .query('DELETE FROM user_role WHERE user_id IN (SELECT id FROM app_user WHERE person_id = $1)', [pr.id])
+          .catch(() => {});
+        await adminPool
+          .query('DELETE FROM app_user u WHERE u.person_id = $1 AND NOT EXISTS (SELECT 1 FROM audit_log a WHERE a.actor_id = u.id)', [pr.id])
+          .catch(() => {});
+        await adminPool
+          .query('DELETE FROM person WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM app_user WHERE person_id = $1)', [pr.id])
+          .catch(() => {});
+      }
     }
     for (const pId of cleanup.personIds) {
       await adminPool.query('DELETE FROM tenant WHERE person_id = $1', [pId]).catch(() => {});
@@ -914,5 +945,486 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     );
 
     await adminPool.query('DELETE FROM receivable WHERE id = $1', [finRecId]).catch(() => {});
+  });
+
+  await t.test('Task 3.1: computeSuggestedCancelSplit rounds to nearest 1,000 VND (ROUND(x, -3))', async () => {
+    const settlementMod = await import('../src/services/depositSettlement.js');
+    assert.equal(
+      typeof settlementMod.computeSuggestedCancelSplit,
+      'function',
+      'computeSuggestedCancelSplit must be exported from depositSettlement.js'
+    );
+
+    const split = settlementMod.computeSuggestedCancelSplit({
+      holdAmount: 1_050_000,
+      holdUntil: '2026-11-05',
+      todayStr: '2026-11-04', // daysLeft = 1 (< full_refund_before_days=3)
+      policy: { full_refund_before_days: 3, partial_refund_pct: 33 },
+    });
+    // 1_050_000 * 33 / 100 = 346_500 -> ROUND(346500, -3) = 347_000; forfeited = 703_000
+    assert.deepEqual(split, {
+      refunded_amount: 347000,
+      forfeited_amount: 703000,
+    });
+  });
+
+  await t.test('Task 3.2: Shared OTP counter across /auth/otp/* and /public/reservations/* (locks on 5th wrong attempt & blocks dev master 123456 on public)', async () => {
+    const aptOtp = await createApt('AOTP');
+    const sharedOtpPhone = `0941${suffix}`;
+    cleanup.publicPhones.push(sharedOtpPhone);
+
+    // Seed a resident person so /auth/otp/request issues an OTP
+    const pRes = await adminPool.query(
+      `INSERT INTO person (org_id, full_name, phone) VALUES ($1, $2, $3) RETURNING id`,
+      [orgId, 'Cư Dân Kiểm Thử OTP Chung', sharedOtpPhone]
+    );
+    cleanup.personIds.push(pRes.rows[0].id);
+
+    const reqOtp = await apiFetch('/api/v1/auth/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: sharedOtpPhone }),
+    });
+    assert.equal(reqOtp.status, 200, JSON.stringify(reqOtp.body));
+    const realOtp = reqOtp.body.devOtp;
+    assert.ok(realOtp && /^\d{6}$/.test(realOtp));
+    const wrongOtpA = realOtp === '999991' ? '999992' : '999991';
+    const wrongMaster = realOtp === '123456' ? '654321' : '123456';
+
+    // 3 wrong attempts at /api/v1/auth/otp/verify
+    for (let i = 0; i < 3; i++) {
+      const vRes = await apiFetch('/api/v1/auth/otp/verify', null, {
+        method: 'POST',
+        body: JSON.stringify({ phone: sharedOtpPhone, otp: wrongOtpA }),
+      });
+      assert.equal(vRes.status, 400, `Attempt ${i + 1} expected 400: ${JSON.stringify(vRes.body)}`);
+      assert.equal(vRes.body.code, 'OTP_INVALID');
+    }
+
+    // 4th wrong attempt at /api/v1/public/reservations using '123456' (dev master OTP must NOT bypass public booking!)
+    const pubAttempt4 = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptOtp.id,
+        prospect_name: 'Khách Sai OTP 4',
+        phone: sharedOtpPhone,
+        otp: wrongMaster,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(3),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(pubAttempt4.status, 400, JSON.stringify(pubAttempt4.body));
+    assert.equal(pubAttempt4.body.code, 'OTP_INVALID');
+
+    // 5th wrong attempt at /api/v1/public/reservations -> immediately locks phone 15m (429 TOO_MANY_ATTEMPTS) + writes audit_log
+    const pubAttempt5 = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptOtp.id,
+        prospect_name: 'Khách Sai OTP 5',
+        phone: sharedOtpPhone,
+        otp: wrongOtpA,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(3),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(pubAttempt5.status, 429, JSON.stringify(pubAttempt5.body));
+    assert.equal(pubAttempt5.body.code, 'TOO_MANY_ATTEMPTS');
+
+    const lockAudit = await adminPool.query(
+      `SELECT id FROM audit_log WHERE entity = 'phone' AND after->>'phone' = $1 LIMIT 1`,
+      [sharedOtpPhone]
+    );
+    assert.ok(lockAudit.rows.length >= 1, 'Expected phone OTP lock audit_log record');
+  });
+
+  await t.test('Task 3.3: Public booking blocks internal staff phone (409 INTERNAL_ACCOUNT_PHONE) and preserves existing resident full_name (FR-021)', async () => {
+    const aptStaffTest = await createApt('ASTF');
+
+    // 1. OWNER phone attempts public booking -> 409 INTERNAL_ACCOUNT_PHONE
+    const otpOwner = await apiFetch('/api/v1/public/reservations/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: ownerPhone }),
+    });
+    assert.equal(otpOwner.status, 200, JSON.stringify(otpOwner.body));
+    assert.ok(otpOwner.body.message, 'Neutral message required (AC-001.3)');
+
+    const staffBookRes = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptStaffTest.id,
+        prospect_name: 'Giả Mạo Chủ Tòa',
+        phone: ownerPhone,
+        otp: otpOwner.body.devOtp,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(4),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(staffBookRes.status, 409, JSON.stringify(staffBookRes.body));
+    assert.equal(staffBookRes.body.code, 'INTERNAL_ACCOUNT_PHONE');
+
+    // Verify OWNER was NOT granted RESIDENT role or tenant record
+    const ownerRolesCheck = await adminPool.query(
+      `SELECT r.code FROM user_role ur JOIN role r ON r.id = ur.role_id WHERE ur.user_id = $1`,
+      [ownerUserRes.rows[0].id]
+    );
+    assert.equal(
+      ownerRolesCheck.rows.some((r) => r.code === 'RESIDENT'),
+      false,
+      'Internal OWNER must not receive RESIDENT role'
+    );
+    const ownerTenantCheck = await adminPool.query(
+      'SELECT id FROM tenant WHERE person_id = $1',
+      [ownerPersonRes.rows[0].id]
+    );
+    assert.equal(ownerTenantCheck.rows.length, 0);
+
+    // 2. Active resident (chainState.leadZeroPhone) books another apartment -> 201 PENDING_CONFIRM without overwriting person.full_name
+    const beforePerson = await adminPool.query(
+      'SELECT id, full_name FROM person WHERE org_id = $1 AND phone = $2 LIMIT 1',
+      [orgId, chainState.leadZeroPhone]
+    );
+    const originalFullName = beforePerson.rows[0].full_name;
+
+    const otpExistRes = await apiFetch('/api/v1/public/reservations/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: chainState.leadZeroPhone }),
+    });
+    assert.equal(otpExistRes.status, 200);
+
+    const existBookRes = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptStaffTest.id,
+        prospect_name: 'Tên Khác Không Được Ghi Đè',
+        phone: chainState.leadZeroPhone,
+        otp: otpExistRes.body.devOtp,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(4),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(existBookRes.status, 201, JSON.stringify(existBookRes.body));
+    assert.equal(existBookRes.body.data.status, 'PENDING_CONFIRM');
+    cleanup.reservationIds.push(existBookRes.body.data.id);
+
+    const afterPerson = await adminPool.query(
+      'SELECT full_name FROM person WHERE id = $1',
+      [beforePerson.rows[0].id]
+    );
+    assert.equal(
+      afterPerson.rows[0].full_name,
+      originalFullName,
+      'Existing resident full_name must NOT be overwritten (FR-021)'
+    );
+  });
+
+  await t.test('Task 3.4 & 3.5: Option A anti-room-locking (2 public bookings -> confirm 1 -> 409 & reject 2), public Idempotency replay, and Four-Eyes / OWNER cancel-settle', async () => {
+    const aptRace = await createApt('ARCE');
+    const guest1Phone = `0942${suffix}`;
+    const guest2Phone = `0943${suffix}`;
+    cleanup.publicPhones.push(guest1Phone, guest2Phone);
+
+    // Public catalog lists AVAILABLE apartments + policies_by_org + payment_accounts
+    const catalogRes = await apiFetch(`/api/v1/public/apartments?building_id=${testBuildingId}`, null);
+    assert.equal(catalogRes.status, 200, JSON.stringify(catalogRes.body));
+    assert.ok(catalogRes.body.data.apartments.some((a) => a.id === aptRace.id));
+    assert.ok(catalogRes.body.data.policy);
+
+    const otp1 = await apiFetch('/api/v1/public/reservations/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: guest1Phone }),
+    });
+    const otp2 = await apiFetch('/api/v1/public/reservations/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: guest2Phone }),
+    });
+    assert.equal(otp1.status, 200);
+    assert.equal(otp2.status, 200);
+    assert.equal(otp1.body.message, otp2.body.message, 'Neutral message must be identical (AC-001.3)');
+
+    const guest1IdemKey = crypto.randomUUID();
+    const guest1Payload = {
+      apartment_id: aptRace.id,
+      prospect_name: 'Khách Vãng Lai 1',
+      phone: guest1Phone,
+      otp: otp1.body.devOtp,
+      hold_amount: 2000000,
+      hold_from: isoDaysFromToday(0),
+      hold_until: isoDaysFromToday(2),
+      privacy_consent: true,
+      evidence: [TINY_PNG_B64],
+    };
+
+    const book1 = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': guest1IdemKey },
+      body: JSON.stringify(guest1Payload),
+    });
+    assert.equal(book1.status, 201, JSON.stringify(book1.body));
+    assert.equal(book1.body.data.status, 'PENDING_CONFIRM');
+    assert.equal(book1.body.data.source, 'PUBLIC');
+    const rsv1Id = book1.body.data.id;
+    cleanup.reservationIds.push(rsv1Id);
+
+    // Replay Guest 1 request with SAME Idempotency-Key + SAME payload (even though OTP is already consumed!) -> 201 replayed!
+    const book1Replay = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': guest1IdemKey },
+      body: JSON.stringify(guest1Payload),
+    });
+    assert.equal(book1Replay.status, 201, JSON.stringify(book1Replay.body));
+    assert.equal(book1Replay.headers.get('idempotent-replayed'), 'true');
+    assert.equal(book1Replay.body.data.id, rsv1Id);
+
+    // Guest 2 books the SAME AVAILABLE apartment -> also 201 PENDING_CONFIRM!
+    const book2 = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptRace.id,
+        prospect_name: 'Khách Vãng Lai 2',
+        phone: guest2Phone,
+        otp: otp2.body.devOtp,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(2),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(book2.status, 201, JSON.stringify(book2.body));
+    assert.equal(book2.body.data.status, 'PENDING_CONFIRM');
+    const rsv2Id = book2.body.data.id;
+    cleanup.reservationIds.push(rsv2Id);
+
+    // Apartment MUST still be AVAILABLE while both are PENDING_CONFIRM!
+    const aptBeforeConfirm = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRace.id]);
+    assert.equal(aptBeforeConfirm.rows[0].status, 'AVAILABLE');
+
+    // MANAGER 1 confirms Guest 1's bank transfer -> 200 HELD, apartment -> RESERVED
+    const confirm1 = await apiFetch(`/api/v1/reservations/${rsv1Id}/confirm-payment`, mgr1.token, {
+      method: 'PATCH',
+      body: '{}',
+    });
+    assert.equal(confirm1.status, 200, JSON.stringify(confirm1.body));
+    assert.equal(confirm1.body.data.status, 'HELD');
+    const aptAfterConfirm1 = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRace.id]);
+    assert.equal(aptAfterConfirm1.rows[0].status, 'RESERVED');
+
+    // MANAGER 1 tries to confirm Guest 2 on the now-RESERVED apartment -> 409 APARTMENT_NOT_AVAILABLE
+    const confirm2 = await apiFetch(`/api/v1/reservations/${rsv2Id}/confirm-payment`, mgr1.token, {
+      method: 'PATCH',
+      body: '{}',
+    });
+    assert.equal(confirm2.status, 409, JSON.stringify(confirm2.body));
+    assert.equal(confirm2.body.code, 'APARTMENT_NOT_AVAILABLE');
+
+    // MANAGER 1 rejects Guest 2 -> 200 REJECTED, forfeited_amount = 0
+    const reject2 = await apiFetch(`/api/v1/reservations/${rsv2Id}/reject-payment`, mgr1.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Căn hộ đã nhận sao kê giữ chỗ thành công từ khách trước' }),
+    });
+    assert.equal(reject2.status, 200, JSON.stringify(reject2.body));
+    assert.equal(reject2.body.data.status, 'REJECTED');
+    assert.equal(Number(reject2.body.data.forfeited_amount || 0), 0);
+
+    // REJECTED reservation cannot call cancel-settle -> 400 INVALID_STATUS
+    const settleRejected = await apiFetch(`/api/v1/reservations/${rsv2Id}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 0,
+        forfeited_amount: 2000000,
+        reason: 'Thử thanh lý phiếu đã từ chối',
+      }),
+    });
+    assert.equal(settleRejected.status, 400);
+    assert.equal(settleRejected.body.code, 'INVALID_STATUS');
+
+    // Four-Eyes on cancel-settle: mgr1 (who confirmed payment) cannot self-approve cancel-settle -> 403 FOUR_EYES_VIOLATION
+    const selfSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, mgr1.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 1000000,
+        forfeited_amount: 1000000,
+        reason: 'Tự duyệt thanh lý hủy giữ chỗ',
+        refund_method: 'CASH',
+      }),
+    });
+    assert.equal(selfSettle.status, 403, JSON.stringify(selfSettle.body));
+    assert.equal(selfSettle.body.code, 'FOUR_EYES_VIOLATION');
+
+    // SYS_ADMIN on building with active OWNER -> 403
+    const sysSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 1000000,
+        forfeited_amount: 1000000,
+        reason: 'Admin can thiệp tòa có chủ',
+        refund_method: 'CASH',
+      }),
+    });
+    assert.equal(sysSettle.status, 403, JSON.stringify(sysSettle.body));
+
+    // OWNER calls cancel-settle BANK_TRANSFER missing refund_bank_info -> 422 BANK_INFO_REQUIRED
+    const missingBank = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 1000000,
+        forfeited_amount: 1000000,
+        reason: 'Khách báo hủy sát hạn hoàn 50%',
+        refund_method: 'BANK_TRANSFER',
+      }),
+    });
+    assert.equal(missingBank.status, 422, JSON.stringify(missingBank.body));
+    assert.equal(missingBank.body.code, 'BANK_INFO_REQUIRED');
+
+    // OWNER calls cancel-settle with valid refund_bank_info -> 200 PARTIALLY_REFUNDED & apartment returns to AVAILABLE without RLS error!
+    const okSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 1000000,
+        forfeited_amount: 1000000,
+        reason: 'Khách báo hủy sát hạn hoàn 50% theo chính sách',
+        refund_method: 'BANK_TRANSFER',
+        refund_bank_info: {
+          bank_name: 'Vietcombank',
+          account_number: '0123456789',
+          account_holder: 'KHACH VANG LAI 1',
+        },
+        refund_evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(okSettle.status, 200, JSON.stringify(okSettle.body));
+    assert.equal(okSettle.body.data.status, 'PARTIALLY_REFUNDED');
+    assert.equal(Number(okSettle.body.data.refunded_amount), 1000000);
+    assert.equal(Number(okSettle.body.data.forfeited_amount), 1000000);
+
+    const aptAfterSettle = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRace.id]);
+    assert.equal(aptAfterSettle.rows[0].status, 'AVAILABLE');
+
+    // Confirmed EXPIRED reservation: 1st cancel-settle -> 200, 2nd cancel-settle -> 400 INVALID_STATUS
+    const expIns = await adminPool.query(
+      `INSERT INTO reservation (
+         org_id, building_id, apartment_id, prospect_name, phone, hold_amount,
+         hold_from, hold_until, status, source, confirmed_by, confirmed_at, created_by
+       ) VALUES ($1, $2, $3, 'Khách Hết Hạn Đã Thu', $4, 2000000, CURRENT_DATE - 6, CURRENT_DATE - 1, 'EXPIRED', 'PUBLIC', $5, NOW() - INTERVAL '5 days', $5)
+       RETURNING id`,
+      [orgId, testBuildingId, aptRace.id, `0944${suffix}`, mgr1.userId]
+    );
+    const expId = expIns.rows[0].id;
+    cleanup.reservationIds.push(expId);
+
+    const expSettle1 = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 0,
+        forfeited_amount: 2000000,
+        reason: 'Hết hạn giữ chỗ không ký HĐ -> tịch thu 100%',
+      }),
+    });
+    assert.equal(expSettle1.status, 200, JSON.stringify(expSettle1.body));
+    assert.equal(expSettle1.body.data.status, 'FORFEITED');
+
+    const expSettle2 = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 0,
+        forfeited_amount: 2000000,
+        reason: 'Gọi thanh lý lặp lần 2',
+      }),
+    });
+    assert.equal(expSettle2.status, 400, JSON.stringify(expSettle2.body));
+    assert.equal(expSettle2.body.code, 'INVALID_STATUS');
+  });
+
+  await t.test('Task 3.6: Prospect logs into Resident Portal via OTP and sees reservation at PENDING_CONFIRM, HELD, and in reservation_history after PARTIALLY_REFUNDED', async () => {
+    const aptPortal = await createApt('APTL');
+    const portalPhone = `0945${suffix}`;
+    cleanup.publicPhones.push(portalPhone);
+
+    const otpBook = await apiFetch('/api/v1/public/reservations/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: portalPhone }),
+    });
+    assert.equal(otpBook.status, 200);
+
+    const pubBook = await apiFetch('/api/v1/public/reservations', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptPortal.id,
+        prospect_name: 'Khách Cổng Cư Dân',
+        phone: portalPhone,
+        otp: otpBook.body.devOtp,
+        hold_amount: 2000000,
+        hold_from: isoDaysFromToday(0),
+        hold_until: isoDaysFromToday(3),
+        privacy_consent: true,
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(pubBook.status, 201, JSON.stringify(pubBook.body));
+    const portalRsvId = pubBook.body.data.id;
+    cleanup.reservationIds.push(portalRsvId);
+
+    // Prospect logs in via OTP
+    const otpLoginReq = await apiFetch('/api/v1/auth/otp/request', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: portalPhone }),
+    });
+    assert.equal(otpLoginReq.status, 200);
+    const otpLoginVerify = await apiFetch('/api/v1/auth/otp/verify', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: portalPhone, otp: otpLoginReq.body.devOtp }),
+    });
+    assert.equal(otpLoginVerify.status, 200, JSON.stringify(otpLoginVerify.body));
+    const prospectToken = otpLoginVerify.body.accessToken;
+
+    // 1. Overview while PENDING_CONFIRM
+    const ov1 = await apiFetch('/api/v1/resident/overview', prospectToken);
+    assert.equal(ov1.status, 200, JSON.stringify(ov1.body));
+    assert.equal(ov1.body.data.reservation?.reservation_id, portalRsvId);
+    assert.equal(ov1.body.data.reservation?.reservation_status, 'PENDING_CONFIRM');
+
+    // 2. Manager confirms -> Overview while HELD
+    const conf = await apiFetch(`/api/v1/reservations/${portalRsvId}/confirm-payment`, mgr1.token, {
+      method: 'PATCH',
+      body: '{}',
+    });
+    assert.equal(conf.status, 200);
+
+    const ov2 = await apiFetch('/api/v1/resident/overview', prospectToken);
+    assert.equal(ov2.status, 200);
+    assert.equal(ov2.body.data.reservation?.reservation_id, portalRsvId);
+    assert.equal(ov2.body.data.reservation?.reservation_status, 'HELD');
+
+    // 3. Owner settles cancel -> Overview shows PARTIALLY_REFUNDED in reservation_history
+    const settle = await apiFetch(`/api/v1/reservations/${portalRsvId}/cancel-settle`, ownerAuth.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        refunded_amount: 1000000,
+        forfeited_amount: 1000000,
+        reason: 'Hủy giữ chỗ hoàn 50% tiền mặt',
+        refund_method: 'CASH',
+      }),
+    });
+    assert.equal(settle.status, 200);
+
+    const ov3 = await apiFetch('/api/v1/resident/overview', prospectToken);
+    assert.equal(ov3.status, 200);
+    assert.equal(ov3.body.data.reservation, null);
+    assert.ok(Array.isArray(ov3.body.data.reservation_history));
+    const histItem = ov3.body.data.reservation_history.find((h) => h.reservation_id === portalRsvId);
+    assert.ok(histItem, 'Expected settled reservation in reservation_history');
+    assert.equal(histItem.reservation_status, 'PARTIALLY_REFUNDED');
   });
 });

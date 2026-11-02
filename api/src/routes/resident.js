@@ -257,7 +257,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
     }
 
     // 3. Đặt cọc giữ chỗ (trả cả danh sách reservations lẫn bản ghi mới nhất reservation)
-    let reservations = [];
+    let reservations = [], reservationHistory = [];
     if (cleanPhone) {
       const reservationRes = await pool.query(
         `SELECT 
@@ -267,7 +267,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
            r.hold_amount,
            r.hold_until,
            r.status as reservation_status,
-           r.note as reservation_note,
+           r.source, r.method, r.evidence, r.rejected_reason, r.refunded_amount, r.forfeited_amount, r.cancel_reason, r.confirmed_at, r.note as reservation_note,
            r.created_at as reservation_created_at,
            a.id as apartment_id,
            a.code as apartment_code,
@@ -287,11 +287,11 @@ router.get('/overview', authenticateToken, async (req, res) => {
          LEFT JOIN floor f ON f.id = a.floor_id
          WHERE r.org_id = $3
            AND (r.phone = $1 OR r.phone = $2)
-           AND r.status = 'HELD'
+           AND r.status IS NOT NULL
          ORDER BY r.created_at DESC`,
         [cleanPhone, userPhone, orgId]
       );
-      reservations = reservationRes.rows;
+      reservationHistory = reservationRes.rows; reservations = reservationHistory.filter((r) => ['HELD', 'PENDING_CONFIRM'].includes(r.reservation_status)).sort((a, b) => (a.reservation_status === 'HELD' ? 0 : 1) - (b.reservation_status === 'HELD' ? 0 : 1) || new Date(b.reservation_created_at).getTime() - new Date(a.reservation_created_at).getTime());
     }
     const reservation = reservations[0] || null;
 
@@ -410,7 +410,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
         total_amount_due_all: totalAmountDueAll,
         latest_invoice: latestInvoice,
         reservation,
-        reservations,
+        reservations, reservation_history: reservationHistory,
         pending_application: pendingApplication,
         onboarding_application: onboardingApplication,
         id_images: idImages,

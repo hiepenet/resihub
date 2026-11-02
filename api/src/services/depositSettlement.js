@@ -261,3 +261,71 @@ export function isSettlementSnapshotStale(
 
   return false;
 }
+
+export const DEFAULT_RESERVATION_CANCEL_POLICY = {
+  max_hold_days: 30,
+  public_max_hold_days: 7,
+  full_refund_before_days: 3,
+  partial_refund_pct: 50,
+  default_hold_amount: 2000000,
+};
+
+/**
+ * Làm tròn số tiền VND đến hàng nghìn gần nhất — ROUND(x, -3) (PRD 10.3).
+ */
+export function roundVndToThousand(amount) {
+  const num = Number(amount || 0);
+  if (!Number.isFinite(num) || num === 0) return 0;
+  const sign = num < 0 ? -1 : 1;
+  return sign * Math.round(Math.abs(num) / 1000) * 1000;
+}
+
+/**
+ * Tính mức gợi ý chia hoàn / phạt khi hủy giữ chỗ theo chính sách tổ chức (FR-005 / FR-067 / PRD 10.3):
+ * - daysLeft >= full_refund_before_days: hoàn 100%
+ * - 0 <= daysLeft < full_refund_before_days: hoàn ROUND(holdAmount * partial_refund_pct / 100, -3)
+ * - daysLeft < 0: hoàn 0, phạt 100%
+ * - forfeited_amount = holdAmount - refunded_amount
+ */
+export function computeSuggestedCancelSplit({
+  holdAmount = 0,
+  holdUntil,
+  todayStr = getTodayVnDateStr(),
+  policy = {},
+} = {}) {
+  const hold = Math.max(0, Math.trunc(Number(holdAmount || 0)));
+  if (hold === 0) {
+    return { refunded_amount: 0, forfeited_amount: 0 };
+  }
+
+  const fullBeforeDays = Number(
+    policy?.full_refund_before_days ?? DEFAULT_RESERVATION_CANCEL_POLICY.full_refund_before_days
+  );
+  const partialPct = Number(
+    policy?.partial_refund_pct ?? DEFAULT_RESERVATION_CANCEL_POLICY.partial_refund_pct
+  );
+
+  const untilIso = getTodayVnDateStr(holdUntil);
+  const todayIso = getTodayVnDateStr(todayStr) || getTodayVnDateStr();
+  const untilMs = untilIso ? new Date(`${untilIso}T00:00:00Z`).getTime() : NaN;
+  const todayMs = todayIso ? new Date(`${todayIso}T00:00:00Z`).getTime() : NaN;
+  const daysLeft =
+    Number.isFinite(untilMs) && Number.isFinite(todayMs)
+      ? Math.round((untilMs - todayMs) / (24 * 60 * 60 * 1000))
+      : -1;
+
+  let refunded = 0;
+  if (daysLeft >= fullBeforeDays) {
+    refunded = hold;
+  } else if (daysLeft >= 0) {
+    const rawRefund = (hold * partialPct) / 100;
+    refunded = Math.min(hold, Math.max(0, roundVndToThousand(rawRefund)));
+  } else {
+    refunded = 0;
+  }
+
+  return {
+    refunded_amount: refunded,
+    forfeited_amount: hold - refunded,
+  };
+}
