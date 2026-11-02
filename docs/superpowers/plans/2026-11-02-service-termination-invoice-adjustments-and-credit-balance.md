@@ -2,122 +2,126 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Deliver end-to-end PRD v2.0-compliant pre-start (`0 ₫`) and mid-term Pro-rata service cancellation (`TERMINATED`), early contract termination `RENT` + `SERVICE` invoice synchronization (`6A`), 3-scenario invoice lifecycle with Four-eyes post-`ISSUED` approvals (`ADJUSTED` / `VOID`), `credit_balance` ledger auto-offsetting, and M06-compatible two-step deposit-separated move-out settlement across PostgreSQL RLS, Express API, and React UI.
+**Goal:** Deliver end-to-end PRD v2.0-compliant pre-start (`0 ₫`) and mid-term Pro-rata service cancellation (`TERMINATED`), strict 3-tier `FR-065` pricing (`is_price_locked`), early contract termination & future M06 room-transfer `RENT` + `SERVICE` invoice synchronization (`6A`), 3-scenario invoice lifecycle with DB-enforced Four-eyes approvals (`ADJUSTED` / `VOID`), `FR-039` multi-stage automated debt reminders, `credit_balance` ledger auto-offsetting + Four-eyes direct refunds (`FR-040`), and M06-compatible two-step deposit-separated move-out settlement (`RP-07` / `RP-08` / `.xlsx` `FR-058`) across PostgreSQL `FORCE ROW LEVEL SECURITY`, Express API, and React UI.
 
-**Architecture:** Migration `047` standardizes status enums (`TERMINATED`, `ADJUSTED`, `VOID`), enforces `Unique(contract_id, period)` on active invoices (`PRD 13.3`), adds `invoice_adjustment` and `credit_balance` under strict `PRD 6.2` RLS (`MANAGER` `CRU`, `SYS_ADMIN` read-only + fallback approver, `OWNER` + 2nd `MANAGER` Four-eyes approval via narrow `SECURITY DEFINER` RPC `fn_resolve_invoice_adjustment`), upgrades M06 `045` settlement RPCs for two-step payout (`APPROVED_PENDING_PAYOUT` -> `payout` / `payout-returned`), and expands `046`'s `rls_audit_log_select` as a strict superset. Two backend domain modules (`serviceBilling.js` for `Asia/Ho_Chi_Minh` Pro-rata & 3-tier `FR-065` pricing; `invoiceLifecycle.js` for 3-scenario `DRAFT` / 4-eyes sync and `credit_balance` FIFO ledger) power service, contract, append-only `daily.js` late-fee, invoice, payment, deposit-settlement, and KPI/`RP-08` routes, surfaced across Admin, Owner, and Resident portals.
+**Architecture:** Migration `048` (following M06 `044`–`047`) creates `invoice_adjustment` and `credit_balance` first, backfills historical `CONFIRMED` overpayments before clamping `invoice.paid_amount <= total_amount`, standardizes status enums (`TERMINATED`, `ADJUSTED`, `VOID`), adds `service_subscription.is_price_locked` (`FR-065`), enforces `Unique(contract_id, period)` on active invoices (`PRD 13.3`), hardens 2-layer `PRD 6.2` RLS (including `FORCE RLS` on `contract_service_price`, `'RETURNED'` in `rls_deposit_update`, and `'credit_balance'`/`'invoice'`/`'invoice_adjustment'` in `can_select_attachment`), and provides `SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off` RPCs (`fn_get_finance_resource_scope`, `fn_lock_invoices_for_authorized_viewer` avoiding `FORCE RLS` `FOR UPDATE` `0`-row filtering for `RESIDENT`/`OWNER`, `fn_notify_building_finance_actors` supporting trusted `adminPool`/`adminClient` callers on `notification(content, payload)`, 4-eyes `fn_resolve_invoice_adjustment` & `fn_resolve_credit_refund`, and 4-pass M06 settlement RPCs). Two domain modules (`serviceBilling.js` for `Asia/Ho_Chi_Minh` Pro-rata, M06 room-transfer child `start_date - 1` half-open cutoff & strict 3-tier `FR-065` pricing; `invoiceLifecycle.js` for 3-scenario `DRAFT` / 4-eyes sync and safe `credit_balance` FIFO/rollover ledger) power service, resident, invoice (`skipped_contracts` + `DRAFT` refresh), payment/attachment/tenant-merge (`AC-016.1`), contract, `daily.js` (Step 5 final-period billing, Steps 6–7 append-only `LATE_FEE`, Step 8 `-3/0/+3/+7/+15` debt reminders), post-credit `remaining_service_debt` deposit settlement, and Dashboard/Reports/Audit `.xlsx` + `CSV` routes and React portals.
 
-**Tech Stack:** Node.js (ESM), Express 4, PostgreSQL 16 (`pg` with session-variable RLS via `getUserClient(req)`), `node:test`, React 19, Vite 8, Tailwind CSS, Zustand, Axios.
+**Tech Stack:** Node.js (ESM), Express 4, PostgreSQL 16 (`pg` with session-variable `FORCE ROW LEVEL SECURITY` via `getUserClient(req)`), `node:test`, React 19, Vite 8, Tailwind CSS, Zustand, Axios.
 
-**Spec:** `docs/superpowers/specs/2026-11-02-service-cancellation-and-invoice-recalc-design.md`
+**Spec:** `docs/superpowers/specs/2026-11-02-service-cancellation-and-invoice-recalc-design.md` (`v6`)
 
 ## Global Constraints
 
 - Physical status codes (`PRD Mục 13.2`): `service_subscription.status IN ('PENDING_APPROVAL', 'ACTIVE', 'CANCELLATION_PENDING', 'TERMINATED', 'REJECTED')`; `invoice.status IN ('DRAFT', 'ISSUED', 'PARTIALLY_PAID', 'PAID', 'OVERDUE', 'ADJUSTED', 'VOID')`; normalize legacy input `'CANCELLED'` -> `'TERMINATED'` (subscriptions) or `'VOID'` (invoices) at both API and `BEFORE` trigger boundaries; do NOT rename `'CANCELLED'` on `contract`, `service_request`, `reservation`, or `announcement`.
-- Timezone & rounding (`PRD Mục 10.3, 13.4`): all business `today` / period checks use `Asia/Ho_Chi_Minh` (`todayVietnamYmd()` in JS, `(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date` in SQL); all VND charges round to nearest thousand via `roundVND` (`ROUND(x, -3)`); `end_date < start_date` (`start_date - 1 day`) represents `0` active days (`0 ₫`).
-- Accounting & immutability invariants (`FR-034`, `FR-035`, `FR-068`, `Mục 13.3`, `NFR-016`): NEVER `UPDATE` or `DELETE` existing `invoice_line` rows once `invoice.status <> 'DRAFT'` (including `LATE_FEE` lines in `daily.js`); enforce `idx_invoice_unique_active_period` (`status <> 'VOID'`) and `0 <= paid_amount <= total_amount` on `invoice`, plus `amount > 0` on `receivable` (`WRITTEN_OFF` when `0 ₫`); NEVER mix `credit_balance` refunds into `deposit_transaction` (`RP-07`) or deduct `RENT` debt from deposit principal (`FR-068`).
-- RBAC, RLS & Idempotency (`PRD Mục 6.1–6.2, 14.3`, `NFR-008`, `AC-003.2`, `AC-019.1`): `MANAGER` has `CRU` on assigned buildings (`get_manager_building_ids()`); `SYS_ADMIN` is read-only (`R`) on services/invoices/payments/credits and only approves `invoice_adjustment` when `NOT building_has_active_owner(building_id)`; `OWNER` (`get_owner_building_ids()`) and 2nd `MANAGER` approve post-`ISSUED` adjustments ONLY through `fn_resolve_invoice_adjustment` (`SECURITY DEFINER`); `RESIDENT` never sees `DRAFT` invoices; business route queries MUST use `getUserClient(req)` (never `adminPool` RLS bypass) and mutating financial/service endpoints (including `/api/v1/resident/*`) MUST attach `idempotencyGuard()`.
-- Workspace hygiene: migration is numbered `047_service_termination_invoice_adjustments_and_credit_balance.sql` (following M06 `044`–`046`); NEVER stage, revert, or overwrite uncommitted M06 working-tree changes (`api/test/m06Phase*.test.js`, `docs/BAO_CAO_RA_SOAT_THU_HOAN_COC_M06.md`, `docs/superpowers/plans/2026-11-02-m06-phase*.md`).
+- Timezone, rounding, M06 room-transfer cutoff & strict 3-tier pricing (`PRD Mục 10.3, 13.4`, `FR-013`, `FR-065`): all business `today` / period / aging / reminder checks use `Asia/Ho_Chi_Minh` (`todayVietnamYmd()` in JS, `(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date` in SQL); all VND charges round to nearest thousand via `roundVND` (`ROUND(x, -3)`); `end_date < start_date` (`start_date - 1 day`) represents `0` active days (`0 ₫`); standard catalog subscriptions persist `is_price_locked = FALSE`; whenever a contract has an activated room-transfer child (`ch.parent_contract_id = c.id AND ch.is_room_transfer = TRUE AND ch.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')`), ALWAYS derive `lastActiveDayYmd = addDaysYmd(ch.start_date, -1)` from `ch.start_date` rather than `c.terminated_at` (which `contracts.js:2850-2864` clamps to `today` on future transfers).
+- Accounting & immutability invariants (`FR-034`, `FR-035`, `FR-040`, `FR-068`, `Mục 13.3`, `NFR-016`): NEVER `UPDATE` or `DELETE` existing `invoice_line` rows once `invoice.status <> 'DRAFT'` (and do NOT add superuser-blocking `BEFORE DELETE` triggers on `invoice`/`payment`/`invoice_adjustment`/`credit_balance` that would break `adminPool` `t.after` test cleanups); backfill historical overpayments into `credit_balance` BEFORE enforcing `0 <= paid_amount <= total_amount`; enforce `idx_invoice_unique_active_period` (`status <> 'VOID'`) and `receivable.amount > 0` (`WRITTEN_OFF` when `0 ₫`); apply cross-bucket negative spill before `RENT`-first `credit_offset_amount` allocation; compute `remaining_service_debt = Math.max(0, serviceDebt - credit_applied_to_service)` and `covered_service_debt = Math.min(remaining_service_debt, remainingDepositAfterItems)` so deposit settlement NEVER double-deducts `UTILITY_DEBT` already paid by `credit_balance` (`RP-07`, `FR-068`).
+- `FORCE ROW LEVEL SECURITY`, RBAC & Idempotency (`PRD Mục 6.1–6.2, 14.3`, `NFR-008`, `FR-070`, `AC-003.2`, `AC-017.3`, `AC-019.1`): every `SECURITY DEFINER` function in Migration `048` MUST specify `SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off` + `GRANT EXECUTE ... TO resihub_app`; `RESIDENT` and `OWNER` flows that lock invoices (`resident.js` payment report, `deposits.js` settlement approve/payout) MUST call `fn_lock_invoices_for_authorized_viewer` instead of raw `SELECT ... FROM invoice ... FOR UPDATE`; `fn_notify_building_finance_actors` MUST support trusted internal sessions (`get_current_user_id() IS NULL AND current_user <> 'resihub_app'`) and write exact `011_notifications.sql` columns `(org_id, user_id, title, content, type, payload)`; mutating financial/service endpoints (`POST`/`PATCH`/`DELETE`) MUST attach `idempotencyGuard()`.
+- Workspace & UI test hygiene: migration is `048_service_termination_invoice_adjustments_and_credit_balance.sql`; NEVER revert uncommitted M06 working-tree changes; preserve `cancelTarget` + `<VehiclePlatesBadges plates={cancelTarget.vehicle_plates}` proximity (`<= 400` chars) in `ServicesTab.jsx` (`parkingPlatesUi.test.js:170-174`) and `row.note` inside `title="Dịch vụ đi kèm theo hợp đồng"` in `ContractDetailPage.jsx` (`contractCreationUi.test.js:104-107`).
 
 ## Review Focus
 
-1. **Sequential post-`ISSUED` downward adjustments on an already-`PAID` invoice & `credit_offset_amount` release when `rawTotal < 0`:** First approval clamps `invoice.paid_amount` to `nextTotal_1` and mints `credit_balance_1 = oldPaid - nextTotal_1`; second approval computes `excessPaid_2 = paid_amount_after_1 - nextTotal_2` (zero double-minting). On an unpaid invoice with `credit_offset_amount > 0` where a negative adjustment drives `rawTotal < 0`, `fn_resolve_invoice_adjustment` releases `LEAST(credit_offset_amount, ABS(rawTotal))` back to source `credit_balance` rows (`AVAILABLE` / `PARTIALLY_APPLIED`) and clamps `total_amount = 0` *(pinned in Task 1 & Task 6)*.
-2. **Append-only `LATE_FEE` accrual & `FR-064` waiver preservation in `daily.js` Step 7:** `fn_resolve_invoice_adjustment` tags `LATE_FEE` waivers (`adjustment_target = 'LATE_FEE'`) and principal-zeroed auto-neutralizations with `formula_meta->>'adjusts_item_type' = 'LATE_FEE'`; `daily.js` separates `gross_accrued_late_fee` (`item_type = 'LATE_FEE'`) from `net_existing_late_fee` (`item_type = 'LATE_FEE' OR adjusts_item_type = 'LATE_FEE'`), never `DELETE`s `invoice_line` rows, never accrues when `unpaid_principal <= 0`, and computes `deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee)` so approved `FR-064` waivers are never clawed back next night *(pinned in Task 1 & Task 5)*.
-3. **Boundary dates on `31`-day months, leap-year February (`2028-02-29`), and `00:05–06:55` ICT (`17:05–23:55` UTC previous day):** `todayVietnamYmd` resolves the Vietnam calendar date (never UTC day-1), and `activeDays === daysInMonth` (`31/31` or `29/29`) charges exact `unitPrice * quantity` with `isProrated = false` and `delta = 0` *(pinned in Task 2)*.
-4. **Order B payment commutativity, `DRAFT` `credit_balance` preservation, `0 ₫` issuance, & idempotent re-sync:** Confirming a `PENDING_CONFIRMATION` bank transfer after downward 4-eyes adjustment (`PATCH /api/v1/payments/:id/confirm`) mints `OVERPAYMENT` `credit_balance` matching Order A; editing manual `adjustment_amount` on a `DRAFT` (`PATCH /api/v1/invoices/:id/status`) only replaces `credit_id IS NULL` `ADJUSTMENT` lines and releases surplus `credit_balance` cleanly; issuing a `0 ₫` `DRAFT` via `generate-batch`, `POST /:id/issue`, OR `PATCH /:id/status` transitions directly to `'PAID'` with zero `receivable`; re-syncing while `PENDING_APPROVAL` exists yields `delta = 0` *(pinned in Task 3 & Task 6)*.
-5. **M06 two-step deposit settlement (`'ADJUSTED'` `RENT` vs `SERVICE` debt split, `deposit_refund_amount = 0` + `credit_refund_amount > 0` `RETURNED` reissue, & `OWNER` `total_payout_amount = 0` RLS):** Both `calculateContractOpenDebts` and `fn_apply_deposit_settlement_accounting` join `invoice_adjustment` (`ia.adjustment_target = 'RENT'`) and allocate `credit_offset_amount` `RENT`-first so negative `RENT` adjustments never wipe out `serviceDebt`; when `deposit_refund_amount = 0` and `credit_refund_amount > 0`, `approve` -> `APPROVED_PENDING_PAYOUT`, `payout` -> `DEDUCTED_FULL` (`0` `refund` rows in `deposit_transaction` for `RP-07` purity), `payout-returned` accepts `'DEDUCTED_FULL'` (`payout_at IS NOT NULL && totalPayoutAmt > 0`) and locks credits in `'PENDING_SETTLEMENT_PAYOUT'`, and re-issued `payout` validates `bank_info` on `totalPayoutAmount` and calls `fn_recommit_returned_settlement_credits` *(pinned in Task 1 & Task 7)*.
+1. **PostgreSQL `FORCE RLS` compatibility (`SET row_security = off`, `fn_lock_invoices_for_authorized_viewer`, trusted `adminPool`/`adminClient` notifications, & `attachment` RLS):** Under `FORCE ROW LEVEL SECURITY`, raw `SELECT ... FROM invoice ... FOR UPDATE` evaluates `rls_invoice_modify` (`MANAGER`-only) and silently returns `0` rows for `RESIDENT` and `OWNER`, while `SECURITY DEFINER` RPCs without `SET row_security = off` fail with `42501`. `fn_lock_invoices_for_authorized_viewer` lets `RESIDENT` (`POST /api/v1/resident/payments/report`) and `OWNER` (`POST /api/v1/deposits/:id/settlement/approve`) lock readable non-`VOID` invoices safely; `fn_notify_building_finance_actors` handles both `resihub_app` and trusted `adminPool`/`adminClient` (`daily.js`, `contracts.js:3336`) into `notification(org_id, user_id, title, content, type, payload)`; `can_select_attachment` + `attachments.js` serve `'credit_balance'` refund proof images *(pinned in Task 1, Task 4, Task 5 & Task 7)*.
+2. **Post-credit `remaining_service_debt` / `covered_service_debt` (`RP-07` zero double-deduction) + 4-pass sequential accounting & cross-bucket spill:** When `credit_balance` pays part or all of `serviceDebt` in Pass 2 (`availableCredit = 1_500_000`, `rentDebt = 0`, `serviceDebt = 1_500_000`, `heldBefore = 5_000_000`), `remaining_service_debt` is `0` and `covered_service_debt` MUST be `0` (`deposit_refund_amount = 5_000_000`, `0` `UTILITY_DEBT` `deposit_transaction` rows, `RP-07` `closing_held === 0` after payout — never deducting raw pre-credit `serviceDebt` from deposit!) *(pinned in Task 1 & Task 7)*.
+3. **Future-dated M06 4-step room transfer (`newStart > today` where `contracts.js:2850-2864` clamps `terminated_at = today`), `FR-065` `is_price_locked` symmetry, & `contractTemplate.js` Điều 5 deduplication:** When `OWNER` approves a room transfer starting `'2028-06-15'`, `oldContract` schedule (`GET /contracts/:oldId`), single-contract `POST /invoices/generate-batch` (`{ contract_id: oldId, period: '2028-06' }`), and `checkSettlementPreconditions` (`endPeriod`) all read `ch.start_date` (`'2028-06-15'`) to bill `oldContract` for exact `14/30` days (`01/06–14/06/2028`), never clamping to `today` and never double-billing `'2028-06-15'` *(pinned in Task 2, Task 5, Task 6 & Task 7)*.
+4. **Sequential 4-eyes adjustments, `credit_offset_amount` release, active/ended/`0`-deposit direct credit refund split/reject, Order A/B + standalone `receivable` overpayment, & historical overpayment backfill:** Migration `048` backfills historical overpayments before clamping `paid_amount <= total_amount`; `PATCH /invoices/:id/status` checks `paid_amount > 0 -> 409 ALREADY_PAID` before `confirm_invoice_code` (`fullWebsiteWhiteBlackBox.test.js:1403`); standalone `receivable_id` overpayments and Order B bank-transfer confirmations mint `credit_balance` identically; `tenants.js` merge transfers `credit_balance.tenant_id` (`FR-021`) *(pinned in Task 1 & Task 5)*.
+5. **Automated `FR-039` multi-stage debt reminders (`-3/0/+3/+7/+15` days), `daily.js` Step 5 `excludeSettledDeposits` + append-only `LATE_FEE` (`FR-064`), `AC-016.1` UI aging buckets, & `FR-058` `.xlsx` exports:** `runDailyJobs()` Step 8 emits idempotent `PAYMENT_REMINDER` notifications + `SEND_DEBT_REMINDER` `audit_log` rows across `-3, 0, 3, 7, 15` days without duplicating on re-run; Step 7 preserves `FR-064` late-fee waivers append-only; `PaymentsPage.jsx`, `ReportsPage.jsx`, `DashboardPage.jsx`, and `AuditLogsPage.jsx` render `AC-016.1` buckets, `invoice_settled` vs net `collected`, 4-eyes queue KPIs, and `.xlsx` + `CSV` exports *(pinned in Task 6, Task 7, Task 8 & Task 9)*.
 
 ---
 
 ## File Structure
 
-- **Database Migration (`047`):**
-  - Create: `api/src/db/migrations/047_service_termination_invoice_adjustments_and_credit_balance.sql` — dynamic `pg_constraint` swaps, `idx_invoice_unique_active_period`, legacy `'CANCELLED'` normalization `BEFORE` triggers, `invoice_adjustment` (`adjustment_target` incl. `'LATE_FEE'`), `credit_balance` (`status` incl. `'PENDING_SETTLEMENT_PAYOUT'`), `PRD 6.2` RLS policies, `rls_audit_log_select` superset over `046` (incl. `'service_catalog'`), `fn_resolve_invoice_adjustment`, and M06 settlement RPC upgrades (`fn_apply_deposit_settlement_accounting`, `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits`, `fn_recommit_returned_settlement_credits`).
+- **Database Migration (`048`):**
+  - Create: `api/src/db/migrations/048_service_termination_invoice_adjustments_and_credit_balance.sql` — dynamic `pg_constraint` swaps, `invoice_adjustment` & `credit_balance` created BEFORE historical overpayment backfill & `invoice_paid_lte_total_check`, `service_subscription.is_price_locked` + `BEFORE INSERT` auto-lock trigger, `idx_invoice_unique_active_period`, legacy `'CANCELLED'` normalization `BEFORE` triggers, `FORCE ROW LEVEL SECURITY` on `invoice_adjustment`, `credit_balance`, and `contract_service_price`, 2-layer `PRD 6.2` RLS policies (`rls_service_catalog_select`, `rls_contract_service_price_modify`, `rls_service_sub_delete` from `042_idempotency_and_draft_services_rls.sql`, `'DRAFT'`-only `DELETE` on `invoice_line`, `'RETURNED'` in `rls_deposit_update`), `can_select_attachment` (`046`) extended for `'credit_balance'`/`'invoice'`/`'invoice_adjustment'`, 12-entity `rls_audit_log_select`, and `SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off` RPCs (`fn_get_finance_resource_scope`, `fn_lock_invoices_for_authorized_viewer`, `fn_notify_building_finance_actors`, `fn_resolve_invoice_adjustment`, `fn_resolve_credit_refund`, 4-pass `fn_apply_deposit_settlement_accounting`, `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits`, `fn_recommit_returned_settlement_credits`).
   - Modify: `api/test/remediationR01ToR24.test.js:416-426` — update raw SQL subscription fixture `'CANCELLED'` -> `'TERMINATED'`.
 - **Backend Domain Services:**
-  - Create: `api/src/services/serviceBilling.js` — `Asia/Ho_Chi_Minh` date helpers, status normalizers, `FR-065` 3-tier price resolver, subscription & contract `RENT` Pro-rata calculators with `formula_meta`.
-  - Modify: `api/src/services/invoiceSchedule.js:1-210` — preserve historical periods `1..N-1` for `TERMINATED` subscriptions and support 3-tier pricing + `'VOID'` / `'ADJUSTED'`.
-  - Modify: `api/src/services/contractTemplate.js:81-90` — exclude `'TERMINATED'` / `'CANCELLED'` / `'REJECTED'` subscriptions cleanly.
-  - Create: `api/src/services/invoiceLifecycle.js` — `credit_balance` FIFO apply/release/transfer helpers, `DRAFT` recalculation (preserving manual vs credit `ADJUSTMENT` lines) + empty-shell auto-`VOID` + `audit_log`, 3-scenario subscription sync, and `closeContractBillingAndSubscriptionsInTx` (`6A`).
+  - Create: `api/src/services/serviceBilling.js` — `Asia/Ho_Chi_Minh` date helpers, status normalizers, strict `FR-065` 3-tier price resolver (`is_price_locked` + `effective_from <= periodEndYmd` + `PARKING_MOTO` alias), subscription & contract `RENT` Pro-rata calculators with `roomTransferChildStartDate` (`newStart - 1`) half-open cutoff and `formula_meta`.
+  - Modify: `api/src/services/invoiceSchedule.js:1-210` — preserve historical periods `1..N-1` for `TERMINATED` subscriptions, accept `roomTransferChildStartDate`, and support 3-tier pricing + `'VOID'` / `'ADJUSTED'`.
+  - Modify: `api/src/services/contractTemplate.js:81-112` — register `codeKey` + canonical aliases in `consumedPriceCodes` for all subscriptions before `continue` so Loop `#3` never re-prints terminated services in Điều 5.
+  - Create: `api/src/services/invoiceLifecycle.js` — `credit_balance` FIFO apply/release/safe-transfer helpers, `DRAFT` recalculation + empty-shell auto-`VOID` + `audit_log`, 3-scenario subscription sync, and `closeContractBillingAndSubscriptionsInTx` (`6A`).
 - **Backend Routes & Jobs:**
-  - Modify: `api/src/routes/services.js` — `MANAGER`-only writes, `getUserClient(req)`, `idempotencyGuard()` + `checkBuildingAccess` + `audit_log` on BOTH `service-catalog` (`FR-006`, `NFR-010`) and `service-subscriptions`, 3-tier price lookup, pre-start `0 ₫` / mid-term `TERMINATED` + 3-scenario invoice sync + reject-cancel.
-  - Modify: `api/src/routes/resident.js` — `idempotencyGuard()` on mutating routes, pre-start `0 ₫` cancel, `PENDING_APPROVAL` withdraw, `PATCH /services/:id/withdraw-cancel`, strict `'DRAFT'`/`'VOID'` filters (`AC-003.2`), `available_credit_balance` on `/overview`.
-  - Modify: `api/src/routes/contracts.js` — wire `closeContractBillingAndSubscriptionsInTx` (`6A`) across all 6 contract-ending paths, wire `transferContractCreditsInTx` on `transfer-room` and inside `runActivationSideEffects` (`parent_contract_id`, covering both `MANAGER` `activate` and `OWNER` `approve-price`), hide `DRAFT` invoices from `RESIDENT`, expose `available_credit_balance`.
-  - Modify: `api/src/jobs/daily.js` — `Asia/Ho_Chi_Minh` dates, wire `6A` into Steps 1a & 1b, include `'ADJUSTED'` (`paid_amount < total_amount`) in Steps 6 & 7, replace `DELETE FROM invoice_line WHERE item_type = 'LATE_FEE'` with append-only `deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee)` preserving `FR-064` waivers.
-  - Modify: `api/src/routes/invoices.js` — `MANAGER`-only writes, exhaustive `'CANCELLED'` -> `'VOID'` & `!['DRAFT', 'VOID']` filters, `DRAFT` line CRUD + `credit_id IS NULL` manual `ADJUSTMENT` preservation, unified `issueDraftInvoiceInTx` (`0 ₫ -> 'PAID'`), `POST /:id/adjust` (incl. `'LATE_FEE'`), `GET /adjustments`, 4-eyes `/approve` & `/reject`, `GET /:id/audit-logs`, `credit_balance` FIFO auto-offset + `23505` duplicate-period guard.
-  - Modify: `api/src/routes/payments.js` — `MANAGER`-only admin writes, `idempotencyGuard()`, block `DRAFT`/`VOID` + `remaining <= 0` on direct `POST /`, allow `PATCH /:id/confirm` when `remaining <= 0` (Order B commutativity), clamp `paid_amount <= total_amount` and mint `OVERPAYMENT` `credit_balance`.
-  - Modify: `api/src/services/depositSettlement.js`, `api/src/routes/deposits.js`, `api/src/routes/reports.js`, `api/src/routes/admin/audit-logs.js` — `'ADJUSTED'` `RENT`/`SERVICE` debt split, M06 two-step payout (`APPROVED_PENDING_PAYOUT` / `payout` / `payout-returned` / `bank-info` / `settlement/pdf`) with `credit_balance` separation (`FR-068`, `RP-07`), `available_credit` staleness guard, `PRD 15.1–15.3` KPIs, and unified 11-entity `FINANCIAL_AUDIT_ENTITIES` on `GET /api/v1/audit-logs?scope=financial` (`RP-08`).
+  - Modify: `api/src/routes/services.js` — `MANAGER`-only writes, `getUserClient(req)` + `fn_get_finance_resource_scope`, `idempotencyGuard()`, `ORG_DEFAULT_SHARED_ACROSS_BUILDINGS` guard (`FR-070`), `audit_log`, `is_price_locked` + 3-tier pricing, pre-start `0 ₫` / mid-term `TERMINATED` + 3-scenario invoice sync.
+  - Modify: `api/src/routes/resident.js` — `getUserClient(req)`, `idempotencyGuard()` on mutating routes, `fn_lock_invoices_for_authorized_viewer` on `POST /payments/report`, building-override catalog deduplication + `resolveServiceUnitPrice` (`is_price_locked = false`), pre-start `0 ₫` cancel, `PATCH /services/:id/withdraw-cancel`, `'DRAFT'`/`'VOID'`/`'ADJUSTED'` filters (`AC-003.2`), `available_credit_balance` on `/overview`.
+  - Modify: `api/src/routes/invoices.js` — `MANAGER`-only writes, `'VOID'`/`'DRAFT'` filters, `contractId` (`NOT IN ('VOID', 'DRAFT')` existing-`DRAFT` refresh) + `excludeSettledDeposits` + `roomTransferChildStartDate` (`newStart - 1` cutoff) + `skipped_contracts` (`FR-033`, `AC-015.1`) + `CREATE_INVOICE` `audit_log` in `generateInvoicesCore`, `DRAFT` line CRUD (`idempotencyGuard()`), `issueDraftInvoiceInTx` (`0 ₫ -> 'PAID'`), `POST /:id/adjust` (incl. `'LATE_FEE'`), `GET /adjustments`, 3-arg `fn_resolve_invoice_adjustment` `/approve` & `/reject`, `GET /:id/audit-logs`.
+  - Modify: `api/src/routes/payments.js`, `api/src/routes/attachments.js:75-105`, `api/src/routes/tenants.js:701-728` — `MANAGER`-only admin writes + `idempotencyGuard()` + `getUserClient(req)`, Order B + standalone `receivable_id` overpayment `credit_balance` minting, 4-eyes `credit_balance` refund endpoints (`'DISPUTED'` guard + `saveBase64Image` `'credit_balance'` proof attachment), `'credit_balance'`/`'invoice'`/`'invoice_adjustment'` in `attachments.js`, `credit_balance.tenant_id` merge in `tenants.js` (`FR-021`), and `GET /api/v1/receivables` `aging_summary_prd` (`AC-016.1`).
+  - Modify: `api/src/routes/contracts.js` — `is_price_locked`, wire `closeContractBillingAndSubscriptionsInTx` (`6A`) across all 5 route paths (`cancel` `:3842`, `terminate` `:2429`, `terminate/approve` `:2580`, `requests/:id/approve` `:813`, and M06 room-transfer inside `runActivationSideEffects` `:2792-2958` with `isRoomTransfer: true`, `roomTransferChildStartDate: sDateStr`, `adjustmentCreatorId: contract.created_by`), wire `transferContractCreditsInTx`, pass `roomTransferChildStartDate` in `loadContractSubscriptionsAndSchedule` (`:89-145`), hide `DRAFT` from `RESIDENT`, expose `available_credit_balance` & `credit_balances`.
+  - Modify: `api/src/jobs/daily.js` — `Asia/Ho_Chi_Minh` dates, Steps 1a & 1b `6A` + deferred renewal `transferContractCreditsInTx`, Step 5 `onlyOngoingContracts: false, excludeSettledDeposits: true`, Steps 6 & 7 `'ADJUSTED'` + `MARK_INVOICE_OVERDUE` / `ACCRUE_LATE_FEE` `audit_log` + append-only `LATE_FEE`, and **Step 8 `FR-039` multi-stage debt reminders (`-3, 0, 3, 7, 15` days + `SEND_DEBT_REMINDER` `audit_log`)**.
+  - Modify: `api/src/services/depositSettlement.js`, `api/src/routes/deposits.js`, `api/src/routes/reports.js`, `api/src/routes/admin/audit-logs.js`, `api/test/m06Phase3P2Features.test.js:931-938` — post-credit `remaining_service_debt` & `covered_service_debt` (`RP-07` zero double-deduction), `fn_lock_invoices_for_authorized_viewer` on `approve`/`payout`, `roomTransferChildStartDate` in `unbilled_final_period`, net `collected` & `invoice_settled` & `pending_invoice_adjustments`/`pending_credit_refunds` KPIs, 12-entity `FINANCIAL_AUDIT_ENTITIES`, and **`format=xlsx` (`toXlsxBuffer`, `FR-058`)** on `audit-logs.js` and `reports.js`.
 - **Frontend:**
-  - Task 8 (Core Helpers + Admin/Owner Services & Invoices UI): `frontend/src/utils/billing.js` (create, reusing `frontend/src/utils/idempotency.js`), `frontend/src/constants/statuses.js`, `frontend/src/services/api.js`, `frontend/src/hooks/usePermission.js`, `frontend/src/services/invoices.service.js`, `frontend/src/services/services.service.js`, `frontend/src/pages/admin/services/ServiceCatalogPage.jsx`, `frontend/src/pages/admin/services/SubscriptionsPage.jsx`, `frontend/src/pages/admin/invoices/InvoicesPage.jsx`, `frontend/src/pages/admin/invoices/InvoiceDetailPage.jsx`.
-  - Task 9 (Resident Portal + Contract, Deposit 2-Step Payout & Reports/Audit UI): `frontend/src/services/resident.service.js`, `frontend/src/pages/resident/tabs/ServicesTab.jsx`, `frontend/src/pages/resident/tabs/InvoicesTab.jsx`, `frontend/src/pages/admin/contracts/ContractDetailPage.jsx`, `frontend/src/pages/admin/deposits/DepositsPage.jsx`, `frontend/src/pages/admin/reports/ReportsPage.jsx`, `frontend/src/pages/admin/audit/AuditLogsPage.jsx`.
+  - Task 8 (Core Helpers + Services, Invoices, Payments `AC-016.1` & Admin Notifications UI): `frontend/src/utils/billing.js`, `frontend/src/constants/statuses.js`, `frontend/src/services/api.js`, `frontend/src/hooks/usePermission.js`, `frontend/src/services/invoices.service.js`, `frontend/src/services/payments.service.js`, `frontend/src/services/services.service.js`, `frontend/src/pages/admin/services/ServiceCatalogPage.jsx`, `frontend/src/pages/admin/services/SubscriptionsPage.jsx`, `frontend/src/pages/admin/invoices/InvoicesPage.jsx`, `frontend/src/pages/admin/invoices/InvoiceDetailPage.jsx`, `frontend/src/pages/admin/payments/PaymentsPage.jsx`, `frontend/src/pages/admin/notifications/NotificationsPage.jsx`.
+  - Task 9 (Resident Portal + Contract Credit Refund, Deposit `unbilled_final_period` / 2-Step Payout & Dashboard/Reports/Audit `.xlsx` UI): `frontend/src/services/resident.service.js`, `frontend/src/services/reports.service.js`, `frontend/src/services/audit.service.js`, `frontend/src/pages/resident/tabs/ServicesTab.jsx`, `frontend/src/pages/resident/tabs/InvoicesTab.jsx`, `frontend/src/pages/resident/tabs/OverviewTab.jsx`, `frontend/src/pages/resident/tabs/NotificationsTab.jsx`, `frontend/src/pages/admin/contracts/ContractDetailPage.jsx`, `frontend/src/pages/admin/deposits/DepositsPage.jsx`, `frontend/src/pages/admin/dashboard/DashboardPage.jsx`, `frontend/src/pages/admin/reports/ReportsPage.jsx`, `frontend/src/pages/admin/audit/AuditLogsPage.jsx`.
 
 ---
 
-### Task 1: Migration `047`, `PRD 6.2` RLS, `fn_resolve_invoice_adjustment` & M06 Settlement RPC Upgrades
+### Task 1: Migration `048`, `FORCE RLS`-Safe 2-Layer Policies, Historical Overpayment Backfill & Self-Contained 4-Eyes / 4-Pass Settlement RPCs
 
 **Files:**
-- Create: `api/src/db/migrations/047_service_termination_invoice_adjustments_and_credit_balance.sql`
+- Create: `api/src/db/migrations/048_service_termination_invoice_adjustments_and_credit_balance.sql`
 - Modify: `api/test/remediationR01ToR24.test.js:416-426`
-- Test: `api/test/migration047RlsAndRpc.test.js`
+- Test: `api/test/migration048RlsAndRpc.test.js`
 
 **Interfaces:**
-- Consumes: SQL helpers `is_org_admin()`, `is_owner()`, `is_manager()`, `is_resident()`, `get_current_user_id()`, `get_current_user_org_id()`, `get_user_assigned_buildings()`, `get_owner_building_ids()`, `get_manager_building_ids()`, `get_resident_contract_ids()`, `get_resident_tenant_ids()`, `building_has_active_owner(UUID)` (`041`), M06 settlement RPCs (`045`), and `rls_audit_log_select` (`046`).
+- Consumes: SQL helpers `is_org_admin()`, `is_owner()`, `is_manager()`, `is_resident()`, `get_current_user_id()`, `get_current_user_org_id()`, `get_user_assigned_buildings()`, `get_owner_building_ids()`, `get_manager_building_ids()`, `get_resident_contract_ids()`, `get_resident_tenant_ids()`, `building_has_active_owner(UUID)` (`041`), `rls_service_sub_delete` (`042_idempotency_and_draft_services_rls.sql`), `system_setting` (`key = 'approval_config'`), `notification(org_id, user_id, title, content, type, payload)` (`011`), M06 settlement RPCs & `rls_deposit_update` (`045`), `rls_audit_log_select` & `can_select_attachment` (`046`), and M06 room-transfer schema (`047`).
 - Produces:
   - `service_catalog` partial unique indexes `idx_service_catalog_org_default_code` (`WHERE building_id IS NULL`) & `idx_service_catalog_building_code` (`WHERE building_id IS NOT NULL`).
-  - `service_subscription.status` enum `'TERMINATED'` + `trg_normalize_legacy_subscription_status` (`BEFORE INSERT OR UPDATE`: `'CANCELLED' -> 'TERMINATED'`).
-  - `invoice.status` enums `'ADJUSTED'`, `'VOID'` + `trg_normalize_legacy_invoice_status` (`BEFORE INSERT OR UPDATE`: `'CANCELLED' -> 'VOID'`), `invoice.credit_offset_amount BIGINT NOT NULL DEFAULT 0`, `invoice_paid_lte_total_check`, and `idx_invoice_unique_active_period ON invoice(contract_id, period) WHERE contract_id IS NOT NULL AND status <> 'VOID'` (`PRD Mục 13.3`).
-  - `invoice_line` columns `subscription_id UUID`, `credit_id UUID`, `adjustment_id UUID`, `formula_meta JSONB`.
-  - Tables `invoice_adjustment` (`adjustment_target IN ('SERVICE', 'RENT', 'LATE_FEE', 'MANUAL')`) and `credit_balance` (`status` including `'PENDING_SETTLEMENT_PAYOUT'`; `settlement_refund_amount BIGINT NOT NULL DEFAULT 0` tracking refunded share per settlement) with `ENABLE` + `FORCE ROW LEVEL SECURITY` and partial unique indexes (`idx_invoice_adj_pending_sub`, `idx_invoice_adj_pending_rent`, `idx_invoice_adj_pending_late_fee`, `idx_invoice_adj_pending_void`, `idx_credit_balance_unique_adj`, `idx_credit_balance_unique_payment`, `idx_credit_balance_contract_avail`).
-  - `rls_audit_log_select` superset over `046`: preserves `building` (for `OWNER`) + `apartment`, `reservation`, `contract`, `deposit`, `deposit_transaction`, `receivable` (for `OWNER` & `MANAGER`) and adds `invoice`, `invoice_line`, `invoice_adjustment`, `payment`, `credit_balance`, `service_subscription`, `service_catalog` for BOTH `is_owner()` (`get_owner_building_ids()`, with `service_catalog.building_id IN (SELECT building_id FROM get_owner_building_ids())`) and `is_manager()` (`get_manager_building_ids()`, with `service_catalog` allowing `org_id = get_current_user_org_id() AND (building_id IS NULL OR building_id IN (SELECT building_id FROM get_manager_building_ids()))`).
-  - `fn_resolve_invoice_adjustment(p_adjustment_id UUID, p_decision TEXT, p_rejection_reason TEXT DEFAULT NULL, p_allow_self_approval BOOLEAN DEFAULT FALSE) RETURNS JSONB` (`SECURITY DEFINER SET search_path = public, pg_temp`).
-  - Upgraded `fn_apply_deposit_settlement_accounting(p_deposit_id UUID, p_covered_service_debt BIGINT, p_uncovered_items_shortfall BIGINT) RETURNS VOID`, `fn_update_deposit_refund_bank_info(p_deposit_id UUID, p_bank_info JSONB) RETURNS deposit`, `fn_restore_returned_settlement_credits(p_deposit_id UUID, p_reason TEXT) RETURNS INT`, and `fn_recommit_returned_settlement_credits(p_deposit_id UUID) RETURNS INT` (`SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off`).
+  - `service_subscription.status` enum `'TERMINATED'`, `service_subscription.is_price_locked BOOLEAN NOT NULL` (backfilled & auto-populated when `NULL` via `trg_normalize_legacy_subscription_status`).
+  - Tables `invoice_adjustment` (`adjustment_target IN ('SERVICE', 'RENT', 'LATE_FEE', 'MANUAL')`) and `credit_balance` (`parent_credit_id UUID`, `settlement_refund_amount BIGINT NOT NULL DEFAULT 0`, `refund_meta JSONB`, `refunded_at TIMESTAMPTZ`, `status IN ('AVAILABLE', 'PARTIALLY_APPLIED', 'APPLIED', 'PENDING_DIRECT_REFUND', 'REFUNDED_DIRECT', 'PENDING_SETTLEMENT_PAYOUT', 'REFUNDED_IN_SETTLEMENT', 'TRANSFERRED', 'VOID')`) created **BEFORE** clamping `invoice.paid_amount`, backfilling historical `CONFIRMED` overpayments (`payment.overpayment_amount > 0` or `invoice.paid_amount > invoice.total_amount` with `invoice.contract_id IS NOT NULL`) into `credit_balance` (`OVERPAYMENT`, `ON CONFLICT DO NOTHING`) BEFORE clamping `invoice.paid_amount = LEAST(GREATEST(0, paid_amount), GREATEST(0, total_amount))` and adding `invoice_paid_lte_total_check`.
+  - `invoice.status` enums `'ADJUSTED'`, `'VOID'` + `trg_normalize_legacy_invoice_status`, `invoice.credit_offset_amount BIGINT NOT NULL DEFAULT 0`, `idx_invoice_unique_active_period ON invoice(contract_id, period) WHERE contract_id IS NOT NULL AND status <> 'VOID'`, and `invoice_line` columns `subscription_id UUID`, `credit_id UUID`, `adjustment_id UUID`, `formula_meta JSONB`.
+  - `ENABLE` + `FORCE ROW LEVEL SECURITY` on `invoice_adjustment`, `credit_balance`, and `contract_service_price` (`ALTER TABLE contract_service_price FORCE ROW LEVEL SECURITY;`); 2-layer `PRD 6.2` RLS policies (`rls_invoice_modify` `INSERT`/`UPDATE` `MANAGER`-only, `rls_invoice_line_modify` `DELETE` allowed ONLY when parent `invoice.status = 'DRAFT'`, zero `BEFORE DELETE` superuser-blocking triggers, `rls_service_catalog_select`, `rls_contract_service_price_modify`, `rls_service_sub_delete`, `'RETURNED'` added to `rls_deposit_update` `WITH CHECK`, `can_select_attachment` extended for `'credit_balance'`, `'invoice'`, `'invoice_adjustment'` preserving `046` `person` PII block, and 12-entity `rls_audit_log_select`).
+  - All `SECURITY DEFINER` RPCs declared with **`SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off`** + `GRANT EXECUTE ... TO resihub_app`:
+    - `fn_get_finance_resource_scope(p_entity TEXT, p_id UUID) RETURNS TABLE(resource_id UUID, org_id UUID, building_id UUID)`
+    - `fn_lock_invoices_for_authorized_viewer(p_contract_id UUID DEFAULT NULL, p_invoice_id UUID DEFAULT NULL) RETURNS SETOF invoice`
+    - `fn_notify_building_finance_actors(p_building_id UUID, p_type TEXT, p_title TEXT, p_message TEXT, p_metadata JSONB DEFAULT '{}'::jsonb, p_include_resident_user_id UUID DEFAULT NULL) RETURNS INT` (supports both `resihub_app` callers and trusted internal sessions `get_current_user_id() IS NULL AND current_user <> 'resihub_app'`; inserts into `notification(org_id, user_id, title, content, type, payload)`)
+    - `fn_resolve_invoice_adjustment(p_adjustment_id UUID, p_decision TEXT, p_rejection_reason TEXT DEFAULT NULL) RETURNS JSONB`
+    - `fn_resolve_credit_refund(p_credit_id UUID, p_decision TEXT, p_rejection_reason TEXT DEFAULT NULL) RETURNS JSONB`
+    - `fn_apply_deposit_settlement_accounting(p_deposit_id UUID, p_covered_service_debt BIGINT, p_uncovered_items_shortfall BIGINT) RETURNS VOID`
+    - `fn_update_deposit_refund_bank_info(p_deposit_id UUID, p_bank_info JSONB) RETURNS deposit`
+    - `fn_restore_returned_settlement_credits(p_deposit_id UUID, p_reason TEXT) RETURNS INT`
+    - `fn_recommit_returned_settlement_credits(p_deposit_id UUID) RETURNS INT`
 
-- [ ] **Step 1: Write the failing schema, RLS & RPC integration test in `api/test/migration047RlsAndRpc.test.js`**
+- [ ] **Step 1: Write the failing schema, `FORCE RLS` & RPC integration test in `api/test/migration048RlsAndRpc.test.js`**
 
 Write `node:test` suite connecting via `adminPool` and `appPool` (`resihub_app` with `set_config('app.current_user_id', ...)`) asserting:
-1. `service_catalog` allows same `code` across `building_id IS NULL` and two distinct buildings while blocking duplicate default `(org_id, code)`; `idx_invoice_unique_active_period` blocks a second non-`VOID` invoice on `(contract_id, period)` with `23505`, then allows inserting a replacement invoice once the first is set to `'VOID'` (including via legacy `UPDATE invoice SET status = 'CANCELLED'`, which stores physical `'VOID'`).
-2. `RESIDENT` `SELECT` on `invoice` returns `0` rows when `status = 'DRAFT'` (`AC-003.2`) and `1` row once `status = 'ISSUED'`; `SYS_ADMIN` and `OWNER` direct `INSERT`/`UPDATE` on `service_catalog`, `service_subscription`, `invoice`, `invoice_line`, `payment`, `receivable`, `credit_balance` are blocked by RLS, while `rls_audit_log_select` lets both `OWNER` and `MANAGER` read `reservation`, `receivable`, `deposit`, `invoice`, `invoice_line`, `invoice_adjustment`, `credit_balance`, `service_subscription`, and building-scoped `service_catalog` logs (`046` superset).
-3. `fn_resolve_invoice_adjustment`:
-   - Rejects self-approval (`SELF_APPROVAL`), blocks `SYS_ADMIN` when `building_has_active_owner(building_id)` is `true`, and allows `SYS_ADMIN` when `owner_id IS NULL`.
-   - **Review Focus #1 pin:** Approving two sequential downward `ADJUST` rows (`SERVICE` `-100_000`, then `RENT` `-5_000_000`) on a `PAID` invoice (`10_200_000`) leaves existing `invoice_line` rows untouched, sets `invoice.status = 'ADJUSTED'`, `total_amount = 5_100_000`, `paid_amount = 5_100_000`, and mints `100_000` + `5_000_000 = 5_100_000` total `credit_balance` (zero double-minting). Approving `ADJUST` (`-400_000`) on an unpaid `ISSUED` invoice (`subtotal = 500_000`, `credit_offset_amount = 300_000`, `total = 200_000`) releases `200_000` back to `credit_balance` (`PARTIALLY_APPLIED`, `applied_amount = 100_000`), sets `invoice.credit_offset_amount = 100_000`, `total_amount = 0`, and marks `receivable` `'WRITTEN_OFF'`.
-   - **Review Focus #2 pin:** Approving an explicit `adjustment_target = 'LATE_FEE'` (`-200_000`) waiver on an `OVERDUE` invoice (`LATE_FEE = 300_000`) tags the appended `ADJUSTMENT` line with `formula_meta->>'adjusts_item_type' = 'LATE_FEE'` (`net_existing_late_fee = 100_000`); subsequently adjusting principal down to `0` (`paid_amount = 0`) appends only `-100_000` (`-net_existing_late_fee`) without deleting any original `LATE_FEE` row.
-4. **Review Focus #5 DB pin:**
-   - On an `'ADJUSTED'` unpaid invoice (`RENT = 12_000_000`, approved `RENT` `ADJUSTMENT = -7_200_000`, `SERVICE = 1_000_000`, approved `SERVICE` `ADJUSTMENT = -600_000`, `total_amount = 5_200_000`), `fn_apply_deposit_settlement_accounting` splits `rent_effective = 4_800_000` and `service_effective = 400_000` (never letting `-7_200_000` wipe out `serviceDebt`), deducts `400_000` `serviceDebt` from deposit, and records `4_800_000` `RENT` `RECEIVABLE_AFTER_MOVE_OUT`.
-   - Calling `fn_apply_deposit_settlement_accounting` as `OWNER` when `total_payout_amount = 0` succeeds without RLS error; `fn_update_deposit_refund_bank_info` succeeds when `deposit_refund_amount = 0` and `total_payout_amount = 400_000`; `fn_restore_returned_settlement_credits` flips `'REFUNDED_IN_SETTLEMENT' -> 'PENDING_SETTLEMENT_PAYOUT'` and `fn_recommit_returned_settlement_credits` flips `'PENDING_SETTLEMENT_PAYOUT' -> 'REFUNDED_IN_SETTLEMENT'`.
+1. `service_catalog` partial unique indexes, `service_subscription.is_price_locked` trigger auto-lock, `idx_invoice_unique_active_period` (`23505` on active duplicate, allowed after `'VOID'`), AND `adminPool` `DELETE` cleanup on `invoice` / `credit_balance` / `invoice_adjustment` succeeds cleanly without trigger errors.
+2. **Review Focus #1 `FORCE RLS` pins:**
+   - `RESIDENT` `SELECT` on `invoice` returns `0` rows on `'DRAFT'` (`AC-003.2`) and `1` row on `'ISSUED'`; calling `SELECT * FROM fn_lock_invoices_for_authorized_viewer(NULL, issuedInvoiceId)` as `RESIDENT` and `SELECT * FROM fn_lock_invoices_for_authorized_viewer(contractId, NULL)` as `OWNER` each lock and return `1` row (whereas raw `SELECT * FROM invoice WHERE id = $1 FOR UPDATE` returns `0` rows under `FORCE RLS`!), while `fn_lock_invoices_for_authorized_viewer` returns `0` rows on `'DRAFT'` for `RESIDENT` and `0` rows on an unassigned building for `OWNER`/`MANAGER`.
+   - Calling `fn_notify_building_finance_actors` both as `MANAGER` via `appPool` AND as a trusted internal caller (`adminPool` with `app.current_user_id` unset) inserts valid rows into `notification(org_id, user_id, title, content, type, payload)` without `42501` or column-mismatch errors.
+   - `can_select_attachment` allows `OWNER`, assigned `MANAGER`, and the contract's `RESIDENT` to read an `attachment` with `owner_entity = 'credit_balance'`, blocks another building's `MANAGER`/`RESIDENT`, and still blocks `OWNER` from reading `owner_entity = 'person'` (`046` PII guard preserved).
+   - `SYS_ADMIN` and `OWNER` direct `INSERT`/`UPDATE`/`DELETE` on `service_catalog`, `service_subscription`, `contract_service_price` (`FORCE RLS` verified!), `invoice`, `invoice_line`, `payment`, `receivable`, `credit_balance` are blocked by RLS; `MANAGER` can `DELETE` `invoice_line` on `'DRAFT'` invoice but is blocked by RLS from `DELETE` on `'ISSUED'` `invoice_line`; `OWNER` and `MANAGER` read all 12 financial entities in `rls_audit_log_select`.
+3. **Review Focus #4 RPC pins (`fn_resolve_invoice_adjustment` & `fn_resolve_credit_refund`):**
+   - 3-arg `fn_resolve_invoice_adjustment` & `fn_resolve_credit_refund` enforce 4-eyes from `system_setting('approval_config')` (`SELF_APPROVAL` error when `false`, `SELF_APPROVAL_WARNING` `audit_log` when `true`), block `SYS_ADMIN` when `building_has_active_owner(building_id)` is `true`, allow `SYS_ADMIN` when `owner_id IS NULL`, and execute cleanly as `OWNER` under `FORCE RLS` (`SET row_security = off`).
+   - Sequential downward `ADJUST`s (`-100_000`, `-5_000_000`) on `10_200_000` `PAID` invoice mint exact `5_100_000` `credit_balance`; `+150_000` upward `ADJUST` on `0 ₫` `'PAID'` invoice UPSERTs `OPEN` `receivable`; `-400_000` `ADJUST` on unpaid `ISSUED` invoice (`subtotal = 500_000, credit_offset_amount = 300_000`) releases `200_000` back to `credit_balance` with `credit_id = v_credit_row.id`; `LATE_FEE` waiver (`-200_000` on `300_000`) appends `formula_meta.adjusts_item_type = 'LATE_FEE'` and principal-zero neutralization appends only `-100_000`; `PARTIALLY_APPLIED` credit split/reject merges back into parent and approve sets `'REFUNDED_DIRECT'` (`refunded_at IS NOT NULL`).
+4. **Review Focus #2 DB pins (4-pass sequential accounting + cross-bucket negative spill):**
+   - Multi-invoice 4-pass test (`'2026-05'` `SERVICE = 1M`, `'2026-06'` `RENT = 4M`, `available_credit = 1M`, `p_covered_service_debt = 1M`): Pass 1 applies `1M` credit to Invoice 2 `RENT` and Pass 4 applies `1M` deposit to Invoice 1 `SERVICE`; when `available_credit = 1_500_000`, `RENT = 0`, `SERVICE = 1_500_000`, and `p_covered_service_debt = 0` (post-credit `remaining_service_debt = 0`), Pass 2 pays `1_500_000` `SERVICE` from `credit_balance` and Pass 4 deducts `0` from deposit; cross-bucket spill (`MANUAL -1.5M` on `SERVICE 0.5M + RENT 10M`) yields `service_effective = 0, rent_effective = 9M`; `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits`, and `fn_recommit_returned_settlement_credits` succeed under `FORCE RLS`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd api && node --test --test-concurrency=1 test/migration047RlsAndRpc.test.js`
-Expected: FAIL (`relation "invoice_adjustment" does not exist` / `function fn_resolve_invoice_adjustment does not exist`).
+Run: `cd api && node --test --test-concurrency=1 test/migration048RlsAndRpc.test.js`
+Expected: FAIL (`relation "invoice_adjustment" does not exist` / `function fn_lock_invoices_for_authorized_viewer does not exist`).
 
-- [ ] **Step 3: Write `api/src/db/migrations/047_service_termination_invoice_adjustments_and_credit_balance.sql` and update `api/test/remediationR01ToR24.test.js:424`**
+- [ ] **Step 3: Write `api/src/db/migrations/048_service_termination_invoice_adjustments_and_credit_balance.sql` and update `api/test/remediationR01ToR24.test.js:424`**
 
-Implement Spec Section `5.1` in `047_service_termination_invoice_adjustments_and_credit_balance.sql`:
-- Add commented Rollback SQL header (`PRD 14.5`).
-- Dynamically drop legacy `service_catalog` `(org_id, code)` unique constraint and `status` `CHECK` constraints on `service_subscription` & `invoice` via `pg_constraint`; migrate `'CANCELLED' -> 'TERMINATED'` / `'VOID'`; attach `BEFORE INSERT OR UPDATE OF status` normalization triggers; deduplicate any stale unpaid `DRAFT` duplicate `(contract_id, period)` rows (setting duplicates to `'VOID'`), then create `idx_invoice_unique_active_period`, `idx_service_catalog_org_default_code`, `idx_service_catalog_building_code`, `invoice.credit_offset_amount`, and `invoice_paid_lte_total_check`.
-- Create `invoice_adjustment` (`adjustment_target IN ('SERVICE', 'RENT', 'LATE_FEE', 'MANUAL')`) and `credit_balance` (`status` including `'PENDING_SETTLEMENT_PAYOUT'`, `settlement_refund_amount BIGINT NOT NULL DEFAULT 0 CHECK (settlement_refund_amount >= 0 AND settlement_refund_amount <= amount)`), `invoice_line` reference columns, partial unique indexes, `GRANT ALL PRIVILEGES ... TO resihub_app`, `ENABLE` + `FORCE ROW LEVEL SECURITY`, `PRD 6.2` RLS policies, and the `046`-superset `rls_audit_log_select` (including `'service_catalog'`).
-- Implement `fn_resolve_invoice_adjustment`, upgraded `fn_apply_deposit_settlement_accounting` (computing `rent_net` = `SUM(il.amount) FILTER (WHERE il.credit_id IS NULL AND (il.item_type = 'RENT' OR (il.item_type = 'ADJUSTMENT' AND ia.adjustment_target = 'RENT')))`, `service_net` = `SUM(il.amount) FILTER (WHERE il.credit_id IS NULL AND il.item_type <> 'RENT' AND NOT (il.item_type = 'ADJUSTMENT' AND COALESCE(ia.adjustment_target, '') = 'RENT'))` via `LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id`, allocating `i.credit_offset_amount` `RENT`-first to derive `rent_effective` & `service_effective`, consuming `credit_balance` FIFO across `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')` open invoices where `v_paid_to_rent := LEAST(v_paid, v_rent_effective)`, marking `credit_refund_amount` as `'REFUNDED_IN_SETTLEMENT'`, then applying `p_covered_service_debt`), upgraded `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits` (`-> 'PENDING_SETTLEMENT_PAYOUT'`), and `fn_recommit_returned_settlement_credits` (`-> 'REFUNDED_IN_SETTLEMENT'`). Grant `EXECUTE` to `resihub_app`.
-- In `api/test/remediationR01ToR24.test.js:424`, update `'CANCELLED'` -> `'TERMINATED'`.
+Implement Spec Section `5.1` in `048_service_termination_invoice_adjustments_and_credit_balance.sql` (following exact DDL order: create `invoice_adjustment` & `credit_balance` -> backfill historical overpayments -> clamp `invoice.paid_amount` -> constraints/indexes -> `FORCE RLS` & policies -> `SET row_security = off` RPCs) and update `'CANCELLED'` -> `'TERMINATED'` at `api/test/remediationR01ToR24.test.js:424`.
 
 - [ ] **Step 4: Run migration and verify tests pass**
 
-Run: `cd api && npm run migrate && node --test --test-concurrency=1 test/migration047RlsAndRpc.test.js test/rbacPrdAlignment.test.js test/m06Phase2RlsAndDisputeWindow.test.js`
-Expected: Migration `047` applies cleanly and all 3 suites PASS (`0` failures).
+Run: `cd api && npm run migrate && node --test --test-concurrency=1 test/migration048RlsAndRpc.test.js test/rbacPrdAlignment.test.js test/m06Phase2RlsAndDisputeWindow.test.js test/m06TransferAndReservationRls.test.js`
+Expected: Migration `048` applies cleanly and all 4 suites PASS (`0` failures).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add api/src/db/migrations/047_service_termination_invoice_adjustments_and_credit_balance.sql api/test/migration047RlsAndRpc.test.js api/test/remediationR01ToR24.test.js
-git commit -m "feat(db): add migration 047 for TERMINATED/VOID/ADJUSTED, 4-eyes RPC, credit_balance, and M06 settlement RPC sync"
+git add api/src/db/migrations/048_service_termination_invoice_adjustments_and_credit_balance.sql api/test/migration048RlsAndRpc.test.js api/test/remediationR01ToR24.test.js
+git commit -m "feat(db): add migration 048 with FORCE RLS-safe RPCs, credit_balance backfill, and 4-pass settlement sync"
 ```
 
 ---
 
-### Task 2: Shared `Asia/Ho_Chi_Minh` Pro-Rata & 3-Tier Pricing Engine (`serviceBilling.js` & `invoiceSchedule.js`)
+### Task 2: Shared `Asia/Ho_Chi_Minh` Pro-Rata, Future Room-Transfer Cutoff & Strict 3-Tier Pricing Engine (`serviceBilling.js`, `invoiceSchedule.js`, `contractTemplate.js`)
 
 **Files:**
 - Create: `api/src/services/serviceBilling.js`
 - Modify: `api/src/services/invoiceSchedule.js:1-210`
-- Modify: `api/src/services/contractTemplate.js:81-90`
+- Modify: `api/src/services/contractTemplate.js:81-112`
 - Test: `api/test/serviceBillingAndSchedule.test.js`
 
 **Interfaces:**
@@ -131,21 +135,22 @@ git commit -m "feat(db): add migration 047 for TERMINATED/VOID/ADJUSTED, 4-eyes 
   - `getMonthBoundsYmd(periodYm: string): { monthStart: string, monthEnd: string, daysInMonth: number }`
   - `normalizeSubscriptionStatusInput(status: unknown): string`
   - `normalizeInvoiceStatusInput(status: unknown): string`
-  - `resolveServiceUnitPrice({ subscription, contractBuildingId, periodEndYmd, contractServicePrices, catalogItems }): { unitPrice: number, priceSource: 'CONTRACT_OVERRIDE' | 'SUBSCRIPTION_SNAPSHOT' | 'BUILDING_CATALOG' | 'DEFAULT_CATALOG' }`
+  - `resolveServiceUnitPrice({ subscription, contractBuildingId, periodEndYmd, contractServicePrices, catalogItems }): { unitPrice: number, priceSource: 'CONTRACT_OVERRIDE' | 'SUBSCRIPTION_LOCKED' | 'BUILDING_CATALOG' | 'DEFAULT_CATALOG' }`
   - `resolveSubscriptionEffectiveWindow(subscription, options?: { includePendingApproval?: boolean }): { billable: boolean, effectiveStart: string | null, effectiveEnd: string | null }`
   - `computeSubscriptionPeriodCharge({ subscription, periodYm, boundStartYmd, boundEndYmd, contractBuildingId, contractServicePrices, catalogItems, lockedUnitPrice, lockedQuantity }): { activeDays: number, daysInMonth: number, isProrated: boolean, unitPrice: number, quantity: number, priceSource: string, rawAmount: number, amount: number, overlapStart: string | null, overlapEnd: string | null, description: string, formulaMeta: object }`
-  - `resolveContractLastActiveDay(contract, options?: { explicitEndYmd?: string | null, isNaturalExpiry?: boolean, todayYmd?: string }): { movedIn: boolean, lastActiveDayYmd: string }`
+  - `resolveContractLastActiveDay(contract, options?: { explicitEndYmd?: string | null, roomTransferChildStartDate?: string | null, isNaturalExpiry?: boolean, isRoomTransfer?: boolean, todayYmd?: string }): { movedIn: boolean, lastActiveDayYmd: string }` (when `roomTransferChildStartDate` or `isRoomTransfer` is supplied, ALWAYS computes `lastActiveDayYmd = addDaysYmd(roomTransferChildStartDate || explicitEndYmd, -1)` ignoring clamped `contract.terminated_at`)
   - `computeContractRentPeriodCharge({ contract, periodYm, lastActiveDayYmd, lockedRentAmount }): { activeDays: number, daysInMonth: number, isProrated: boolean, unitPrice: number, rawAmount: number, amount: number, overlapStart: string | null, overlapEnd: string | null, description: string, formulaMeta: object }`
 
 - [ ] **Step 1: Write the failing unit tests in `api/test/serviceBillingAndSchedule.test.js`**
 
 Write pure unit tests covering:
-1. Pre-start cancellation (`start_date = '2026-12-01'`, `end_date = '2026-11-30'`, `status = 'TERMINATED'`) -> `activeDays = 0`, `amount = 0` in `'2026-11'`, `'2026-12'`, `'2027-01'`; `end_date = '2026-12-01'` -> `activeDays = 1` (`1/31` month).
-2. Mid-month subscribe + same-month cancel (`start_date = '2026-11-10'`, `end_date = '2026-11-20'`, `unit_price = 300_000`, `qty = 1`) -> `activeDays = 11` (`11/30`), `amount = 110_000` (NOT `20/30 = 200_000`).
-3. 5-month usage + mid-month-6 cancel (`start_date = '2026-01-01'`, `end_date = '2026-06-15'`, `status = 'TERMINATED'`, `unit_price = 200_000`, `qty = 2`) -> Months `'2026-01'`..`'2026-05'` each return `amount = 400_000` (`isProrated = false`), `'2026-06'` returns `200_000` (`15/30`, `isProrated = true`, `formulaMeta.active_days = 15`), `'2026-07'` returns `0`; `buildExpectedInvoiceSchedule` preserves all 5 first months at `rent + 400_000`.
-4. `FR-065` 3-tier price priority (`CONTRACT_OVERRIDE` with `INTERNET_FIBER -> INTERNET` & `MANAGEMENT_FEE -> COMMON_SERVICE` aliases > `SUBSCRIPTION_SNAPSHOT` > `BUILDING_CATALOG` > `DEFAULT_CATALOG`), plus `lockedUnitPrice` override for already-`ISSUED` periods.
-5. **Review Focus #3 pin:** `todayVietnamYmd(new Date('2026-11-01T18:30:00.000Z')) === '2026-11-02'` (`01:30` ICT next day); terminating on `'2028-02-29'` (`29/29`) or `'2026-07-31'` (`31/31`) yields `isProrated = false` and exact `unitPrice * quantity`.
-6. `computeContractRentPeriodCharge` & `resolveContractLastActiveDay`: pre-move-in (`movedIn = false` -> `0 ₫`), mid-month (`12/30 * 12_000_000 = 4_800_000`), and natural half-open expiry (`'2027-01-01'` -> `lastActiveDayYmd = '2026-12-31'`).
+1. Pre-start cancellation (`start_date = '2026-12-01'`, `end_date = '2026-11-30'`, `status = 'TERMINATED'`) -> `activeDays = 0, amount = 0`; `end_date = '2026-12-01'` -> `activeDays = 1`.
+2. Mid-month subscribe + same-month cancel (`10/11` -> `20/11`, `unit_price = 300_000`) -> `activeDays = 11` (`110_000`, NOT `200_000`).
+3. 5-month usage + mid-month-6 cancel (`'2026-01-01'`..`'2026-06-15'`) -> Months `1..5` full charge, Month `6` `15/30` Pro-rata, Month `7` `0 ₫`, and `buildExpectedInvoiceSchedule` preserves Months `1..5`.
+4. **Review Focus #3 pins (`FR-065` `is_price_locked` symmetry, `contractTemplate.js` Điều 5 deduplication, & clamped `terminated_at` future room-transfer cutoff):**
+   - `is_price_locked === false` resolves updated default catalog and newly inserted building catalog override identically (`150_000`), while `is_price_locked === true` preserves `sub.unit_price`; `effective_from <= periodEndYmd` + `INTERNET_FIBER`/`MANAGEMENT_FEE`/`PARKING_MOTO` aliases work bidirectionally.
+   - `buildContractTemplateServiceRows` with a `TERMINATED` `INTERNET_FIBER` subscription + `contract_service_price` for `INTERNET` omits the terminated service from Điều 5.
+   - When `contract.terminated_at = '2026-11-03'` (clamped to `today` by M06) while `roomTransferChildStartDate = '2028-06-15'`, BOTH `resolveContractLastActiveDay(contract, { roomTransferChildStartDate: '2028-06-15', isRoomTransfer: true })` AND `buildExpectedInvoiceSchedule({ contract, roomTransferChildStartDate: '2028-06-15', ... })` compute `lastActiveDayYmd = '2028-06-14'` (`14/30` days in `'2028-06'`, NOT clamped `'2026-11-03'`)!
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -154,9 +159,7 @@ Expected: FAIL (`Cannot find module '../src/services/serviceBilling.js'`).
 
 - [ ] **Step 3: Implement `api/src/services/serviceBilling.js` and update `api/src/services/invoiceSchedule.js` & `api/src/services/contractTemplate.js`**
 
-- Create `api/src/services/serviceBilling.js` implementing all exported functions from **Interfaces** per Spec Section `5.2`.
-- Refactor `api/src/services/invoiceSchedule.js` to delegate subscription window/pricing/pro-rata math to `serviceBilling.js` (`includePendingApproval: true`), exclude `existingInvoices` only when `status IN ('VOID', 'CANCELLED')`, and preserve `TERMINATED` subscriptions across historical months `[start_date .. end_date]`.
-- Confirm `api/src/services/contractTemplate.js:83-85` keeps `status === 'PENDING_APPROVAL' || status === 'ACTIVE'` (excluding `'TERMINATED'`, `'CANCELLED'`, `'REJECTED'`).
+Implement all exported functions in `serviceBilling.js`, update `invoiceSchedule.js` (accepting optional `roomTransferChildStartDate` and preserving `TERMINATED` historical months), and update `contractTemplate.js:82-111` to register all non-`METERED` subscription codes/aliases in `consumedPriceCodes` before `continue`.
 
 - [ ] **Step 4: Run unit tests (new + existing schedule/template suites)**
 
@@ -167,7 +170,7 @@ Expected: PASS (`0` failures).
 
 ```bash
 git add api/src/services/serviceBilling.js api/src/services/invoiceSchedule.js api/src/services/contractTemplate.js api/test/serviceBillingAndSchedule.test.js
-git commit -m "feat(billing): add Vietnam-TZ pro-rata and FR-065 3-tier pricing engine preserving prior periods"
+git commit -m "feat(billing): add Vietnam-TZ pro-rata, future room-transfer cutoff, and FR-065 3-tier pricing engine"
 ```
 
 ---
@@ -179,27 +182,22 @@ git commit -m "feat(billing): add Vietnam-TZ pro-rata and FR-065 3-tier pricing 
 - Test: `api/test/invoiceLifecycleSync.test.js`
 
 **Interfaces:**
-- Consumes: `serviceBilling.js` exports (Task 2); `roundVND` from `api/src/services/pricing.js`.
+- Consumes: `serviceBilling.js` exports (Task 2); `roundVND` from `api/src/services/pricing.js`; `fn_notify_building_finance_actors` (Task 1).
 - Produces (exported from `api/src/services/invoiceLifecycle.js`):
   - `applyAvailableCreditsInTx(client, { contractId, invoiceId, subtotalAmount, actorId }): Promise<{ totalCreditUsed: number, appliedItems: Array<{ creditId: string, amount: number, lineId: string }> }>`
   - `releaseInvoiceCreditsInTx(client, { invoiceId, maxReleaseAmount?: number | null, actorId }): Promise<{ releasedAmount: number, remainingCreditOffset: number }>`
   - `recalculateDraftInvoiceTotalsInTx(client, { invoiceId, actorId, autoVoidIfZero?: boolean, voidReason?: string | null }): Promise<{ invoice: object, lines: object[], releasedCreditAmount: number, autoVoided: boolean }>`
   - `syncSubscriptionTerminationInvoicesInTx(client, { subscription, contract, actorId, reason }): Promise<{ scenario: 'UNBILLED' | 'DRAFT_UPDATED' | 'ADJUSTMENT_CREATED' | 'MIXED' | 'NO_CHANGE', updatedDraftInvoiceIds: string[], voidedDraftInvoiceIds: string[], createdAdjustments: object[] }>`
-  - `closeContractBillingAndSubscriptionsInTx(client, { contract, explicitEndYmd?: string | null, isNaturalExpiry?: boolean, actorId, reason }): Promise<{ movedIn: boolean, lastActiveDayYmd: string, terminatedSubscriptionIds: string[], updatedDraftInvoiceIds: string[], voidedDraftInvoiceIds: string[], createdAdjustments: object[] }>`
-  - `transferContractCreditsInTx(client, { fromContractId, toContractId, toBuildingId, actorId, reason }): Promise<{ transferredTotal: number, count: number }>`
-  - `notifyBuildingInvoiceAdjustmentApprovers(clientOrPool, { orgId, buildingId, invoiceId, invoiceCode, adjustmentId, actionType, deltaAmount, actorId }): Promise<void>`
+  - `closeContractBillingAndSubscriptionsInTx(client, { contract, explicitEndYmd?: string | null, roomTransferChildStartDate?: string | null, isNaturalExpiry?: boolean, isRoomTransfer?: boolean, actorId, adjustmentCreatorId?: string | null, reason }): Promise<{ movedIn: boolean, lastActiveDayYmd: string, terminatedSubscriptionIds: string[], updatedDraftInvoiceIds: string[], voidedDraftInvoiceIds: string[], createdAdjustments: object[] }>`
+  - `transferContractCreditsInTx(client, { fromContractId, toContractId, toBuildingId, retainAmount?: number, actorId, reason }): Promise<{ transferredTotal: number, retainedTotal: number, count: number }>`
+  - `notifyBuildingInvoiceAdjustmentApprovers(client, { orgId, buildingId, invoiceId, invoiceCode, adjustmentId, actionType, deltaAmount, actorId }): Promise<void>`
 
 - [ ] **Step 1: Write the failing DB-backed service tests in `api/test/invoiceLifecycleSync.test.js`**
 
-Write `node:test` integration tests running inside `appPool` transactions as `MANAGER` (`manager.vop.a@resihub.vn`) asserting:
-1. **Scenario 1 (Unbilled):** `syncSubscriptionTerminationInvoicesInTx` when no invoice exists for the termination period returns `scenario = 'UNBILLED'` and touches zero invoices.
-2. **Scenario 2 (`DRAFT` invoice):** Updating a `TERMINATED` subscription (`end_date = '2026-06-15'`) mutates ONLY the `'2026-06'` `DRAFT` `SERVICE` line to `15/30` Pro-rata (or deletes the line when `0 ₫`), leaves `'2026-01'`..`'2026-05'` `PAID` invoices untouched (`delta === 0`), releases surplus `credit_balance` if `subtotal_amount < credit_offset_amount`, and writes `UPDATE_DRAFT_INVOICE_LINES` `audit_log` (`before`/`after`, `AC-020.1`).
-3. **Scenario 3 (Post-`ISSUED` invoice):** When `'2026-06'` invoice is `ISSUED` or `PAID`, `syncSubscriptionTerminationInvoicesInTx` leaves existing `invoice_line` rows immutable and inserts a `PENDING_APPROVAL` `invoice_adjustment` (`adjustment_target = 'SERVICE'`, `action_type = 'ADJUST'`, `delta_amount < 0`) using the locked `unit_price` on `invoice_line` (`FR-065`).
-4. **Option `6A` (`closeContractBillingAndSubscriptionsInTx`):**
-   - Pre-move-in (`!movedIn`): sets open subscriptions to `'TERMINATED'` (`end_date = start_date - 1`), auto-`VOID`s unpaid `0 ₫` `DRAFT` invoices across all periods, creates a `PENDING_APPROVAL` `VOID` `invoice_adjustment` for unpaid `ISSUED` invoices with `expectedTotal === 0`, and creates `SERVICE` + `RENT` `ADJUST` rows if `paid_amount > 0`.
-   - Mid-month (`movedIn = true`, `explicitEndYmd = '2026-06-12'`): **only inspects invoices with `period >= '2026-06'`** (preserving `'2026-01'`..`'2026-05'` and any manual ad-hoc `SERVICE` lines where `subscription_id IS NULL` 100% untouched), creating `PENDING_APPROVAL` `ADJUST` rows for BOTH `RENT` and recurring `SERVICE` on an already-`ISSUED` `'2026-06'` invoice.
-5. **Review Focus #4 re-sync pin:** Calling `syncSubscriptionTerminationInvoicesInTx` or `closeContractBillingAndSubscriptionsInTx` a second time while `PENDING_APPROVAL` rows exist computes `currentlyAccounted` including `PENDING_APPROVAL` `delta_amount` (`delta === 0`) and inserts zero duplicates.
-6. `transferContractCreditsInTx` marks source `AVAILABLE`/`PARTIALLY_APPLIED` credits `'TRANSFERRED'` and creates matching `'AVAILABLE'` (`reason_type = 'TRANSFERRED_IN'`) credit on the destination contract.
+Write `node:test` integration tests running inside `appPool` (`MANAGER`) AND `adminPool` (simulating `contracts.js:3336` `adminClient` / `daily.js`) asserting:
+1. Scenario 1 (`UNBILLED`), Scenario 2 (`DRAFT` updated with `UPDATE_DRAFT_INVOICE_LINES` `audit_log` + surplus `credit_balance` release + Months `1..5` untouched), and Scenario 3 (post-`ISSUED` immutable `invoice_line` + `PENDING_APPROVAL` `invoice_adjustment` + `fn_notify_building_finance_actors` succeeding on both `appPool` and `adminPool`!).
+2. Option `6A` (`closeContractBillingAndSubscriptionsInTx`): pre-move-in (`!movedIn` -> `0 ₫`, auto-`VOID` empty `DRAFT`, `PENDING_APPROVAL` `VOID` on unpaid `ISSUED`), mid-month (`period >= lastActiveDayYmd.slice(0, 7)` only, ad-hoc `subscription_id IS NULL` lines untouched), and idempotent second call (`delta === 0`, zero duplicate `PENDING_APPROVAL` rows).
+3. `transferContractCreditsInTx` retains `retainAmount` on source contract and transfers only excess credit; `releaseInvoiceCreditsInTx` only mutates `status` on `('AVAILABLE', 'PARTIALLY_APPLIED', 'APPLIED')`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -208,12 +206,7 @@ Expected: FAIL (`Cannot find module '../src/services/invoiceLifecycle.js'`).
 
 - [ ] **Step 3: Implement `api/src/services/invoiceLifecycle.js`**
 
-Implement all exported functions per Spec Sections `5.3.2`, `5.4`, and `5.5.2`:
-- Lock target contract invoices (`status <> 'VOID'`, and `AND period >= lastActiveDayYmd.slice(0, 7)` when `movedIn === true` in `closeContractBillingAndSubscriptionsInTx`) with `FOR UPDATE`.
-- Match subscription lines via `il.subscription_id = sub.id` (falling back for pre-`047` rows to `il.subscription_id IS NULL AND il.item_type = 'SERVICE' AND il.description ILIKE '%' || sub.service_name || '%'`, never touching unrelated ad-hoc `SERVICE` lines when `movedIn === true`).
-- Compute `currentlyAccounted = originalLineSum + approvedAdjustmentSum + pendingAdjustmentSum`; skip whenever `delta >= 0`.
-- On `DRAFT`: snapshot `before`, update/delete `SERVICE`/`RENT` lines, call `recalculateDraftInvoiceTotalsInTx` (computing `subtotal_amount` = sum of `item_type <> 'ADJUSTMENT'`, `manualAdj` = sum of `item_type = 'ADJUSTMENT' AND credit_id IS NULL`, `nonCreditNet = Math.max(0, subtotal_amount + manualAdj)`, releasing surplus `credit_balance` FIFO-reverse whenever `credit_offset_amount > nonCreditNet`, setting `adjustment_amount = manualAdj - remainingCreditOffset`, `total_amount = Math.max(0, nonCreditNet - remainingCreditOffset)`, and transitioning to `'VOID'` when `autoVoidIfZero && subtotal_amount === 0 && paid_amount === 0`), write `audit_log`.
-- On post-`ISSUED`: insert `invoice_adjustment` (`VOID` when `expectedTotal === 0 && paid_amount === 0` and no non-zero metered/ad-hoc lines remain, else `ADJUST` per negative `delta`), write `CREATE_INVOICE_ADJUSTMENT` `audit_log`, and notify active `OWNER`s + other `MANAGER`s of `building_id` (or `SYS_ADMIN` when `NOT building_has_active_owner`).
+Implement all exported functions per **Interfaces** and Spec Sections `5.3.2`, `5.4`, and `5.5.2`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -224,12 +217,12 @@ Expected: PASS (`0` failures).
 
 ```bash
 git add api/src/services/invoiceLifecycle.js api/test/invoiceLifecycleSync.test.js
-git commit -m "feat(invoices): implement 3-scenario invoice sync, 6A contract rent/service closure, and credit_balance helpers"
+git commit -m "feat(invoices): implement 3-scenario invoice sync, 6A contract closure, and credit_balance helpers"
 ```
 
 ---
 
-### Task 4: Service Catalog & Subscription Cancellation Routes (`services.js` & `resident.js`)
+### Task 4: Service Catalog Multi-Building Guard & `FORCE RLS`-Safe Resident Payment/Service Routes (`services.js` & `resident.js`)
 
 **Files:**
 - Modify: `api/src/routes/services.js:1-434`
@@ -237,32 +230,28 @@ git commit -m "feat(invoices): implement 3-scenario invoice sync, 6A contract re
 - Test: `api/test/serviceCancellationFlow.test.js`
 
 **Interfaces:**
-- Consumes: `serviceBilling.js` (Task 2), `invoiceLifecycle.js` (Task 3), `idempotencyGuard()` from `api/src/middleware/idempotency.js`, `getUserClient(req)` from `api/src/db/client.js`.
+- Consumes: `fn_get_finance_resource_scope`, `fn_lock_invoices_for_authorized_viewer` (Task 1), `serviceBilling.js` (Task 2), `invoiceLifecycle.js` (Task 3), `idempotencyGuard()` from `api/src/middleware/idempotency.js`, `getUserClient(req)` from `api/src/db/client.js`.
 - Produces:
-  - `POST /api/v1/service-catalog`, `PATCH /api/v1/service-catalog/:id` — `requireRole(['MANAGER'])`, `idempotencyGuard()` on BOTH `POST` and `PATCH`, `getUserClient(req)`, `checkBuildingAccess` when `building_id IS NOT NULL` (`AC-019.1`), and mandatory `audit_log` (`CREATE` / `UPDATE`, `entity = 'service_catalog'`, `before`/`after` per `FR-006`, `NFR-010`).
-  - `POST /api/v1/service-subscriptions`, `PATCH /api/v1/service-subscriptions/:id` — `requireRole(['MANAGER'])`, `idempotencyGuard()` on BOTH `POST` and `PATCH`, 3-tier `FR-065` unit price resolution, `status: 'TERMINATED'` (`'CANCELLED'` alias accepted), `zero_usage?: boolean`, reject-cancel (`CANCELLATION_PENDING -> ACTIVE`), `audit_log` `before`/`after`, returns `{ message, data, invoice_sync }`.
-  - `POST /api/v1/resident/services`, `PATCH /api/v1/resident/services/:id/cancel`, `PATCH /api/v1/resident/services/:id/withdraw-cancel`, `POST /api/v1/resident/payments/report` — all attached with `idempotencyGuard()` (`PRD 14.3`).
-  - `GET /api/v1/resident/overview` (`resident.js:240, 251` `latestInvRes` filtering `i.status NOT IN ('DRAFT', 'VOID')`, `current_amount_due` over `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`, returning `available_credit_balance`), `GET /api/v1/resident/invoices` (`resident.js:1007` filtering `i.status <> 'DRAFT'`), and `POST /api/v1/resident/payments/report` (`resident.js:1074` rejecting `inv.status IN ('DRAFT', 'VOID')` with `409 INVALID_STATUS` and `Number(inv.total_amount) - Number(inv.paid_amount) <= 0` with `409 ALREADY_PAID`).
+  - `POST /api/v1/service-catalog`, `PATCH /api/v1/service-catalog/:id` — `requireRole(['MANAGER'])`, `idempotencyGuard()`, `getUserClient(req)` + `fn_get_finance_resource_scope` (`AC-019.1`), `403 ORG_DEFAULT_SHARED_ACROSS_BUILDINGS` (+ `ACCESS_DENIED` `audit_log`) on `building_id IS NULL` when referenced by active/pending subscriptions in unassigned buildings without a building override (`FR-070`), and `audit_log` `before`/`after`.
+  - `POST /api/v1/service-subscriptions`, `PATCH /api/v1/service-subscriptions/:id` — `requireRole(['MANAGER'])`, `idempotencyGuard()`, `is_price_locked`, 3-tier `FR-065` pricing, `'TERMINATED'` (`'CANCELLED'` alias), `zero_usage`, reject-cancel (`CANCELLATION_PENDING -> ACTIVE`), `audit_log`, returns `{ message, data, invoice_sync }`.
+  - `GET /api/v1/resident/services`, `POST /api/v1/resident/services`, `PATCH /api/v1/resident/services/:id/cancel`, `PATCH /api/v1/resident/services/:id/withdraw-cancel` — `getUserClient(req)`, `idempotencyGuard()` on mutating routes, building-override catalog deduplication + `resolveServiceUnitPrice` (`is_price_locked = false`), pre-start `0 ₫` cancel, `PENDING_APPROVAL` withdraw.
+  - `GET /api/v1/resident/overview` (`resident.js:217, 231, 240, 251` filtering `status NOT IN ('DRAFT', 'VOID')`, `current_amount_due` over `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`, returning `available_credit_balance`), `GET /api/v1/resident/invoices` (`resident.js:1017` filtering `i.status <> 'DRAFT'`), and **`POST /api/v1/resident/payments/report` (`resident.js:1073-1095` locking target invoice via `SELECT * FROM fn_lock_invoices_for_authorized_viewer(NULL, $1)` so `RESIDENT` never hits `FORCE RLS` `0`-row `FOR UPDATE` filtering, rejecting `inv.status IN ('DRAFT', 'VOID')` with `409 INVALID_STATUS` and `total_amount - paid_amount <= 0` with `409 ALREADY_PAID`)**.
 
 - [ ] **Step 1: Write the failing API integration tests in `api/test/serviceCancellationFlow.test.js`**
 
 Write integration tests asserting:
-1. `SYS_ADMIN` gets `403` on `POST /api/v1/service-catalog` and `PATCH /api/v1/service-subscriptions/:id` (`PRD 6.2`), while `GET` succeeds; `MANAGER` creating and updating a building-scoped `service_catalog` row writes `CREATE` and `UPDATE` `audit_log` entries (`entity = 'service_catalog'`, `before`/`after`, `FR-006`, `NFR-010`) and returns `403` on an unassigned building (`AC-019.1`).
-2. Resident & Manager pre-`start_date` cancellation (`start_date` in next month) + `Idempotency-Key` replay: Resident `PATCH /api/v1/resident/services/:id/cancel` with `Idempotency-Key` sets `CANCELLATION_PENDING`, `end_date = start_date - 1`, `prorata_amount = 0` (replaying same key returns `Idempotent-Replayed: true`); `PATCH /withdraw-cancel` restores `ACTIVE`; cancelling again + Manager `PATCH /api/v1/service-subscriptions/:id` `{ status: 'TERMINATED' }` finalizes `0 ₫` and logs `audit_log`.
-3. Mid-term cancellation across all 3 scenarios:
-   - Scenario 1 (unbilled): `invoice_sync.scenario === 'UNBILLED'`.
-   - Scenario 2 (`DRAFT`): `DRAFT` line updates to Pro-rata `roundVND`, `RESIDENT` cannot see `DRAFT` or `VOID` as `latest_invoice` on `/resident/overview`, on `/resident/invoices`, or on `/resident/payments/report`.
-   - Scenario 3 (`PAID` Month `6` after 5 `PAID` months): Months `1..5` stay untouched, Month `6` gets a `PENDING_APPROVAL` `invoice_adjustment`, and mutating an already-`TERMINATED` subscription returns `409 INVALID_STATUS`.
+1. `SYS_ADMIN` gets `403` on `POST /api/v1/service-catalog` and `PATCH /api/v1/service-subscriptions/:id` (`PRD 6.2`); `MANAGER` catalog `POST`/`PATCH` logs `audit_log`, returns `403` on unassigned building, returns `403 ORG_DEFAULT_SHARED_ACROSS_BUILDINGS` on shared org-default row (`FR-070`), and returns `200` on unshared org-default row.
+2. Pre-`start_date` cancel + `Idempotency-Key` replay (`Idempotent-Replayed: true`) + `PATCH /withdraw-cancel` + Manager `TERMINATED` (`0 ₫`).
+3. Mid-term 3 scenarios (`UNBILLED`, `DRAFT` hidden from `RESIDENT` across `/overview`, `/invoices`, `/payments/report`, and `PAID` Month 6 creating `PENDING_APPROVAL` `invoice_adjustment` while keeping Months `1..5` intact), **PLUS Review Focus #1 pin: `RESIDENT` calling `POST /api/v1/resident/payments/report` on an `ISSUED` invoice succeeds with `201` (`PENDING_CONFIRMATION`) under `FORCE ROW LEVEL SECURITY` (never returning `404`!)**.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd api && node --test --test-concurrency=1 test/serviceCancellationFlow.test.js`
-Expected: FAIL (`SYS_ADMIN` allowed / pre-start cancel `422` / `withdraw-cancel` `404` / `VOID` leaked in `latestInvRes`).
+Expected: FAIL (`SYS_ADMIN` allowed / `ORG_DEFAULT_SHARED_ACROSS_BUILDINGS` missing / `RESIDENT` `payments/report` `404` under `rls_invoice_modify` / pre-start cancel `422`).
 
 - [ ] **Step 3: Update `api/src/routes/services.js` and `api/src/routes/resident.js`**
 
-- Refactor `api/src/routes/services.js` per **Interfaces** (using `getUserClient(req)` instead of `pool`/`adminPool` for business queries, `MANAGER`-only writes, `idempotencyGuard()`, `serviceBilling.js` 3-tier pricing & `todayVietnamYmd()`, and `syncSubscriptionTerminationInvoicesInTx`).
-- Refactor `api/src/routes/resident.js` per **Interfaces** (attaching `idempotencyGuard()` to `POST /services`, `PATCH /services/:id/cancel`, `PATCH /services/:id/withdraw-cancel`, `POST /payments/report`; updating lines `240, 251, 1007, 1074, 1319, 1331` for `'DRAFT'`/`'VOID'`/`'TERMINATED'`; exposing `available_credit_balance` on `GET /overview`).
+Implement all route updates per **Interfaces** using `getUserClient(req)` and `fn_lock_invoices_for_authorized_viewer`.
 
 - [ ] **Step 4: Run new + existing service & resident tests**
 
@@ -273,177 +262,184 @@ Expected: PASS (`0` failures).
 
 ```bash
 git add api/src/routes/services.js api/src/routes/resident.js api/test/serviceCancellationFlow.test.js
-git commit -m "feat(services,resident): add pre-start 0 VND cancel, withdraw-cancel, idempotency, and TERMINATED 3-scenario sync"
+git commit -m "feat(services,resident): add 0 VND pre-start cancel, multi-building catalog guard, and FORCE RLS-safe resident payment report"
 ```
 
 ---
 
-### Task 5: Contract Early-Termination `6A` Sync, Renewal/Transfer Credit Carryover & Append-Only `daily.js` (`contracts.js` & `daily.js`)
+### Task 5: Invoices `DRAFT` Line CRUD (`skipped_contracts` & `DRAFT` Refresh), Four-Eyes Approvals, Attachment RLS, Tenant Merge & Payments (`invoices.js`, `payments.js`, `attachments.js`, `tenants.js`)
 
 **Files:**
-- Modify: `api/src/routes/contracts.js:89-140, 2724-2795, 2960-2998, 3380-3435, 3600-3950, 4400-4820`
-- Modify: `api/src/jobs/daily.js:1-375`
+- Modify: `api/src/routes/invoices.js:1-738`
+- Modify: `api/src/routes/payments.js:1-520`
+- Modify: `api/src/routes/attachments.js:75-105`
+- Modify: `api/src/routes/tenants.js:701-728`
+- Test: `api/test/invoiceFourEyesAndCreditBalance.test.js`
+
+**Interfaces:**
+- Consumes: `fn_get_finance_resource_scope`, `fn_notify_building_finance_actors`, `fn_resolve_invoice_adjustment`, `fn_resolve_credit_refund`, `can_select_attachment` (Task 1), `serviceBilling.js` (Task 2), `invoiceLifecycle.js` (Task 3), `saveBase64Image` from `api/src/utils/upload.js`, `validateRefundBankInfo` from `api/src/services/depositSettlement.js`, `idempotencyGuard()`, `getUserClient(req)`.
+- Produces:
+  - Upgraded `generateInvoicesCore(client, { orgId, targetPeriod, buildingId, contractId = null, matchBillingDays, onlyOngoingContracts, excludeSettledDeposits = false, autoIssue, actorId, applyScope })` in `api/src/routes/invoices.js`:
+    - When `contractId` is supplied, filters `NOT EXISTS (... inv.status NOT IN ('VOID', 'DRAFT'))` (instead of `inv.status <> 'VOID'`) so an existing `DRAFT` invoice for `(contractId, targetPeriod)` is fetched and refreshed in-place (`RENT`/`SERVICE`/metered `ELECTRICITY` & `WATER` + `recalculateDraftInvoiceTotalsInTx`).
+    - Joins/subqueries `room_transfer_child_start_date` (`SELECT ch.start_date FROM contract ch WHERE ch.parent_contract_id = c.id AND ch.is_room_transfer = TRUE AND ch.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED') ORDER BY ch.created_at DESC LIMIT 1`) and passes `roomTransferChildStartDate` + `isRoomTransfer: Boolean(roomTransferChildStartDate)` to `resolveContractLastActiveDay` (never using clamped `c.terminated_at`).
+    - Returns `{ created_count, updated_draft_count, skipped_contracts: Array<{ contract_id, contract_code, apartment_code, reason }>, warnings, data }` (`FR-033`, `AC-015.1`), persists `subscription_id` + `formula_meta`, applies FIFO `applyAvailableCreditsInTx`, writes `CREATE_INVOICE` `audit_log`, and catches `23505` gracefully.
+  - `POST /api/v1/invoices/:id/lines`, `PATCH /api/v1/invoices/:id/lines/:lineId`, `DELETE /api/v1/invoices/:id/lines/:lineId`, `POST /api/v1/invoices/:id/issue` — all `MANAGER` + `idempotencyGuard()`; shared `issueDraftInvoiceInTx` (`0 ₫ -> 'PAID'`, zero `receivable`).
+  - `PATCH /api/v1/invoices/:id/status` (`MANAGER` + `idempotencyGuard()`): normalizes `'CANCELLED' -> 'VOID'`; **Check #1: `targetStatus === 'VOID' && Number(inv.paid_amount) > 0 -> 409 ALREADY_PAID`** (preserving `fullWebsiteWhiteBlackBox.test.js:1403-1408`); Check #2: `inv.status !== 'DRAFT'` with `adjustment_amount` or `VOID` -> `409 REQUIRES_FOUR_EYES_ADJUSTMENT`; on `DRAFT`, deletes ONLY `credit_id IS NULL` manual `ADJUSTMENT` lines before `recalculateDraftInvoiceTotalsInTx` and checks `confirm_invoice_code` when supplied.
+  - `POST /api/v1/invoices/:id/adjust`, `GET /api/v1/invoices/adjustments`, `POST /api/v1/invoices/:id/adjustments/:adjId/approve` & `/reject` (`fn_resolve_invoice_adjustment`), and `GET /api/v1/invoices/:id/audit-logs`.
+  - `api/src/routes/payments.js`:
+    - `POST /api/v1/payments`, `PATCH /api/v1/payments/:id/confirm`, `PATCH /api/v1/payments/:id/reject` (`MANAGER` + `idempotencyGuard()` + `getUserClient(req)`): Order B commutativity on invoices, **PLUS standalone `receivable_id` (`invoice_id IS NULL` & `rec.contract_id IS NOT NULL`) overpayment minting into `credit_balance` (`OVERPAYMENT`)**, plus `REJECT_PAYMENT` `audit_log`.
+    - `GET /api/v1/receivables` returning both `aging_summary` and `aging_summary_prd` (`AC-016.1`).
+    - `GET /api/v1/payments/credits`, `POST /api/v1/payments/credits/:id/refund` (`MANAGER` + `idempotencyGuard()`, blocking `409 SETTLEMENT_IN_PROGRESS` when deposit is in `('PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT', 'RETURNED')` OR `('DISPUTED' && !dep.settlement?.accounting_committed_at)`, persisting base64 `proof_image` via `saveBase64Image({ entity: 'credit_balance', ... })`), and `POST /api/v1/payments/credits/:id/refund/approve` & `/reject` (`fn_resolve_credit_refund`).
+  - `api/src/routes/attachments.js:86`: adds `'credit_balance'`, `'invoice'`, `'invoice_adjustment'` to allowed `att.owner_entity` list.
+  - `api/src/routes/tenants.js:701-728` (`POST /api/v1/tenants/:id/merge`, `FR-021`): adds `UPDATE credit_balance SET tenant_id = $1, updated_at = NOW() WHERE tenant_id = $2`.
+
+- [ ] **Step 1: Write the failing API integration tests in `api/test/invoiceFourEyesAndCreditBalance.test.js`**
+
+Write integration tests asserting:
+1. `DRAFT` line CRUD (`POST/PATCH/DELETE /invoices/:id/lines`), `credit_id IS NOT NULL` preservation on `PATCH /invoices/:id/status` `{ adjustment_amount }`, `paid_amount > 0` returning `409 ALREADY_PAID` even without `confirm_invoice_code`, `skipped_contracts` array returned by `POST /invoices/generate-batch` when a contract has `0` billable charges (`AC-015.1`), and existing-`DRAFT` in-place refresh when `{ contract_id, period }` is passed after meter readings are recorded!
+2. Four-eyes RBAC & `FR-064` `LATE_FEE` waiver matrix (`403 SELF_APPROVAL`, `SYS_ADMIN` `403` on `VOP-A`, `OWNER` & `mgr2VopA` `200`).
+3. Order A vs Order B payment commutativity, **standalone `receivable_id` overpayment minting `credit_balance` (`OVERPAYMENT`)**, `PATCH /payments/:id/reject` (`REJECT_PAYMENT` `audit_log`), and `GET /api/v1/receivables` `aging_summary_prd` (`AC-016.1`).
+4. Active & ended/`0`-deposit 4-eyes `credit_balance` refund with base64 `proof_image` (`GET /api/v1/attachments/:attId/view` returns `200` for `OWNER`, `MANAGER`, and `RESIDENT`, and `403`/`404` for unassigned building staff), split/reject merge-back, `'DISPUTED'` uncommitted deposit returning `409 SETTLEMENT_IN_PROGRESS`, AND `POST /api/v1/tenants/:targetId/merge` migrating `credit_balance.tenant_id` (`FR-021`).
+5. FIFO `credit_balance` auto-offset on next period, `0 ₫` issuance -> `'PAID'` with zero `receivable`, and `DRAFT -> VOID` restoring `credit_balance`.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && node --test --test-concurrency=1 test/invoiceFourEyesAndCreditBalance.test.js`
+Expected: FAIL (`404` on `/lines`, `/adjust`, `/payments/credits/:id/refund`, `skipped_contracts` missing).
+
+- [ ] **Step 3: Implement updates in `invoices.js`, `payments.js`, `attachments.js`, and `tenants.js`**
+
+Implement all updates per **Interfaces** using `getUserClient(req)`.
+
+- [ ] **Step 4: Run new + existing invoice, payment, attachment & tenant suites**
+
+Run: `cd api && node --test --test-concurrency=1 test/invoiceFourEyesAndCreditBalance.test.js test/sprint1And2Rebuild.test.js`
+Expected: PASS (`0` failures).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/routes/invoices.js api/src/routes/payments.js api/src/routes/attachments.js api/src/routes/tenants.js api/test/invoiceFourEyesAndCreditBalance.test.js
+git commit -m "feat(invoices,payments): add DRAFT CRUD, 4-eyes adjustments/credit refunds, attachment RLS, and tenant merge sync"
+```
+
+---
+
+### Task 6: Contract `6A` Sync (Future Room-Transfer Cutoff), Renewal Credit Carryover, `daily.js` Final-Period Billing, Append-Only `LATE_FEE` & `FR-039` Debt Reminders (`contracts.js` & `daily.js`)
+
+**Files:**
+- Modify: `api/src/routes/contracts.js:89-145, 813-1060, 2429-2998, 3330-3520, 3817-3865, 4880-5170`
+- Modify: `api/src/jobs/daily.js:1-649`
 - Modify: `api/test/contractCreationFixes.test.js:626-631`
 - Test: `api/test/contractEarlyTerminationBillingSync.test.js`
 
 **Interfaces:**
-- Consumes: `closeContractBillingAndSubscriptionsInTx`, `transferContractCreditsInTx` from `api/src/services/invoiceLifecycle.js` (Task 3); `todayVietnamYmd` from `api/src/services/serviceBilling.js` (Task 2).
+- Consumes: `closeContractBillingAndSubscriptionsInTx`, `transferContractCreditsInTx` (Task 3); `todayVietnamYmd`, `currentVietnamPeriod`, `addDaysYmd` (Task 2); upgraded `generateInvoicesCore` (Task 5).
 - Produces:
-  - Automatic `6A` `SERVICE` + `RENT` closure (`invoice_sync`) across all 6 contract-ending paths: `cancel` (`contracts.js:3415`), `terminate`, `terminate/approve`, `requests/:id/approve` (`TERMINATED_NOW`), `transfer-room`, and `runDailyJobs()` Steps 1a & 1b.
-  - `transferContractCreditsInTx` wired in `POST /:id/transfer-room` (when `transfer_deposit !== false`) AND **inside `runActivationSideEffects(dbClient, contract, ...)` (`contracts.js:2731`)** when `!matchedRsv && contract.parent_contract_id` so BOTH `MANAGER` `POST /:id/activate` (`client`) and `OWNER` `POST /:id/approve-price` (`adminClient`) carry over `credit_balance` from `parent_contract_id` without RLS errors.
-  - `loadContractSubscriptionsAndSchedule` (`contracts.js:125`): filters `status <> 'VOID'` (and `AND status <> 'DRAFT'` when `req.user` is `RESIDENT`, `AC-003.2`), returns `available_credit_balance` and `pending_invoice_adjustments_count`.
-  - Append-only `LATE_FEE` in `api/src/jobs/daily.js` Step 7 (`lines 227-305`): **removes `DELETE FROM invoice_line WHERE invoice_id = $1 AND item_type = 'LATE_FEE'`**, computes BOTH `gross_accrued_late_fee = COALESCE(SUM(il.amount) FILTER (WHERE il.item_type = 'LATE_FEE'), 0)` and `net_existing_late_fee = COALESCE(SUM(il.amount) FILTER (WHERE il.item_type = 'LATE_FEE' OR il.formula_meta->>'adjusts_item_type' = 'LATE_FEE'), 0)`, checks `unpaid_principal = GREATEST(0, (i.total_amount - GREATEST(0, net_existing_late_fee)) - i.paid_amount) > 0`, and **INSERTs** an append-only delta `LATE_FEE` line only when `deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee) > 0` (preserving `FR-064` approved late-fee waivers across subsequent nights).
+  - Automatic `6A` `SERVICE` + `RENT` closure across all 6 contract-ending paths: `cancel` (`contracts.js:3842-3850`), `terminate` (`:2429`), `terminate/approve` (`:2580`), `requests/:id/approve` (`:813`), M06 4-step room-transfer activation inside `runActivationSideEffects` (`:2792-2958`, passing `isRoomTransfer: true`, `roomTransferChildStartDate: sDateStr`, `adjustmentCreatorId: contract.created_by`), and `runDailyJobs()` Steps 1a & 1b.
+  - `loadContractSubscriptionsAndSchedule` (`contracts.js:89-145`): queries active room-transfer child `start_date` (`roomTransferChildStartDate`) and passes it to `buildExpectedInvoiceSchedule`, hides `DRAFT`/`VOID` from `RESIDENT` (`AC-003.2`), and returns `available_credit_balance`, `credit_balances`, and `pending_invoice_adjustments_count`.
+  - Safe `transferContractCreditsInTx` inside `runActivationSideEffects` and `daily.js` Step 1b.
+  - `api/src/jobs/daily.js`:
+    - Step 5: `onlyOngoingContracts: false, excludeSettledDeposits: true` (`FR-066`).
+    - Steps 6 & 7: `'ADJUSTED'` (`paid_amount < total_amount`), `MARK_INVOICE_OVERDUE` & `ACCRUE_LATE_FEE` `audit_log` rows (`actor_id = NULL`), and append-only `deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee)` (`FR-064`).
+    - **Step 8 (`FR-039`, `PRD Mục 10.1 & 12.4` — Automated Multi-Stage Debt Reminders):** queries unpaid `('ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED')` invoices (`paid_amount < total_amount`) against `todayVn = (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`, matching `daysDiff = (todayVn - i.due_date)::int` across `-3` (`PRE_DUE_3D`), `0` (`DUE_TODAY`), and post-due `reminder_days` from `system_setting('billing_config')` (default `[3, 7, 15]` -> `OVERDUE_3D`, `OVERDUE_7D`, `OVERDUE_15D`), deduplicating idempotently via `NOT EXISTS (SELECT 1 FROM notification n WHERE n.user_id = resident_user_id AND n.type = 'PAYMENT_REMINDER' AND n.payload->>'invoice_id' = i.id::text AND n.payload->>'reminder_stage' = stage_key)` and inserting `notification(org_id, user_id, title, content, type, payload)` + `SEND_DEBT_REMINDER` `audit_log` (`actor_id = NULL`).
 
 - [ ] **Step 1: Write the failing integration tests in `api/test/contractEarlyTerminationBillingSync.test.js`**
 
 Write integration tests asserting:
-1. Pre-move-in `POST /api/v1/contracts/:id/terminate` flips open subscriptions to `'TERMINATED'` (`0 ₫`), auto-`VOID`s unpaid `DRAFT` invoices, and creates a `PENDING_APPROVAL` `VOID` `invoice_adjustment` for unpaid `ISSUED` invoices.
-2. Mid-month `POST /api/v1/contracts/:id/terminate` (`terminated_date = '2028-06-12'`) preserves `'2028-05'` (`PAID`) 100% and creates `PENDING_APPROVAL` `ADJUST` rows for BOTH `RENT` and `SERVICE` on `'2028-06'` (`PAID`).
-3. Credit transfer across BOTH `transfer-room` (`transfer_deposit: true`) AND `renew` with `>10%` rent deviation activated by `OWNER` via `POST /api/v1/contracts/:id/approve-price` (`parent_contract_id` `credit_balance` -> `'TRANSFERRED'`, child contract -> `'AVAILABLE'`, `reason_type = 'TRANSFERRED_IN'`, zero RLS error).
-4. `GET /api/v1/contracts/:id` as `RESIDENT` omits `DRAFT` and `VOID` invoices (`AC-003.2`).
-5. **Review Focus #2 pin (`daily.js` Step 7 append-only `LATE_FEE` & `FR-064` waiver preservation):**
-   - Day 8 overdue (`3` chargeable days after 5 grace days) inserts `LATE_FEE` line `#1` (`300_000`); `OWNER` approves an `FR-064` `adjustment_target = 'LATE_FEE'` waiver of `-200_000` (`gross_accrued_late_fee = 300_000`, `net_existing_late_fee = 100_000`); Day 9 overdue (`4` chargeable days, `expectedFee = 400_000`) **keeps line `#1` and the `-200_000` waiver intact** and appends delta line `#2` for **`100_000` only** (`400_000 - 300_000`, NOT `300_000`), leaving `net_existing_late_fee = 200_000`!
-   - After an approved adjustment reduces principal to `0` and neutralizes `-200_000` (`formula_meta.adjusts_item_type = 'LATE_FEE'`), re-running `runDailyJobs()` touches zero lines (`unpaid_principal === 0`, invoice stays `'ADJUSTED'` at `0 ₫`, never flipped to `'OVERDUE'`).
+1. Pre-move-in & mid-month `POST /api/v1/contracts/:id/terminate` (`6A` preserving prior months and syncing `RENT` + `SERVICE`).
+2. **Review Focus #3 future room-transfer pin:** `POST /api/v1/contracts/:id/transfer-room` (`new_start_date = '2028-06-15'`, `transfer_deposit: true`) + scan + submit + `OWNER` `POST /api/v1/contracts/:newId/approve` (running via `adminClient` at `:3336`):
+   - Even though `oldContract.terminated_at` in DB was clamped to `today`, **BOTH `GET /api/v1/contracts/:oldId` (`invoice_schedule` for `'2028-06'`) AND `POST /api/v1/invoices/generate-batch` (`{ contract_id: oldId, period: '2028-06' }`) bill `oldContract` for exact `14/30` days (`01/06–14/06/2028`), while `newContract` bills `16/30` days (`15/06–30/06/2028`) = `30/30` days total!**
+   - Early-activated `renew` keeps `credit_balance` on `oldContract` while `ACTIVE`, then rolls excess credit to `newContract` when `runDailyJobs()` Step 1b expires `oldContract`.
+3. `RESIDENT` `GET /api/v1/contracts/:id` hides `DRAFT`/`VOID` (`AC-003.2`).
+4. **Review Focus #5 pins (`daily.js` Step 5 `excludeSettledDeposits`, Steps 6–7 append-only `LATE_FEE` + `FR-064` waiver, & Step 8 `FR-039` multi-stage debt reminders):**
+   - Step 5 auto-bills unsettled `TERMINATED` contract on `billing_day` and skips settled-deposit contract.
+   - Step 7 preserves `-200_000` `LATE_FEE` waiver across Day 8 -> Day 9 (`deltaFee = 100_000`) and writes `MARK_INVOICE_OVERDUE` / `ACCRUE_LATE_FEE` `audit_log` rows.
+   - Step 8 (`FR-039`): seeding unpaid issued invoices with `due_date` at `todayVn + 3`, `todayVn`, `todayVn - 3`, `todayVn - 7`, and `todayVn - 15` emits exact `1` `PAYMENT_REMINDER` notification + `1` `SEND_DEBT_REMINDER` `audit_log` per stage on the first `runDailyJobs()` run, and emits **`0` duplicates** when `runDailyJobs()` is called a second time on the same day!
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd api && node --test --test-concurrency=1 test/contractEarlyTerminationBillingSync.test.js`
-Expected: FAIL (`DELETE FROM invoice_line` mutates old `LATE_FEE` row, `approve-price` renewal doesn't transfer `credit_balance`, `6A` not wired).
+Expected: FAIL (future room-transfer schedule clamped to `today` / `LATE_FEE` deleted / Step 8 `PAYMENT_REMINDER` missing).
 
 - [ ] **Step 3: Implement updates in `api/src/routes/contracts.js`, `api/src/jobs/daily.js`, and `api/test/contractCreationFixes.test.js:630`**
 
-- Update `api/src/routes/contracts.js` per **Interfaces** (replacing `status <> 'CANCELLED'` at `:125` with `status <> 'VOID'`, subscription `'CANCELLED'` at `:3415` with `'TERMINATED'` while preserving `contract.status = 'CANCELLED'` at `:3410`, wiring `closeContractBillingAndSubscriptionsInTx` into all 5 route termination/transfer paths, and wiring `transferContractCreditsInTx` in `transfer-room` + `runActivationSideEffects`).
-- Update `api/src/jobs/daily.js` per **Interfaces** (`Asia/Ho_Chi_Minh` dates, Steps 1a & 1b `closeContractBillingAndSubscriptionsInTx`, Steps 6 & 7 `'ADJUSTED'` filter with `paid_amount < total_amount`, and append-only `LATE_FEE` delta insertion with `receivable.amount` sync and zero `DELETE`/`UPDATE` on `invoice_line`).
-- Update `api/test/contractCreationFixes.test.js:630` (`'CANCELLED'` -> `'TERMINATED'`).
+Implement all updates per **Interfaces** (preserving M06 reservation expiration in `daily.js` and `contract.status = 'CANCELLED'` at `contracts.js:3842`, updating subscription `'CANCELLED'` -> `'TERMINATED'` at `contracts.js:3847` and `contractCreationFixes.test.js:630`).
 
-- [ ] **Step 4: Run new + existing contract & daily job test suites**
+- [ ] **Step 4: Run new + existing contract, M06 room-transfer & daily job test suites**
 
-Run: `cd api && node --test --test-concurrency=1 test/contractEarlyTerminationBillingSync.test.js test/contractCreationFixes.test.js test/multiBuildingAndFutureContract.test.js`
+Run: `cd api && node --test --test-concurrency=1 test/contractEarlyTerminationBillingSync.test.js test/contractCreationFixes.test.js test/multiBuildingAndFutureContract.test.js test/m06RoomTransferApprovalFlow.test.js`
 Expected: PASS (`0` failures).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add api/src/routes/contracts.js api/src/jobs/daily.js api/test/contractEarlyTerminationBillingSync.test.js api/test/contractCreationFixes.test.js
-git commit -m "feat(contracts,jobs): wire 6A billing sync, renewal/transfer credit carryover, and append-only LATE_FEE"
+git commit -m "feat(contracts,jobs): add 6A sync with future room-transfer cutoff, append-only LATE_FEE, and FR-039 debt reminders"
 ```
 
 ---
 
-### Task 6: Invoices `DRAFT` Line CRUD, Four-Eyes Post-`ISSUED` Approvals, Audit Endpoint & Payments Commutativity (`invoices.js` & `payments.js`)
-
-**Files:**
-- Modify: `api/src/routes/invoices.js:1-738`
-- Modify: `api/src/routes/payments.js:1-520`
-- Test: `api/test/invoiceFourEyesAndCreditBalance.test.js`
-
-**Interfaces:**
-- Consumes: `fn_resolve_invoice_adjustment` (Task 1), `serviceBilling.js` (Task 2), `invoiceLifecycle.js` (Task 3), `checkFourEyesOrWarn` & `roundVND` from `api/src/services/pricing.js`, `idempotencyGuard()` from `api/src/middleware/idempotency.js`.
-- Produces:
-  - Exhaustive `'VOID'` / `'DRAFT'` query updates in `api/src/routes/invoices.js`: `:128` (`inv.status <> 'VOID'`), `:192` (`i2.status <> 'VOID'`), `:225, 249` (`TERMINATED` overlap via `serviceBilling.js`), `:431` (`!['DRAFT', 'VOID'].includes(r.status)` so `DRAFT` never inflates list summary totals, plus hiding `DRAFT` for `RESIDENT`), `:520-570` (`GET /:id` via `getUserClient(req)` returning `404` on `DRAFT` for `RESIDENT` per `AC-003.2`, logging `ACCESS_DENIED` on cross-building staff access per `AC-019.1`, and returning `adjustments` array), `:612, 631, 712` (`VOID` / `ADJUSTED`), plus graceful catch of `err.code === '23505'` on `idx_invoice_unique_active_period` in `generateInvoicesCore` (skipping concurrent duplicate period instead of `500`).
-  - Shared `issueDraftInvoiceInTx(client, { inv, dueDate, note, actorId, orgId })` used across `POST /api/v1/invoices/generate-batch` (`auto_issue`), `POST /api/v1/invoices/:id/issue`, AND `PATCH /api/v1/invoices/:id/status` (`DRAFT -> ISSUED`): when `nextTotal === 0` (e.g. 100% covered by `credit_balance` or manual discount), transitions directly to `status = 'PAID'`, records `issued_by` + `issued_at = NOW()`, creates **zero** `receivable` rows, sends `INVOICE_ISSUED` (`0 ₫ — đã bù trừ đủ`), and writes `audit_log`.
-  - `POST /api/v1/invoices/generate-batch` (`MANAGER` + `idempotencyGuard()`): FIFO `applyAvailableCreditsInTx` (`FR-033`) + `issueDraftInvoiceInTx` when `auto_issue === true`.
-  - `POST /api/v1/invoices/:id/lines` (`MANAGER` + `idempotencyGuard()`), `PATCH /api/v1/invoices/:id/lines/:lineId` (`MANAGER`), `DELETE /api/v1/invoices/:id/lines/:lineId` (`MANAGER`) — `DRAFT` only (`409 IMMUTABLE_AFTER_ISSUED`), writes `audit_log` `before`/`after` (`AC-020.1`).
-  - `POST /api/v1/invoices/:id/issue` (`MANAGER` + `idempotencyGuard()`) & `PATCH /api/v1/invoices/:id/status` (`MANAGER` + `idempotencyGuard()`, normalizing `'CANCELLED' -> 'VOID'`, checking `paid_amount > 0 -> 409 ALREADY_PAID` **before** `inv.status !== 'DRAFT' -> 409 REQUIRES_FOUR_EYES_ADJUSTMENT`, replacing manual `DRAFT` discounts ONLY via `DELETE FROM invoice_line WHERE invoice_id = $1 AND item_type = 'ADJUSTMENT' AND credit_id IS NULL` + `recalculateDraftInvoiceTotalsInTx` + `audit_log` `before`/`after` so `credit_id IS NOT NULL` lines are never orphaned, and enforcing `confirm_invoice_code === inv.invoice_code` when supplied on `DRAFT -> VOID`).
-  - `POST /api/v1/invoices/:id/adjust` (`MANAGER` + `idempotencyGuard()`, supporting `adjustment_target IN ('MANUAL', 'LATE_FEE', 'SERVICE', 'RENT')` and validating `delta_amount < 0 && Math.abs(delta_amount) <= net_existing_late_fee` when `adjustment_target === 'LATE_FEE'` per `FR-064`), `GET /api/v1/invoices/adjustments`, `POST /api/v1/invoices/:id/adjustments/:adjId/approve` & `/reject` (`OWNER`, `MANAGER`, `SYS_ADMIN` + `idempotencyGuard()`, executing `fn_resolve_invoice_adjustment`), and `GET /api/v1/invoices/:id/audit-logs` (returning chronological logs across `invoice`, `invoice_line`, `invoice_adjustment`, `payment`, `credit_balance`).
-  - Payment distinction in `api/src/routes/payments.js`:
-    - `POST /api/v1/payments` (`MANAGER` + `idempotencyGuard()`): rejects BOTH `inv.status IN ('DRAFT', 'VOID')` (`409 INVALID_STATUS`) AND `Number(inv.total_amount) - Number(inv.paid_amount) <= 0` (`409 ALREADY_PAID`).
-    - `PATCH /api/v1/payments/:id/confirm` (`MANAGER` + `idempotencyGuard()`): rejects **ONLY** `inv.status IN ('DRAFT', 'VOID')`; if `remaining` shrank to `0` (or `< pay.amount`) due to an approved downward adjustment after the resident already transferred funds, `applyPaymentToInvoice` clamps `invoice.paid_amount = inv.total_amount`, sets `status = 'PAID'` (or keeps `'ADJUSTED'` when `total_amount === 0`), and mints `credit_balance` (`reason_type = 'OVERPAYMENT'`, `source_payment_id = pay.id`, `amount = currentPaid + payAmount - inv.total_amount`).
-
-- [ ] **Step 1: Write the failing API integration tests in `api/test/invoiceFourEyesAndCreditBalance.test.js`**
-
-Write integration tests asserting:
-1. `DRAFT` line CRUD (`POST/PATCH/DELETE /invoices/:id/lines`) & `PATCH /invoices/:id/status` `{ adjustment_amount }`: updates totals with `roundVND`, **preserves `credit_id IS NOT NULL` `ADJUSTMENT` lines while releasing surplus `credit_balance`** if `subtotal_amount + manualAdj < credit_offset_amount`, excludes `DRAFT` from `GET /invoices` summary debt totals, and logs `before`/`after` in `GET /invoices/:id/audit-logs`; post-`ISSUED` direct edits/voids return `409` (`IMMUTABLE_AFTER_ISSUED` / `ALREADY_PAID` / `REQUIRES_FOUR_EYES_ADJUSTMENT`).
-2. Four-eyes RBAC & `FR-064` late-fee waiver matrix: self-approval -> `403 SELF_APPROVAL`; `SYS_ADMIN` on `VOP-A` -> `403`; `OWNER` of `VOP` and 2nd `MANAGER` (`mgr2VopA`) -> `200` (including `POST /:id/adjust` with `adjustment_target = 'LATE_FEE'`, rejecting `Math.abs(delta_amount) > net_existing_late_fee` with `422`); `OWNER` direct `POST /:id/adjust` -> `403`; `reject` frees the partial unique index for resubmission.
-3. **Review Focus #1 & #4 (Order A vs Order B Commutativity) pin:**
-   - **Order A:** Direct payment `10_400_000` -> `PAID` (subsequent direct `POST /payments` on same `PAID` invoice returns `409 ALREADY_PAID`), then `SERVICE` `-200_000` + `RENT` `-5_000_000` adjustments approved -> `total_amount = 5_200_000`, `paid_amount = 5_200_000`, total `credit_balance = 5_200_000`.
-   - **Order B:** Resident reports `10_400_000` bank transfer (`PENDING_CONFIRMATION`) while invoice is `ISSUED`, then `SERVICE` `-200_000` + `RENT` `-5_000_000` (or full `-10_400_000` down to `0 ₫`) adjustments are approved, then Manager calls `PATCH /api/v1/payments/:id/confirm` -> succeeds (`200`) and produces identical `total_amount`, `paid_amount`, and `credit_balance` as Order A!
-4. Next-period `POST /invoices/generate-batch` with `Idempotency-Key` auto-offsets `credit_balance` FIFO (`credit_offset_amount`), issuing `0 ₫` net `DRAFT`s via `generate-batch` (`auto_issue: true`), `POST /:id/issue`, OR `PATCH /:id/status` (`{ status: 'ISSUED' }`) transitions directly to `'PAID'` with zero `receivable`, and voiding an unpaid `DRAFT` (`confirm_invoice_code`) restores `credit_balance`.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && node --test --test-concurrency=1 test/invoiceFourEyesAndCreditBalance.test.js`
-Expected: FAIL (`404` on `/lines`, `/adjust`, `/audit-logs`, `credit_balance` not minted/offset).
-
-- [ ] **Step 3: Implement route updates in `api/src/routes/invoices.js` and `api/src/routes/payments.js`**
-
-Implement all routes and query filters in `api/src/routes/invoices.js` and `api/src/routes/payments.js` per **Interfaces** using `getUserClient(req)` (never `adminPool` for business queries).
-
-- [ ] **Step 4: Run new + existing white-box/black-box invoice & payment suites**
-
-Run: `cd api && node --test --test-concurrency=1 test/invoiceFourEyesAndCreditBalance.test.js test/remediationR01ToR24.test.js`
-Expected: PASS (`0` failures).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/routes/invoices.js api/src/routes/payments.js api/test/invoiceFourEyesAndCreditBalance.test.js
-git commit -m "feat(invoices,payments): add DRAFT line CRUD, 4-eyes adjustments, Order A/B commutativity, and credit_balance offset"
-```
-
----
-
-### Task 7: M06 Two-Step Deposit Settlement (`credit_balance` Separation) & KPI / `RP-08` Reports (`deposits.js`, `reports.js`, `audit-logs.js`)
+### Task 7: M06 Two-Step Deposit Settlement (`remaining_service_debt` `RP-07` Guard, `FORCE RLS` Locks, `unbilled_final_period`) & KPI / `RP-08` `.xlsx` Reports (`deposits.js`, `reports.js`, `audit-logs.js`)
 
 **Files:**
 - Modify: `api/src/services/depositSettlement.js:1-331`
 - Modify: `api/src/routes/deposits.js:110-270, 735-2458`
-- Modify: `api/src/routes/reports.js:1-826`
+- Modify: `api/src/routes/reports.js:1-840`
 - Modify: `api/src/routes/admin/audit-logs.js:1-215`
+- Modify: `api/test/m06Phase3P2Features.test.js:931-938`
 - Test: `api/test/settlementCreditAndKpiReports.test.js`
 
 **Interfaces:**
-- Consumes: upgraded `fn_apply_deposit_settlement_accounting`, `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits`, `fn_recommit_returned_settlement_credits` (Task 1); `todayVietnamYmd` / `currentVietnamPeriod` (Task 2).
+- Consumes: `fn_lock_invoices_for_authorized_viewer`, `fn_apply_deposit_settlement_accounting`, `fn_update_deposit_refund_bank_info`, `fn_restore_returned_settlement_credits`, `fn_recommit_returned_settlement_credits` (Task 1); `todayVietnamYmd`, `currentVietnamPeriod`, `resolveContractLastActiveDay` (Task 2); `toUtf8BomCsv`, `toXlsxBuffer` from `api/src/utils/csv.js`.
 - Produces:
   - `computeFinalSettlementWithCredit({ heldBefore, availableCredit, serviceDebt, rentDebt, items })` in `api/src/services/depositSettlement.js`:
-    - Step 1 (`credit_balance` — tenant's overpaid invoice cash, `FR-040`): offsets `rentDebt` first (matching `v_paid_to_rent := LEAST(v_paid, v_rent_effective)`), then `serviceDebt`, then excess damages (`Math.max(0, sumItems - heldBefore)`), yielding `credit_applied_to_invoices`, `credit_applied_to_damages`, and `credit_refund_amount`.
-    - Step 2 (`deposit` — strict `FR-068` & `RP-07`): applies `heldBefore` ONLY to `items` and `remainingServiceDebt` (NEVER `remainingRentDebt`), yielding `deposit_refund_amount = Math.max(0, heldBefore - sumItems - remainingServiceDebt)`, `shortfall = Math.max(0, sumItems + remainingServiceDebt - heldBefore - credit_applied_to_damages)`, and `total_payout_amount = deposit_refund_amount + credit_refund_amount` (keeping `refund_amount = deposit_refund_amount`, `outstanding_debt = serviceDebt`, `rent_debt = rentDebt`).
-  - `isSettlementSnapshotStale(savedSettlement, liveState)` in `depositSettlement.js`: compares `availableCredit` against `savedSettlement.available_credit` (when defined) in addition to `serviceDebt`, `rentDebt`, `heldAmount`, and `openInvoices`.
-  - Full M06 Phase 2 compatibility in `api/src/routes/deposits.js`:
-    - `calculateContractOpenDebts` (`:116-184`) & `FOR UPDATE` invoice locks (`:1291, 1957`): include `'ADJUSTED'` in `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`; `LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id` computing `rent_net` (`il.credit_id IS NULL AND (il.item_type = 'RENT' OR (il.item_type = 'ADJUSTMENT' AND ia.adjustment_target = 'RENT'))`) and `service_net` (`il.credit_id IS NULL AND il.item_type <> 'RENT' AND NOT (il.item_type = 'ADJUSTMENT' AND COALESCE(ia.adjustment_target, '') = 'RENT')`), allocating `i.credit_offset_amount` `RENT`-first (`credit_to_rent = LEAST(credit_offset_amount, rent_net)`, `credit_to_service = LEAST(credit_offset_amount - credit_to_rent, service_net)`) to derive `rent_effective` & `service_effective` matching `fn_apply_deposit_settlement_accounting` 100%.
-    - `checkSettlementPreconditions`: adds `no_pending_invoice_adjustments` (`409 PENDING_INVOICE_ADJUSTMENT` when `invoice_adjustment.status = 'PENDING_APPROVAL'` exists on contract).
-    - `POST /:id/settlement` & `POST /:id/settlement/approve`: `validateRefundBankInfo` validates `refundAmount: total_payout_amount`; `approve` commits immediately via `commitSettlementAccounting` ONLY when `total_payout_amount === 0`, and transitions to `'APPROVED_PENDING_PAYOUT'` (`accounting_committed_at = null`) whenever `total_payout_amount > 0`.
-    - `POST /:id/payout` (`:1903-2103`): computes `depositRefundAmount` (`isAlreadyCommitted ? Number(dep.amount_held || 0) : Number(settlement.deposit_refund_amount ?? settlement.refund_amount ?? 0)`), `creditRefundAmount` (`Number(settlement.credit_refund_amount || 0)`), and `totalPayoutAmount = depositRefundAmount + creditRefundAmount`; allows payout when `totalPayoutAmount > 0`; validates `validateRefundBankInfo` on `refundAmount: totalPayoutAmount`; calls `fn_recommit_returned_settlement_credits(id)` when `isAlreadyCommitted && creditRefundAmount > 0`; inserts `deposit_transaction(type = 'refund', amount = depositRefundAmount)` **ONLY when `depositRefundAmount > 0`** (`RP-07` purity!).
-    - `POST /:id/payout-returned` (`:2165-2252`): accepts `'DEDUCTED_FULL'` alongside `'REFUNDED'` / `'PARTIALLY_REFUNDED'` when `Boolean(dep.settlement?.payout_at) && BigInt(dep.amount_held || 0) === 0n && totalPayoutAmt > 0`; inserts `deposit_transaction(type = 'refund_reversal')` ONLY when `depositRefundAmt > 0`, sets `deposit.amount_held = depositRefundAmt` (`0` when `depositRefundAmt === 0`) and `status = 'RETURNED'`, and calls `fn_restore_returned_settlement_credits(id, trimmedReason)` (`-> 'PENDING_SETTLEMENT_PAYOUT'`) when `creditRefundAmt > 0`.
-    - `GET /:id/settlement/pdf` (`:735-929`, `FR-024`) & `GET /:id/audit-logs` (`:2396`): `settlement/pdf` renders separated `credit_balance` reconciliation rows (`available_credit`, `credit_applied_to_invoices`, `credit_applied_to_damages`, `credit_refund_amount`), `deposit_refund_amount`, and `total_payout_amount`; `audit-logs` includes `al.entity = 'credit_balance' AND al.entity_id IN (SELECT cb.id FROM credit_balance cb WHERE cb.settlement_deposit_id = $1::uuid)`.
-  - `GET /api/v1/reports/dashboard` & `GET /api/v1/reports/summary` (`reports.js` via `getUserClient(req)`): uses `currentVietnamPeriod()` / `todayVietnamYmd()` (`:14-24, 47, 175, 188, 697, 767-770`); excludes `'DRAFT'` and `'VOID'` (`:92, 93, 709-712`); computes `billed` (`SUM(total_amount + credit_offset_amount)`), `collected` (*Tiền thực thu* from `CONFIRMED` `payment` in `Asia/Ho_Chi_Minh`, `PRD 15.3`), `invoice_settled` (`SUM(paid_amount + credit_offset_amount)`, `PRD 15.1`), `outstanding` (including `'ADJUSTED'`), and `pending_invoice_adjustments` count on `/dashboard`.
-  - Unified `RP-08` in `api/src/routes/admin/audit-logs.js` (zero duplicate endpoint): exports 11-entity `FINANCIAL_AUDIT_ENTITIES = ['invoice', 'invoice_line', 'invoice_adjustment', 'payment', 'credit_balance', 'receivable', 'deposit', 'deposit_transaction', 'reservation', 'service_subscription', 'service_catalog']` on `GET /api/v1/audit-logs?scope=financial` (JSON + `format=csv`); allows `SYS_ADMIN` & `OWNER` on all scopes and `MANAGER` specifically when `scope === 'financial'` (returning `403` for `MANAGER` when `scope !== 'financial'`).
+    - Returns `{ credit_applied_to_rent, credit_applied_to_service, credit_applied_to_invoices, credit_applied_to_damages, credit_refund_amount, remaining_rent_debt, remaining_service_debt, covered_service_debt, uncovered_items_shortfall, deposit_refund_amount, refund_amount, total_payout_amount, shortfall, outstanding_debt, rent_debt }` where **`remaining_service_debt = Math.max(0, serviceDebt - credit_applied_to_service)`** and **`covered_service_debt = Math.min(Math.max(0, heldBefore - sumItems), remaining_service_debt)`** (`RP-07` zero double-deduction invariant!).
+  - `isSettlementSnapshotStale(savedSettlement, liveState)`: compares `availableCredit` against `savedSettlement.available_credit` in addition to `serviceDebt`, `rentDebt`, `heldAmount`, and `openInvoices`.
+  - `api/src/routes/deposits.js`:
+    - `calculateContractOpenDebts`: `'ADJUSTED'` included + cross-bucket negative spill + `RENT`-first `credit_offset_amount` allocation matching `fn_apply_deposit_settlement_accounting` 100%.
+    - `checkSettlementPreconditions` (`:201`): derives `lastActiveDayYmd` via `resolveContractLastActiveDay` (including `roomTransferChildStartDate`) and `endPeriod = lastActiveDayYmd.slice(0, 7)` (so `'2026-06-01'` transfer yields `endPeriod = '2026-05'`), adds blocking `no_pending_invoice_adjustments` + `no_pending_credit_refunds`, and returns non-blocking `unbilled_final_period: { has_unbilled_period, period: endPeriod, active_days }`.
+    - `POST /:id/settlement/approve` (`:1324, 1419`), `commitSettlementAccounting` (`:1209`), & `POST /:id/payout` (`:1957, 1982`): **locks contract invoices via `SELECT * FROM fn_lock_invoices_for_authorized_viewer($1, NULL)`** (never raw `SELECT ... FROM invoice ... FOR UPDATE` on `OWNER` session!), and **computes `coveredServiceDebt = Math.min(remainingServiceDebt, remainingDepositToDeduct)` using post-credit `remainingServiceDebt = Math.max(0, liveDebts.serviceDebt - creditAppliedToService)`** (NEVER passing raw `liveDebts.serviceDebt`!).
+    - `POST /:id/payout-returned` & `GET /:id/settlement/pdf` & `GET /:id/audit-logs`: full 2-step M06 `credit_balance` separation (`DEDUCTED_FULL -> RETURNED` when `creditRefundAmt > 0`, `RP-07` purity).
+  - `GET /api/v1/reports/dashboard` & `GET /api/v1/reports/summary` (`reports.js` via `getUserClient(req)`):
+    - `billed`, net `collected` (subtracting `REFUNDED_DIRECT` + paid-out `REFUNDED_IN_SETTLEMENT`), `invoice_settled`, `AC-016.1` aging buckets (`current_not_due`, `bucket_0_15`, `bucket_16_30`, `bucket_31_60`, `bucket_over_60`), BOTH `pending_invoice_adjustments` and `pending_credit_refunds` in `/dashboard` `kpis`, AND **`?format=csv` / `?format=xlsx` (`toXlsxBuffer`, `FR-058`)** on `/summary` (`section=revenue|aging|all`).
+  - `GET /api/v1/audit-logs` (`admin/audit-logs.js` + `api/test/m06Phase3P2Features.test.js:931-938`): 12-entity `FINANCIAL_AUDIT_ENTITIES`, allows `MANAGER` when `scope === 'financial'`, and supports **both `format=csv` and `format=xlsx` (`toXlsxBuffer`, `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `FR-058`)**.
 
 - [ ] **Step 1: Write the failing settlement & KPI report tests in `api/test/settlementCreditAndKpiReports.test.js`**
 
 Write integration tests asserting:
-1. `POST /api/v1/deposits/:id/settlement` returns `409 PENDING_INVOICE_ADJUSTMENT` while an `invoice_adjustment` is `PENDING_APPROVAL`, and `409 SETTLEMENT_SNAPSHOT_STALE` on `approve`/`payout` if `available_credit` changes after submission.
-2. **Review Focus #5 pins:**
-   - **Case A0 (`'ADJUSTED'` mixed `RENT` + `SERVICE` debt split):** On an unpaid `'ADJUSTED'` invoice (`RENT = 12_000_000`, approved `RENT` `ADJUSTMENT = -7_200_000`, `SERVICE = 1_000_000`, approved `SERVICE` `ADJUSTMENT = -600_000`, `total_amount = 5_200_000`), `GET /api/v1/deposits/:id/settlement` and `POST /:id/settlement` compute `rent_debt = 4_800_000` and `outstanding_debt = 400_000` (never letting `-7_200_000` wipe out `serviceDebt`), deducting `400_000` from deposit and leaving `4_800_000` `RENT` `RECEIVABLE_AFTER_MOVE_OUT`.
-   - **Case A (`total_payout_amount === 0` approved by `OWNER`):** `heldBefore = 5_000_000`, `availableCredit = 2_000_000`, `rentDebt = 3_000_000`, `serviceDebt = 1_500_000`, `DAMAGE = 3_500_000` -> Step 1 `credit_balance` pays `2_000_000` of `rentDebt` (leaving `1_000_000` `RECEIVABLE_AFTER_MOVE_OUT` rent debt); Step 2 `deposit` deducts `3_500_000` damage + `1_500_000` service debt (`total_payout_amount = 0`); `OWNER` approves immediately -> `DEDUCTED_FULL` with zero RLS error!
-   - **Case B (Damages consume 100% of deposit `deposit_refund_amount = 0`, while `credit_refund_amount = 1_800_000 > 0`):** `heldBefore = 6_000_000`, `DAMAGE = 6_000_000`, `availableCredit = 1_800_000`, zero debt -> `approve` transitions to `'APPROVED_PENDING_PAYOUT'` (`total_payout_amount = 1_800_000`); Resident updates bank account via `PATCH /:id/bank-info` (`200`); `GET /:id/settlement/pdf` HTML includes `1.800.000 ₫` total payout (`FR-024`); Manager executes `POST /:id/payout` with UNC -> status becomes `'DEDUCTED_FULL'`, `credit_balance.status === 'REFUNDED_IN_SETTLEMENT'`, AND `deposit_transaction` has ONLY the `6_000_000` `deduct` row (`0` `refund` rows, so `RP-07` ledger `closing_held === 0` with zero distortion!); `POST /:id/payout-returned` accepts `'DEDUCTED_FULL'` -> `'RETURNED'` (`credit_balance.status === 'PENDING_SETTLEMENT_PAYOUT'`, locked against invoice offset) -> clearing `bank_info` causes re-issued `POST /:id/payout` (`BANK_TRANSFER`) to return `422` until `PATCH /:id/bank-info` restores valid bank account -> re-issued `POST /:id/payout` -> `'DEDUCTED_FULL'` & `credit_balance.status === 'REFUNDED_IN_SETTLEMENT'` again!
-3. KPI Reports (`GET /api/v1/reports/dashboard` & `/summary`): M1 (`10M` paid, `-2M` adjusted -> `2M` credit) + M2 (`10M` subtotal, `2M` credit offset, `8M` cash paid in M2) -> M1 `billed = 8M`, M2 `billed = 10M`, M2 `collected = 8M` (*Tiền thực thu*, `PRD 15.3`), M2 `invoice_settled = 10M` (`PRD 15.1`), `DRAFT`/`VOID` excluded.
-4. `GET /api/v1/audit-logs?scope=financial` (`&format=csv`) returns all 11 `FINANCIAL_AUDIT_ENTITIES` (including building-scoped `'service_catalog'`) for `OWNER` and building-scoped `MANAGER`, while `GET /api/v1/audit-logs?limit=5` (without `scope=financial`) still returns `403` for `MANAGER`.
+1. `409 PENDING_INVOICE_ADJUSTMENT`, `409 PENDING_CREDIT_REFUND`, `unbilled_final_period` (`has_unbilled_period: true -> false` after `generate-batch`), and `409 SETTLEMENT_SNAPSHOT_STALE` when `available_credit` changes.
+2. **Review Focus #1 & #2 pins:**
+   - **Case A0 (`'ADJUSTED'` mixed `RENT` + `SERVICE` debt split & cross-bucket negative spill):** exact match between JS preview and SQL `fn_apply_deposit_settlement_accounting`.
+   - **Case A1 (Zero `UTILITY_DEBT` double-deduction & `OWNER` `FORCE RLS` approve when `total_payout_amount > 0`):** `heldBefore = 5_000_000`, `availableCredit = 1_500_000`, `rentDebt = 0`, `serviceDebt = 1_500_000`, `items = []` -> `remaining_service_debt = 0`, `covered_service_debt = 0`, `deposit_refund_amount = 5_000_000`, `credit_refund_amount = 0`; **`OWNER` calling `POST /api/v1/deposits/:id/settlement/approve` succeeds (`200`, `'APPROVED_PENDING_PAYOUT'`) under `FORCE RLS`**, and after `MANAGER` `POST /:id/payout`, `deposit_transaction` has **zero `UTILITY_DEBT` `deduct` rows** (only `1` `refund` row of `5_000_000`), and `GET /api/v1/reports/deposit-ledger` (`RP-07`) has `closing_held === 0`!
+   - **Case A (`total_payout_amount === 0` approved by `OWNER`)** & **Case B (`deposit_refund_amount = 0`, `credit_refund_amount = 1_800_000 > 0` -> `APPROVED_PENDING_PAYOUT` -> `bank-info` -> `settlement/pdf` -> `payout` -> `DEDUCTED_FULL` with `0` `deposit_transaction` `refund` rows -> `payout-returned` -> `RETURNED` -> `payout` reissue)**.
+3. KPI Reports (`/dashboard` & `/summary`): `billed = 8M / 10M`, net `collected = 7.5M` (`credit_refunded_direct = 1M`, `credit_refunded_settlement = 0.5M`), `invoice_settled = 10M`, `pending_invoice_adjustments` & `pending_credit_refunds` counts on `/dashboard`, AND `GET /api/v1/reports/summary?section=aging&format=xlsx` returns `200` with PK zip magic bytes `0x50 0x4B` (`FR-058`).
+4. `GET /api/v1/audit-logs?scope=financial` returns all **12** `FINANCIAL_AUDIT_ENTITIES` for `OWNER` and `MANAGER` across JSON, `&format=csv`, AND `&format=xlsx` (`0x50 0x4B` valid `.xlsx` buffer, `FR-058`), while unscoped `/audit-logs` returns `403` for `MANAGER`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd api && node --test --test-concurrency=1 test/settlementCreditAndKpiReports.test.js`
-Expected: FAIL (`no_pending_invoice_adjustments` missing, `deposit_refund_amount = 0` + `credit_refund_amount > 0` rejected at `/bank-info` / `/payout` / `/payout-returned`, `scope=financial` `403` for `MANAGER`).
+Expected: FAIL (`UTILITY_DEBT` double-deducted / `OWNER` `FOR UPDATE` `0` rows / `format=xlsx` unsupported / `scope=financial` `403` for `MANAGER`).
 
-- [ ] **Step 3: Implement updates in `depositSettlement.js`, `deposits.js`, `reports.js`, and `admin/audit-logs.js`**
+- [ ] **Step 3: Implement updates in `depositSettlement.js`, `deposits.js`, `reports.js`, `admin/audit-logs.js`, and `api/test/m06Phase3P2Features.test.js:931-938`**
 
-Implement all settlement, payout, `payout-returned`, `settlement/pdf`, `RP-07`-safe ledger, KPI, and 11-entity `RP-08` updates per **Interfaces** and Spec Sections `5.5.3`–`5.5.4`.
+Implement all settlement, `remaining_service_debt` / `covered_service_debt`, `fn_lock_invoices_for_authorized_viewer`, `unbilled_final_period`, KPI, 12-entity `RP-08`, and `format=xlsx` updates per **Interfaces**.
 
 - [ ] **Step 4: Run new + all existing M06 & white-box regression suites**
 
-Run: `cd api && node --test --test-concurrency=1 test/settlementCreditAndKpiReports.test.js test/depositCollectAndRefund.test.js test/m06Phase1P0Fixes.test.js test/m06Phase2OwnerApprovalAndEscalation.test.js test/m06Phase2PayoutAndReturnedFlow.test.js test/m06Phase3P2Features.test.js test/fullWebsiteWhiteBlackBox.test.js`
+Run: `cd api && node --test --test-concurrency=1 test/settlementCreditAndKpiReports.test.js test/depositCollectAndRefund.test.js test/m06Phase1P0Fixes.test.js test/m06Phase2OwnerApprovalAndEscalation.test.js test/m06Phase2PayoutAndReturnedFlow.test.js test/m06Phase3P2Features.test.js test/m06RoomTransferApprovalFlow.test.js test/m06TransferAndReservationRls.test.js test/fullWebsiteWhiteBlackBox.test.js`
 Expected: PASS (`0` failures across every single M06 and white-box test!).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add api/src/services/depositSettlement.js api/src/routes/deposits.js api/src/routes/reports.js api/src/routes/admin/audit-logs.js api/test/settlementCreditAndKpiReports.test.js
-git commit -m "feat(settlement,reports): integrate credit_balance with M06 2-step payout, settlement PDF, PRD 15.1-15.3 KPIs, and 11-entity RP-08"
+git add api/src/services/depositSettlement.js api/src/routes/deposits.js api/src/routes/reports.js api/src/routes/admin/audit-logs.js api/test/m06Phase3P2Features.test.js api/test/settlementCreditAndKpiReports.test.js
+git commit -m "feat(settlement,reports): prevent RP-07 utility double-deduction, add FORCE RLS locks, PRD KPIs, and xlsx exports"
 ```
 
 ---
 
-### Task 8: Frontend Billing/RBAC Helpers & Admin/Owner Services + Invoices UI (`PRD 8.2`, `16.1`, `16.2`)
+### Task 8: Frontend Billing/RBAC Helpers & Admin/Owner Services, Invoices, `AC-016.1` Receivables & Notifications UI
 
 **Files:**
 - Create: `frontend/src/utils/billing.js`
@@ -451,47 +447,42 @@ git commit -m "feat(settlement,reports): integrate credit_balance with M06 2-ste
 - Modify: `frontend/src/services/api.js:1-79`
 - Modify: `frontend/src/hooks/usePermission.js:25-52`
 - Modify: `frontend/src/services/invoices.service.js:1-20`
+- Modify: `frontend/src/services/payments.service.js:1-20`
 - Modify: `frontend/src/services/services.service.js:1-20`
 - Modify: `frontend/src/pages/admin/services/ServiceCatalogPage.jsx`
 - Modify: `frontend/src/pages/admin/services/SubscriptionsPage.jsx`
 - Modify: `frontend/src/pages/admin/invoices/InvoicesPage.jsx`
 - Modify: `frontend/src/pages/admin/invoices/InvoiceDetailPage.jsx`
+- Modify: `frontend/src/pages/admin/payments/PaymentsPage.jsx`
+- Modify: `frontend/src/pages/admin/notifications/NotificationsPage.jsx:31-41`
 - Test: `api/test/frontendBillingHelpers.test.js`
 
 **Interfaces:**
-- Consumes: `createIdempotencyKey`, `withIdempotency` from `frontend/src/utils/idempotency.js`; backend endpoints from Tasks 4 & 6.
+- Consumes: `createIdempotencyKey`, `withIdempotency` from `frontend/src/utils/idempotency.js`; backend endpoints from Tasks 4 & 5.
 - Produces:
-  - `frontend/src/utils/billing.js` (re-exporting `createIdempotencyKey` & `withIdempotency` from `./idempotency.js` — zero duplicate implementation!):
-    - `roundVND(amount)`
-    - `todayVietnamYmd(now)`
-    - `previewSubscriptionProrata({ unitPrice, quantity, startDate, endDate })`
-    - `canConfirmInvoiceVoid(typedCode, expectedInvoiceCode, reason)`
-    - `canActorApproveInvoiceAdjustment({ currentUserId, roleCodes, adjustment, hasBuildingOwner })`
-  - `frontend/src/services/api.js`: Axios request interceptor auto-attaching `Idempotency-Key` (`createIdempotencyKey()`) on mutating `POST`/`PATCH` requests to `/api/v1/invoices`, `/api/v1/payments`, `/api/v1/service-catalog`, `/api/v1/service-subscriptions`, `/api/v1/contracts`, `/api/v1/deposits`, and `/api/v1/resident` when not already set (preserving the key across `401` refresh retries).
-  - `frontend/src/hooks/usePermission.js`: `canManageServiceCatalog: isManager`, `canManageServices: isManager`, `canManageInvoices: isManager`, `canManagePayments: isManager`, `canApproveInvoiceAdjustments: isOwner || isManager || isSysAdmin`, `canViewFinancialAuditLogs: isSysAdmin || isOwner || isManager`.
-  - `invoicesService`: `addLine`, `updateLine`, `deleteLine`, `issue`, `createAdjustment`, `listAdjustments`, `approveAdjustment`, `rejectAdjustment`, `getAuditLogs`.
+  - `frontend/src/utils/billing.js` (re-exporting `createIdempotencyKey` & `withIdempotency`): `roundVND`, `todayVietnamYmd`, `previewSubscriptionProrata`, `canConfirmInvoiceVoid`, `canActorApproveInvoiceAdjustment`, `canActorApproveCreditRefund`, `resolvePrdAgingBucket(daysOverdue)`.
+  - `frontend/src/constants/statuses.js`: `SUBSCRIPTION_STATUS.TERMINATED`, `INVOICE_STATUS.ADJUSTED` & `VOID`, `INVOICE_ADJUSTMENT_STATUS`, `CREDIT_BALANCE_STATUS`.
+  - `frontend/src/services/api.js`: Axios request interceptor auto-attaching `Idempotency-Key` when `!config.headers['Idempotency-Key']` on mutating `POST`/`PATCH`/`DELETE` requests to `/api/v1/invoices`, `/api/v1/payments`, `/api/v1/service-catalog`, `/api/v1/service-subscriptions`, `/api/v1/contracts`, `/api/v1/deposits`, and `/api/v1/resident`.
+  - `frontend/src/hooks/usePermission.js`: `canManageServiceCatalog: isManager`, `canManageServices: isManager`, `canManageInvoices: isManager`, `canManagePayments: isManager`, `canApproveInvoiceAdjustments: isOwner || isManager || isSysAdmin`, `canApproveCreditRefunds: isOwner || isManager || isSysAdmin`, `canViewFinancialAuditLogs: isSysAdmin || isOwner || isManager`.
+  - `PaymentsPage.jsx`: `'ADJUSTED'` in `openCreateModal` (`:229`) **AND full `AC-016.1` Receivables aging upgrade (`:59-64, 868-960`) displaying & exporting `Chưa đến hạn`, `0–15 ngày`, `16–30 ngày`, `31–60 ngày`, `>60 ngày` from `aging_summary_prd`**.
+  - `SubscriptionsPage.jsx` (`TERMINATED` filter pill + `previewSubscriptionProrata`), `InvoicesPage.jsx` (`skipped_contracts` summary display on batch generation per `AC-015.1`), `InvoiceDetailPage.jsx` (`DRAFT` line editor, contextual issue confirm `PRD 16.1`, 2-step `VOID` `PRD 16.2`, 4-eyes `ADJUST`/`LATE_FEE`, `Lịch sử / Kiểm toán` tab `PRD 8.2`), and `NotificationsPage.jsx` (`CREDIT_*`, `INVOICE_ADJUSTMENT_*`, `INVOICE_ADJUSTED`, `INVOICE_VOIDED`, `SERVICE_TERMINATED`, `PAYMENT_REMINDER` labels).
 
-- [ ] **Step 1: Write failing unit tests for frontend billing, 2-step `VOID`, and 4-eyes helpers in `api/test/frontendBillingHelpers.test.js`**
+- [ ] **Step 1: Write failing unit tests for frontend billing, `AC-016.1` aging bucket, 2-step `VOID`, and 4-eyes helpers in `api/test/frontendBillingHelpers.test.js`**
 
 Import `../../frontend/src/utils/billing.js` and `../../frontend/src/constants/statuses.js` in `node:test`, asserting:
-1. `SUBSCRIPTION_STATUS.TERMINATED`, `INVOICE_STATUS.ADJUSTED`, `INVOICE_STATUS.VOID`, and `INVOICE_ADJUSTMENT_STATUS.PENDING_APPROVAL` exist alongside `CANCELLED` display fallback; `billing.js` reuses `createIdempotencyKey` from `frontend/src/utils/idempotency.js`.
-2. `previewSubscriptionProrata` uses `todayVietnamYmd` and `roundVND` (`ROUND(x, -3)`), returns `0 ₫` (`activeDays = 0`) when `endDate < startDate`, and computes `[max(startDate, monthStart) .. endDate]` (`11/30` days for `10/11 -> 20/11`) matching `serviceBilling.js` 100%.
-3. `canConfirmInvoiceVoid` returns `false` unless `String(typedCode || '').trim() === expectedInvoiceCode` AND `String(reason || '').trim().length > 0` (`PRD 16.2`).
-4. `canActorApproveInvoiceAdjustment` returns `false` when `adjustment.status !== 'PENDING_APPROVAL'` or `String(currentUserId) === String(adjustment.created_by)` (4-eyes), returns `false` for `SYS_ADMIN`-only when `hasBuildingOwner === true`, and returns `true` for `OWNER`, 2nd `MANAGER`, or `SYS_ADMIN` when `hasBuildingOwner === false`.
+1. All new status maps exist with `CANCELLED` display fallback; `billing.js` re-exports `createIdempotencyKey` from `./idempotency.js`.
+2. `previewSubscriptionProrata` returns `0 ₫` when `endDate < startDate` and `11/30` days (`roundVND`) for `10/11 -> 20/11`.
+3. `resolvePrdAgingBucket(daysOverdue)` maps `<= 0 -> 'current_not_due'`, `1..15 -> '0_15'`, `16..30 -> '16_30'`, `31..60 -> '31_60'`, `> 60 -> 'over_60'` (`AC-016.1`).
+4. `canConfirmInvoiceVoid`, `canActorApproveInvoiceAdjustment`, and `canActorApproveCreditRefund` enforce 2-step `invoice_code` + non-empty `reason` and 4-eyes / `SYS_ADMIN` fallback rules.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd api && node --test --test-concurrency=1 test/frontendBillingHelpers.test.js`
 Expected: FAIL (`Cannot find module '../../frontend/src/utils/billing.js'`).
 
-- [ ] **Step 3: Implement shared frontend helpers, `api.js` interceptor, and Admin/Owner Services + Invoices pages**
+- [ ] **Step 3: Implement shared frontend helpers, `api.js` interceptor, and Admin/Owner Services, Invoices, Payments & Notifications pages**
 
-- Create `frontend/src/utils/billing.js`; update `statuses.js`, `api.js` (including `/api/v1/resident`), `usePermission.js`, `invoices.service.js`, and `services.service.js`.
-- Update `ServiceCatalogPage.jsx` & `SubscriptionsPage.jsx` (`MANAGER`-only writes, pre-start `0 ₫` / `zero_usage` checkbox, *"Giữ lại dịch vụ (Từ chối hủy)"*, `invoice_sync` 3-scenario toast).
-- Update `InvoicesPage.jsx` & `InvoiceDetailPage.jsx`:
-  - `DRAFT` (`MANAGER`): inline add/edit/delete line controls + contextual *"Phát hành hóa đơn"* confirmation modal (`PRD 16.1`).
-  - `VOID` (both `DRAFT` direct void and post-`ISSUED` `VOID` request): 2-step modal gated by `canConfirmInvoiceVoid` (`PRD 16.2`).
-  - Post-`ISSUED`: *"Lập điều chỉnh / Hủy hóa đơn (4 mắt)"* modal (`MANAGER`, including `adjustment_target = 'LATE_FEE'` *"Miễn/giảm phí phạt chậm (`FR-064`)"* option when net late fee `> 0`), *"Chờ duyệt điều chỉnh"* filter, **Phê duyệt / Từ chối** buttons gated by `canActorApproveInvoiceAdjustment`, and inline **`Lịch sử / Kiểm toán`** tab (`PRD 8.2`) rendering `before`/`after` diffs from `invoicesService.getAuditLogs(id)`.
+Implement all helpers and UI updates per **Interfaces**.
 
 - [ ] **Step 4: Run helper unit tests and frontend lint/build check**
 
@@ -501,54 +492,62 @@ Expected: `frontendBillingHelpers.test.js` PASS, `oxlint` `0` errors, `vite buil
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/utils/billing.js frontend/src/constants/statuses.js frontend/src/services/api.js frontend/src/hooks/usePermission.js frontend/src/services/invoices.service.js frontend/src/services/services.service.js frontend/src/pages/admin/services/ServiceCatalogPage.jsx frontend/src/pages/admin/services/SubscriptionsPage.jsx frontend/src/pages/admin/invoices/InvoicesPage.jsx frontend/src/pages/admin/invoices/InvoiceDetailPage.jsx api/test/frontendBillingHelpers.test.js
-git commit -m "feat(frontend): add billing/4-eyes helpers, DRAFT line editor, 2-step VOID confirm, and invoice audit tab"
+git add frontend/src/utils/billing.js frontend/src/constants/statuses.js frontend/src/services/api.js frontend/src/hooks/usePermission.js frontend/src/services/invoices.service.js frontend/src/services/payments.service.js frontend/src/services/services.service.js frontend/src/pages/admin/services/ServiceCatalogPage.jsx frontend/src/pages/admin/services/SubscriptionsPage.jsx frontend/src/pages/admin/invoices/InvoicesPage.jsx frontend/src/pages/admin/invoices/InvoiceDetailPage.jsx frontend/src/pages/admin/payments/PaymentsPage.jsx frontend/src/pages/admin/notifications/NotificationsPage.jsx api/test/frontendBillingHelpers.test.js
+git commit -m "feat(frontend): add billing/4-eyes helpers, DRAFT line editor, AC-016.1 receivables aging, and invoice audit tab"
 ```
 
 ---
 
-### Task 9: Frontend Resident Portal, Contract Credit View, M06 Deposit Payout UI & KPI / `RP-08` Pages
+### Task 9: Frontend Resident Portal, Contract Credit Refund UI, M06 Deposit Payout UI, `DashboardPage.jsx` KPIs & Reports/Audit `.xlsx` Export (`FR-058`)
 
 **Files:**
 - Modify: `frontend/src/services/resident.service.js:1-45`
+- Modify: `frontend/src/services/reports.service.js`
+- Modify: `frontend/src/services/audit.service.js`
 - Modify: `frontend/src/pages/resident/tabs/ServicesTab.jsx`
 - Modify: `frontend/src/pages/resident/tabs/InvoicesTab.jsx`
+- Modify: `frontend/src/pages/resident/tabs/OverviewTab.jsx`
+- Modify: `frontend/src/pages/resident/tabs/NotificationsTab.jsx:24-78`
 - Modify: `frontend/src/pages/admin/contracts/ContractDetailPage.jsx`
 - Modify: `frontend/src/pages/admin/deposits/DepositsPage.jsx`
+- Modify: `frontend/src/pages/admin/dashboard/DashboardPage.jsx`
 - Modify: `frontend/src/pages/admin/reports/ReportsPage.jsx`
 - Modify: `frontend/src/pages/admin/audit/AuditLogsPage.jsx`
+- Test: `api/test/frontendBillingHelpers.test.js`
 
 **Interfaces:**
-- Consumes: `billing.js` & `statuses.js` (Task 8); backend endpoints from Tasks 4, 5, 6, 7; `auditService` (`GET /api/v1/audit-logs?scope=financial`).
+- Consumes: `billing.js`, `statuses.js`, `invoicesService`, `paymentsService` (Task 8); backend endpoints from Tasks 4, 5, 6, 7.
 - Produces:
-  - `residentService.withdrawCancelService(id)` calling `PATCH /api/v1/resident/services/:id/withdraw-cancel`.
-  - Resident `ServicesTab.jsx` (`0 ₫` pre-start cancel unlock + banner, `previewSubscriptionProrata`, *"Rút yêu cầu hủy"*, `'TERMINATED'` history filter) & `InvoicesTab.jsx` (`available_credit_balance` banner from `/api/v1/resident/overview`, `'ADJUSTED'`/`'VOID'` filters, `formula_meta` Pro-rata breakdown).
-  - `ContractDetailPage.jsx` (`available_credit_balance` card + `'TERMINATED'`/`'VOID'`/`'ADJUSTED'` schedule badges).
-  - `DepositsPage.jsx` (M06 two-step payout aware: displays `available_credit`, `credit_applied_to_invoices`, `credit_applied_to_damages`, `deposit_refund_amount`, `credit_refund_amount`, and `total_payout_amount` across `PENDING_APPROVAL`, `APPROVED_PENDING_PAYOUT`, UNC `payout` modal, and `RETURNED` bank-update/reissue flows; shows `PENDING_APPROVAL` `invoice_adjustment` precondition warning).
-  - `ReportsPage.jsx` & `AuditLogsPage.jsx`: renders `billed` vs `collected` (*Tiền thực thu*, `PRD 15.3`) vs `invoice_settled` (`PRD 15.1`), adds `invoice_line`, `invoice_adjustment`, `credit_balance`, `service_subscription`, `service_catalog` to `ENTITY_OPTIONS` in `AuditLogsPage.jsx`, and links/surfaces `RP-08` CSV export via `/api/v1/audit-logs?scope=financial`.
+  - `residentService.withdrawCancelService(id)` (`PATCH /api/v1/resident/services/:id/withdraw-cancel`), `reportsService.exportSummaryXlsx(params)` & `reportsService.exportSummaryCsv(params)` (`responseType: 'blob'`), and `auditService.exportXlsx(params)` alongside existing `auditService.exportCsv(params)`.
+  - Resident `ServicesTab.jsx` (`0 ₫` pre-start cancel unlock, `previewSubscriptionProrata`, `max={contractEffectiveEndStr}`, *"Rút yêu cầu hủy"*, `'TERMINATED'` history filter, **preserving `cancelTarget` within 400 chars of `<VehiclePlatesBadges plates={cancelTarget.vehicle_plates}` per `parkingPlatesUi.test.js:170-174`**), `InvoicesTab.jsx` & `OverviewTab.jsx` (`:1077, 1285`, excluding `'DRAFT'`/`'VOID'` from summary totals, enabling pay action on `'ADJUSTED'` when `remaining > 0`, `available_credit_balance` banner, `formula_meta` breakdown), and `NotificationsTab.jsx` (`CREDIT_*` -> `invoices` tab routing + `PAYMENT_REMINDER` / `INVOICE_ADJUSTED` labels).
+  - `ContractDetailPage.jsx`: `<StatusBadge status={row.status} domain="subscription" />` (**preserving `row.note` inside `title="Dịch vụ đi kèm theo hợp đồng"` per `contractCreationUi.test.js:104-107`**), `/admin/invoices/${row.actual_invoice.id}` link on schedule, and `credit_balances` card + 4-eyes direct refund request/approve/reject modal (with optional proof image upload, `FR-040`).
+  - `DepositsPage.jsx`: `credit_balance` in `AUDIT_ENTITY_META` (`:76-81`), separated `deposit_refund_amount` / `credit_refund_amount` / `total_payout_amount`, pending adjustment/refund warnings, and 1-click **"Sinh hóa đơn Pro-rata kỳ cuối"** banner when `unbilled_final_period?.has_unbilled_period === true`.
+  - **`DashboardPage.jsx` (`PRD 15.1–15.3`):** plots `billed`, `invoice_settled`, and net `collected` on the 12-month revenue chart, and renders Four-eyes pending queue drill-down cards/badges for `pending_invoice_adjustments` (`-> /admin/invoices`) and `pending_credit_refunds` (`-> /admin/payments`).
+  - **`ReportsPage.jsx` & `AuditLogsPage.jsx` (`AC-016.1`, `FR-058`, `RP-08`):**
+    - `ReportsPage.jsx`: Tab Doanh thu (`RP-01`) renders & exports (`CSV` + `.xlsx`) `billed`, `invoice_settled`, net `collected`, `credit_refunded`; Tab Công nợ (`RP-02`) renders & exports (`CSV` + `.xlsx`) the 4 PRD overdue buckets (`0–15`, `16–30`, `31–60`, `>60` ngày + `Chưa đến hạn`); embeds `<AuditLogsView lockedScope="financial" />` as `'financial-audit'` tab (`RP-08`).
+    - `AuditLogsPage.jsx`: all 12 financial entities in `ENTITY_OPTIONS`, `lockedScope` + `?scope=` support, and **both Xuất CSV & Xuất Excel (`.xlsx`)** buttons (`FR-058`).
 
-- [ ] **Step 1: Extend `api/test/frontendBillingHelpers.test.js` with payout-display & resident status assertions**
+- [ ] **Step 1: Extend `api/test/frontendBillingHelpers.test.js` with `resolveSettlementPayoutSummary` assertions**
 
-Add pure helper tests in `api/test/frontendBillingHelpers.test.js` verifying a `resolveSettlementPayoutSummary(settlement)` helper exported from `frontend/src/utils/billing.js` (computing `{ depositRefund, creditRefund, totalPayout, requiresUncPayout: totalPayout > 0 }` including when `depositRefund === 0 && creditRefund > 0`).
+Add unit test verifying `resolveSettlementPayoutSummary(settlement)` returns `{ depositRefund, creditRefund, totalPayout, requiresUncPayout: totalPayout > 0 }` including when `depositRefund === 0 && creditRefund > 0`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd api && node --test --test-concurrency=1 test/frontendBillingHelpers.test.js`
 Expected: FAIL (`resolveSettlementPayoutSummary is not a function`).
 
-- [ ] **Step 3: Implement `resolveSettlementPayoutSummary` and update Resident, Contract, Deposit Payout, Reports, and Audit UI pages**
+- [ ] **Step 3: Implement `resolveSettlementPayoutSummary` and update Resident, Contract, Deposit, Dashboard, Reports, and Audit UI pages**
 
-- Export `resolveSettlementPayoutSummary` in `frontend/src/utils/billing.js`.
-- Update `resident.service.js`, `ServicesTab.jsx`, `InvoicesTab.jsx`, `ContractDetailPage.jsx`, `DepositsPage.jsx`, `ReportsPage.jsx`, and `AuditLogsPage.jsx` per **Interfaces** and Spec Section `5.6.2`–`5.6.3`.
+Implement all updates per **Interfaces** and Spec Section `5.6`.
 
-- [ ] **Step 4: Run full verification gate (helper tests, frontend lint + Vite build, and full backend test suite)**
+- [ ] **Step 4: Run full verification gate (helper + UI contract tests, frontend lint + Vite build, and full backend test suite)**
 
-Run: `cd frontend && npm run lint && npm run build && cd ../api && npm test`
-Expected: `oxlint` `0` errors, `vite build` succeeds cleanly, and `npm test` passes across all suites (`0` failures).
+Run: `cd api && node --test --test-concurrency=1 test/frontendBillingHelpers.test.js test/parkingPlatesUi.test.js test/contractCreationUi.test.js && cd ../frontend && npm run lint && npm run build && cd ../api && npm test`
+Expected: `parkingPlatesUi.test.js` + `contractCreationUi.test.js` + `frontendBillingHelpers.test.js` PASS, `oxlint` `0` errors, `vite build` succeeds cleanly, and `npm test` passes across all suites (`0` failures).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/utils/billing.js frontend/src/services/resident.service.js frontend/src/pages/resident/tabs/ServicesTab.jsx frontend/src/pages/resident/tabs/InvoicesTab.jsx frontend/src/pages/admin/contracts/ContractDetailPage.jsx frontend/src/pages/admin/deposits/DepositsPage.jsx frontend/src/pages/admin/reports/ReportsPage.jsx frontend/src/pages/admin/audit/AuditLogsPage.jsx api/test/frontendBillingHelpers.test.js
-git commit -m "feat(frontend): complete resident 0 VND cancel, credit_balance banners, M06 2-step payout breakdown, and RP-08 UI"
+git add frontend/src/utils/billing.js frontend/src/services/resident.service.js frontend/src/services/reports.service.js frontend/src/services/audit.service.js frontend/src/pages/resident/tabs/ServicesTab.jsx frontend/src/pages/resident/tabs/InvoicesTab.jsx frontend/src/pages/resident/tabs/OverviewTab.jsx frontend/src/pages/resident/tabs/NotificationsTab.jsx frontend/src/pages/admin/contracts/ContractDetailPage.jsx frontend/src/pages/admin/deposits/DepositsPage.jsx frontend/src/pages/admin/dashboard/DashboardPage.jsx frontend/src/pages/admin/reports/ReportsPage.jsx frontend/src/pages/admin/audit/AuditLogsPage.jsx api/test/frontendBillingHelpers.test.js
+git commit -m "feat(frontend): complete resident 0 VND cancel, credit refunds, Dashboard/RP-02 AC-016.1 KPIs, and RP-08 xlsx export"
 ```
