@@ -1287,7 +1287,16 @@ export function DepositsPage() {
         label: 'Trạng thái',
         align: 'center',
         sortable: true,
-        render: (row) => <StatusBadge status={row.status} domain="deposit" />,
+        render: (row) => (
+          <div className="inline-flex flex-col items-center gap-1">
+            <StatusBadge status={row.status} domain="deposit" />
+            {row.status === 'HELD' && Number(row.amount_held || 0) === 0 ? (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 whitespace-nowrap">
+                Chờ thu cọc
+              </span>
+            ) : null}
+          </div>
+        ),
       },
       {
         key: 'actions',
@@ -1496,6 +1505,7 @@ export function DepositsPage() {
         settlementPreconditions.contract_ended !== false &&
           settlementPreconditions.final_meters_recorded !== false &&
           settlementPreconditions.no_draft_invoices !== false &&
+          settlementPreconditions.final_invoice_issued !== false &&
           isInspectionSatisfied
       )
     : isContractReadyForSettlement;
@@ -2143,6 +2153,17 @@ export function DepositsPage() {
                           Còn hóa đơn bản nháp (<strong>DRAFT</strong>) chưa phát hành hoặc chưa hủy. Vui lòng phát hành hoặc hủy hóa đơn nháp trước khi tất toán.
                         </li>
                       ) : null}
+                      {settlementPreconditions &&
+                      settlementPreconditions.final_invoice_issued === false ? (
+                        <li>
+                          Chỉ số điện/nước kỳ cuối có phát sinh tiêu thụ
+                          {Array.isArray(settlementPreconditions.unbilled_meter_types) &&
+                          settlementPreconditions.unbilled_meter_types.length > 0
+                            ? ` (${settlementPreconditions.unbilled_meter_types.join(', ')})`
+                            : ''}{' '}
+                          nhưng chưa phát hành hóa đơn kỳ cuối. Vui lòng sinh và phát hành hóa đơn kỳ cuối trước khi tất toán (FR-024).
+                        </li>
+                      ) : null}
                       {!isInspectionSatisfied ? (
                         <li>
                           Chưa có biên bản nghiệm thu bàn giao căn hộ có ảnh chụp hiện trạng — vui lòng nghiệm thu phòng hoặc tải lên ít nhất 01 ảnh biên bản kiểm tra ngay bên dưới.
@@ -2183,7 +2204,8 @@ export function DepositsPage() {
                     </Button>
                   ) : null}
                   {settlementPreconditions &&
-                  settlementPreconditions.no_draft_invoices === false ? (
+                  (settlementPreconditions.no_draft_invoices === false ||
+                    settlementPreconditions.final_invoice_issued === false) ? (
                     <Button
                       variant="outline"
                       size="xs"
@@ -2193,7 +2215,9 @@ export function DepositsPage() {
                         navigate('/admin/invoices');
                       }}
                     >
-                      Kiểm tra Hóa đơn nháp
+                      {settlementPreconditions.no_draft_invoices === false
+                        ? 'Kiểm tra Hóa đơn nháp'
+                        : 'Sinh / Phát hành Hóa đơn kỳ cuối'}
                     </Button>
                   ) : null}
                   {(settlementDetail?.apartment_id || settlementDeposit?.apartment_id) &&

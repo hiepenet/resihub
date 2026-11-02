@@ -1,7 +1,9 @@
 /**
  * Deadlines Service (M05 / M06)
- * Xử lý mốc thời hạn hoàn cọc (FR-068) và cảnh báo hợp đồng sắp hết hạn (FR-018)
+ * Xử lý mốc thời hạn hoàn cọc (FR-068 / FR-005) và cảnh báo hợp đồng sắp hết hạn (FR-018)
  */
+
+import { getTodayVnDateStr } from './depositSettlement.js';
 
 function formatDateUtc(date) {
   const y = date.getUTCFullYear();
@@ -11,23 +13,48 @@ function formatDateUtc(date) {
 }
 
 /**
+ * Đọc cấu hình SLA hạn hoàn cọc (sla_config.deposit_refund_days) theo tổ chức (FR-005 / FR-068).
+ * Mặc định 5 ngày nếu chưa cấu hình hoặc giá trị ngoài khoảng hợp lệ.
+ */
+export async function getOrgDepositRefundDays(dbPool, orgId) {
+  if (!dbPool || !orgId) return 5;
+  try {
+    const res = await dbPool.query(
+      `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'sla_config' LIMIT 1`,
+      [orgId]
+    );
+    const raw = Number(res.rows[0]?.value?.deposit_refund_days);
+    if (Number.isFinite(raw) && raw >= 1 && raw <= 90) {
+      return Math.round(raw);
+    }
+  } catch {
+    // Fallback mặc định 5 ngày
+  }
+  return 5;
+}
+
+/**
  * Tính hạn hoàn cọc theo ngày chấm dứt hợp đồng (FR-068):
- * - warnAt: ngày chấm dứt + 3 ngày (cảnh báo BQL)
- * - dueAt: ngày chấm dứt + 5 ngày (quá hạn, báo lên Giám đốc)
+ * - dueAt: ngày chấm dứt + refundDays (mặc định 5 ngày — quá hạn, báo lên Chủ nhà / Giám đốc)
+ * - warnAt: trước hạn 2 ngày (mặc định +3 ngày — cảnh báo BQL)
  *
- * @param {string} terminatedAt Chuỗi ngày YYYY-MM-DD
+ * @param {string|Date} terminatedAt Chuỗi ngày YYYY-MM-DD
+ * @param {number} [refundDays=5] Số ngày hạn hoàn cọc theo sla_config
  * @returns {{warnAt: string, dueAt: string}}
  */
-export function refundDeadline(terminatedAt) {
-  if (!terminatedAt) {
-    const today = new Date();
-    terminatedAt = today.toISOString().split('T')[0];
-  }
-  const parts = typeof terminatedAt === 'string' ? terminatedAt.split('T')[0].split('-').map(Number) : [terminatedAt.getFullYear(), terminatedAt.getMonth() + 1, terminatedAt.getDate()];
+export function refundDeadline(terminatedAt, refundDays = 5) {
+  const dateStr = terminatedAt ? getTodayVnDateStr(terminatedAt) : getTodayVnDateStr();
+  const parts = dateStr.split('-').map(Number);
   const base = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
 
-  const warnDate = new Date(base.getTime() + 3 * 24 * 60 * 60 * 1000);
-  const dueDate = new Date(base.getTime() + 5 * 24 * 60 * 60 * 1000);
+  const days =
+    Number.isFinite(Number(refundDays)) && Number(refundDays) >= 1
+      ? Math.round(Number(refundDays))
+      : 5;
+  const warnDays = Math.max(0, days - 2);
+
+  const warnDate = new Date(base.getTime() + warnDays * 24 * 60 * 60 * 1000);
+  const dueDate = new Date(base.getTime() + days * 24 * 60 * 60 * 1000);
 
   return {
     warnAt: formatDateUtc(warnDate),

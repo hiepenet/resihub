@@ -7,7 +7,7 @@
 // 6. Cảnh báo hạn hoàn cọc cho cả HĐ TERMINATED và EXPIRED trên mọi trạng thái chưa tất toán xong (FR-068)
 import { adminPool } from '../db/client.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
-import { refundDeadline } from '../services/deadlines.js';
+import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.js';
 import { generateInvoicesCore } from '../routes/invoices.js';
 import { roundVND } from '../services/pricing.js';
 import { getTodayVnDateStr } from '../services/depositSettlement.js';
@@ -15,6 +15,18 @@ import { getTodayVnDateStr } from '../services/depositSettlement.js';
 export async function runDailyJobs() {
   const expiredAptIds = new Set();
   const otherAffectedAptIds = new Set();
+  const orgRefundDaysCache = new Map();
+
+  async function resolveBuildingRefundDays(buildingId) {
+    if (!buildingId) return 5;
+    const bRes = await adminPool.query(`SELECT org_id FROM building WHERE id = $1 LIMIT 1`, [buildingId]);
+    const orgId = bRes.rows[0]?.org_id;
+    if (!orgId) return 5;
+    if (!orgRefundDaysCache.has(orgId)) {
+      orgRefundDaysCache.set(orgId, await getOrgDepositRefundDays(adminPool, orgId));
+    }
+    return orgRefundDaysCache.get(orgId);
+  }
 
   // 1a. Hợp đồng đang chờ bàn giao chấm dứt (TERMINATION_PENDING) đã đến ngày hẹn trả phòng -> tự động chuyển sang TERMINATED
   const scheduledTerminated = await adminPool.query(
@@ -24,12 +36,13 @@ export async function runDailyJobs() {
          updated_at = NOW()
      WHERE status = 'TERMINATION_PENDING'
        AND COALESCE(terminated_at, end_date) <= CURRENT_DATE
-     RETURNING id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date`
+     RETURNING id, building_id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date`
   );
   for (const row of scheduledTerminated.rows) {
     const termStr = getTodayVnDateStr(row.eff_end_date);
     const sDateStr = getTodayVnDateStr(row.start_date);
-    const { dueAt } = refundDeadline(termStr);
+    const refundDays = await resolveBuildingRefundDays(row.building_id);
+    const { dueAt } = refundDeadline(termStr, refundDays);
     await adminPool.query(
       `UPDATE deposit
        SET refund_due_date = $1, updated_at = NOW()
@@ -70,11 +83,12 @@ export async function runDailyJobs() {
   const expired = await adminPool.query(
     `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
      WHERE status IN ('ACTIVE', 'RENEWAL_PENDING') AND end_date <= CURRENT_DATE
-     RETURNING id, apartment_id, end_date`
+     RETURNING id, building_id, apartment_id, end_date`
   );
   for (const row of expired.rows) {
     const endDateStr = getTodayVnDateStr(row.end_date);
-    const { dueAt } = refundDeadline(endDateStr);
+    const refundDays = await resolveBuildingRefundDays(row.building_id);
+    const { dueAt } = refundDeadline(endDateStr, refundDays);
     await adminPool.query(
       `UPDATE deposit
        SET refund_due_date = $1, updated_at = NOW()
@@ -385,35 +399,55 @@ export async function runOverdueDepositSettlementAlerts() {
             b.org_id,
             a.code AS apartment_code,
             b.name AS building_name,
-            (CURRENT_DATE - COALESCE(c.terminated_at, c.end_date))::int AS days_since_end
+            (CURRENT_DATE - COALESCE(c.terminated_at, c.end_date))::int AS days_since_end,
+            GREATEST(
+              1,
+              LEAST(
+                90,
+                COALESCE(
+                  CASE
+                    WHEN (ss.value->>'deposit_refund_days') ~ '^[0-9]+$'
+                      THEN (ss.value->>'deposit_refund_days')::int
+                    ELSE NULL
+                  END,
+                  5
+                )
+              )
+            ) AS sla_refund_days
      FROM deposit d
      JOIN contract c ON c.id = d.contract_id
      JOIN building b ON b.id = c.building_id
      JOIN apartment a ON a.id = c.apartment_id
+     LEFT JOIN system_setting ss ON ss.org_id = b.org_id AND ss.key = 'sla_config'
      WHERE d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
        AND d.amount_held > 0
        AND c.status IN ('TERMINATED', 'EXPIRED')
-       AND COALESCE(c.terminated_at, c.end_date) IS NOT NULL
-       AND (
-         (CURRENT_DATE - COALESCE(c.terminated_at, c.end_date)) = 3
-         OR (CURRENT_DATE - COALESCE(c.terminated_at, c.end_date)) >= 5
-         OR (d.refund_due_date IS NOT NULL AND CURRENT_DATE = (d.refund_due_date - INTERVAL '2 days')::date)
-         OR (d.refund_due_date IS NOT NULL AND CURRENT_DATE >= d.refund_due_date)
-       )`
+       AND COALESCE(c.terminated_at, c.end_date) IS NOT NULL`
   );
 
+  const todayStr = getTodayVnDateStr();
   for (const dep of depositAlerts.rows) {
     const days = Number(dep.days_since_end);
+    const slaDays = Number(dep.sla_refund_days) || 5;
+    const warnThreshold = Math.max(0, slaDays - 2);
     const dueStr = dep.refund_due_date ? getTodayVnDateStr(dep.refund_due_date) : null;
-    const isOverdue =
-      days >= 5 ||
-      Boolean(dueStr && getTodayVnDateStr() >= dueStr);
+    const warnDueStr = dueStr
+      ? (() => {
+          const [y, m, d] = dueStr.split('-').map(Number);
+          return new Date(Date.UTC(y, m - 1, d - 2)).toISOString().slice(0, 10);
+        })()
+      : null;
+
+    const isOverdue = dueStr ? todayStr >= dueStr : days >= slaDays;
+    const isWarning = !isOverdue && (dueStr ? todayStr === warnDueStr : days === warnThreshold);
+    if (!isOverdue && !isWarning) continue;
+
     const title = isOverdue
-      ? `[QUÁ HẠN] Hoàn cọc căn ${dep.apartment_code} đã quá hạn 5 ngày`
+      ? `[QUÁ HẠN] Hoàn cọc căn ${dep.apartment_code} đã quá hạn ${slaDays} ngày`
       : `[CẢNH BÁO] Đến hạn hoàn cọc căn ${dep.apartment_code} (còn 2 ngày)`;
     const content = isOverdue
       ? `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày nhưng chưa hoàn tất thủ tục hoàn cọc (trạng thái: ${dep.deposit_status}, số tiền đang giữ: ${Number(dep.amount_held).toLocaleString('vi-VN')} ₫). Báo cáo khẩn gửi Chủ sở hữu tòa nhà & Ban Quản Lý (FR-068).`
-      : `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày. Vui lòng hoàn tất hồ sơ tất toán và hoàn cọc cho cư dân đúng hạn 5 ngày.`;
+      : `Hợp đồng căn ${dep.apartment_code} đã kết thúc ${days} ngày. Vui lòng hoàn tất hồ sơ tất toán và hoàn cọc cho cư dân đúng hạn ${slaDays} ngày.`;
 
     const recipientSet = new Set();
 
@@ -541,16 +575,22 @@ export async function sendMonthlyOwnerDepositReports(dbPool = adminPool, refDate
              AND dt.type = 'collect'
              AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
          ), 0)::bigint AS collected_in_period,
-         COALESCE((
-           SELECT SUM(dt.amount)
+         GREATEST(0, COALESCE((
+           SELECT SUM(
+             CASE
+               WHEN dt.type = 'refund' THEN dt.amount
+               WHEN dt.type = 'refund_reversal' THEN -dt.amount
+               ELSE 0
+             END
+           )
            FROM deposit_transaction dt
            JOIN deposit d2 ON d2.id = dt.deposit_id
            JOIN contract c2 ON c2.id = d2.contract_id
            WHERE c2.building_id = $1
              AND dt.status = 'APPROVED'
-             AND dt.type = 'refund'
+             AND dt.type IN ('refund', 'refund_reversal')
              AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
-         ), 0)::bigint AS refunded_in_period
+         ), 0))::bigint AS refunded_in_period
        FROM deposit d
        JOIN contract c ON c.id = d.contract_id
        WHERE c.building_id = $1`,

@@ -334,6 +334,7 @@ export function ContractDetailPage() {
     new_start_date: '',
     new_end_date: '',
     new_rent_amount: '',
+    new_deposit_amount: '',
     transfer_deposit: true,
     note: '',
   });
@@ -1185,6 +1186,7 @@ export function ContractDetailPage() {
       new_start_date: todayStr,
       new_end_date: curEnd && curEnd > todayStr ? curEnd : addMonthsStr(todayStr, 12),
       new_rent_amount: String(Math.round(Number(contract.rent_amount || 0))),
+      new_deposit_amount: String(Math.round(Number(contract.deposit_amount || 0))),
       transfer_deposit: true,
       note: '',
     });
@@ -1217,6 +1219,20 @@ export function ContractDetailPage() {
       toast.warning('Ngày kết thúc hợp đồng mới phải sau ngày chuyển phòng.');
       return;
     }
+    const chosenApt = availableApts.find(
+      (a) => String(a.id) === String(transferForm.new_apartment_id)
+    );
+    const proposedRent = Math.round(Number(transferForm.new_rent_amount || 0));
+    if (
+      chosenApt?.base_rent &&
+      Number(chosenApt.base_rent) > 0 &&
+      proposedRent < Number(chosenApt.base_rent) * 0.9
+    ) {
+      toast.warning(
+        'Giá thuê căn hộ mới giảm quá 10% so với giá niêm yết cần Chủ nhà phê duyệt (FR-013). Vui lòng tạo hợp đồng mới trình duyệt.'
+      );
+      return;
+    }
     setSubmittingTransfer(true);
     try {
       const res = await contractsService.transferRoom(
@@ -1225,13 +1241,22 @@ export function ContractDetailPage() {
           new_apartment_id: transferForm.new_apartment_id,
           new_start_date: transferForm.new_start_date,
           new_end_date: transferForm.new_end_date,
-          new_rent_amount: Math.round(Number(transferForm.new_rent_amount || 0)),
+          new_rent_amount: proposedRent,
+          ...(transferForm.new_deposit_amount !== ''
+            ? { new_deposit_amount: Math.max(0, Math.round(Number(transferForm.new_deposit_amount))) }
+            : {}),
           transfer_deposit: Boolean(transferForm.transfer_deposit),
           note: transferForm.note.trim() || undefined,
         },
         { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() }
       );
       toast.success(res?.message || 'Chuyển phòng thành công!');
+      const surplusAmt = Number(res?.data?.surplus_deposit_amount || 0);
+      if (surplusAmt > 0) {
+        toast.warning(
+          `Sổ cọc căn cũ còn dư ${formatMoney(surplusAmt)} — vui lòng lập hồ sơ tất toán hoàn trả phần cọc dư cho cư dân đúng hạn.`
+        );
+      }
       setTransferOpen(false);
       const newContractId = res?.data?.new_contract?.id;
       if (newContractId) {
@@ -2995,13 +3020,21 @@ export function ContractDetailPage() {
             />
           </div>
 
-          <MoneyInput
-            label="Giá thuê căn hộ mới (VND / tháng)"
-            required
-            placeholder="VD: 8.500.000"
-            value={transferForm.new_rent_amount}
-            onChange={(e) => setTransferForm((p) => ({ ...p, new_rent_amount: e.target.value }))}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <MoneyInput
+              label="Giá thuê căn hộ mới (VND / tháng)"
+              required
+              placeholder="VD: 8.500.000"
+              value={transferForm.new_rent_amount}
+              onChange={(e) => setTransferForm((p) => ({ ...p, new_rent_amount: e.target.value }))}
+            />
+            <MoneyInput
+              label="Tiền đặt cọc hợp đồng mới (VND)"
+              placeholder="VD: 8.500.000"
+              value={transferForm.new_deposit_amount}
+              onChange={(e) => setTransferForm((p) => ({ ...p, new_deposit_amount: e.target.value }))}
+            />
+          </div>
 
           <label className="flex items-start gap-2.5 p-3 rounded-xl bg-sky-50 border border-sky-200 cursor-pointer">
             <input

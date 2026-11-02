@@ -203,6 +203,7 @@ async function checkSettlementPreconditions(
   const movedIn = Boolean(startStr && endRefStr && endRefStr >= startStr);
 
   let missingMeterTypes = [];
+  let unbilledMeterTypes = [];
   if (movedIn && endRefStr && endPeriod && contractRow.apartment_id) {
     const meterRes = await client.query(
       `SELECT m.meter_type
@@ -217,8 +218,28 @@ async function checkSettlementPreconditions(
       [contractRow.apartment_id, endRefStr, endPeriod]
     );
     missingMeterTypes = meterRes.rows.map((r) => r.meter_type);
+
+    if (missingMeterTypes.length === 0) {
+      const unbilledRes = await client.query(
+        `SELECT DISTINCT m.meter_type
+         FROM meter m
+         JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period = $3
+         WHERE m.apartment_id = $1
+           AND m.created_at::date <= $2::date
+           AND COALESCE(mr.consumption, mr.current_reading - mr.previous_reading, 0) > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM invoice inv
+             WHERE inv.contract_id = $4
+               AND inv.period >= $3
+               AND inv.status NOT IN ('DRAFT', 'CANCELLED', 'VOID')
+           )`,
+        [contractRow.apartment_id, endRefStr, endPeriod, contractRow.contract_id]
+      );
+      unbilledMeterTypes = unbilledRes.rows.map((r) => r.meter_type);
+    }
   }
   const finalMetersRecorded = missingMeterTypes.length === 0;
+  const finalInvoiceIssued = unbilledMeterTypes.length === 0;
 
   const draftInvRes = await client.query(
     `SELECT COUNT(*)::int AS cnt
@@ -242,12 +263,19 @@ async function checkSettlementPreconditions(
     : null;
 
   return {
-    ready: contractEnded && finalMetersRecorded && noDraftInvoices && apartmentInspected,
+    ready:
+      contractEnded &&
+      finalMetersRecorded &&
+      noDraftInvoices &&
+      finalInvoiceIssued &&
+      apartmentInspected,
     contract_ended: contractEnded,
     final_meters_recorded: finalMetersRecorded,
     missing_meter_types: missingMeterTypes,
     no_draft_invoices: noDraftInvoices,
     draft_invoice_count: draftInvoiceCount,
+    final_invoice_issued: finalInvoiceIssued,
+    unbilled_meter_types: unbilledMeterTypes,
     apartment_inspected: apartmentInspected,
     handover_recorded_at: handoverRecordedAt,
   };
@@ -992,6 +1020,16 @@ router.post(
           await client.query('ROLLBACK');
           return res.status(422).json({ code: v.code, message: v.message });
         }
+      }
+
+      if (!preconditions.final_invoice_issued) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'UNBILLED_FINAL_METER_READING',
+          message: `Chỉ số điện/nước kỳ cuối (${preconditions.unbilled_meter_types.join(', ')}) có phát sinh tiêu thụ nhưng chưa phát hành hóa đơn kỳ cuối cho hợp đồng (FR-024).`,
+          unbilled_meter_types: preconditions.unbilled_meter_types,
+          preconditions,
+        });
       }
 
       if (!preconditions.apartment_inspected) {

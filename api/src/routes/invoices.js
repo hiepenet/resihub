@@ -71,7 +71,12 @@ export async function generateInvoicesCore(
     : `(
          c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
          OR (
-           c.status IN ('TERMINATED', 'EXPIRED')
+           c.status = 'TERMINATED'
+           AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
+           AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+         )
+         OR (
+           c.status = 'EXPIRED'
            AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
            AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
          )
@@ -85,7 +90,11 @@ export async function generateInvoicesCore(
              (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
               - GREATEST(c.start_date, ($2 || '-01')::date))::int
              + CASE
-                 WHEN c.status IN ('TERMINATED', 'EXPIRED', 'TERMINATION_PENDING')
+                 WHEN c.status IN ('TERMINATED', 'TERMINATION_PENDING')
+                  AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
+                  AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+                 THEN 1
+                 WHEN c.status = 'EXPIRED'
                   AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
                   AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
                  THEN 1
@@ -100,8 +109,18 @@ export async function generateInvoicesCore(
     WHERE b.org_id = $1
       AND ${statusClause}
       AND c.start_date < (($2 || '-01')::date + INTERVAL '1 month')::date
-      AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
-      AND COALESCE(c.terminated_at, c.end_date) > c.start_date
+      AND (
+        (
+          c.status = 'TERMINATED'
+          AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
+          AND COALESCE(c.terminated_at, c.end_date) >= c.start_date
+        )
+        OR (
+          c.status != 'TERMINATED'
+          AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+          AND COALESCE(c.terminated_at, c.end_date) > c.start_date
+        )
+      )
       AND NOT EXISTS (
         SELECT 1 FROM invoice inv
         WHERE inv.contract_id = c.id

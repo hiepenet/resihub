@@ -880,6 +880,18 @@ router.patch(
           });
         }
         normalizedBankInfo = effectiveMethod === 'BANK_TRANSFER' ? bankCheck.normalizedBankInfo : null;
+        if (effectiveMethod === 'BANK_TRANSFER') {
+          const validEv = Array.isArray(refund_evidence)
+            ? refund_evidence.filter((item) => typeof item === 'string' && item.trim().length > 0)
+            : [];
+          if (validEv.length === 0) {
+            return res.status(422).json({
+              code: 'REFUND_EVIDENCE_REQUIRED',
+              message:
+                'Hoàn tiền giữ chỗ qua chuyển khoản ngân hàng (BANK_TRANSFER) bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC (PRD 7.5).',
+            });
+          }
+        }
       }
 
       await client.query('BEGIN');

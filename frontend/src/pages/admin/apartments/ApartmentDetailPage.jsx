@@ -32,6 +32,7 @@ import {
   PAYMENT_METHOD_LABELS,
 } from '../../../constants/statuses';
 import { buildingsService } from '../../../services/buildings.service';
+import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
@@ -59,6 +60,7 @@ export function ApartmentDetailPage() {
   const [apt, setApt] = useState(null);
   const [zones, setZones] = useState([]);
   const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
+  const [allowSelfApproval, setAllowSelfApproval] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -79,6 +81,12 @@ export function ApartmentDetailPage() {
         if (res?.data) {
           setCancelPolicy((prev) => ({ ...prev, ...res.data }));
         }
+      })
+      .catch(() => {});
+    usersService
+      .getSettings()
+      .then((res) => {
+        setAllowSelfApproval(Boolean(res?.data?.approval_config?.allow_self_approval));
       })
       .catch(() => {});
   }, []);
@@ -421,6 +429,15 @@ export function ApartmentDetailPage() {
         !String(settleModal.account_holder || '').trim()
       ) {
         toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn.');
+        return;
+      }
+      const evList = Array.isArray(settleModal.refund_evidence)
+        ? settleModal.refund_evidence.filter(Boolean)
+        : [];
+      if (evList.length === 0) {
+        toast.warning(
+          'Hoàn tiền giữ chỗ qua chuyển khoản bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC.'
+        );
         return;
       }
     }
@@ -789,6 +806,7 @@ export function ApartmentDetailPage() {
                       buildingHasActiveOwner: Boolean(
                         r.building_has_active_owner ?? apt.building_has_active_owner
                       ),
+                      allowSelfApproval,
                     });
 
                   return (
@@ -1210,7 +1228,11 @@ export function ApartmentDetailPage() {
                 ) : null}
 
                 <FileUpload
-                  label="Chứng từ hoàn tiền / biên nhận (tùy chọn)"
+                  label={
+                    settleModal.refund_method === 'BANK_TRANSFER'
+                      ? 'Ảnh chứng từ UNC chuyển khoản hoàn tiền (bắt buộc ≥ 1 ảnh)'
+                      : 'Chứng từ hoàn tiền / biên nhận (tùy chọn)'
+                  }
                   multiple
                   maxFiles={3}
                   value={settleModal.refund_evidence}

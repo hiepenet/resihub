@@ -7,7 +7,7 @@ import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
 import { saveBase64Image, MAX_CONTRACT_SCAN_BYTES } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
-import { refundDeadline } from '../services/deadlines.js';
+import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.js';
 import { splitDepositOpening, getTodayVnDateStr } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
@@ -904,7 +904,8 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['MANAGER'])
           enterMaintenance: movedIn,
         });
 
-        const { dueAt } = refundDeadline(effDate);
+        const refundDays = await getOrgDepositRefundDays(adminPool, req.user.org_id);
+        const { dueAt } = refundDeadline(effDate, refundDays);
         await client.query(
           `UPDATE deposit
            SET refund_due_date = $1, updated_at = NOW()
@@ -2423,7 +2424,8 @@ router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), idemp
     });
 
     // 3. Thiết lập hạn hoàn cọc +5 ngày (FR-068) trên sổ cọc đang HELD
-    const { dueAt } = refundDeadline(termDate);
+    const refundDays = await getOrgDepositRefundDays(adminPool, req.user.org_id);
+    const { dueAt } = refundDeadline(termDate, refundDays);
     await client.query(
       `UPDATE deposit SET refund_due_date = $1, updated_at = NOW()
        WHERE contract_id = $2 AND status = 'HELD'`,
@@ -2544,18 +2546,17 @@ router.post('/:id/terminate/approve', authenticateToken, requireRole(['MANAGER']
     // 2. Đồng bộ trạng thái căn hộ theo thời điểm bắt đầu thực tế
     const todayRes = await client.query('SELECT CURRENT_DATE::text AS today');
     const todayStr = todayRes.rows[0].today;
-    const sDate = currentContract.start_date.toISOString
-      ? currentContract.start_date.toISOString().split('T')[0]
-      : String(currentContract.start_date).slice(0, 10);
+    const sDate = toVnDateOnlyStr(currentContract.start_date);
     const termAt = currentContract.terminated_at
-      ? (currentContract.terminated_at.toISOString ? currentContract.terminated_at.toISOString().split('T')[0] : String(currentContract.terminated_at).slice(0, 10))
+      ? toVnDateOnlyStr(currentContract.terminated_at)
       : todayStr;
     await syncApartmentStatus(client, currentContract.apartment_id, {
       enterMaintenance: sDate <= todayStr && termAt >= sDate,
     });
 
-    // 3. Gán hạn hoàn cọc (refund_due_date = ngày chấm dứt + 5 ngày theo FR-068) trên sổ cọc
-    const { dueAt } = refundDeadline(termAt);
+    // 3. Gán hạn hoàn cọc theo sla_config.deposit_refund_days (mặc định +5 ngày, FR-068) trên sổ cọc
+    const refundDays = await getOrgDepositRefundDays(adminPool, req.user.org_id);
+    const { dueAt } = refundDeadline(termAt, refundDays);
 
     await client.query(
       `UPDATE deposit SET refund_due_date = $1, updated_at = NOW()
@@ -2751,7 +2752,8 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
 
         if (transferAmt > 0n) {
           if (surplusAmt > 0n) {
-            const { dueAt: parentDueAt } = refundDeadline(sDateStr);
+            const refundDays = await getOrgDepositRefundDays(adminPool, req?.user?.org_id);
+            const { dueAt: parentDueAt } = refundDeadline(sDateStr, refundDays);
             await dbClient.query(
               `UPDATE deposit
                SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
@@ -4668,6 +4670,27 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
+    const finalRent = new_rent_amount !== undefined && new_rent_amount !== null
+      ? Number(new_rent_amount)
+      : Number(newAptLock.rows[0].base_rent || oldContract.rent_amount);
+
+    if (!Number.isFinite(finalRent) || finalRent <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_RENT_AMOUNT',
+        message: 'Giá thuê hợp đồng mới phải lớn hơn 0.',
+      });
+    }
+
+    if (isDiscountedPrice(finalRent, newAptLock.rows[0].base_rent)) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'DISCOUNTED_PRICE_REQUIRES_APPROVAL',
+        message:
+          'Giá thuê căn hộ mới giảm quá 10% so với giá niêm yết cần Chủ nhà phê duyệt (FR-013). Vui lòng tạo hợp đồng mới trình duyệt thay vì chuyển phòng trực tiếp.',
+      });
+    }
+
     // 1. Đóng hợp đồng cũ & đặt căn cũ sang MAINTENANCE
     await client.query(
       `UPDATE contract
@@ -4685,9 +4708,6 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     );
 
     // 2. Tạo hợp đồng mới ACTIVE trên căn mới, liên kết parent_contract_id
-    const finalRent = new_rent_amount !== undefined && new_rent_amount !== null
-      ? Number(new_rent_amount)
-      : Number(newAptLock.rows[0].base_rent || oldContract.rent_amount);
 
     const explicitNewDeposit =
       new_deposit_amount !== undefined && new_deposit_amount !== null
@@ -4740,7 +4760,10 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     );
 
     // 3. Chuyển sổ cọc (nếu chọn transfer_deposit) hoặc tách tất toán cọc cũ + mở sổ cọc mới
+    const refundDays = await getOrgDepositRefundDays(adminPool, req.user.org_id);
     let transferredDeposit = null;
+    let surplusDepositAmount = 0;
+    let oldDepositId = null;
     if (transfer_deposit) {
       const oldDepRes = await client.query(
         `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' FOR UPDATE`,
@@ -4748,13 +4771,15 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       );
       if (oldDepRes.rows.length > 0) {
         const oldDep = oldDepRes.rows[0];
+        oldDepositId = oldDep.id;
         const heldAmt = BigInt(oldDep.amount_held || 0);
         const targetDep = BigInt(Math.round(Number(newContract.deposit_amount ?? 0)));
         const transferAmt = targetDep > 0n ? (heldAmt > targetDep ? targetDep : heldAmt) : 0n;
         const surplusAmt = heldAmt - transferAmt;
 
         if (surplusAmt > 0n) {
-          const { dueAt: oldDueAt } = refundDeadline(transferDate);
+          surplusDepositAmount = Number(surplusAmt);
+          const { dueAt: oldDueAt } = refundDeadline(transferDate, refundDays);
           await client.query(
             `UPDATE deposit
              SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
@@ -4817,7 +4842,7 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
         transferredDeposit = newDepRes.rows[0];
       }
     } else {
-      const { dueAt: oldDueAt } = refundDeadline(transferDate);
+      const { dueAt: oldDueAt } = refundDeadline(transferDate, refundDays);
       await client.query(
         `UPDATE deposit
          SET refund_due_date = COALESCE(refund_due_date, $1), updated_at = NOW()
@@ -4847,12 +4872,18 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     );
 
     await client.query('COMMIT');
+    const surplusNotice =
+      surplusDepositAmount > 0
+        ? ` Lưu ý: Sổ cọc căn cũ còn dư ${surplusDepositAmount.toLocaleString('vi-VN')} ₫ cần lập tất toán hoàn trả cho cư dân đúng hạn.`
+        : '';
     res.status(201).json({
-      message: `Chuyển phòng sang căn ${newAptLock.rows[0].code} thành công!`,
+      message: `Chuyển phòng sang căn ${newAptLock.rows[0].code} thành công!${surplusNotice}`,
       data: {
         old_contract_id: oldContract.id,
         new_contract: newContract,
         transferred_deposit: transferredDeposit,
+        surplus_deposit_amount: surplusDepositAmount,
+        old_deposit_id: oldDepositId,
       },
     });
   } catch (err) {
