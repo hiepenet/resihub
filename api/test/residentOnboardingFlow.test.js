@@ -38,6 +38,17 @@ async function apiFetch(path, token, options = {}) {
   return { status: res.status, body };
 }
 
+function vnDaysFromToday(offsetDays) {
+  const vnTodayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const [y, m, d] = vnTodayStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
 test('Task 1 — Migration 040 Schema & RLS: desired_building_id visibility & OWNER person-attachment block', async (t) => {
   const adminPool = new pg.Pool({ connectionString: ADMIN_DB_URL });
   const appPool = new pg.Pool({ connectionString: APP_DB_URL });
@@ -241,8 +252,8 @@ test('Task 2 — Reservation auto-provisions preliminary person & OTP RESIDENT a
   const apt2 = aptsRes.body.data[1] || apt1;
   assert.ok(apt1, 'Need at least 1 AVAILABLE apartment');
 
-  const dFrom = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
-  const dUntil = new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10);
+  const dFrom = vnDaysFromToday(2);
+  const dUntil = vnDaysFromToday(9);
 
   // 1. Create reservation for brand-new phone
   const rsvRes = await apiFetch('/api/v1/reservations', mgrA.token, {
@@ -321,8 +332,8 @@ test('Task 2 — Reservation auto-provisions preliminary person & OTP RESIDENT a
   });
   assert.equal(createTenantRes.status, 201);
 
-  const dFrom2 = new Date(Date.now() + 12 * 86400000).toISOString().slice(0, 10);
-  const dUntil2 = new Date(Date.now() + 18 * 86400000).toISOString().slice(0, 10);
+  const dFrom2 = vnDaysFromToday(12);
+  const dUntil2 = vnDaysFromToday(18);
   const rsvExisting = await apiFetch('/api/v1/reservations', mgrA.token, {
     method: 'POST',
     body: JSON.stringify({
@@ -419,8 +430,8 @@ test('Task 3 — Resident self-onboarding (FR-012): consent, CCCD upload, duplic
   assert.ok(targetApt);
   reservedAptId = targetApt.id;
 
-  const dFrom = new Date(Date.now() + 1 * 86400000).toISOString().slice(0, 10);
-  const dUntil = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const dFrom = vnDaysFromToday(1);
+  const dUntil = vnDaysFromToday(7);
   const rsv = await apiFetch('/api/v1/reservations', mgrA.token, {
     method: 'POST',
     body: JSON.stringify({
@@ -787,8 +798,8 @@ test('Final Review Fixes — (1) block applying to another prospect RESERVED apa
   assert.ok(targetApt);
   reservedAptId = aptForFix1.id;
 
-  const dFrom = new Date(Date.now() + 1 * 86400000).toISOString().slice(0, 10);
-  const dUntil = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+  const dFrom = vnDaysFromToday(1);
+  const dUntil = vnDaysFromToday(6);
 
   await t.test('Fix 2 — POST /api/v1/reservations rejects malformed phone (<10 digits) with 400 INVALID_PHONE', async () => {
     const badRsv = await apiFetch('/api/v1/reservations', mgrA.token, {
@@ -821,7 +832,7 @@ test('Final Review Fixes — (1) block applying to another prospect RESERVED apa
     assert.equal(rsvA.status, 201);
     createdRsvIds.push(rsvA.body.data.id);
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = vnDaysFromToday(0);
     await adminPool.query(`UPDATE reservation SET hold_from = $1 WHERE id = $2`, [todayStr, rsvA.body.data.id]);
     await adminPool.query(`UPDATE apartment SET status = 'RESERVED' WHERE id = $1`, [aptForFix1.id]);
 
@@ -946,8 +957,8 @@ test('Scenario 1 Regression — Resident overview exposes full reservation metad
   assert.ok(apt1 && apt2, 'Need at least 2 AVAILABLE apartments');
   touchedAptIds.push(apt1.id, apt2.id);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const dUntil = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+  const todayStr = vnDaysFromToday(0);
+  const dUntil = vnDaysFromToday(5);
 
   // 1. Create reservation for rsvPhone and verify overview returns hold_from, apartment_type/bedrooms, and reservations array
   const createRsv = await apiFetch('/api/v1/reservations', mgrA.token, {

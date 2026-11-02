@@ -17,6 +17,7 @@ const adminConnectionConfig = {
         user: process.env.POSTGRES_USER || 'postgres',
         password: process.env.POSTGRES_PASSWORD || 'postgres',
       }),
+  options: '-c timezone=Asia/Ho_Chi_Minh',
   max: 30, // Tăng pool size chống starvation khi nhiều request đồng thời
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
@@ -32,6 +33,7 @@ let appConnectionConfig;
 if (process.env.APP_DATABASE_URL) {
   appConnectionConfig = {
     connectionString: process.env.APP_DATABASE_URL,
+    options: '-c timezone=Asia/Ho_Chi_Minh',
     max: 30, // Tăng pool size cho appPool
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,

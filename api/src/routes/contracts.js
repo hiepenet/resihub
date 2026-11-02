@@ -36,6 +36,14 @@ import {
 import { maskIdNumber } from '../utils/piiMask.js';
 
 const router = express.Router();
+
+function toVnDateOnlyStr(val) {
+  if (!val) return '';
+  if (val instanceof Date || typeof val?.toISOString === 'function') {
+    return getTodayVnDateStr(val);
+  }
+  return String(val).slice(0, 10);
+}
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -855,8 +863,7 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['MANAGER'])
       [id]
     );
 
-    const toDateOnly = (val) =>
-      val instanceof Date ? val.toISOString().slice(0, 10) : String(val || '').slice(0, 10);
+    const toDateOnly = (val) => toVnDateOnlyStr(val);
 
     let updatedContract = null;
     let contractTransitionMode = null; // 'TERMINATED_NOW' | 'SCHEDULED_TERMINATION' | 'RENEWAL_PENDING' | null
@@ -2121,7 +2128,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
       const todayRes = await client.query('SELECT CURRENT_DATE::text AS today');
       const todayStr = todayRes.rows[0].today;
-      const nextStartStr = nextStart instanceof Date ? nextStart.toISOString().slice(0, 10) : String(nextStart).slice(0, 10);
+      const nextStartStr = toVnDateOnlyStr(nextStart);
       const isFutureContract = nextStartStr > todayStr;
 
       if (aptCheck.rows[0].status === 'INACTIVE') {
@@ -2376,12 +2383,8 @@ router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), idemp
     const todayRes = await client.query('SELECT CURRENT_DATE::text AS today');
     const todayStr = todayRes.rows[0].today;
     const termDate = terminated_date ? String(terminated_date).slice(0, 10) : todayStr;
-    const sDate = currentContract.start_date.toISOString
-      ? currentContract.start_date.toISOString().split('T')[0]
-      : String(currentContract.start_date).slice(0, 10);
-    const eDate = currentContract.end_date.toISOString
-      ? currentContract.end_date.toISOString().split('T')[0]
-      : String(currentContract.end_date).slice(0, 10);
+    const sDate = toVnDateOnlyStr(currentContract.start_date);
+    const eDate = toVnDateOnlyStr(currentContract.end_date);
 
     const isPreMoveInWindow = todayStr < sDate;
     const minAllowedDate = isPreMoveInWindow ? todayStr : sDate;
@@ -2891,9 +2894,7 @@ async function completeActivation(
     [contract.apartment_id]
   );
   const apt = aptRes.rows[0];
-  const sDateStr = contract.start_date.toISOString
-    ? contract.start_date.toISOString().split('T')[0]
-    : String(contract.start_date).slice(0, 10);
+  const sDateStr = toVnDateOnlyStr(contract.start_date);
   const isFutureContract = sDateStr > apt.today;
 
   if (apt.status === 'INACTIVE') {
@@ -3546,7 +3547,7 @@ router.post('/:id/service-prices', authenticateToken, requireRole(['MANAGER']), 
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hợp đồng.' });
     }
 
-    const effFrom = effective_from || (cRes.rows[0].start_date.toISOString ? cRes.rows[0].start_date.toISOString().split('T')[0] : cRes.rows[0].start_date);
+    const effFrom = effective_from || toVnDateOnlyStr(cRes.rows[0].start_date);
 
     const upsertRes = await client.query(
       `INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
@@ -3694,7 +3695,7 @@ router.post('/:id/amendments', authenticateToken, requireRole(['MANAGER']), asyn
 
     // Re-check overlap nếu có thay đổi end_date mới (loại trừ chính hợp đồng này)
     if (changes.end_date) {
-      const sDate = cur.start_date.toISOString ? cur.start_date.toISOString().split('T')[0] : String(cur.start_date);
+      const sDate = toVnDateOnlyStr(cur.start_date);
       const newEndDate = changes.end_date;
 
       if (newEndDate <= sDate) {
@@ -3729,7 +3730,7 @@ router.post('/:id/amendments', authenticateToken, requireRole(['MANAGER']), asyn
     );
     const nextVer = vRes.rows[0].next_no;
 
-    const effDate = effective_from || new Date().toISOString().split('T')[0];
+    const effDate = effective_from || getTodayVnDateStr();
 
     const diffPayload = {
       ...diffRes.diff,
@@ -4475,7 +4476,7 @@ router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), idempoten
       });
     }
 
-    const oldEndStr = cur.end_date.toISOString ? cur.end_date.toISOString().split('T')[0] : String(cur.end_date);
+    const oldEndStr = toVnDateOnlyStr(cur.end_date);
     if (new_end_date <= oldEndStr) {
       await client.query('ROLLBACK');
       return res.status(422).json({
@@ -4639,10 +4640,8 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
-    const transferDate = new_start_date || new Date().toISOString().slice(0, 10);
-    const oldEndStr = oldContract.end_date.toISOString
-      ? oldContract.end_date.toISOString().split('T')[0]
-      : String(oldContract.end_date);
+    const transferDate = new_start_date || getTodayVnDateStr();
+    const oldEndStr = toVnDateOnlyStr(oldContract.end_date);
     const finalEndDate = new_end_date || oldEndStr;
 
     if (finalEndDate <= transferDate) {

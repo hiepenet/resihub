@@ -91,9 +91,9 @@ async function apiFetch(path, token, options = {}) {
 }
 
 function addDaysStr(daysOffset) {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + daysOffset);
-  return d.toISOString().slice(0, 10);
+  const vnTodayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const [y, m, d] = vnTodayStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + daysOffset)).toISOString().slice(0, 10);
 }
 
 // ============================================================================

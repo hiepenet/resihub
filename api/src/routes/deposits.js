@@ -43,7 +43,12 @@ async function getDepositWriteBuildingIds(userId, orgId, roleCodes) {
   return Array.from(ids);
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function getDepositAccessMeta(client, depositId) {
+  if (!UUID_REGEX.test(String(depositId || ''))) {
+    return null;
+  }
   const res = await client.query('SELECT * FROM fn_get_deposit_access_meta($1)', [depositId]);
   return res.rows[0] || null;
 }

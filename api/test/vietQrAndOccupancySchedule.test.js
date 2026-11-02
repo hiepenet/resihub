@@ -28,9 +28,14 @@ async function apiFetch(path, token, options = {}) {
 }
 
 function addDaysStr(days) {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
+  const vnTodayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const [y, m, d] = vnTodayStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
 test('VietQR Bank List API & Multi-Reservation / Occupied Schedule on Apartments', async (t) => {
