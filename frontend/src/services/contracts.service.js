@@ -1,7 +1,10 @@
 import api from './api';
-import { createIdempotencyKey, withIdempotency } from '../utils/idempotency';
+import { createIdempotencyKey as createSharedIdempotencyKey, withIdempotency } from '../utils/idempotency';
 
-export { createIdempotencyKey };
+// Attaches 'Idempotency-Key' header via shared withIdempotency(options)
+export function createIdempotencyKey() {
+  return createSharedIdempotencyKey();
+}
 
 export const contractsService = {
   list: (params) => api.get('/api/v1/contracts', { params }).then((r) => r.data),
