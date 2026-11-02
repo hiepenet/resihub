@@ -445,6 +445,7 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
         );
       }
     } else if (eventType === 'PENDING_APPROVAL') {
+      const isTransferOnly = extra.approvalCode === 'TRANSFER_NEEDS_APPROVAL';
       let approverIds = await getBuildingActiveOwnerUserIds(meta.building_id);
       if (approverIds.length === 0) {
         const sysRes = await adminPool.query(
@@ -456,13 +457,12 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
            WHERE p.org_id = $1 AND u.status = 'ACTIVE'
              AND (
                r.code = 'SYS_ADMIN'
-               OR (r.code = 'MANAGER' AND ur.building_id = $2 AND u.id <> COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid))
+               OR ($4::boolean = TRUE AND r.code = 'MANAGER' AND ur.building_id = $2 AND u.id <> COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid))
              )`,
-          [meta.org_id, meta.building_id, meta.created_by || null]
+          [meta.org_id, meta.building_id, meta.created_by || null, isTransferOnly]
         );
         approverIds = sysRes.rows.map((r) => String(r.id));
       }
-      const isTransferOnly = extra.approvalCode === 'TRANSFER_NEEDS_APPROVAL';
       for (const ownerUserId of approverIds) {
         await adminPool.query(
           `INSERT INTO notification (org_id, user_id, title, content, type, payload)
@@ -1196,6 +1196,7 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
       const result = await client.query(
         `SELECT c.*, 
           a.code as apartment_code, 
+          a.base_rent as apartment_base_rent,
           b.name as building_name, 
           p.id as person_id,
           p.full_name as tenant_name, 
@@ -2124,11 +2125,22 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
 
     if (cur.is_room_transfer && cur.parent_contract_id) {
       const parentCheck = await adminPool.query(
-        'SELECT id, apartment_id, building_id, start_date, status FROM contract WHERE id = $1 LIMIT 1',
+        'SELECT id, apartment_id, building_id, primary_tenant_id, start_date, end_date, status FROM contract WHERE id = $1 LIMIT 1',
         [cur.parent_contract_id]
       );
       const parentContract = parentCheck.rows[0] || null;
       if (parentContract) {
+        if (
+          primary_tenant_id !== undefined &&
+          primary_tenant_id !== null &&
+          String(primary_tenant_id) !== String(parentContract.primary_tenant_id)
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            code: 'CANNOT_CHANGE_TRANSFER_TENANT',
+            message: 'Hợp đồng chuyển phòng bắt buộc giữ nguyên khách thuê chính của hợp đồng gốc.',
+          });
+        }
         if (String(nextApartment) === String(parentContract.apartment_id)) {
           await client.query('ROLLBACK');
           return res.status(400).json({
@@ -2138,11 +2150,12 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         }
         const nextStartOnly = toVnDateOnlyStr(nextStart);
         const parentStartOnly = toVnDateOnlyStr(parentContract.start_date);
-        if (nextStartOnly < parentStartOnly) {
+        const parentEndOnly = toVnDateOnlyStr(parentContract.end_date);
+        if (nextStartOnly < parentStartOnly || nextStartOnly > parentEndOnly) {
           await client.query('ROLLBACK');
           return res.status(422).json({
             code: 'INVALID_TRANSFER_DATE',
-            message: 'Ngày chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng hiện tại.',
+            message: 'Ngày chuyển phòng phải nằm trong thời hạn hiệu lực của hợp đồng hiện tại.',
           });
         }
       }
@@ -2195,7 +2208,15 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
         });
       }
 
-      if (!isFutureContract && !['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
+      if (cur.is_room_transfer) {
+        if (aptCheck.rows[0].status !== 'AVAILABLE') {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            code: 'APARTMENT_NOT_AVAILABLE',
+            message: `Căn hộ đích đang ở trạng thái ${aptCheck.rows[0].status}, chỉ căn AVAILABLE mới có thể chuyển đến.`,
+          });
+        }
+      } else if (!isFutureContract && !['AVAILABLE', 'RESERVED'].includes(aptCheck.rows[0].status)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'INVALID_APARTMENT_STATUS',
@@ -2806,9 +2827,30 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
       throw err;
     }
     const oldContract = oldRes.rows[0];
+    if (String(contract.primary_tenant_id) !== String(oldContract.primary_tenant_id)) {
+      const err = new Error('Hợp đồng chuyển phòng bắt buộc giữ nguyên khách thuê chính của hợp đồng gốc.');
+      err.httpStatus = 422;
+      err.code = 'CANNOT_CHANGE_TRANSFER_TENANT';
+      throw err;
+    }
 
-    const newAptRes = await dbClient.query(`SELECT code FROM apartment WHERE id = $1`, [contract.apartment_id]);
-    const newAptCode = newAptRes.rows[0]?.code || '';
+    const newAptRes = await dbClient.query(
+      `SELECT id, code, status FROM apartment WHERE id = $1 FOR UPDATE`,
+      [contract.apartment_id]
+    );
+    if (newAptRes.rows.length === 0 || newAptRes.rows[0].status !== 'AVAILABLE') {
+      const err = new Error(
+        `Căn hộ đích đang ở trạng thái ${newAptRes.rows[0]?.status || 'UNKNOWN'}, chỉ căn AVAILABLE mới có thể chuyển đến.`
+      );
+      err.httpStatus = 409;
+      err.code = 'APARTMENT_NOT_AVAILABLE';
+      throw err;
+    }
+    const newAptCode = newAptRes.rows[0].code || '';
+    const todayVnStr = getTodayVnDateStr();
+    const oldStartStr = toVnDateOnlyStr(oldContract.start_date);
+    const effectiveTerminatedAt =
+      sDateStr > todayVnStr ? (todayVnStr < oldStartStr ? oldStartStr : todayVnStr) : sDateStr;
 
     // 1. Đóng hợp đồng cũ & chuyển căn cũ sang MAINTENANCE chờ nghiệm thu (FR-013, FR-017)
     await dbClient.query(
@@ -2818,7 +2860,7 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
            note = COALESCE(NULLIF(btrim(note), '') || ' ', '') || $2,
            updated_at = NOW()
        WHERE id = $3`,
-      [sDateStr, `[Chuyển sang căn ${newAptCode}]`, oldContract.id]
+      [effectiveTerminatedAt, `[Chuyển sang căn ${newAptCode}]`, oldContract.id]
     );
     await dbClient.query(
       `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
@@ -2848,7 +2890,7 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
 
           if (surplusAmt > 0n) {
             surplusDepositAmount = Number(surplusAmt);
-            const { dueAt: oldDueAt } = refundDeadline(sDateStr, refundDays);
+            const { dueAt: oldDueAt } = refundDeadline(effectiveTerminatedAt, refundDays);
             await dbClient.query(
               `UPDATE deposit
                SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
@@ -2916,7 +2958,7 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
           }
         }
       } else {
-        const { dueAt: oldDueAt } = refundDeadline(sDateStr, refundDays);
+        const { dueAt: oldDueAt } = refundDeadline(effectiveTerminatedAt, refundDays);
         const oldUpd = await dbClient.query(
           `UPDATE deposit
            SET refund_due_date = COALESCE(refund_due_date, $1), updated_at = NOW()
@@ -2943,7 +2985,7 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
        VALUES ($1, 'TRANSFER_ROOM', 'contract', $2, $3, $4)`,
       [
         approverUserId,
-        contract.id,
+        oldContract.id,
         JSON.stringify({ old_contract_id: oldContract.id, old_apartment_id: oldContract.apartment_id }),
         JSON.stringify({
           new_contract_id: contract.id,
@@ -3148,7 +3190,7 @@ async function completeActivation(
       };
     }
     const parentCheck = await adminPool.query(
-      `SELECT id, status, apartment_id, building_id, start_date FROM contract WHERE id = $1 LIMIT 1`,
+      `SELECT id, status, apartment_id, building_id, primary_tenant_id, start_date, end_date FROM contract WHERE id = $1 LIMIT 1`,
       [contract.parent_contract_id]
     );
     if (parentCheck.rows.length === 0 || parentCheck.rows[0].status !== 'ACTIVE') {
@@ -3160,13 +3202,23 @@ async function completeActivation(
         },
       };
     }
+    if (String(contract.primary_tenant_id) !== String(parentCheck.rows[0].primary_tenant_id)) {
+      return {
+        error: {
+          status: 422,
+          code: 'CANNOT_CHANGE_TRANSFER_TENANT',
+          message: 'Hợp đồng chuyển phòng bắt buộc giữ nguyên khách thuê chính của hợp đồng gốc.',
+        },
+      };
+    }
     const parentStartStr = toVnDateOnlyStr(parentCheck.rows[0].start_date);
-    if (sDateStr < parentStartStr) {
+    const parentEndStr = toVnDateOnlyStr(parentCheck.rows[0].end_date);
+    if (sDateStr < parentStartStr || sDateStr > parentEndStr) {
       return {
         error: {
           status: 422,
           code: 'INVALID_TRANSFER_DATE',
-          message: 'Ngày bắt đầu hợp đồng chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng gốc.',
+          message: 'Ngày bắt đầu hợp đồng chuyển phòng phải nằm trong thời hạn hiệu lực của hợp đồng gốc.',
         },
       };
     }
@@ -3179,12 +3231,21 @@ async function completeActivation(
         },
       };
     }
+    if (apt.status !== 'AVAILABLE') {
+      return {
+        error: {
+          status: 409,
+          code: 'APARTMENT_NOT_AVAILABLE',
+          message: `Căn hộ đích đang ở trạng thái ${apt.status}, chỉ căn AVAILABLE mới có thể chuyển đến.`,
+        },
+      };
+    }
   }
 
   if (apt.status === 'INACTIVE') {
     return { error: { status: 409, code: 'INVALID_APARTMENT_STATUS', message: 'Căn hộ đang ngừng khai thác (INACTIVE), không thể kích hoạt hợp đồng.' } };
   }
-  if (!isFutureContract && ['AVAILABLE', 'RESERVED'].indexOf(apt.status) === -1) {
+  if (!contract.is_room_transfer && !isFutureContract && ['AVAILABLE', 'RESERVED'].indexOf(apt.status) === -1) {
     return { error: { status: 409, code: 'INVALID_APARTMENT_STATUS', message: `Căn hộ đang ở trạng thái ${apt.status}, không thể kích hoạt hợp đồng bắt đầu ngay.` } };
   }
 
@@ -3722,7 +3783,8 @@ router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'MANAGER', '
     }
 
     const trimmedReason = String(reason).trim();
-    const updatedNote = `${cur.note || ''} [Từ chối duyệt giá: ${trimmedReason}]`.trim();
+    const rejectLabel = cur.is_room_transfer ? 'Từ chối duyệt đổi phòng' : 'Từ chối duyệt giá';
+    const updatedNote = `${cur.note || ''} [${rejectLabel}: ${trimmedReason}]`.trim();
     const updated = await client.query(
       `UPDATE contract SET status = 'DRAFT', note = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
       [updatedNote, id]
@@ -5048,11 +5110,11 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     const oldEndStr = toVnDateOnlyStr(oldContract.end_date);
     const finalEndDate = String(new_end_date || oldEndStr).slice(0, 10);
 
-    if (transferDate < oldStartStr) {
+    if (transferDate < oldStartStr || transferDate > oldEndStr) {
       await client.query('ROLLBACK');
       return res.status(422).json({
         code: 'INVALID_TRANSFER_DATE',
-        message: 'Ngày chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng hiện tại.',
+        message: 'Ngày chuyển phòng phải nằm trong thời hạn hiệu lực của hợp đồng hiện tại.',
       });
     }
 

@@ -648,7 +648,8 @@ router.get(
           'Số tiền (VND)',
         ];
         const rsvRows = [
-          ['Giữ chỗ đã xác nhận đang giữ (HELD)', reservationSummary.active_held_count, reservationSummary.active_held_amount],
+          ['Giữ chỗ đang giữ / chờ duyệt hủy (HELD / CANCEL_PENDING_APPROVAL)', reservationSummary.active_held_count, reservationSummary.active_held_amount],
+          ['Giữ chỗ đã duyệt chờ BQL chi hoàn (APPROVED_PENDING_PAYOUT)', reservationSummary.pending_payout_count, reservationSummary.pending_payout_amount],
           ['Giữ chỗ chờ đối chiếu sao kê (PENDING_CONFIRM)', reservationSummary.pending_confirm_count, reservationSummary.pending_confirm_amount],
           ['Hoàn trả giữ chỗ trong kỳ', '', reservationSummary.refunded_in_period],
           ['Tịch thu giữ chỗ trong kỳ', '', reservationSummary.forfeited_in_period],

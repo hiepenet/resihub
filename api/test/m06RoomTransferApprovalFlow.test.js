@@ -211,6 +211,18 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
     resRoleRes.rows[0].id,
   ]);
 
+  const pIns2 = await adminPool.query(
+    `INSERT INTO person (org_id, full_name, phone, email, id_number)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    [orgId, `Cu Dan Khac ${suffix}`, `0967${suffix}`, `tr2.${suffix}@resihub.test`, `079389${suffix}`]
+  );
+  cleanup.personIds.push(pIns2.rows[0].id);
+  const tIns2 = await adminPool.query(
+    `INSERT INTO tenant (org_id, person_id, type, status) VALUES ($1, $2, 'primary', 'APPROVED') RETURNING id`,
+    [orgId, pIns2.rows[0].id]
+  );
+  cleanup.tenantIds.push(tIns2.rows[0].id);
+
   async function makeApt(buildingId, floorId, code, baseRent = 9000000) {
     const r = await apiFetch('/api/v1/apartments', sysAdmin.token, {
       method: 'POST',
@@ -292,6 +304,23 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
   assert.equal(crossBld.status, 422, JSON.stringify(crossBld.body));
   assert.equal(crossBld.body?.code, 'CROSS_BUILDING_TRANSFER_NOT_ALLOWED');
 
+  // 1b. Out-of-range transfer date (> oldContract.end_date) -> 422 INVALID_TRANSFER_DATE
+  const afterEndTr = await apiFetch(`/api/v1/contracts/${oldContractId}/transfer-room`, mgrA.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      new_apartment_id: aptNew.id,
+      new_start_date: isoDaysFromToday(195),
+      new_end_date: isoDaysFromToday(365),
+      new_rent_amount: 9000000,
+      transfer_deposit: true,
+    }),
+  });
+  if (afterEndTr.body?.data?.new_contract?.id) {
+    cleanup.contractIds.push(afterEndTr.body.data.new_contract.id);
+  }
+  assert.equal(afterEndTr.status, 422, JSON.stringify(afterEndTr.body));
+  assert.equal(afterEndTr.body?.code, 'INVALID_TRANSFER_DATE');
+
   // 2. Valid transfer-room with >10% rent discount (8M on 10M base_rent) + 6M new deposit -> 201 DRAFT, oldContract stays ACTIVE!
   const trDraft = await apiFetch(`/api/v1/contracts/${oldContractId}/transfer-room`, mgrA.token, {
     method: 'POST',
@@ -347,6 +376,19 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
   assert.equal(badPatchSame.status, 400);
   assert.equal(badPatchSame.body?.code, 'SAME_APARTMENT');
 
+  // PATCH draft attempting to swap primary_tenant_id on a room transfer must fail 422 CANNOT_CHANGE_TRANSFER_TENANT
+  const badPatchTenant = await apiFetch(`/api/v1/contracts/${newContractId}`, mgrA.token, {
+    method: 'PATCH',
+    body: JSON.stringify({ primary_tenant_id: tIns2.rows[0].id }),
+  });
+  assert.equal(badPatchTenant.status, 422, JSON.stringify(badPatchTenant.body));
+  assert.equal(badPatchTenant.body?.code, 'CANNOT_CHANGE_TRANSFER_TENANT');
+
+  // GET /api/v1/contracts/:id must expose apartment_base_rent for UI discount guard
+  const detailNew = await apiFetch(`/api/v1/contracts/${newContractId}`, mgrA.token, { method: 'GET' });
+  assert.equal(detailNew.status, 200);
+  assert.equal(Number(detailNew.body?.data?.apartment_base_rent), 10000000);
+
   // 4. Activate without signed scan -> 409 MISSING_SIGNED_SCAN (AC-009.2)
   const actNoScan = await apiFetch(`/api/v1/contracts/${newContractId}/activate`, mgrA.token, {
     method: 'POST',
@@ -385,6 +427,9 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
   });
   assert.equal(ownReject.status, 200, JSON.stringify(ownReject.body));
   assert.equal(ownReject.body.data.status, 'DRAFT');
+
+  // Reject note on room transfer uses [Từ chối duyệt đổi phòng: ...]
+  assert.match(ownReject.body.data.note || '', /\[Từ chối duyệt đổi phòng:/);
 
   const oldAfterReject = await adminPool.query('SELECT status FROM contract WHERE id = $1', [oldContractId]);
   assert.equal(oldAfterReject.rows[0].status, 'ACTIVE');
@@ -445,7 +490,14 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
     assert.equal(row.approved_by, ownerVop.user.sub, 'TRANSFER_IN / TRANSFER_OUT must record OWNER as approved_by (FR-025)');
   }
 
-  // 8. Parent-terminated race: transfer from newContract -> aptRace, then terminate newContract before OWNER approves -> 409 PARENT_CONTRACT_NOT_ACTIVE
+  // TRANSFER_ROOM audit_log must be anchored on oldContractId (Spec 5.2.B.4)
+  const trAudit = await adminPool.query(
+    `SELECT entity_id FROM audit_log WHERE entity = 'contract' AND action = 'TRANSFER_ROOM' AND entity_id = $1`,
+    [oldContractId]
+  );
+  assert.equal(trAudit.rows.length, 1, 'TRANSFER_ROOM audit_log must record oldContractId as entity_id');
+
+  // 8. Target apartment RESERVED race + Parent-terminated race:
   const trRace = await apiFetch(`/api/v1/contracts/${newContractId}/transfer-room`, mgrA.token, {
     method: 'POST',
     body: JSON.stringify({
@@ -471,7 +523,19 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
   assert.equal(actRace.status, 409);
   assert.equal(actRace.body?.code, 'TRANSFER_NEEDS_APPROVAL');
 
-  // Simulate parent contract terminated before OWNER approves
+  // 8a. Simulate target apartment becoming RESERVED while room transfer sits in PENDING_APPROVAL -> 409 APARTMENT_NOT_AVAILABLE
+  await adminPool.query(`UPDATE apartment SET status = 'RESERVED' WHERE id = $1`, [aptRace.id]);
+  const approveReservedApt = await apiFetch(`/api/v1/contracts/${raceContractId}/approve`, ownerVop.token, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assert.equal(approveReservedApt.status, 409, JSON.stringify(approveReservedApt.body));
+  assert.equal(approveReservedApt.body?.code, 'APARTMENT_NOT_AVAILABLE');
+  const parentStillActive = await adminPool.query('SELECT status FROM contract WHERE id = $1', [newContractId]);
+  assert.equal(parentStillActive.rows[0].status, 'ACTIVE');
+  await adminPool.query(`UPDATE apartment SET status = 'AVAILABLE' WHERE id = $1`, [aptRace.id]);
+
+  // 8b. Simulate parent contract terminated before OWNER approves -> 409 PARENT_CONTRACT_NOT_ACTIVE
   await adminPool.query(`UPDATE contract SET status = 'TERMINATED', terminated_at = CURRENT_DATE WHERE id = $1`, [newContractId]);
 
   const approveRace = await apiFetch(`/api/v1/contracts/${raceContractId}/approve`, ownerVop.token, {

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
@@ -71,6 +72,11 @@ test('M06 Task 4 — Separated Reservation Cancel-Settlement (Propose -> Approve
     };
     if (token) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(`${API_BASE}${urlPath}`, { ...options, headers });
+    const contentType = res.headers.get('content-type') || '';
+    if (options.rawBuffer) {
+      const arrayBuf = await res.arrayBuffer();
+      return { status: res.status, headers: res.headers, contentType, buffer: Buffer.from(arrayBuf) };
+    }
     const text = await res.text();
     let body = null;
     try {
@@ -360,13 +366,15 @@ test('M06 Task 4 — Separated Reservation Cancel-Settlement (Propose -> Approve
     assert.equal(sysApp.status, 403);
     assert.equal(sysApp.body.code, 'SYS_ADMIN_READ_ONLY_ON_OWNED_BUILDING');
 
-    // OWNER approves WITHOUT UNC -> 200 APPROVED_PENDING_PAYOUT + apartment immediately AVAILABLE!
+    // OWNER approves WITHOUT UNC (with optional approval note) -> 200 APPROVED_PENDING_PAYOUT + apartment immediately AVAILABLE!
     const ownApp = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-approve`, ownerAuth.token, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ note: 'Duyệt hoàn 60% theo chính sách giữ chỗ' }),
     });
     assert.equal(ownApp.status, 200, JSON.stringify(ownApp.body));
     assert.equal(ownApp.body.data.status, 'APPROVED_PENDING_PAYOUT');
+    assert.equal(ownApp.body.data.cancel_settlement?.approval_note, 'Duyệt hoàn 60% theo chính sách giữ chỗ');
+    assert.match(ownApp.body.data.note || '', /Duyệt hoàn 60% theo chính sách giữ chỗ/);
 
     const aptAfterApprove = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [apt1.id]);
     assert.equal(aptAfterApprove.rows[0].status, 'AVAILABLE', 'Apartment MUST immediately become AVAILABLE on APPROVED_PENDING_PAYOUT');
@@ -384,6 +392,30 @@ test('M06 Task 4 — Separated Reservation Cancel-Settlement (Propose -> Approve
     assert.equal(Number(rsMid.pending_payout_count), 1);
     assert.equal(Number(rsMid.forfeited_in_period), 800000);
     assert.equal(Number(rsMid.refunded_in_period), 0);
+
+    // RP-07 .xlsx export Sheet 2 (Doi soat giu cho) must also include APPROVED_PENDING_PAYOUT (1,200,000)
+    const rpXlsx = await apiFetch(
+      `/api/v1/reports/deposit-ledger?building_id=${bldId}&from_date=${currentPeriod}-01&to_date=${isoDaysFromToday(1)}&format=xlsx`,
+      ownerAuth.token,
+      { rawBuffer: true }
+    );
+    assert.equal(rpXlsx.status, 200);
+    const zipEntries = new Map();
+    let offset = 0;
+    while (offset + 30 <= rpXlsx.buffer.length && rpXlsx.buffer.readUInt32LE(offset) === 0x04034b50) {
+      const method = rpXlsx.buffer.readUInt16LE(offset + 8);
+      const compSize = rpXlsx.buffer.readUInt32LE(offset + 18);
+      const fnLen = rpXlsx.buffer.readUInt16LE(offset + 26);
+      const exLen = rpXlsx.buffer.readUInt16LE(offset + 28);
+      const fn = rpXlsx.buffer.subarray(offset + 30, offset + 30 + fnLen).toString('utf8');
+      const dataStart = offset + 30 + fnLen + exLen;
+      const slice = rpXlsx.buffer.subarray(dataStart, dataStart + compSize);
+      zipEntries.set(fn, method === 8 ? zlib.inflateRawSync(slice) : Buffer.from(slice));
+      offset = dataStart + compSize;
+    }
+    const sheet2Xml = zipEntries.get('xl/worksheets/sheet2.xml').toString('utf8');
+    assert.match(sheet2Xml, /APPROVED_PENDING_PAYOUT/);
+    assert.match(sheet2Xml, /1200000/);
 
     // RESIDENT updates bank info with nested { bank_info: { ..., bank_logo } }
     const resBank = await apiFetch(`/api/v1/reservations/${rsvId}/bank-info`, resAuth.token, {

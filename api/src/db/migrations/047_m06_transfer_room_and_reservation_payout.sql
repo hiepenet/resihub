@@ -218,7 +218,7 @@ BEGIN
     RETURN 0;
   END IF;
 
-  IF is_org_admin() THEN
+  IF is_org_admin() AND NOT building_has_active_owner(v_rsv.building_id) THEN
     v_allowed := TRUE;
   ELSIF (is_manager() OR is_owner()) AND v_rsv.building_id IN (SELECT building_id FROM get_user_assigned_buildings()) THEN
     v_allowed := TRUE;
@@ -395,3 +395,4 @@ BEGIN
 END $$;
 
 COMMIT;
+

@@ -1096,13 +1096,16 @@ router.post(
       const forfeitAmt = Number(currentRes.forfeited_amount || 0);
       const nextStatus = refundAmt === 0 ? 'FORFEITED' : 'APPROVED_PENDING_PAYOUT';
       const nowIso = new Date().toISOString();
+      const approvalNote = String(req.body?.note || '').trim();
       const mergedSettlement = {
         ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
           ? currentRes.cancel_settlement
           : {}),
         approved_by: req.user.sub,
         approved_at: nowIso,
+        approval_note: approvalNote || null,
       };
+      const approvalNoteSuffix = approvalNote ? ` — ${approvalNote}` : '';
 
       const updated = await client.query(
         `UPDATE reservation
@@ -1117,8 +1120,8 @@ router.post(
           nextStatus,
           JSON.stringify(mergedSettlement),
           refundAmt === 0
-            ? `[Đã duyệt thanh lý hủy giữ chỗ — Phạt cọc 100%]: ${forfeitAmt.toLocaleString('vi-VN')} ₫`
-            : `[Đã duyệt thanh lý hủy giữ chỗ — Chờ BQL chi hoàn]: Hoàn ${refundAmt.toLocaleString('vi-VN')} ₫ / Phạt ${forfeitAmt.toLocaleString('vi-VN')} ₫`,
+            ? `[Đã duyệt thanh lý hủy giữ chỗ — Phạt cọc 100%]: ${forfeitAmt.toLocaleString('vi-VN')} ₫${approvalNoteSuffix}`
+            : `[Đã duyệt thanh lý hủy giữ chỗ — Chờ BQL chi hoàn]: Hoàn ${refundAmt.toLocaleString('vi-VN')} ₫ / Phạt ${forfeitAmt.toLocaleString('vi-VN')} ₫${approvalNoteSuffix}`,
         ]
       );
 
