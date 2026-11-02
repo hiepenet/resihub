@@ -82,7 +82,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
     `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'approval_config' LIMIT 1`,
     [orgId]
   );
-  cleanup.originalApprovalCfg = origCfgRes.rows[0]?.value ?? { allow_self_approval: false };
+  cleanup.originalApprovalCfg = { allow_self_approval: false };
 
   t.after(async () => {
     try {
@@ -422,7 +422,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
     );
     await adminPool.query(
       `INSERT INTO service_subscription (org_id, building_id, apartment_id, contract_id, service_id, quantity, unit_price, prorata_amount, start_date, end_date, status)
-       VALUES ($1, $2, $3, $4, $5, 1, 300000, 100000, '2028-04-01', '2028-04-10', 'CANCELLED')`,
+       VALUES ($1, $2, $3, $4, $5, 1, 300000, 100000, '2028-04-01', '2028-04-10', 'TERMINATED')`,
       [orgId, vopAId, aptId, aprCtrId, catRes.rows[0].id]
     );
 
