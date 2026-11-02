@@ -554,7 +554,7 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
   // =========================================================================
   // 3. Item 3.4 (PRD 7.5): Reservation cancel-settle requires UNC evidence when BANK_TRANSFER & refunded_amount > 0
   // =========================================================================
-  await t.test('3.4: PATCH /reservations/:id/cancel-settle requires refund_evidence for BANK_TRANSFER refund > 0', async () => {
+  await t.test('3.4: separated cancel-settle -> cancel-approve -> cancel-payout requires refund_evidence for BANK_TRANSFER refund > 0', async () => {
     const aptRsv = await createApt('RSV', 9000000);
     const createRsv = await apiFetch('/api/v1/reservations', mgrAuth.token, {
       method: 'POST',
@@ -572,36 +572,42 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
     const rsvId = createRsv.body.data.id;
     cleanup.reservationIds.push(rsvId);
 
-    const noUnc = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-settle`, ownerAuth.token, {
+    const propRsv = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-settle`, mgrAuth.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 1000000,
         forfeited_amount: 1000000,
-        reason: 'Khách hủy giữ chỗ hoàn 50% chuyển khoản thiếu UNC',
+        reason: 'Khách hủy giữ chỗ hoàn 50% chuyển khoản',
         refund_method: 'BANK_TRANSFER',
         refund_bank_info: {
           bank_name: 'Vietcombank',
           account_number: '0123456789',
           account_holder: 'KHACH GIU CHO PR',
         },
+      }),
+    });
+    assert.equal(propRsv.status, 200, JSON.stringify(propRsv.body));
+    assert.equal(propRsv.body.data.status, 'CANCEL_PENDING_APPROVAL');
+
+    const appRsv = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-approve`, ownerAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(appRsv.status, 200, JSON.stringify(appRsv.body));
+    assert.equal(appRsv.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+    const noUnc = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-payout`, mgrAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({
         refund_evidence: [],
       }),
     });
     assert.equal(noUnc.status, 422, JSON.stringify(noUnc.body));
     assert.equal(noUnc.body.code, 'REFUND_EVIDENCE_REQUIRED');
 
-    const withUnc = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-settle`, ownerAuth.token, {
-      method: 'PATCH',
+    const withUnc = await apiFetch(`/api/v1/reservations/${rsvId}/cancel-payout`, mgrAuth.token, {
+      method: 'POST',
       body: JSON.stringify({
-        refunded_amount: 1000000,
-        forfeited_amount: 1000000,
-        reason: 'Khách hủy giữ chỗ hoàn 50% chuyển khoản đủ UNC',
-        refund_method: 'BANK_TRANSFER',
-        refund_bank_info: {
-          bank_name: 'Vietcombank',
-          account_number: '0123456789',
-          account_holder: 'KHACH GIU CHO PR',
-        },
         refund_evidence: [TINY_PNG_B64],
       }),
     });

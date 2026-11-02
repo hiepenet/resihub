@@ -1003,12 +1003,19 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
 
     const okRefundExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, owner.token, {
       method: 'PATCH',
-      body: JSON.stringify({ reason: 'Hoàn thiện chí do chủ nhà chậm bàn giao' }),
+      body: JSON.stringify({ reason: 'Hoàn thiện chí do chủ nhà chậm bàn giao', refund_method: 'CASH' }),
     });
     assert.equal(okRefundExp.status, 200);
-    assert.equal(okRefundExp.body.data.status, 'REFUNDED');
+    assert.equal(okRefundExp.body.data.status, 'APPROVED_PENDING_PAYOUT');
     assert.match(okRefundExp.body.data.note, /Phiếu chờ hoàn sau hết hạn/);
-    assert.match(okRefundExp.body.data.note, /\[Hoàn cọc giữ chỗ\]: Hoàn thiện chí do chủ nhà chậm bàn giao/);
+    assert.match(okRefundExp.body.data.note, /Hoàn thiện chí do chủ nhà chậm bàn giao/);
+
+    const payoutExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/cancel-payout`, manager.token, {
+      method: 'POST',
+      body: JSON.stringify({ refund_method: 'CASH', note: 'Chi tiền mặt hoàn thiện chí' }),
+    });
+    assert.equal(payoutExp.status, 200);
+    assert.equal(payoutExp.body.data.status, 'REFUNDED');
 
     const rsvExpForfeit = await apiFetch('/api/v1/reservations', manager.token, {
       method: 'POST',

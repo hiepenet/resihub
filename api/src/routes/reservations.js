@@ -392,12 +392,12 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
       });
     }
 
-    // Kiểm tra chồng lấn với các phiếu giữ chỗ đang hiệu lực (HELD) khác trên cùng căn hộ
+    // Kiểm tra chồng lấn với các phiếu giữ chỗ đang hiệu lực (HELD / CANCEL_PENDING_APPROVAL) khác trên cùng căn hộ
     const overlapRes = await client.query(
       `SELECT prospect_name, COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) AS hold_from, hold_until
        FROM reservation
        WHERE apartment_id = $1
-         AND status = 'HELD'
+         AND status IN ('HELD', 'CANCEL_PENDING_APPROVAL')
          AND COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) <= $2::date
          AND hold_until >= $3::date
        ORDER BY hold_until ASC
@@ -599,7 +599,7 @@ router.patch(
         `SELECT id FROM reservation
          WHERE apartment_id = $1
            AND id <> $2
-           AND status = 'HELD'
+           AND status IN ('HELD', 'CANCEL_PENDING_APPROVAL')
            AND COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) <= $3::date
            AND hold_until >= $4::date
          LIMIT 1`,
@@ -792,14 +792,27 @@ async function canActAsReservationApprover(req, rsvRow, actionLabel) {
   };
 }
 
+function extractReservationBankPayload(rawInput) {
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+    return {};
+  }
+  if (rawInput.bank_info !== undefined) {
+    return rawInput.bank_info && typeof rawInput.bank_info === 'object' && !Array.isArray(rawInput.bank_info)
+      ? rawInput.bank_info
+      : {};
+  }
+  return rawInput;
+}
+
 /**
  * PATCH /api/v1/reservations/:id/cancel-settle
- * Thanh lý hủy phiếu giữ chỗ theo chính sách chia hoàn / phạt (FR-005 / FR-067 / PRD 6.2 & 10.3)
+ * Bước 1: MANAGER lập đề xuất thanh lý hủy phiếu giữ chỗ theo chính sách chia hoàn / phạt (FR-005 / FR-067 / PRD 6.2 & 10.3)
+ * Chuyển sang CANCEL_PENDING_APPROVAL (không yêu cầu UNC ở bước lập đề xuất).
  */
 router.patch(
   '/:id/cancel-settle',
   authenticateToken,
-  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -809,7 +822,6 @@ router.patch(
       reason,
       refund_method = 'BANK_TRANSFER',
       refund_bank_info = {},
-      refund_evidence = [],
     } = req.body || {};
 
     const trimmedReason = String(reason || '').trim();
@@ -833,18 +845,19 @@ router.patch(
       }
       const preRow = rsvExist.rows[0];
 
-      const approverAccess = await canActAsReservationApprover(req, preRow, 'reservation cancel-settle');
-      if (!approverAccess.ok) {
+      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+      if (!mgrIds.includes(preRow.building_id)) {
+        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted cancel-settle proposal on unassigned building');
         return res.status(403).json({
-          code: approverAccess.code,
-          message: approverAccess.message,
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền quản lý tòa nhà của hồ sơ giữ chỗ này.',
         });
       }
 
       if (!isReservationSettleable(preRow)) {
         return res.status(400).json({
           code: 'INVALID_STATUS',
-          message: `Hồ sơ giữ chỗ đang ở trạng thái ${preRow.status} (hoặc đã được thanh lý trước đó), chỉ phiếu HELD hoặc EXPIRED đã xác nhận tiền mới được xử lý.`,
+          message: `Hồ sơ giữ chỗ đang ở trạng thái ${preRow.status} (hoặc đã được thanh lý trước đó), chỉ phiếu HELD hoặc EXPIRED đã xác nhận tiền mới được lập đề xuất hủy.`,
         });
       }
 
@@ -865,13 +878,14 @@ router.patch(
         });
       }
 
-      const effectiveMethod = refundInt > 0 ? String(refund_method || 'BANK_TRANSFER').trim() : null;
+      const effectiveMethod = refundInt > 0 ? String(refund_method || 'BANK_TRANSFER').trim().toUpperCase() : null;
       let normalizedBankInfo = null;
       if (refundInt > 0) {
+        const rawBankPayload = extractReservationBankPayload(refund_bank_info);
         const bankCheck = validateRefundBankInfo({
           refundAmount: refundInt,
           refundMethod: effectiveMethod,
-          bankInfo: refund_bank_info,
+          bankInfo: rawBankPayload,
         });
         if (!bankCheck.ok) {
           return res.status(422).json({
@@ -880,18 +894,6 @@ router.patch(
           });
         }
         normalizedBankInfo = effectiveMethod === 'BANK_TRANSFER' ? bankCheck.normalizedBankInfo : null;
-        if (effectiveMethod === 'BANK_TRANSFER') {
-          const validEv = Array.isArray(refund_evidence)
-            ? refund_evidence.filter((item) => typeof item === 'string' && item.trim().length > 0)
-            : [];
-          if (validEv.length === 0) {
-            return res.status(422).json({
-              code: 'REFUND_EVIDENCE_REQUIRED',
-              message:
-                'Hoàn tiền giữ chỗ qua chuyển khoản ngân hàng (BANK_TRANSFER) bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC (PRD 7.5).',
-            });
-          }
-        }
       }
 
       await client.query('BEGIN');
@@ -901,7 +903,7 @@ router.patch(
         await client.query('ROLLBACK');
         return res.status(400).json({
           code: 'INVALID_STATUS',
-          message: 'Phiếu giữ chỗ không còn ở trạng thái cho phép thanh lý.',
+          message: 'Phiếu giữ chỗ không còn ở trạng thái cho phép lập đề xuất hủy.',
         });
       }
       const currentRes = resCheck.rows[0];
@@ -909,37 +911,9 @@ router.patch(
         await client.query('ROLLBACK');
         return res.status(400).json({
           code: 'INVALID_STATUS',
-          message: `Phiếu giữ chỗ đang ở trạng thái ${currentRes.status} hoặc đã hạch toán trước đó.`,
+          message: `Phiếu giữ chỗ đang ở trạng thái ${currentRes.status} hoặc đã lập đề xuất thanh lý trước đó.`,
         });
       }
-
-      const creatorId = currentRes.confirmed_by || currentRes.created_by;
-      const fourEyes = await checkFourEyesOrWarn({
-        orgId: req.user.org_id,
-        actorId: req.user.sub,
-        creatorId,
-        entity: 'reservation',
-        entityId: id,
-        actionContext: 'RESERVATION_CANCEL_SETTLE',
-      });
-      if (!fourEyes.allowed) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({
-          code: 'FOUR_EYES_VIOLATION',
-          message:
-            'Quy tắc 4 mắt (Four-eyes): Người phê duyệt thanh lý hủy giữ chỗ phải khác người tạo / xác nhận tiền phiếu giữ chỗ.',
-        });
-      }
-
-      let savedRefundEvidence = [];
-      if (Array.isArray(refund_evidence) && refund_evidence.length > 0) {
-        savedRefundEvidence = await persistReservationEvidence(client, req, id, refund_evidence, {
-          allowExistingAttachmentUrls: true,
-        });
-      }
-
-      const nextStatus =
-        refundInt === 0 ? 'FORFEITED' : forfeitInt === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
 
       const policy = await getOrgReservationCancelPolicy(req.user.org_id);
       const suggestedSplit = computeSuggestedCancelSplit({
@@ -952,44 +926,58 @@ router.patch(
         suggestedSplit.refunded_amount !== refundInt ||
         suggestedSplit.forfeited_amount !== forfeitInt;
 
+      const nowIso = new Date().toISOString();
+      const cancelSettlementMeta = {
+        previous_status: currentRes.status,
+        proposed_by: req.user.sub,
+        proposed_at: nowIso,
+        policy_suggested_split: suggestedSplit,
+        policy_override: policyOverride,
+        approved_by: null,
+        approved_at: null,
+        payout_by: null,
+        payout_at: null,
+        reference_code: null,
+      };
+
       const updated = await client.query(
         `UPDATE reservation
-         SET status = $2,
-             refunded_amount = $3,
-             forfeited_amount = $4,
-             cancel_reason = $5,
-             refund_method = $6,
-             refund_bank_info = $7,
-             refund_evidence = $8,
-             note = COALESCE(NULLIF(note, '') || E'\n', '') || $9,
+         SET status = 'CANCEL_PENDING_APPROVAL',
+             refunded_amount = $2,
+             forfeited_amount = $3,
+             cancel_reason = $4,
+             refund_method = $5,
+             refund_bank_info = $6,
+             cancel_settlement = $7::jsonb,
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $8,
              updated_at = NOW()
          WHERE id = $1
          RETURNING *`,
         [
           id,
-          nextStatus,
           refundInt,
           forfeitInt,
           trimmedReason,
           effectiveMethod,
           normalizedBankInfo ? JSON.stringify(normalizedBankInfo) : null,
-          savedRefundEvidence,
-          `[Thanh lý hủy giữ chỗ]: Hoàn ${refundInt.toLocaleString('vi-VN')} ₫ / Phạt ${forfeitInt.toLocaleString('vi-VN')} ₫ — ${trimmedReason}`,
+          JSON.stringify(cancelSettlementMeta),
+          `[Đề xuất thanh lý hủy giữ chỗ]: Hoàn ${refundInt.toLocaleString('vi-VN')} ₫ / Phạt ${forfeitInt.toLocaleString('vi-VN')} ₫ — ${trimmedReason}`,
         ]
       );
 
       await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
 
-      await client.query('SELECT fn_notify_reservation_prospect($1, $2, $3, $4)', [
+      await client.query('SELECT fn_notify_reservation_staff($1, $2, $3, $4, $5)', [
         id,
-        'RESERVATION_CANCEL_SETTLED',
-        'Đã thanh lý hủy phiếu đặt giữ chỗ',
-        `Phiếu giữ chỗ của bạn đã được thanh lý: hoàn trả ${refundInt.toLocaleString('vi-VN')} ₫, phí hủy ${forfeitInt.toLocaleString('vi-VN')} ₫.`,
+        'APPROVERS',
+        'RESERVATION_CANCEL_PENDING_APPROVAL',
+        'Đề xuất thanh lý hủy giữ chỗ chờ phê duyệt',
+        `BQL đề xuất thanh lý giữ chỗ khách ${currentRes.prospect_name}: hoàn ${refundInt.toLocaleString('vi-VN')} ₫, phạt ${forfeitInt.toLocaleString('vi-VN')} ₫.`,
       ]);
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-         VALUES ($1, 'CANCEL_SETTLE', 'reservation', $2, $3, $4)`,
+         VALUES ($1, 'CANCEL_SETTLE_PROPOSE', 'reservation', $2, $3, $4)`,
         [
           req.user.sub,
           id,
@@ -1001,7 +989,7 @@ router.patch(
             refund_method: effectiveMethod,
             policy_suggested_split: suggestedSplit,
             policy_override: policyOverride,
-            approved_by: req.user.sub,
+            proposed_by: req.user.sub,
             reason: trimmedReason,
           }),
         ]
@@ -1009,7 +997,7 @@ router.patch(
 
       await client.query('COMMIT');
       res.json({
-        message: 'Đã phê duyệt thanh lý hủy giữ chỗ thành công. Trạng thái căn hộ đã được đồng bộ.',
+        message: 'Đã gửi đề xuất thanh lý hủy giữ chỗ chờ phê duyệt (Four-Eyes).',
         data: updated.rows[0],
       });
     } catch (err) {
@@ -1017,8 +1005,611 @@ router.patch(
       if (err.httpStatus) {
         return res.status(err.httpStatus).json({ code: err.code, message: err.message });
       }
-      console.error('[Cancel-Settle Reservation Error]:', err);
-      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi thanh lý hủy giữ chỗ.' });
+      console.error('[Cancel-Settle Propose Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi lập đề xuất thanh lý hủy giữ chỗ.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/reservations/:id/cancel-approve
+ * Bước 2a: OWNER (hoặc người duyệt Four-Eyes dự phòng) phê duyệt đề xuất hủy giữ chỗ (FR-067 / PRD 6.1–6.2)
+ * - Nếu refunded_amount === 0: chốt thẳng FORFEITED + mở căn AVAILABLE.
+ * - Nếu refunded_amount > 0: chuyển sang APPROVED_PENDING_PAYOUT + mở ngay căn AVAILABLE để BQL chi hoàn kèm UNC.
+ */
+router.post(
+  '/:id/cancel-approve',
+  authenticateToken,
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { client, release } = await getUserClient(req);
+    try {
+      const rsvExist = await adminPool.query(
+        `SELECT r.*, building_has_active_owner(r.building_id) AS building_has_active_owner
+         FROM reservation r
+         WHERE r.id = $1 AND r.org_id = $2`,
+        [id, req.user.org_id]
+      );
+      if (rsvExist.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const preRow = rsvExist.rows[0];
+
+      const approverAccess = await canActAsReservationApprover(req, preRow, 'reservation cancel-approve');
+      if (!approverAccess.ok) {
+        return res.status(403).json({
+          code: approverAccess.code,
+          message: approverAccess.message,
+        });
+      }
+
+      if (preRow.status !== 'CANCEL_PENDING_APPROVAL') {
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${preRow.status}, chỉ phiếu CANCEL_PENDING_APPROVAL mới được phê duyệt.`,
+        });
+      }
+
+      await client.query('BEGIN');
+
+      const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
+      if (resCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: 'Phiếu giữ chỗ không còn ở trạng thái chờ phê duyệt.',
+        });
+      }
+      const currentRes = resCheck.rows[0];
+      if (currentRes.status !== 'CANCEL_PENDING_APPROVAL') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${currentRes.status}, chỉ phiếu CANCEL_PENDING_APPROVAL mới được phê duyệt.`,
+        });
+      }
+
+      const proposerId =
+        currentRes.cancel_settlement?.proposed_by || currentRes.confirmed_by || currentRes.created_by;
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: proposerId,
+        entity: 'reservation',
+        entityId: id,
+        actionContext: 'RESERVATION_CANCEL_APPROVE',
+      });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FOUR_EYES_VIOLATION',
+          message:
+            'Quy tắc 4 mắt (Four-eyes): Người phê duyệt thanh lý hủy giữ chỗ phải khác người lập đề xuất / xác nhận phiếu giữ chỗ.',
+        });
+      }
+
+      const refundAmt = Number(currentRes.refunded_amount || 0);
+      const forfeitAmt = Number(currentRes.forfeited_amount || 0);
+      const nextStatus = refundAmt === 0 ? 'FORFEITED' : 'APPROVED_PENDING_PAYOUT';
+      const nowIso = new Date().toISOString();
+      const mergedSettlement = {
+        ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
+          ? currentRes.cancel_settlement
+          : {}),
+        approved_by: req.user.sub,
+        approved_at: nowIso,
+      };
+
+      const updated = await client.query(
+        `UPDATE reservation
+         SET status = $2,
+             cancel_settlement = $3::jsonb,
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $4,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [
+          id,
+          nextStatus,
+          JSON.stringify(mergedSettlement),
+          refundAmt === 0
+            ? `[Đã duyệt thanh lý hủy giữ chỗ — Phạt cọc 100%]: ${forfeitAmt.toLocaleString('vi-VN')} ₫`
+            : `[Đã duyệt thanh lý hủy giữ chỗ — Chờ BQL chi hoàn]: Hoàn ${refundAmt.toLocaleString('vi-VN')} ₫ / Phạt ${forfeitAmt.toLocaleString('vi-VN')} ₫`,
+        ]
+      );
+
+      await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
+
+      if (refundAmt === 0) {
+        await client.query('SELECT fn_notify_reservation_prospect($1, $2, $3, $4)', [
+          id,
+          'RESERVATION_CANCEL_SETTLED',
+          'Đã thanh lý hủy phiếu đặt giữ chỗ',
+          `Phiếu giữ chỗ của bạn đã được thanh lý hủy (phí hủy giữ chỗ: ${forfeitAmt.toLocaleString('vi-VN')} ₫).`,
+        ]);
+      } else {
+        await client.query('SELECT fn_notify_reservation_staff($1, $2, $3, $4, $5)', [
+          id,
+          'BUILDING_MANAGERS',
+          'RESERVATION_CANCEL_APPROVED_FOR_PAYOUT',
+          'Đề xuất hủy giữ chỗ đã được duyệt — Chờ chi hoàn & tải UNC',
+          `Phương án hoàn ${refundAmt.toLocaleString('vi-VN')} ₫ cho khách ${currentRes.prospect_name} đã được duyệt. Vui lòng thực chi và tải chứng từ UNC.`,
+        ]);
+        await client.query('SELECT fn_notify_reservation_prospect($1, $2, $3, $4)', [
+          id,
+          'RESERVATION_CANCEL_APPROVED',
+          'Đã duyệt phương án hoàn tiền giữ chỗ',
+          `Phương án hoàn trả ${refundAmt.toLocaleString('vi-VN')} ₫ đã được phê duyệt. Ban quản lý đang thực hiện thủ tục chi hoàn.`,
+        ]);
+      }
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'CANCEL_SETTLE_APPROVE', 'reservation', $2, $3, $4)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify(currentRes),
+          JSON.stringify({
+            reservation: updated.rows[0],
+            refunded_amount: refundAmt,
+            forfeited_amount: forfeitAmt,
+            approved_by: req.user.sub,
+            approved_at: nowIso,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({
+        message:
+          refundAmt === 0
+            ? 'Đã phê duyệt thanh lý hủy giữ chỗ (phạt cọc 100%). Căn hộ đã được mở lại có sẵn.'
+            : 'Đã phê duyệt phương án hủy giữ chỗ và mở lại căn hộ. Chờ BQL thực chi hoàn tiền & tải UNC.',
+        data: updated.rows[0],
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('[Cancel-Approve Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi phê duyệt hủy giữ chỗ.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/reservations/:id/cancel-reject
+ * Bước 2b: OWNER (hoặc người duyệt Four-Eyes dự phòng) từ chối đề xuất hủy giữ chỗ
+ * Khôi phục EXPIRED (nếu hold_until < today hoặc trước đó là EXPIRED) hoặc HELD.
+ */
+router.post(
+  '/:id/cancel-reject',
+  authenticateToken,
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const trimmedReason = String(req.body?.reason || '').trim();
+    if (!trimmedReason) {
+      return res.status(400).json({
+        code: 'REASON_REQUIRED',
+        message: 'Vui lòng cung cấp lý do từ chối đề xuất hủy giữ chỗ.',
+      });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const rsvExist = await adminPool.query(
+        `SELECT r.*, building_has_active_owner(r.building_id) AS building_has_active_owner
+         FROM reservation r
+         WHERE r.id = $1 AND r.org_id = $2`,
+        [id, req.user.org_id]
+      );
+      if (rsvExist.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const preRow = rsvExist.rows[0];
+
+      const approverAccess = await canActAsReservationApprover(req, preRow, 'reservation cancel-reject');
+      if (!approverAccess.ok) {
+        return res.status(403).json({
+          code: approverAccess.code,
+          message: approverAccess.message,
+        });
+      }
+
+      if (preRow.status !== 'CANCEL_PENDING_APPROVAL') {
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${preRow.status}, chỉ phiếu CANCEL_PENDING_APPROVAL mới được từ chối duyệt.`,
+        });
+      }
+
+      await client.query('BEGIN');
+
+      const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
+      if (resCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: 'Phiếu giữ chỗ không còn ở trạng thái chờ phê duyệt.',
+        });
+      }
+      const currentRes = resCheck.rows[0];
+      if (currentRes.status !== 'CANCEL_PENDING_APPROVAL') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${currentRes.status}, chỉ phiếu CANCEL_PENDING_APPROVAL mới được từ chối duyệt.`,
+        });
+      }
+
+      const proposerId =
+        currentRes.cancel_settlement?.proposed_by || currentRes.confirmed_by || currentRes.created_by;
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: proposerId,
+        entity: 'reservation',
+        entityId: id,
+        actionContext: 'RESERVATION_CANCEL_REJECT',
+      });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FOUR_EYES_VIOLATION',
+          message:
+            'Quy tắc 4 mắt (Four-eyes): Người duyệt / từ chối đề xuất hủy giữ chỗ phải khác người lập đề xuất.',
+        });
+      }
+
+      const todayStr = getTodayVnDateStr();
+      const holdUntilStr = currentRes.hold_until ? getTodayVnDateStr(currentRes.hold_until) : null;
+      const prevStatus = currentRes.cancel_settlement?.previous_status;
+      const restoredStatus =
+        prevStatus === 'EXPIRED' || (holdUntilStr && holdUntilStr < todayStr) ? 'EXPIRED' : 'HELD';
+
+      const nowIso = new Date().toISOString();
+      const mergedSettlement = {
+        ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
+          ? currentRes.cancel_settlement
+          : {}),
+        rejected_by: req.user.sub,
+        rejected_at: nowIso,
+        rejected_reason: trimmedReason,
+      };
+
+      const updated = await client.query(
+        `UPDATE reservation
+         SET status = $2,
+             refunded_amount = 0,
+             forfeited_amount = 0,
+             cancel_settlement = $3::jsonb,
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $4,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [
+          id,
+          restoredStatus,
+          JSON.stringify(mergedSettlement),
+          `[Từ chối đề xuất hủy giữ chỗ]: ${trimmedReason}`,
+        ]
+      );
+
+      await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
+
+      await client.query('SELECT fn_notify_reservation_staff($1, $2, $3, $4, $5)', [
+        id,
+        'BUILDING_MANAGERS',
+        'RESERVATION_CANCEL_REJECTED',
+        'Đề xuất thanh lý hủy giữ chỗ bị từ chối',
+        `Đề xuất hủy giữ chỗ khách ${currentRes.prospect_name} bị từ chối: ${trimmedReason}`,
+      ]);
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'CANCEL_SETTLE_REJECT', 'reservation', $2, $3, $4)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify(currentRes),
+          JSON.stringify({
+            reservation: updated.rows[0],
+            restored_status: restoredStatus,
+            rejected_by: req.user.sub,
+            reason: trimmedReason,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã từ chối đề xuất thanh lý hủy giữ chỗ.',
+        data: updated.rows[0],
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('[Cancel-Reject Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi từ chối đề xuất hủy giữ chỗ.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/reservations/:id/cancel-payout
+ * Bước 3: MANAGER thực chi hoàn tiền giữ chỗ & tải chứng từ UNC (PRD 6.2 & 7.5)
+ */
+router.post(
+  '/:id/cancel-payout',
+  authenticateToken,
+  requireRole(['MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const {
+      refund_method,
+      refund_bank_info,
+      refund_evidence = [],
+      reference_code,
+      note,
+    } = req.body || {};
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const rsvExist = await adminPool.query(
+        `SELECT r.* FROM reservation r WHERE r.id = $1 AND r.org_id = $2`,
+        [id, req.user.org_id]
+      );
+      if (rsvExist.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const preRow = rsvExist.rows[0];
+
+      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+      if (!mgrIds.includes(preRow.building_id)) {
+        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted cancel-payout on unassigned building');
+        return res.status(403).json({
+          code: 'FORBIDDEN_BUILDING',
+          message: 'Bạn không có quyền quản lý tòa nhà của hồ sơ giữ chỗ này.',
+        });
+      }
+
+      if (preRow.status !== 'APPROVED_PENDING_PAYOUT' || Number(preRow.refunded_amount || 0) <= 0) {
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${preRow.status}, chỉ phiếu APPROVED_PENDING_PAYOUT có số tiền hoàn > 0 mới được thực chi.`,
+        });
+      }
+
+      await client.query('BEGIN');
+
+      const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
+      if (resCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: 'Phiếu giữ chỗ không còn ở trạng thái chờ chi hoàn.',
+        });
+      }
+      const currentRes = resCheck.rows[0];
+      const refundAmt = Number(currentRes.refunded_amount || 0);
+      const forfeitAmt = Number(currentRes.forfeited_amount || 0);
+      if (currentRes.status !== 'APPROVED_PENDING_PAYOUT' || refundAmt <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Phiếu giữ chỗ đang ở trạng thái ${currentRes.status}, chỉ phiếu APPROVED_PENDING_PAYOUT có số tiền hoàn > 0 mới được thực chi.`,
+        });
+      }
+
+      const effectiveMethod = String(
+        refund_method || currentRes.refund_method || 'BANK_TRANSFER'
+      )
+        .trim()
+        .toUpperCase();
+
+      const bodyBankPayload =
+        refund_bank_info !== undefined ? extractReservationBankPayload(refund_bank_info) : null;
+      const candidateBankInfo =
+        bodyBankPayload && Object.keys(bodyBankPayload).length > 0
+          ? bodyBankPayload
+          : currentRes.refund_bank_info || {};
+
+      const bankCheck = validateRefundBankInfo({
+        refundAmount: refundAmt,
+        refundMethod: effectiveMethod,
+        bankInfo: candidateBankInfo,
+      });
+      if (!bankCheck.ok) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          code: bankCheck.code,
+          message: bankCheck.message,
+        });
+      }
+      const normalizedBankInfo =
+        effectiveMethod === 'BANK_TRANSFER' ? bankCheck.normalizedBankInfo : currentRes.refund_bank_info;
+
+      if (effectiveMethod === 'BANK_TRANSFER') {
+        const validEv = Array.isArray(refund_evidence)
+          ? refund_evidence.filter((item) => typeof item === 'string' && item.trim().length > 0)
+          : [];
+        if (validEv.length === 0) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            code: 'REFUND_EVIDENCE_REQUIRED',
+            message:
+              'Chi hoàn tiền giữ chỗ qua chuyển khoản ngân hàng (BANK_TRANSFER) bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC (PRD 7.5).',
+          });
+        }
+      }
+
+      let savedRefundEvidence = Array.isArray(currentRes.refund_evidence) ? currentRes.refund_evidence : [];
+      if (Array.isArray(refund_evidence) && refund_evidence.length > 0) {
+        savedRefundEvidence = await persistReservationEvidence(client, req, id, refund_evidence, {
+          allowExistingAttachmentUrls: true,
+        });
+      }
+
+      const nextStatus = forfeitAmt === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+      const nowIso = new Date().toISOString();
+      const trimmedRef = reference_code ? String(reference_code).trim() : null;
+      const trimmedNote = note ? String(note).trim() : '';
+      const mergedSettlement = {
+        ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
+          ? currentRes.cancel_settlement
+          : {}),
+        payout_by: req.user.sub,
+        payout_at: nowIso,
+        reference_code: trimmedRef,
+      };
+
+      const noteLine = `[Đã chi hoàn giữ chỗ]: Hoàn ${refundAmt.toLocaleString('vi-VN')} ₫ (${effectiveMethod})${trimmedRef ? ` — Mã GD: ${trimmedRef}` : ''}${trimmedNote ? ` — ${trimmedNote}` : ''}`;
+
+      const updated = await client.query(
+        `UPDATE reservation
+         SET status = $2,
+             refund_method = $3,
+             refund_bank_info = $4,
+             refund_evidence = $5,
+             cancel_settlement = $6::jsonb,
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $7,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [
+          id,
+          nextStatus,
+          effectiveMethod,
+          normalizedBankInfo ? JSON.stringify(normalizedBankInfo) : null,
+          savedRefundEvidence,
+          JSON.stringify(mergedSettlement),
+          noteLine,
+        ]
+      );
+
+      await client.query('SELECT fn_notify_reservation_prospect($1, $2, $3, $4)', [
+        id,
+        'RESERVATION_CANCEL_SETTLED',
+        'Đã hoàn trả tiền đặt giữ chỗ',
+        `Ban quản lý đã hoàn trả ${refundAmt.toLocaleString('vi-VN')} ₫ tiền đặt giữ chỗ cho bạn${trimmedRef ? ` (Mã GD: ${trimmedRef})` : ''}.`,
+      ]);
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'CANCEL_SETTLE_PAYOUT', 'reservation', $2, $3, $4)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify(currentRes),
+          JSON.stringify({
+            reservation: updated.rows[0],
+            refunded_amount: refundAmt,
+            forfeited_amount: forfeitAmt,
+            refund_method: effectiveMethod,
+            reference_code: trimmedRef,
+            payout_by: req.user.sub,
+            payout_at: nowIso,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã xác nhận chi hoàn tiền giữ chỗ và lưu chứng từ UNC thành công.',
+        data: updated.rows[0],
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err.httpStatus) {
+        return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+      }
+      console.error('[Cancel-Payout Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xác nhận chi hoàn tiền giữ chỗ.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/reservations/:id/bank-info
+ * Cập nhật thông tin tài khoản nhận hoàn tiền giữ chỗ (MANAGER hoặc RESIDENT trùng SĐT khi đang APPROVED_PENDING_PAYOUT)
+ */
+router.patch(
+  '/:id/bank-info',
+  authenticateToken,
+  requireRole(['MANAGER', 'RESIDENT']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const rawBankPayload = extractReservationBankPayload(req.body);
+    const bankCheck = validateRefundBankInfo({
+      refundAmount: 1,
+      refundMethod: 'BANK_TRANSFER',
+      bankInfo: rawBankPayload,
+    });
+    if (!bankCheck.ok) {
+      return res.status(422).json({
+        code: bankCheck.code,
+        message: bankCheck.message,
+      });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const rpcRes = await client.query(
+        `SELECT * FROM fn_update_reservation_refund_bank_info($1::uuid, $2::jsonb)`,
+        [id, JSON.stringify(bankCheck.normalizedBankInfo)]
+      );
+      const updated = rpcRes.rows[0];
+
+      const userRoles = getUserRoleCodes(req);
+      if (userRoles.includes('RESIDENT') && !userRoles.includes('MANAGER')) {
+        await client.query('SELECT fn_notify_reservation_staff($1, $2, $3, $4, $5)', [
+          id,
+          'BUILDING_MANAGERS',
+          'RESERVATION_BANK_INFO_UPDATED',
+          'Khách giữ chỗ đã cập nhật tài khoản nhận hoàn tiền',
+          `Khách ${updated.prospect_name} đã cập nhật STK nhận hoàn (${bankCheck.normalizedBankInfo.bank_name} - ${bankCheck.normalizedBankInfo.account_number}).`,
+        ]);
+      }
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã cập nhật thông tin tài khoản ngân hàng nhận hoàn tiền giữ chỗ.',
+        data: updated,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err.code === 'P0002') {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      if (err.code === '42501') {
+        await logAccessDenied(req, 'reservation', id, 'Unauthorized reservation bank-info update');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn không có quyền cập nhật thông tin nhận hoàn của hồ sơ giữ chỗ này.',
+        });
+      }
+      if (err.code === 'P0001') {
+        return res.status(409).json({
+          code: 'INVALID_STATUS_FOR_BANK_UPDATE',
+          message: 'Chỉ hồ sơ giữ chỗ đang chờ chi hoàn (APPROVED_PENDING_PAYOUT) mới được cập nhật tài khoản nhận tiền.',
+        });
+      }
+      console.error('[Update Reservation Bank Info Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật thông tin tài khoản nhận hoàn giữ chỗ.' });
     } finally {
       await release();
     }
@@ -1115,17 +1706,29 @@ router.patch(
         });
       }
 
+      const nowIso = new Date().toISOString();
+      const forfeitSettlement = {
+        ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
+          ? currentRes.cancel_settlement
+          : {}),
+        previous_status: currentRes.status,
+        approved_by: req.user.sub,
+        approved_at: nowIso,
+        direct_forfeit_approval: true,
+      };
+
       const updated = await client.query(
         `UPDATE reservation
          SET status = 'FORFEITED',
              refunded_amount = 0,
              forfeited_amount = hold_amount,
              cancel_reason = $3,
+             cancel_settlement = $4::jsonb,
              note = COALESCE(NULLIF(note, '') || E'\n', '') || $2,
              updated_at = NOW()
          WHERE id = $1
          RETURNING *`,
-        [id, `[Tịch thu cọc]: ${trimmedReason}`, trimmedReason]
+        [id, `[Tịch thu cọc]: ${trimmedReason}`, trimmedReason, JSON.stringify(forfeitSettlement)]
       );
 
       await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
@@ -1161,6 +1764,8 @@ router.patch(
 
 /**
  * PATCH /api/v1/reservations/:id/refund
+ * Duyệt hoàn 100% tiền giữ chỗ trực tiếp -> chuyển sang APPROVED_PENDING_PAYOUT và mở lại căn hộ (AVAILABLE).
+ * BQL (MANAGER) sau đó thực hiện chi hoàn & tải chứng từ UNC tại POST /:id/cancel-payout.
  */
 router.patch(
   '/:id/refund',
@@ -1175,6 +1780,30 @@ router.patch(
         code: 'REASON_REQUIRED',
         message: 'Vui lòng cung cấp lý do hoàn trả cọc giữ chỗ (NFR-016).',
       });
+    }
+
+    const rawMethod = req.body?.refund_method
+      ? String(req.body.refund_method).trim().toUpperCase()
+      : null;
+    const effectiveMethod = rawMethod && ['BANK_TRANSFER', 'CASH'].includes(rawMethod) ? rawMethod : null;
+
+    let optionalBankInfo = null;
+    if (req.body?.refund_bank_info !== undefined) {
+      const candidate = extractReservationBankPayload(req.body.refund_bank_info);
+      if (Object.keys(candidate).length > 0) {
+        const bankCheck = validateRefundBankInfo({
+          refundAmount: 1,
+          refundMethod: effectiveMethod || 'BANK_TRANSFER',
+          bankInfo: candidate,
+        });
+        if (!bankCheck.ok) {
+          return res.status(422).json({
+            code: bankCheck.code,
+            message: bankCheck.message,
+          });
+        }
+        optionalBankInfo = bankCheck.normalizedBankInfo;
+      }
     }
 
     const { client, release } = await getUserClient(req);
@@ -1249,20 +1878,56 @@ router.patch(
         });
       }
 
+      const nowIso = new Date().toISOString();
+      const refundSettlement = {
+        ...(currentRes.cancel_settlement && typeof currentRes.cancel_settlement === 'object'
+          ? currentRes.cancel_settlement
+          : {}),
+        previous_status: currentRes.status,
+        approved_by: req.user.sub,
+        approved_at: nowIso,
+        direct_refund_approval: true,
+      };
+
       const updated = await client.query(
         `UPDATE reservation
-         SET status = 'REFUNDED',
+         SET status = 'APPROVED_PENDING_PAYOUT',
              refunded_amount = hold_amount,
              forfeited_amount = 0,
              cancel_reason = $3,
+             refund_method = COALESCE($4, refund_method, 'BANK_TRANSFER'),
+             refund_bank_info = COALESCE($5::jsonb, refund_bank_info),
+             cancel_settlement = $6::jsonb,
              note = COALESCE(NULLIF(note, '') || E'\n', '') || $2,
              updated_at = NOW()
          WHERE id = $1
          RETURNING *`,
-        [id, `[Hoàn cọc giữ chỗ]: ${trimmedReason}`, trimmedReason]
+        [
+          id,
+          `[Duyệt hoàn 100% cọc giữ chỗ — Chờ BQL chi hoàn]: ${trimmedReason}`,
+          trimmedReason,
+          effectiveMethod,
+          optionalBankInfo ? JSON.stringify(optionalBankInfo) : null,
+          JSON.stringify(refundSettlement),
+        ]
       );
 
       await client.query('SELECT fn_sync_apartment_status_after_reservation($1)', [currentRes.apartment_id]);
+
+      await client.query('SELECT fn_notify_reservation_staff($1, $2, $3, $4, $5)', [
+        id,
+        'BUILDING_MANAGERS',
+        'RESERVATION_CANCEL_APPROVED_FOR_PAYOUT',
+        'Đã duyệt hoàn 100% cọc giữ chỗ — Chờ chi hoàn & tải UNC',
+        `Phiếu giữ chỗ khách ${currentRes.prospect_name} đã được duyệt hoàn ${Number(currentRes.hold_amount).toLocaleString('vi-VN')} ₫. Vui lòng thực chi và tải chứng từ UNC.`,
+      ]);
+
+      await client.query('SELECT fn_notify_reservation_prospect($1, $2, $3, $4)', [
+        id,
+        'RESERVATION_CANCEL_APPROVED',
+        'Đã duyệt hoàn trả 100% tiền giữ chỗ',
+        `Yêu cầu hoàn trả ${Number(currentRes.hold_amount).toLocaleString('vi-VN')} ₫ tiền giữ chỗ đã được phê duyệt. Vui lòng kiểm tra / cập nhật số tài khoản nhận hoàn để Ban quản lý chuyển khoản.`,
+      ]);
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -1275,14 +1940,18 @@ router.patch(
             reservation: updated.rows[0],
             refunded_amount: currentRes.hold_amount,
             approved_by: req.user.sub,
+            approved_at: nowIso,
             reason: trimmedReason,
-            note: 'Hoàn trả tiền đặt cọc giữ chỗ cho khách',
+            note: 'Phê duyệt hoàn trả 100% tiền đặt cọc giữ chỗ — chờ BQL chi hoàn kèm UNC',
           }),
         ]
       );
 
       await client.query('COMMIT');
-      res.json({ message: 'Đã hoàn tiền giữ chỗ cho khách. Phòng đã mở lại có sẵn.', data: updated.rows[0] });
+      res.json({
+        message: 'Đã phê duyệt hoàn trả 100% tiền giữ chỗ và mở lại căn hộ. Chờ BQL thực chi hoàn tiền & tải UNC.',
+        data: updated.rows[0],
+      });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       console.error('[Refund Reservation Error]:', err);

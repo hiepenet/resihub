@@ -270,12 +270,13 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
     assert.equal(rsvACheck.rows[0].status, 'CONVERTED', 'R-03: Phải chuyển đúng đặt cọc giữ chỗ của Khách A');
     assert.equal(rsvBCheck.rows[0].status, 'HELD', 'R-03: Tuyệt đối KHÔNG được chiếm đoạt đặt cọc giữ chỗ của Khách B');
 
-    // R-14: OWNER hoàn tiền giữ chỗ của Khách B để giải phóng lịch cho gia hạn nối tiếp
+    // R-14: OWNER duyệt hoàn tiền giữ chỗ của Khách B (APPROVED_PENDING_PAYOUT) để giải phóng lịch cho gia hạn nối tiếp
     const refundRsvB = await apiFetch(`/api/v1/reservations/${rsvB.body.data.id}/refund`, ownerVop.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Hoàn cọc giữ chỗ cho Khách B theo thỏa thuận' }),
     });
     assert.equal(refundRsvB.status, 200, `R-14: OWNER refund reservation failed: ${JSON.stringify(refundRsvB.body)}`);
+    assert.equal(refundRsvB.body.data.status, 'APPROVED_PENDING_PAYOUT');
 
     // R-20: Thêm thành viên ở cùng có tài khoản Cổng cư dân -> kiểm tra đọc được Tòa nhà & Căn hộ
     const occPhone = `092${suffix}3`;

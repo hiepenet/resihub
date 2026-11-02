@@ -226,17 +226,21 @@ router.get(
           depKpiParams
         ),
         pool.query(
-          `SELECT COUNT(*)::int AS pending_reservation_confirms
+          `SELECT
+             COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_reservation_confirms,
+             COUNT(*) FILTER (WHERE r.status = 'CANCEL_PENDING_APPROVAL')::int AS pending_reservation_approvals,
+             COUNT(*) FILTER (WHERE r.status = 'APPROVED_PENDING_PAYOUT')::int AS pending_reservation_payouts
            FROM reservation r
            JOIN building b ON b.id = r.building_id
            WHERE b.org_id = $1
-             AND r.status = 'PENDING_CONFIRM'
+             AND r.status IN ('PENDING_CONFIRM', 'CANCEL_PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT')
              ${rsvKpiScope} ${rsvKpiFilter}`,
           rsvKpiParams
         ),
       ]);
 
       const depKpiRow = depKpiRes.rows[0] || {};
+      const rsvKpiRow = rsvKpiRes.rows[0] || {};
 
       res.json({
         data: {
@@ -255,7 +259,9 @@ router.get(
             pending_deposit_payouts: Number(depKpiRow.pending_deposit_payouts || 0),
             overdue_deposit_refunds: Number(depKpiRow.overdue_deposit_refunds || 0),
             disputed_deposits: Number(depKpiRow.disputed_deposits || 0),
-            pending_reservation_confirms: Number(rsvKpiRes.rows[0]?.pending_reservation_confirms || 0),
+            pending_reservation_confirms: Number(rsvKpiRow.pending_reservation_confirms || 0),
+            pending_reservation_approvals: Number(rsvKpiRow.pending_reservation_approvals || 0),
+            pending_reservation_payouts: Number(rsvKpiRow.pending_reservation_payouts || 0),
           },
           apartment_status_breakdown: statusCounts,
           revenue_12m: revenue12m,
@@ -417,10 +423,12 @@ router.get(
 
       const rsvSql = `
         SELECT
-          COUNT(*) FILTER (WHERE r.status = 'HELD')::int AS active_held_count,
-          COALESCE(SUM(r.hold_amount) FILTER (WHERE r.status = 'HELD'), 0)::bigint AS active_held_amount,
+          COUNT(*) FILTER (WHERE r.status IN ('HELD', 'CANCEL_PENDING_APPROVAL'))::int AS active_held_count,
+          COALESCE(SUM(r.hold_amount) FILTER (WHERE r.status IN ('HELD', 'CANCEL_PENDING_APPROVAL')), 0)::bigint AS active_held_amount,
           COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_confirm_count,
           COALESCE(SUM(r.hold_amount) FILTER (WHERE r.status = 'PENDING_CONFIRM'), 0)::bigint AS pending_confirm_amount,
+          COUNT(*) FILTER (WHERE r.status = 'APPROVED_PENDING_PAYOUT')::int AS pending_payout_count,
+          COALESCE(SUM(r.refunded_amount) FILTER (WHERE r.status = 'APPROVED_PENDING_PAYOUT'), 0)::bigint AS pending_payout_amount,
           COALESCE(SUM(
             CASE
               WHEN r.status = 'REFUNDED' THEN COALESCE(NULLIF(r.refunded_amount, 0), r.hold_amount)
@@ -429,17 +437,20 @@ router.get(
             END
           ) FILTER (
             WHERE r.status IN ('REFUNDED', 'PARTIALLY_REFUNDED')
-              AND (r.updated_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+              AND (COALESCE((r.cancel_settlement->>'payout_at')::timestamptz, r.updated_at) AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
           ), 0)::bigint AS refunded_in_period,
           COALESCE(SUM(
             CASE
               WHEN r.status = 'FORFEITED' THEN COALESCE(NULLIF(r.forfeited_amount, 0), r.hold_amount)
-              WHEN r.status = 'PARTIALLY_REFUNDED' THEN r.forfeited_amount
+              WHEN r.status IN ('APPROVED_PENDING_PAYOUT', 'PARTIALLY_REFUNDED') THEN COALESCE(r.forfeited_amount, 0)
               ELSE 0
             END
           ) FILTER (
-            WHERE r.status IN ('FORFEITED', 'PARTIALLY_REFUNDED')
-              AND (r.updated_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            WHERE (
+              r.status = 'FORFEITED'
+              OR (r.status IN ('APPROVED_PENDING_PAYOUT', 'PARTIALLY_REFUNDED') AND COALESCE(r.forfeited_amount, 0) > 0)
+            )
+              AND (COALESCE((r.cancel_settlement->>'approved_at')::timestamptz, r.updated_at) AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
           ), 0)::bigint AS forfeited_in_period
         FROM reservation r
         JOIN building b ON b.id = r.building_id
@@ -552,6 +563,8 @@ router.get(
         active_held_amount: Number(rsvRow.active_held_amount || 0),
         pending_confirm_count: Number(rsvRow.pending_confirm_count || 0),
         pending_confirm_amount: Number(rsvRow.pending_confirm_amount || 0),
+        pending_payout_count: Number(rsvRow.pending_payout_count || 0),
+        pending_payout_amount: Number(rsvRow.pending_payout_amount || 0),
         refunded_in_period: Number(rsvRow.refunded_in_period || 0),
         forfeited_in_period: Number(rsvRow.forfeited_in_period || 0),
       };

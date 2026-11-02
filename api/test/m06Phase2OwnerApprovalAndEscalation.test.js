@@ -352,12 +352,13 @@ test('M06 Phase 2 (Task 2) — PRD 6.2 Role Matrix (OWNER R+A, MANAGER CRU, SYS_
     assert.equal(mgrSelfForf.status, 403);
     assert.equal(mgrSelfForf.body?.code, 'FOUR_EYES_VIOLATION');
 
-    // VOP-A OWNER succeeds (200) on refund & forfeit, and apartment transitions RESERVED -> AVAILABLE
+    // VOP-A OWNER succeeds (200) on refund (APPROVED_PENDING_PAYOUT) & forfeit, and apartment transitions RESERVED -> AVAILABLE
     const ownRefRsv = await apiFetch(`/api/v1/reservations/${rsv1.body.data.id}/refund`, ownerVop.token, {
       method: 'PATCH',
       body: JSON.stringify({ reason: 'Chủ nhà duyệt hoàn cọc giữ chỗ khách hủy đúng hạn' }),
     });
     assert.equal(ownRefRsv.status, 200, JSON.stringify(ownRefRsv.body));
+    assert.equal(ownRefRsv.body.data.status, 'APPROVED_PENDING_PAYOUT');
     const apt1After = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRsv1.id]);
     assert.equal(apt1After.rows[0].status, 'AVAILABLE');
 

@@ -439,7 +439,7 @@ router.post(
          UNION ALL
          SELECT 1 FROM reservation
          WHERE apartment_id = $1
-           AND status = 'HELD'
+           AND status IN ('HELD', 'CANCEL_PENDING_APPROVAL')
          LIMIT 1`,
         [aptId]
       );
@@ -473,13 +473,13 @@ router.post(
         }
       }
 
-      // Chặn spam: 1 SĐT chỉ có tối đa 1 phiếu đang hoạt động (PENDING_CONFIRM hoặc HELD) trong cùng tổ chức
+      // Chặn spam: 1 SĐT chỉ có tối đa 1 phiếu đang hoạt động (PENDING_CONFIRM, HELD, hoặc đang chờ duyệt hủy CANCEL_PENDING_APPROVAL) trong cùng tổ chức
       const dupPhoneRsv = await client.query(
         `SELECT id
          FROM reservation
          WHERE org_id = $1
            AND phone = $2
-           AND status IN ('PENDING_CONFIRM', 'HELD')
+           AND status IN ('PENDING_CONFIRM', 'HELD', 'CANCEL_PENDING_APPROVAL')
          LIMIT 1`,
         [orgId, cleanPhone]
       );

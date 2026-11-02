@@ -268,6 +268,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
            r.hold_until,
            r.status as reservation_status,
            r.source, r.method, r.evidence, r.rejected_reason, r.refunded_amount, r.forfeited_amount, r.cancel_reason, r.confirmed_at, r.note as reservation_note,
+           r.refund_method, r.refund_bank_info, r.refund_evidence, r.cancel_settlement,
            r.created_at as reservation_created_at,
            a.id as apartment_id,
            a.code as apartment_code,
@@ -291,7 +292,16 @@ router.get('/overview', authenticateToken, async (req, res) => {
          ORDER BY r.created_at DESC`,
         [cleanPhone, userPhone, orgId]
       );
-      reservationHistory = reservationRes.rows; reservations = reservationHistory.filter((r) => ['HELD', 'PENDING_CONFIRM'].includes(r.reservation_status)).sort((a, b) => (a.reservation_status === 'HELD' ? 0 : 1) - (b.reservation_status === 'HELD' ? 0 : 1) || new Date(b.reservation_created_at).getTime() - new Date(a.reservation_created_at).getTime());
+      reservationHistory = reservationRes.rows;
+      const activeRsvStatuses = ['HELD', 'PENDING_CONFIRM', 'CANCEL_PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'];
+      const rsvRank = (st) => (st === 'HELD' ? 0 : st === 'APPROVED_PENDING_PAYOUT' ? 1 : st === 'CANCEL_PENDING_APPROVAL' ? 2 : 3);
+      reservations = reservationHistory
+        .filter((r) => activeRsvStatuses.includes(r.reservation_status))
+        .sort(
+          (a, b) =>
+            rsvRank(a.reservation_status) - rsvRank(b.reservation_status) ||
+            new Date(b.reservation_created_at).getTime() - new Date(a.reservation_created_at).getTime()
+        );
     }
     const reservation = reservations[0] || null;
 

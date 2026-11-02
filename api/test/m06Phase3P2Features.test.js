@@ -1259,7 +1259,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(Number(reject2.body.data.forfeited_amount || 0), 0);
 
     // REJECTED reservation cannot call cancel-settle -> 400 INVALID_STATUS
-    const settleRejected = await apiFetch(`/api/v1/reservations/${rsv2Id}/cancel-settle`, ownerAuth.token, {
+    const settleRejected = await apiFetch(`/api/v1/reservations/${rsv2Id}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 0,
@@ -1270,33 +1270,8 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(settleRejected.status, 400);
     assert.equal(settleRejected.body.code, 'INVALID_STATUS');
 
-    // Four-Eyes on cancel-settle: mgr1 (who confirmed payment) cannot self-approve cancel-settle -> 403 FOUR_EYES_VIOLATION
-    const selfSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, mgr1.token, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        refunded_amount: 1000000,
-        forfeited_amount: 1000000,
-        reason: 'Tự duyệt thanh lý hủy giữ chỗ',
-        refund_method: 'CASH',
-      }),
-    });
-    assert.equal(selfSettle.status, 403, JSON.stringify(selfSettle.body));
-    assert.equal(selfSettle.body.code, 'FOUR_EYES_VIOLATION');
-
-    // SYS_ADMIN on building with active OWNER -> 403
-    const sysSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, sysAdmin.token, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        refunded_amount: 1000000,
-        forfeited_amount: 1000000,
-        reason: 'Admin can thiệp tòa có chủ',
-        refund_method: 'CASH',
-      }),
-    });
-    assert.equal(sysSettle.status, 403, JSON.stringify(sysSettle.body));
-
-    // OWNER calls cancel-settle BANK_TRANSFER missing refund_bank_info -> 422 BANK_INFO_REQUIRED
-    const missingBank = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, ownerAuth.token, {
+    // MANAGER calls cancel-settle BANK_TRANSFER missing refund_bank_info -> 422 BANK_INFO_REQUIRED
+    const missingBank = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 1000000,
@@ -1308,8 +1283,8 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(missingBank.status, 422, JSON.stringify(missingBank.body));
     assert.equal(missingBank.body.code, 'BANK_INFO_REQUIRED');
 
-    // OWNER calls cancel-settle with valid refund_bank_info -> 200 PARTIALLY_REFUNDED & apartment returns to AVAILABLE without RLS error!
-    const okSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, ownerAuth.token, {
+    // MANAGER proposes cancel-settle with valid refund_bank_info (no UNC yet) -> 200 CANCEL_PENDING_APPROVAL
+    const propSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 1000000,
@@ -1321,7 +1296,43 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
           account_number: '0123456789',
           account_holder: 'KHACH VANG LAI 1',
         },
+      }),
+    });
+    assert.equal(propSettle.status, 200, JSON.stringify(propSettle.body));
+    assert.equal(propSettle.body.data.status, 'CANCEL_PENDING_APPROVAL');
+
+    // Four-Eyes on cancel-approve: mgr1 (who confirmed & proposed) cannot self-approve -> 403 FOUR_EYES_VIOLATION
+    const selfApprove = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-approve`, mgr1.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(selfApprove.status, 403, JSON.stringify(selfApprove.body));
+    assert.equal(selfApprove.body.code, 'FOUR_EYES_VIOLATION');
+
+    // SYS_ADMIN on building with active OWNER -> 403
+    const sysApprove = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-approve`, sysAdmin.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(sysApprove.status, 403, JSON.stringify(sysApprove.body));
+
+    // OWNER approves -> 200 APPROVED_PENDING_PAYOUT & apartment immediately returns to AVAILABLE without RLS error!
+    const okApprove = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-approve`, ownerAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(okApprove.status, 200, JSON.stringify(okApprove.body));
+    assert.equal(okApprove.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+    const aptAfterSettle = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRace.id]);
+    assert.equal(aptAfterSettle.rows[0].status, 'AVAILABLE');
+
+    // MANAGER executes payout with UNC -> 200 PARTIALLY_REFUNDED
+    const okSettle = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-payout`, mgr1.token, {
+      method: 'POST',
+      body: JSON.stringify({
         refund_evidence: [TINY_PNG_B64],
+        reference_code: 'UNC-P3-001',
       }),
     });
     assert.equal(okSettle.status, 200, JSON.stringify(okSettle.body));
@@ -1329,10 +1340,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(Number(okSettle.body.data.refunded_amount), 1000000);
     assert.equal(Number(okSettle.body.data.forfeited_amount), 1000000);
 
-    const aptAfterSettle = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [aptRace.id]);
-    assert.equal(aptAfterSettle.rows[0].status, 'AVAILABLE');
-
-    // Confirmed EXPIRED reservation: 1st cancel-settle -> 200, 2nd cancel-settle -> 400 INVALID_STATUS
+    // Confirmed EXPIRED reservation: MANAGER proposes 0 refund -> OWNER approves -> FORFEITED, 2nd cancel-settle -> 400 INVALID_STATUS
     const expIns = await adminPool.query(
       `INSERT INTO reservation (
          org_id, building_id, apartment_id, prospect_name, phone, hold_amount,
@@ -1344,7 +1352,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     const expId = expIns.rows[0].id;
     cleanup.reservationIds.push(expId);
 
-    const expSettle1 = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, ownerAuth.token, {
+    const expProp = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 0,
@@ -1352,10 +1360,17 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
         reason: 'Hết hạn giữ chỗ không ký HĐ -> tịch thu 100%',
       }),
     });
+    assert.equal(expProp.status, 200, JSON.stringify(expProp.body));
+    assert.equal(expProp.body.data.status, 'CANCEL_PENDING_APPROVAL');
+
+    const expSettle1 = await apiFetch(`/api/v1/reservations/${expId}/cancel-approve`, ownerAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
     assert.equal(expSettle1.status, 200, JSON.stringify(expSettle1.body));
     assert.equal(expSettle1.body.data.status, 'FORFEITED');
 
-    const expSettle2 = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, ownerAuth.token, {
+    const expSettle2 = await apiFetch(`/api/v1/reservations/${expId}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 0,
@@ -1427,8 +1442,8 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(ov2.body.data.reservation?.reservation_id, portalRsvId);
     assert.equal(ov2.body.data.reservation?.reservation_status, 'HELD');
 
-    // 3. Owner settles cancel -> Overview shows PARTIALLY_REFUNDED in reservation_history
-    const settle = await apiFetch(`/api/v1/reservations/${portalRsvId}/cancel-settle`, ownerAuth.token, {
+    // 3. Manager proposes -> Owner approves -> Manager pays out -> Overview shows PARTIALLY_REFUNDED in reservation_history
+    const settleProp = await apiFetch(`/api/v1/reservations/${portalRsvId}/cancel-settle`, mgr1.token, {
       method: 'PATCH',
       body: JSON.stringify({
         refunded_amount: 1000000,
@@ -1436,6 +1451,18 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
         reason: 'Hủy giữ chỗ hoàn 50% tiền mặt',
         refund_method: 'CASH',
       }),
+    });
+    assert.equal(settleProp.status, 200);
+
+    const settleApp = await apiFetch(`/api/v1/reservations/${portalRsvId}/cancel-approve`, ownerAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(settleApp.status, 200);
+
+    const settle = await apiFetch(`/api/v1/reservations/${portalRsvId}/cancel-payout`, mgr1.token, {
+      method: 'POST',
+      body: JSON.stringify({ refund_method: 'CASH' }),
     });
     assert.equal(settle.status, 200);
 

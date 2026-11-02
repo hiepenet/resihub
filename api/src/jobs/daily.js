@@ -159,12 +159,12 @@ export async function runDailyJobs() {
   });
   console.log(`[DailyJob] reservation expired: ${rsvExpired.rowCount}`);
 
-  // 4. Các căn đang RESERVED mồ côi (không còn giữ chỗ HELD hay HĐ mở)
+  // 4. Các căn đang RESERVED mồ côi (không còn giữ chỗ HELD / CANCEL_PENDING_APPROVAL hay HĐ mở)
   const orphanReserved = await adminPool.query(
     `SELECT a.id AS apartment_id
      FROM apartment a
      WHERE a.status = 'RESERVED'
-       AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status = 'HELD' AND (r.hold_until IS NULL OR r.hold_until >= CURRENT_DATE))
+       AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status IN ('HELD', 'CANCEL_PENDING_APPROVAL') AND (r.hold_until IS NULL OR r.hold_until >= CURRENT_DATE))
        AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING') AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE)`
   );
   orphanReserved.rows.forEach((r) => {

@@ -228,13 +228,20 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(selfRefundRsv.status, 403);
   assert.equal(selfRefundRsv.body.code, 'FOUR_EYES_VIOLATION');
 
-  // OWNER duyệt hoàn cọc giữ chỗ -> 200 REFUNDED
+  // OWNER duyệt hoàn cọc giữ chỗ -> 200 APPROVED_PENDING_PAYOUT -> MANAGER chi hoàn -> 200 REFUNDED
   const okRefundRsv = await apiFetch(`/api/v1/reservations/${rsv1Id}/refund`, owner.token, {
     method: 'PATCH',
-    body: JSON.stringify({ reason: 'Hoàn cọc giữ chỗ theo thỏa thuận' }),
+    body: JSON.stringify({ reason: 'Hoàn cọc giữ chỗ theo thỏa thuận', refund_method: 'CASH' }),
   });
   assert.equal(okRefundRsv.status, 200);
-  assert.equal(okRefundRsv.body.data.status, 'REFUNDED');
+  assert.equal(okRefundRsv.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+  const payoutRsv1 = await apiFetch(`/api/v1/reservations/${rsv1Id}/cancel-payout`, manager.token, {
+    method: 'POST',
+    body: JSON.stringify({ refund_method: 'CASH', note: 'Chi tiền mặt hoàn cọc giữ chỗ' }),
+  });
+  assert.equal(payoutRsv1.status, 200);
+  assert.equal(payoutRsv1.body.data.status, 'REFUNDED');
 
   // Khách 2 đặt giữ chỗ rồi bỏ cọc -> FORFEITED (Four-Eyes + reason)
   const rsv2Res = await apiFetch('/api/v1/reservations', manager.token, {
@@ -782,7 +789,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(Number(sfReceivable.rows[0].amount), 1500000);
 
   // Trên c3: Thu cọc 9.000.000 -> Gia hạn sang c4 với mức cọc giảm xuống 6.000.000 -> chuyển 6M sang c4, giữ 3M ở c3 chờ hoàn!
-  const dep3Id = transferRes.body.data.transferred_deposit.id;
+  const dep3Id = c3App.body.transferred_deposit.id;
   await apiFetch(`/api/v1/deposits/${dep3Id}/transactions`, manager.token, {
     method: 'POST',
     body: JSON.stringify({ type: 'collect', amount: 9000000, method: 'BANK_TRANSFER', description: 'Thu cọc HĐ căn A3' }),

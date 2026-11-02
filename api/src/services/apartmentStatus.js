@@ -73,7 +73,7 @@ export async function syncApartmentStatus(
          SELECT 1
          FROM reservation
          WHERE apartment_id = $1
-           AND status = 'HELD'
+           AND status IN ('HELD', 'CANCEL_PENDING_APPROVAL')
            AND (hold_until IS NULL OR hold_until >= CURRENT_DATE)
          LIMIT 1`,
         [apartmentId]
