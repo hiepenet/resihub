@@ -641,6 +641,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
             evidence: [TINY_PNG_B64],
           },
         ],
+        inspection_evidence: [TINY_PNG_B64],
         refund_method: 'BANK_TRANSFER',
         bank_info: {
           bank_name: 'Vietcombank',

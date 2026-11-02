@@ -1694,6 +1694,16 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       [orgId, vopAId, activeContractId, primaryTenantId, finalInvId]
     );
 
+    const hoApt1Pre = await apiFetch(`/api/v1/apartments/${testApt1Id}/handover`, mgr2VopA.token, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        note: 'Nghiệm thu bàn giao',
+        evidence: [TINY_PNG_BASE64],
+        keep_maintenance: true,
+      }),
+    });
+    assert.equal(hoApt1Pre.status, 200);
+
     const getSettlePre = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgr2VopA.token);
     assert.equal(getSettlePre.status, 200);
     assert.equal(getSettlePre.body.data.calculated_service_debt, 1500000, 'R-06: Phải tự động lấy đúng 1.500.000 ₫ nợ dịch vụ');

@@ -447,6 +447,17 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(term1.status, 200);
   assert.ok(term1.body.refund_due_date, 'Phải sinh hạn hoàn cọc +5 ngày');
 
+  // Ghi nhận biên bản kiểm tra bàn giao phòng kèm hình ảnh (FR-024, R-12) trước khi kiểm tra điều kiện tiên quyết
+  const hoApt1 = await apiFetch(`/api/v1/apartments/${apt1.id}/handover`, manager.token, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      note: 'Nghiệm thu bàn giao',
+      evidence: ['https://example.com/handover-apt1.png'],
+      keep_maintenance: true,
+    }),
+  });
+  assert.equal(hoApt1.status, 200);
+
   // Kiểm tra GET /settlement bóc tách đúng serviceDebt = 1.200.000 và rentDebt = 5.000.000
   const preSettle = await apiFetch(`/api/v1/deposits/${dep1.id}/settlement`, manager.token);
   assert.equal(preSettle.status, 200);
@@ -710,6 +721,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
           evidence: ['https://example.com/ac-broken.png'],
         },
       ],
+      inspection_evidence: ['https://example.com/handover-apt2.png'],
       refund_method: 'CASH',
     }),
   });

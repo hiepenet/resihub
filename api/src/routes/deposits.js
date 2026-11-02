@@ -179,12 +179,17 @@ async function calculateContractOpenDebts(client, contractId) {
 }
 
 /**
- * Kiểm tra điều kiện tiên quyết trước khi lập hồ sơ tất toán cọc (R-06 / Mục 3.7):
+ * Kiểm tra điều kiện tiên quyết trước khi lập hồ sơ tất toán cọc (R-06 / FR-024 / R-12):
  * 1) Hợp đồng đã kết thúc (TERMINATED / EXPIRED)
  * 2) Nếu hợp đồng đã nhận phòng và căn hộ có đồng hồ điện/nước khởi tạo trước/trong ngày kết thúc -> phải có chỉ số kỳ cuối
  * 3) Không còn hóa đơn DRAFT chưa phát hành/chưa hủy trên hợp đồng
+ * 4) Nếu hợp đồng đã nhận phòng (movedIn === true) -> bắt buộc có biên bản kiểm tra bàn giao phòng kèm hình ảnh (HANDOVER hoặc inspection_evidence)
  */
-async function checkSettlementPreconditions(client, contractRow) {
+async function checkSettlementPreconditions(
+  client,
+  contractRow,
+  { latestPhotoHandoverAt = null, existingSettlement = null, incomingInspectionEvidence = null } = {}
+) {
   const contractEnded = ['TERMINATED', 'EXPIRED'].includes(contractRow.contract_status);
 
   const startStr = getTodayVnDateStr(contractRow.start_date);
@@ -219,13 +224,27 @@ async function checkSettlementPreconditions(client, contractRow) {
   const draftInvoiceCount = draftInvRes.rows[0]?.cnt || 0;
   const noDraftInvoices = draftInvoiceCount === 0;
 
+  const effectiveInspectionEvidence =
+    incomingInspectionEvidence !== null && incomingInspectionEvidence !== undefined
+      ? incomingInspectionEvidence
+      : existingSettlement?.inspection_evidence;
+  const hasInlineInspectionEvidence =
+    Array.isArray(effectiveInspectionEvidence) &&
+    effectiveInspectionEvidence.some((item) => typeof item === 'string' && item.trim().length > 0);
+  const apartmentInspected = !movedIn || Boolean(latestPhotoHandoverAt) || hasInlineInspectionEvidence;
+  const handoverRecordedAt = latestPhotoHandoverAt
+    ? new Date(latestPhotoHandoverAt).toISOString()
+    : null;
+
   return {
-    ready: contractEnded && finalMetersRecorded && noDraftInvoices,
+    ready: contractEnded && finalMetersRecorded && noDraftInvoices && apartmentInspected,
     contract_ended: contractEnded,
     final_meters_recorded: finalMetersRecorded,
     missing_meter_types: missingMeterTypes,
     no_draft_invoices: noDraftInvoices,
     draft_invoice_count: draftInvoiceCount,
+    apartment_inspected: apartmentInspected,
+    handover_recorded_at: handoverRecordedAt,
   };
 }
 
@@ -599,7 +618,10 @@ router.get(
       }
       const row = q.rows[0];
       const debts = await calculateContractOpenDebts(client, row.contract_id);
-      const preconditions = await checkSettlementPreconditions(client, row);
+      const preconditions = await checkSettlementPreconditions(client, row, {
+        latestPhotoHandoverAt: meta.latest_photo_handover_at,
+        existingSettlement: row.settlement,
+      });
 
       const saved = row.settlement || null;
       const isAccountingCommitted =
@@ -883,7 +905,7 @@ router.post(
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
-    const { items = [], refund_method = 'BANK_TRANSFER', bank_info = {} } = req.body;
+    const { items = [], refund_method = 'BANK_TRANSFER', bank_info = {}, inspection_evidence } = req.body;
 
     const { client, release } = await getUserClient(req);
     try {
@@ -926,7 +948,11 @@ router.post(
         });
       }
 
-      const preconditions = await checkSettlementPreconditions(client, dep);
+      const preconditions = await checkSettlementPreconditions(client, dep, {
+        latestPhotoHandoverAt: meta.latest_photo_handover_at,
+        existingSettlement: dep.settlement,
+        incomingInspectionEvidence: inspection_evidence !== undefined ? inspection_evidence : null,
+      });
       if (!preconditions.contract_ended) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -963,6 +989,37 @@ router.post(
         }
       }
 
+      if (!preconditions.apartment_inspected) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'MISSING_APARTMENT_INSPECTION',
+          message: 'Chưa có biên bản kiểm tra bàn giao phòng kèm hình ảnh sau khi hợp đồng kết thúc (FR-024, R-12).',
+          preconditions,
+        });
+      }
+
+      const preAmountItems = items.map((item) => ({
+        ...item,
+        amount: Number(String(item.amount).trim()),
+      }));
+      const { serviceDebt, rentDebt, openInvoices } = await calculateContractOpenDebts(client, dep.contract_id);
+
+      const { refund, shortfall } = computeRefund({
+        depositAmount: dep.amount_held,
+        outstandingDebt: serviceDebt,
+        items: preAmountItems,
+      });
+
+      const vBank = validateRefundBankInfo({
+        refundAmount: refund,
+        refundMethod: refund_method,
+        bankInfo: bank_info,
+      });
+      if (!vBank.ok) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ code: vBank.code, message: vBank.message });
+      }
+
       const normalizedItems = [];
       for (const item of items) {
         const normEv = await normalizeAndPersistEvidence(client, {
@@ -980,27 +1037,26 @@ router.post(
         });
       }
 
-      const { serviceDebt, rentDebt, openInvoices } = await calculateContractOpenDebts(client, dep.contract_id);
-
-      const { refund, shortfall } = computeRefund({
-        depositAmount: dep.amount_held,
-        outstandingDebt: serviceDebt,
-        items: normalizedItems,
-      });
-
-      const vBank = validateRefundBankInfo({
-        refundAmount: refund,
-        refundMethod: refund_method,
-        bankInfo: bank_info,
-      });
-      if (!vBank.ok) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({ code: vBank.code, message: vBank.message });
-      }
-
       const prevSettlement = dep.settlement || {};
+      const rawInspectionEvidence =
+        inspection_evidence !== undefined
+          ? Array.isArray(inspection_evidence)
+            ? inspection_evidence
+            : []
+          : Array.isArray(prevSettlement.inspection_evidence)
+            ? prevSettlement.inspection_evidence
+            : [];
+      const normalizedInspectionEvidence = await normalizeAndPersistEvidence(client, {
+        entity: 'deposit',
+        ownerId: id,
+        folder: 'handovers',
+        evidence: rawInspectionEvidence,
+        req,
+      });
+
       const settlementPayload = {
         items: normalizedItems,
+        inspection_evidence: normalizedInspectionEvidence,
         outstanding_debt: serviceDebt,
         service_debt: serviceDebt,
         rent_debt: rentDebt,

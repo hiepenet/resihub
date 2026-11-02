@@ -462,7 +462,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
 
     const subSettle1 = await apiFetch(`/api/v1/deposits/${aprDepId}/settlement`, mgrVopA.token, {
       method: 'POST',
-      body: JSON.stringify({ items: [], refund_method: 'CASH' }),
+      body: JSON.stringify({ items: [], inspection_evidence: [TINY_PNG_BASE64], refund_method: 'CASH' }),
     });
     assert.equal(subSettle1.status, 200);
     // Nợ dịch vụ + điện = 450.000 + 100.000 = 550.000 ₫; Nợ thuê = 10.000.000 ₫ (KHÔNG trừ vào cọc 10.000.000 ₫!) -> Hoàn cọc = 9.450.000 ₫!
@@ -486,7 +486,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
 
     const subSettle2 = await apiFetch(`/api/v1/deposits/${aprDepId}/settlement`, mgrVopA.token, {
       method: 'POST',
-      body: JSON.stringify({ items: [], refund_method: 'CASH' }),
+      body: JSON.stringify({ items: [], inspection_evidence: [TINY_PNG_BASE64], refund_method: 'CASH' }),
     });
     assert.equal(subSettle2.status, 200);
 

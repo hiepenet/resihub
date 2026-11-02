@@ -1,7 +1,8 @@
 import express from 'express';
-import { pool, adminPool } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { saveBase64Image } from '../services/imageUpload.js';
 import { isTransitionAllowed, APARTMENT_TRANSITIONS, syncApartmentStatus } from '../services/apartmentStatus.js';
 import {
   getUserRoleCodes,
@@ -576,15 +577,18 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
 /**
  * PATCH /api/v1/apartments/:id/handover
- * Bàn giao & nghiệm thu phòng (B8 / PRD 7.5): căn MAINTENANCE (sau chấm dứt hợp đồng) về AVAILABLE.
+ * Bàn giao & nghiệm thu phòng (B8 / PRD 6.2, 7.5, FR-024, R-12):
+ * Ghi nhận biên bản kiểm tra bàn giao kèm ảnh (attachment + audit_log HANDOVER) và giải phóng MAINTENANCE -> AVAILABLE (trừ khi keep_maintenance = true).
  */
 router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
   const { id } = req.params;
+  const { note, checklist, evidence, keep_maintenance } = req.body || {};
   const roleCodes = getUserRoleCodes(req);
   const isSysAdmin = roleCodes.includes('SYS_ADMIN');
 
+  const { client, release } = await getUserClient(req);
   try {
-    const aptExist = await adminPool.query(
+    const aptExist = await client.query(
       `SELECT a.* FROM apartment a
        JOIN building b ON b.id = a.building_id
        WHERE a.id = $1 AND b.org_id = $2`,
@@ -610,7 +614,7 @@ router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANA
       });
     }
 
-    const activeContract = await pool.query(
+    const activeContract = await client.query(
       `SELECT 1 FROM contract
        WHERE apartment_id = $1
          AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
@@ -627,7 +631,7 @@ router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANA
     }
 
     const warnings = [];
-    const heldDeposit = await pool.query(
+    const heldDeposit = await client.query(
       `SELECT 1 FROM deposit WHERE contract_id IN (
          SELECT id FROM contract WHERE apartment_id = $1
        ) AND status = 'HELD' LIMIT 1`,
@@ -637,18 +641,83 @@ router.patch('/:id/handover', authenticateToken, requireRole(['SYS_ADMIN', 'MANA
       warnings.push('Còn cọc đang giữ chưa tất toán. Hãy hoàn tất tất toán theo FR-024.');
     }
 
-    await syncApartmentStatus(pool, id, { leaveMaintenance: true });
-    const result = await pool.query(`SELECT * FROM apartment WHERE id = $1`, [id]);
-    await pool.query(
+    await client.query('BEGIN');
+
+    const evidenceList = [];
+    if (Array.isArray(evidence)) {
+      for (const rawItem of evidence) {
+        const item = typeof rawItem === 'string' ? rawItem.trim() : '';
+        if (!item) continue;
+        if (item.startsWith('data:')) {
+          const saved = await saveBase64Image({
+            imageBase64: item,
+            folder: 'handovers',
+            entityId: id,
+            entity: 'apartment',
+            ownerId: id,
+            req,
+            query: client.query.bind(client),
+            allowPdf: true,
+          });
+          if (saved.error) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({ code: saved.error.code, message: saved.error.message });
+          }
+          evidenceList.push(`/api/v1/attachments/${saved.attachment.id}/view`);
+        } else if (item.startsWith('/api/v1/attachments/')) {
+          evidenceList.push(item);
+        } else {
+          await client.query(
+            `INSERT INTO attachment (owner_entity, owner_id, storage_path, uploaded_by)
+             SELECT 'apartment', $1::uuid, $2::text, $3::uuid
+             WHERE NOT EXISTS (
+               SELECT 1 FROM attachment
+               WHERE owner_entity = 'apartment' AND owner_id = $1 AND storage_path = $2
+             )`,
+            [id, item, req.user.sub]
+          );
+          evidenceList.push(item);
+        }
+      }
+    }
+
+    if (!keep_maintenance) {
+      await syncApartmentStatus(client, id, { leaveMaintenance: true });
+    }
+    const result = await client.query(`SELECT * FROM apartment WHERE id = $1`, [id]);
+    const updatedApt = result.rows[0];
+    await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'HANDOVER', 'apartment', $2, $3, $4)`,
-      [req.user.sub, id, JSON.stringify(before), JSON.stringify(result.rows[0])]
+      [
+        req.user.sub,
+        id,
+        JSON.stringify(before),
+        JSON.stringify({
+          ...updatedApt,
+          inspection_note: note || null,
+          checklist: Array.isArray(checklist) ? checklist : [],
+          evidence: evidenceList,
+        }),
+      ]
     );
 
-    res.json({ message: 'Bàn giao và nghiệm thu phòng thành công. Căn hộ sẵn sàng kinh doanh.', data: result.rows[0], warnings });
+    await client.query('COMMIT');
+
+    res.json({
+      message: keep_maintenance
+        ? 'Đã ghi nhận biên bản kiểm tra bàn giao phòng kèm hình ảnh.'
+        : 'Bàn giao và nghiệm thu phòng thành công. Căn hộ sẵn sàng kinh doanh.',
+      data: updatedApt,
+      evidence: evidenceList,
+      warnings,
+    });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('[Handover Apartment Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi bàn giao căn hộ.' });
+  } finally {
+    await release();
   }
 });
 

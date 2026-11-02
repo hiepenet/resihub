@@ -576,7 +576,12 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     // 6) BANK_TRANSFER with refund > 0 missing bank_info or malformed account_number -> 422
     const noBank = await apiFetch(`/api/v1/deposits/${depId}/settlement`, manager.token, {
       method: 'POST',
-      body: JSON.stringify({ items: [], refund_method: 'BANK_TRANSFER', bank_info: {} }),
+      body: JSON.stringify({
+        items: [],
+        inspection_evidence: ['https://example.com/handover-p0.png'],
+        refund_method: 'BANK_TRANSFER',
+        bank_info: {},
+      }),
     });
     assert.equal(noBank.status, 422);
     assert.equal(noBank.body.code, 'BANK_INFO_REQUIRED');
@@ -585,6 +590,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
       method: 'POST',
       body: JSON.stringify({
         items: [],
+        inspection_evidence: ['https://example.com/handover-p0.png'],
         refund_method: 'BANK_TRANSFER',
         bank_info: { bank_name: 'VCB', account_number: '0011-0099', account_holder: 'CU DAN C' },
       }),
@@ -604,6 +610,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
             evidence: ['https://example.com/clean-p0.png'],
           },
         ],
+        inspection_evidence: ['https://example.com/handover-p0.png'],
         refund_method: 'BANK_TRANSFER',
         bank_info: { bank_name: ' Vietcombank ', account_number: ' 001100888999 ', account_holder: ' CU DAN P0 C ' },
       }),
@@ -707,6 +714,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
             evidence: ['https://example.com/clean-p0.png'],
           },
         ],
+        inspection_evidence: ['https://example.com/handover-p0.png'],
         refund_method: 'BANK_TRANSFER',
         bank_info: { bank_name: 'Vietcombank', account_number: '001100888999', account_holder: 'CU DAN P0 C' },
       }),
@@ -768,6 +776,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
             evidence: ['https://example.com/damage-65m.png'],
           },
         ],
+        inspection_evidence: ['https://example.com/handover-p0-d.png'],
         refund_method: 'CASH',
       }),
     });
