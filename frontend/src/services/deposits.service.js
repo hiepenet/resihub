@@ -4,6 +4,7 @@ import { withIdempotency } from '../utils/idempotency';
 export const depositsService = {
   list: (params) => api.get('/api/v1/deposits', { params }).then((r) => r.data),
   listTransactions: (id) => api.get(`/api/v1/deposits/${id}/transactions`).then((r) => r.data),
+  getAuditLogs: (id) => api.get(`/api/v1/deposits/${id}/audit-logs`).then((r) => r.data),
   createTransaction: (id, payload, options = {}) =>
     api.post(`/api/v1/deposits/${id}/transactions`, payload, withIdempotency(options)).then((r) => r.data),
   getSettlement: (id) => api.get(`/api/v1/deposits/${id}/settlement`).then((r) => r.data),

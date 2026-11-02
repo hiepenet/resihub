@@ -2327,4 +2327,89 @@ router.patch(
   }
 );
 
+/**
+ * GET /api/v1/deposits/:id/audit-logs
+ * Lịch sử kiểm toán xuyên suốt của Sổ cọc (GAP-07, PRD Mục 6.2 & 8.2):
+ * Hợp nhất audit_log của deposit, deposit_transaction thuộc sổ, receivable phát sinh từ sổ và reservation gốc.
+ */
+router.get(
+  '/:id/audit-logs',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
+  async (req, res) => {
+    const { id } = req.params;
+    const { client, release } = await getUserClient(req);
+    try {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+      const allowed = await verifyDepositReadAccess(req, meta, id, 'deposit audit-logs');
+      if (!allowed) {
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn không có quyền xem nhật ký kiểm toán của sổ cọc này.',
+        });
+      }
+
+      const depRes = await client.query(
+        'SELECT id, source_reservation_id FROM deposit WHERE id = $1',
+        [id]
+      );
+      if (depRes.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+      const sourceReservationId = depRes.rows[0].source_reservation_id || null;
+
+      const logsRes = await client.query(
+        `SELECT
+           al.id,
+           al.action,
+           al.entity,
+           al.entity_id,
+           al.before,
+           al.after,
+           al.at,
+           al.at AS created_at,
+           al.actor_id,
+           COALESCE(
+             p.full_name,
+             CASE WHEN al.actor_id IS NULL THEN 'Hệ thống (Cron)' ELSE 'Người dùng' END
+           ) AS actor_name,
+           COALESCE(
+             (
+               SELECT ARRAY_AGG(DISTINCT rl.code)
+               FROM user_role ur
+               JOIN role rl ON rl.id = ur.role_id
+               WHERE ur.user_id = al.actor_id
+             ),
+             '{}'::text[]
+           ) AS actor_roles
+         FROM audit_log al
+         LEFT JOIN app_user au ON au.id = al.actor_id
+         LEFT JOIN person p ON p.id = au.person_id
+         WHERE (al.entity = 'deposit' AND al.entity_id = $1::uuid)
+            OR (
+              al.entity = 'deposit_transaction'
+              AND al.entity_id IN (SELECT dt.id FROM deposit_transaction dt WHERE dt.deposit_id = $1::uuid)
+            )
+            OR (
+              al.entity = 'receivable'
+              AND al.entity_id IN (SELECT rc.id FROM receivable rc WHERE rc.deposit_id = $1::uuid)
+            )
+            OR ($2::uuid IS NOT NULL AND al.entity = 'reservation' AND al.entity_id = $2::uuid)
+         ORDER BY al.at DESC, al.id DESC`,
+        [id, sourceReservationId]
+      );
+
+      res.json({ data: logsRes.rows });
+    } catch (err) {
+      console.error('[Deposit Audit Logs Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải nhật ký kiểm toán sổ cọc.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
 export default router;

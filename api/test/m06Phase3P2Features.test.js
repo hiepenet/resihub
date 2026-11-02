@@ -675,7 +675,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
       assert.equal(Number(rsvSummary.pending_confirm_count), 1);
       assert.equal(Number(rsvSummary.pending_confirm_amount), 2500000);
 
-      chainState = { dep1Id, dep2Id, dep4Id, dep5Id, leadZeroPhone };
+      chainState = { dep1Id, dep2Id, dep4Id, dep5Id, leadZeroPhone, resChain };
     }
   );
 
@@ -774,5 +774,145 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
       1,
       `Expected exactly 1 MONTHLY_DEPOSIT_REPORT for OWNER, got ${notifRes.rows.length}`
     );
+  });
+
+  await t.test('Task 2.1..2.3: Zero adminPool in deposits.js & Full-origin GET /api/v1/deposits/:id/audit-logs under strict RLS', async () => {
+    const fsMod = await import('node:fs/promises');
+    const depositsSrc = await fsMod.readFile(
+      fileURLToPath(new URL('../src/routes/deposits.js', import.meta.url)),
+      'utf8'
+    );
+    assert.equal(
+      /\badminPool\b/.test(depositsSrc),
+      false,
+      'deposits.js must keep 0 references to adminPool (BUG-07 invariant)'
+    );
+
+    // Seed a receivable linked to dep4Id + audit_log on receivable so we also verify entity='receivable' in timeline
+    const recIns = await adminPool.query(
+      `INSERT INTO receivable (org_id, building_id, deposit_id, type, amount, status, description)
+       VALUES ($1, $2, $3, 'RECEIVABLE_AFTER_MOVE_OUT', 500000, 'OPEN', '=SUM(A1:A5) Truy thu hậu bàn giao')
+       RETURNING id`,
+      [orgId, testBuildingId, chainState.dep4Id]
+    );
+    const recId = recIns.rows[0].id;
+    await adminPool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE_RECEIVABLE', 'receivable', $2, $3::jsonb)`,
+      [mgr1.userId, recId, JSON.stringify({ formula_note: '=SUM(A1:A5)', deposit_id: chainState.dep4Id })]
+    );
+
+    // dep1Id was created from rsv1 -> must include reservation + deposit_transaction (+ deposit if any)
+    for (const caller of [mgr1, ownerAuth]) {
+      const resLogs = await apiFetch(
+        `/api/v1/deposits/${chainState.dep1Id}/audit-logs`,
+        caller.token
+      );
+      assert.equal(resLogs.status, 200, JSON.stringify(resLogs.body));
+      const logs = resLogs.body.data;
+      assert.ok(Array.isArray(logs) && logs.length >= 2);
+      const entities = new Set(logs.map((l) => l.entity));
+      assert.ok(entities.has('reservation'), `Expected reservation audit log in ${JSON.stringify(logs)}`);
+      assert.ok(entities.has('deposit_transaction'), `Expected deposit_transaction audit log in ${JSON.stringify(logs)}`);
+
+      // Verify descending order (at DESC, id DESC)
+      for (let i = 1; i < logs.length; i++) {
+        const prevMs = new Date(logs[i - 1].at).getTime();
+        const currMs = new Date(logs[i].at).getTime();
+        assert.ok(prevMs >= currMs, 'Audit logs must be sorted by at DESC');
+      }
+
+      // dep4Id has deposit + receivable logs
+      const dep4LogsRes = await apiFetch(
+        `/api/v1/deposits/${chainState.dep4Id}/audit-logs`,
+        caller.token
+      );
+      assert.equal(dep4LogsRes.status, 200);
+      const dep4Entities = new Set(dep4LogsRes.body.data.map((l) => l.entity));
+      assert.ok(dep4Entities.has('deposit'));
+      assert.ok(dep4Entities.has('receivable'));
+    }
+
+    // RESIDENT -> 403
+    const resDenied = await apiFetch(
+      `/api/v1/deposits/${chainState.dep1Id}/audit-logs`,
+      chainState.resChain.token
+    );
+    assert.equal(resDenied.status, 403);
+
+    // Unrelated building MANAGER / OWNER (VOP-A) -> 403 ACCESS_DENIED
+    const otherMgr = await loginEmail('manager.vop.a@resihub.vn', 'Demo@123456');
+    const otherOwner = await loginEmail('owner.vop@resihub.vn', 'Demo@123456');
+    for (const outsider of [otherMgr, otherOwner]) {
+      const denied = await apiFetch(
+        `/api/v1/deposits/${chainState.dep1Id}/audit-logs`,
+        outsider.token
+      );
+      assert.equal(denied.status, 403);
+      assert.equal(denied.body?.code, 'ACCESS_DENIED');
+    }
+
+    await adminPool.query('DELETE FROM receivable WHERE id = $1', [recId]).catch(() => {});
+  });
+
+  await t.test('Task 2.4: RP-08 Financial Audit Logs (scope=financial & format=csv) for OWNER excludes non-financial entities & escapes formulas', async () => {
+    // Seed a non-financial building log and a financial receivable log on testBuildingId (acted by mgr2 so ownerAuth only sees via RLS scope!)
+    await adminPool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'UPDATE_BUILDING_NOTE', 'building', $2, '{"note":"Phi tai chinh"}'::jsonb)`,
+      [mgr2.userId, testBuildingId]
+    );
+    const finRec = await adminPool.query(
+      `INSERT INTO receivable (org_id, building_id, type, amount, status, description)
+       VALUES ($1, $2, 'OTHER', 250000, 'OPEN', '=HYPERLINK("http://evil.test")')
+       RETURNING id`,
+      [orgId, testBuildingId]
+    );
+    const finRecId = finRec.rows[0].id;
+    await adminPool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, '=CMD_EVIL', 'receivable', $2, '{"formula":"=1+1"}'::jsonb)`,
+      [mgr2.userId, finRecId]
+    );
+
+    const jsonFin = await apiFetch('/api/v1/audit-logs?scope=financial&limit=100', ownerAuth.token);
+    assert.equal(jsonFin.status, 200);
+    const allowedFinancial = new Set([
+      'invoice',
+      'payment',
+      'receivable',
+      'deposit',
+      'deposit_transaction',
+      'reservation',
+    ]);
+    for (const item of jsonFin.body.data) {
+      assert.ok(
+        allowedFinancial.has(item.entity),
+        `Non-financial entity ${item.entity} leaked into scope=financial!`
+      );
+    }
+
+    const csvFin = await apiFetch(
+      '/api/v1/audit-logs?scope=financial&format=csv',
+      ownerAuth.token,
+      { rawBuffer: true }
+    );
+    assert.equal(csvFin.status, 200);
+    assert.ok(csvFin.contentType.includes('text/csv'));
+    assert.equal(csvFin.buffer[0], 0xef);
+    assert.equal(csvFin.buffer[1], 0xbb);
+    assert.equal(csvFin.buffer[2], 0xbf);
+    const csvStr = new TextDecoder('utf-8', { ignoreBOM: true }).decode(csvFin.buffer);
+    assert.ok(csvStr.startsWith('\uFEFF'));
+    assert.ok(csvStr.includes('receivable'));
+    assert.ok(csvStr.includes('deposit'));
+    assert.ok(csvStr.includes('reservation'));
+    assert.equal(csvStr.includes('UPDATE_BUILDING_NOTE'), false, 'Must exclude building audit log');
+    assert.ok(
+      csvStr.includes(`"'=CMD_EVIL"`),
+      `Formula action cell must be prefixed with single quote in RP-08 CSV: ${csvStr}`
+    );
+
+    await adminPool.query('DELETE FROM receivable WHERE id = $1', [finRecId]).catch(() => {});
   });
 });

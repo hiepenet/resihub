@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   Wallet,
   Clock,
@@ -21,6 +21,8 @@ import {
   MessageSquareWarning,
   RotateCcw,
   Landmark,
+  FileSpreadsheet,
+  ScrollText,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -41,6 +43,7 @@ import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { depositsService } from '../../../services/deposits.service';
+import { reportsService } from '../../../services/reports.service';
 import { usersService } from '../../../services/users.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
@@ -65,6 +68,15 @@ const CATEGORY_LABEL_MAP = {
   CLEANING: 'Vệ sinh mặt bằng',
   UTILITY_DEBT: 'Tiện ích phát sinh',
   OTHER: 'Khoản mục khác',
+  TRANSFER_IN: 'Nhận kết chuyển',
+  TRANSFER_OUT: 'Kết chuyển đi',
+};
+
+const AUDIT_ENTITY_META = {
+  deposit: { label: 'Sổ cọc hợp đồng', variant: 'sky' },
+  deposit_transaction: { label: 'Bút toán giao dịch cọc', variant: 'emerald' },
+  receivable: { label: 'Công nợ cấn trừ / phát sinh', variant: 'amber' },
+  reservation: { label: 'Phiếu đặt giữ chỗ gốc', variant: 'purple' },
 };
 
 const TXN_TYPE_META = {
@@ -76,7 +88,10 @@ const TXN_TYPE_META = {
 };
 
 function resolveDepositTxnMeta(tx) {
-  if (tx?.type === 'transfer' && /^chuyển kết dư/i.test(String(tx?.description || '').trim())) {
+  if (
+    tx?.type === 'transfer' &&
+    (tx?.category === 'TRANSFER_OUT' || /^chuyển kết dư/i.test(String(tx?.description || '').trim()))
+  ) {
     return { label: 'Kết chuyển đi', variant: 'amber', sign: '-' };
   }
   return TXN_TYPE_META[tx?.type] || { label: tx?.type || 'Giao dịch', variant: 'slate', sign: '' };
@@ -108,11 +123,13 @@ function createEmptyDeductionItem() {
 
 export function DepositsPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const toast = useToast();
   const {
     isSysAdmin,
     isOwner,
     isManager,
+    isResident,
     canSettleDeposits,
     canExecuteDepositPayout,
     canApproveDepositRefund,
@@ -126,15 +143,20 @@ export function DepositsPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('held');
   const [search, setSearch] = useState('');
+  const [exportingExcel, setExportingExcel] = useState(false);
 
   // Image Preview state
   const [previewImg, setPreviewImg] = useState(null);
 
-  // Transactions & Collect Deposit Modal state
+  // Transactions, Audit Timeline & Collect Deposit Modal state
   const [txnModalOpen, setTxnModalOpen] = useState(false);
+  const [txnModalSubTab, setTxnModalSubTab] = useState('transactions'); // 'transactions' | 'audit'
   const [selectedDepositForTxn, setSelectedDepositForTxn] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [loadingTxns, setLoadingTxns] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
+  const [auditLoadedDepositId, setAuditLoadedDepositId] = useState(null);
   const [showCollectForm, setShowCollectForm] = useState(false);
   const [collectForm, setCollectForm] = useState({
     amount: '',
@@ -286,21 +308,95 @@ export function DepositsPage() {
     return { held, pending, returned, refunded, disputed, totalHeldAmount };
   }, [scopedDeposits]);
 
+  const tabQueryParam = searchParams.get('tab') || '';
+  const statusQueryParam = searchParams.get('status') || '';
+  const overdueOnlyFilter = searchParams.get('overdue') === '1';
+  const payoutOnlyFilter = tabQueryParam === 'payout';
+
+  useEffect(() => {
+    if (statusQueryParam === 'DISPUTED') {
+      setActiveTab('disputed');
+    } else if (tabQueryParam === 'payout') {
+      setActiveTab('pending');
+    } else if (['held', 'pending', 'returned', 'refunded', 'disputed'].includes(tabQueryParam)) {
+      setActiveTab(tabQueryParam);
+    }
+  }, [tabQueryParam, statusQueryParam]);
+
+  const handleSelectMainTab = useCallback(
+    (nextTab) => {
+      setActiveTab(nextTab);
+      if (tabQueryParam || statusQueryParam || overdueOnlyFilter) {
+        setSearchParams({}, { replace: true });
+      }
+    },
+    [tabQueryParam, statusQueryParam, overdueOnlyFilter, setSearchParams]
+  );
+
+  const handleClearDrillDown = useCallback(() => {
+    setSearchParams({}, { replace: true });
+  }, [setSearchParams]);
+
+  const handleExportLedgerExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const blob = await reportsService.exportDepositLedgerXlsx({
+        building_id: selectedBuildingId || undefined,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `so-coc-rp07-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Đã xuất Sổ cọc (RP-07) ra tệp Excel (.xlsx).');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xuất tệp Excel Sổ cọc (RP-07).'));
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   const filteredDeposits = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const now = new Date();
+    const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+      now.getDate()
+    ).padStart(2, '0')}`;
+
     return scopedDeposits.filter((d) => {
-      if (activeTab === 'held' && !['HELD', 'SETTLEMENT_DRAFT'].includes(d.status)) return false;
-      if (activeTab === 'pending' && !['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(d.status)) {
-        return false;
+      if (overdueOnlyFilter) {
+        const dueStr = d.refund_due_date ? String(d.refund_due_date).slice(0, 10) : '';
+        if (
+          !dueStr ||
+          dueStr >= todayIso ||
+          ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
+        ) {
+          return false;
+        }
+      } else if (payoutOnlyFilter) {
+        if (!['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(d.status)) return false;
+      } else if (statusQueryParam) {
+        if (d.status !== statusQueryParam) return false;
+      } else {
+        if (activeTab === 'held' && !['HELD', 'SETTLEMENT_DRAFT'].includes(d.status)) return false;
+        if (
+          activeTab === 'pending' &&
+          !['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(d.status)
+        ) {
+          return false;
+        }
+        if (activeTab === 'returned' && d.status !== 'RETURNED') return false;
+        if (
+          activeTab === 'refunded' &&
+          !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
+        ) {
+          return false;
+        }
+        if (activeTab === 'disputed' && d.status !== 'DISPUTED') return false;
       }
-      if (activeTab === 'returned' && d.status !== 'RETURNED') return false;
-      if (
-        activeTab === 'refunded' &&
-        !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
-      ) {
-        return false;
-      }
-      if (activeTab === 'disputed' && d.status !== 'DISPUTED') return false;
 
       if (q) {
         const haystacks = [
@@ -317,7 +413,14 @@ export function DepositsPage() {
       }
       return true;
     });
-  }, [scopedDeposits, activeTab, search]);
+  }, [
+    scopedDeposits,
+    activeTab,
+    search,
+    overdueOnlyFilter,
+    payoutOnlyFilter,
+    statusQueryParam,
+  ]);
 
   const canActAsApproverOnRow = useCallback(
     (depRow, settlementObj = null) =>
@@ -342,38 +445,78 @@ export function DepositsPage() {
     [isOwner, isManager, isSysAdmin]
   );
 
-  // Mở Modal Lịch sử giao dịch & Thu bổ sung cọc
-  const handleOpenTransactions = useCallback(async (dep, defaultOpenCollect = false) => {
-    setSelectedDepositForTxn(dep);
-    const allowCollect = Boolean(defaultOpenCollect) && canCollectAdditionalDeposit(dep);
-    if (allowCollect) {
-      collectIdemKeyRef.current = createIdempotencyKey();
-    }
-    setShowCollectForm(allowCollect);
-    const shortage = Math.max(
-      0,
-      Math.round(Number(dep?.deposit_amount || 0) - Number(dep?.amount_held || 0))
-    );
-    setCollectForm({
-      amount: shortage > 0 ? String(shortage) : '',
-      method: 'BANK_TRANSFER',
-      description:
-        Number(dep?.amount_held || 0) === 0
-          ? 'Thu tiền đặt cọc bảo đảm hợp đồng'
-          : 'Thu bổ sung tiền đặt cọc hợp đồng',
-      evidence: [],
-    });
-    setTxnModalOpen(true);
-    setLoadingTxns(true);
-    try {
-      const res = await depositsService.listTransactions(dep.id);
-      setTransactions(Array.isArray(res?.data) ? res.data : []);
-    } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể tải lịch sử giao dịch sổ cọc.'));
-    } finally {
-      setLoadingTxns(false);
-    }
-  }, [toast]);
+  const fetchDepositAuditLogs = useCallback(
+    async (depositId) => {
+      if (!depositId || isResident) return;
+      setLoadingAuditLogs(true);
+      try {
+        const res = await depositsService.getAuditLogs(depositId);
+        setAuditLogs(Array.isArray(res?.data) ? res.data : []);
+        setAuditLoadedDepositId(depositId);
+      } catch (err) {
+        toast.error(extractErrorMessage(err, 'Không thể tải lịch sử kiểm toán của sổ cọc.'));
+      } finally {
+        setLoadingAuditLogs(false);
+      }
+    },
+    [isResident, toast]
+  );
+
+  const handleSwitchTxnSubTab = useCallback(
+    (nextSubTab) => {
+      setTxnModalSubTab(nextSubTab);
+      if (
+        nextSubTab === 'audit' &&
+        selectedDepositForTxn?.id &&
+        auditLoadedDepositId !== selectedDepositForTxn.id
+      ) {
+        fetchDepositAuditLogs(selectedDepositForTxn.id);
+      }
+    },
+    [selectedDepositForTxn, auditLoadedDepositId, fetchDepositAuditLogs]
+  );
+
+  // Mở Modal Lịch sử giao dịch, Kiểm toán & Thu bổ sung cọc
+  const handleOpenTransactions = useCallback(
+    async (dep, defaultOpenCollect = false, defaultSubTab = 'transactions') => {
+      setSelectedDepositForTxn(dep);
+      setTxnModalSubTab(defaultSubTab);
+      setAuditLogs([]);
+      setAuditLoadedDepositId(null);
+      const allowCollect = Boolean(defaultOpenCollect) && canCollectAdditionalDeposit(dep);
+      if (allowCollect) {
+        collectIdemKeyRef.current = createIdempotencyKey();
+      }
+      setShowCollectForm(allowCollect);
+      const shortage = Math.max(
+        0,
+        Math.round(Number(dep?.deposit_amount || 0) - Number(dep?.amount_held || 0))
+      );
+      setCollectForm({
+        amount: shortage > 0 ? String(shortage) : '',
+        method: 'BANK_TRANSFER',
+        description:
+          Number(dep?.amount_held || 0) === 0
+            ? 'Thu tiền đặt cọc bảo đảm hợp đồng'
+            : 'Thu bổ sung tiền đặt cọc hợp đồng',
+        evidence: [],
+      });
+      setTxnModalOpen(true);
+      if (defaultSubTab === 'audit' && !isResident) {
+        fetchDepositAuditLogs(dep.id);
+      }
+      setLoadingTxns(true);
+      try {
+        const res = await depositsService.listTransactions(dep.id);
+        setTransactions(Array.isArray(res?.data) ? res.data : []);
+      } catch (err) {
+        toast.error(extractErrorMessage(err, 'Không thể tải lịch sử giao dịch sổ cọc.'));
+      } finally {
+        setLoadingTxns(false);
+      }
+    },
+    [toast, isResident, fetchDepositAuditLogs]
+  );
 
   const handleSubmitCollect = async (e) => {
     e?.preventDefault();
@@ -1405,9 +1548,22 @@ export function DepositsPage() {
         title="Quản lý Tiền đặt cọc & Tất toán"
         subtitle="Theo dõi sổ tiền cọc bảo đảm, Chủ nhà / cấp thẩm quyền phê duyệt Four-Eyes và BQL chi hoàn chứng từ UNC (FR-024)"
         actions={
-          <Button variant="outline" size="md" icon={RefreshCw} onClick={fetchDeposits}>
-            Làm mới dữ liệu
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {!isResident ? (
+              <Button
+                variant="outline"
+                size="md"
+                icon={FileSpreadsheet}
+                loading={exportingExcel}
+                onClick={handleExportLedgerExcel}
+              >
+                Xuất Excel (RP-07)
+              </Button>
+            ) : null}
+            <Button variant="outline" size="md" icon={RefreshCw} onClick={fetchDeposits}>
+              Làm mới dữ liệu
+            </Button>
+          </div>
         }
       />
 
@@ -1419,7 +1575,7 @@ export function DepositsPage() {
           subtext={`${tabCounts.held} sổ đang bảo lưu${tabCounts.returned > 0 ? ` • ${tabCounts.returned} hoàn trả lệnh chi` : ''}`}
           icon={Wallet}
           color="sky"
-          onClick={() => setActiveTab('held')}
+          onClick={() => handleSelectMainTab('held')}
         />
         <StatsCard
           title="Chờ duyệt / Chi hoàn"
@@ -1427,7 +1583,7 @@ export function DepositsPage() {
           subtext="Chờ Four-Eyes hoặc chờ UNC chi hoàn"
           icon={Clock}
           color="amber"
-          onClick={() => setActiveTab('pending')}
+          onClick={() => handleSelectMainTab('pending')}
         />
         <StatsCard
           title="Đã hoàn / Tất toán"
@@ -1435,7 +1591,7 @@ export function DepositsPage() {
           subtext="Hoàn đủ, hoàn một phần hoặc cấn trừ hết"
           icon={CheckCircle2}
           color="emerald"
-          onClick={() => setActiveTab('refunded')}
+          onClick={() => handleSelectMainTab('refunded')}
         />
         <StatsCard
           title="Hồ sơ tranh chấp"
@@ -1443,12 +1599,35 @@ export function DepositsPage() {
           subtext="Đang tạm khóa phê duyệt / chi hoàn"
           icon={ShieldAlert}
           color="rose"
-          onClick={() => setActiveTab('disputed')}
+          onClick={() => handleSelectMainTab('disputed')}
         />
       </div>
 
+      {/* Banner thông báo khi đang áp dụng bộ lọc nhanh từ Dashboard */}
+      {overdueOnlyFilter || payoutOnlyFilter || statusQueryParam ? (
+        <div className="p-3.5 rounded-xl border border-amber-300 bg-amber-50/80 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs sm:text-sm text-amber-900">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Đang áp dụng bộ lọc nhanh từ Dashboard:{' '}
+              <strong>
+                {overdueOnlyFilter
+                  ? 'Các sổ cọc quá hạn hoàn trả (FR-068)'
+                  : payoutOnlyFilter
+                  ? 'Các sổ cọc chờ BQL chi hoàn UNC / ngân hàng trả lại'
+                  : `Trạng thái ${statusQueryParam}`}
+              </strong>{' '}
+              ({filteredDeposits.length} bản ghi)
+            </span>
+          </div>
+          <Button variant="outline" size="xs" icon={XCircle} onClick={handleClearDrillDown}>
+            Xóa bộ lọc nhanh
+          </Button>
+        </div>
+      ) : null}
+
       {/* Tabs */}
-      <Tabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
+      <Tabs tabs={tabs} activeTab={activeTab} onChange={handleSelectMainTab} />
 
       {/* Search Bar */}
       <Card className="p-4">
@@ -1469,14 +1648,14 @@ export function DepositsPage() {
         emptyDescription="Các sổ cọc được tự động khởi tạo khi hợp đồng thuê được kích hoạt sang trạng thái ACTIVE."
       />
 
-      {/* MODAL 1: Lịch sử giao dịch cọc & Thu bổ sung cọc */}
+      {/* MODAL 1: Lịch sử giao dịch cọc, Kiểm toán xuyên suốt & Thu bổ sung cọc */}
       <Modal
         open={txnModalOpen}
         onClose={() => setTxnModalOpen(false)}
         title={
           selectedDepositForTxn
-            ? `Sổ giao dịch tiền cọc — Căn ${selectedDepositForTxn.apartment_code}`
-            : 'Lịch sử giao dịch cọc'
+            ? `Chi tiết sổ tiền cọc — Căn ${selectedDepositForTxn.apartment_code}`
+            : 'Lịch sử giao dịch & kiểm toán cọc'
         }
         subtitle={
           selectedDepositForTxn
@@ -1516,13 +1695,14 @@ export function DepositsPage() {
                     variant={showCollectForm ? 'outline' : 'primary'}
                     size="sm"
                     icon={showCollectForm ? XCircle : Plus}
-                    onClick={() =>
+                    onClick={() => {
+                      setTxnModalSubTab('transactions');
                       setShowCollectForm((v) => {
                         const next = !v;
                         if (next) collectIdemKeyRef.current = createIdempotencyKey();
                         return next;
-                      })
-                    }
+                      });
+                    }}
                   >
                     {showCollectForm ? 'Ẩn biểu mẫu thu' : 'Thu bổ sung cọc'}
                   </Button>
@@ -1531,140 +1711,226 @@ export function DepositsPage() {
             </div>
           ) : null}
 
-          {/* Form Thu bổ sung cọc (type='collect') */}
-          {showCollectForm && canSettleDeposits ? (
-            <form
-              onSubmit={handleSubmitCollect}
-              className="p-4 rounded-xl border border-primary-200 bg-primary-50/20 space-y-4"
-            >
-              <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
-                <Banknote className="w-4 h-4 text-primary-600" />
-                Ghi nhận thu bổ sung tiền đặt cọc
-              </h4>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <MoneyInput
-                  label="Số tiền thu thêm (VND)"
-                  required
-                  placeholder="VD: 5.000.000"
-                  value={collectForm.amount}
-                  onChange={(e) => setCollectForm((p) => ({ ...p, amount: e.target.value }))}
-                />
-                <Select
-                  label="Phương thức thanh toán"
-                  required
-                  value={collectForm.method}
-                  onChange={(e) => setCollectForm((p) => ({ ...p, method: e.target.value }))}
-                  options={PAYMENT_METHOD_OPTIONS}
-                />
-              </div>
-
-              <Input
-                label="Nội dung diễn giải"
-                placeholder="VD: Thu đủ phần cọc còn lại sau khi trừ tiền giữ chỗ..."
-                value={collectForm.description}
-                onChange={(e) => setCollectForm((p) => ({ ...p, description: e.target.value }))}
-              />
-
-              <FileUpload
-                label="Ảnh chứng từ / Ủy nhiệm chi đính kèm"
-                multiple
-                maxFiles={3}
-                value={collectForm.evidence}
-                onChange={(vals) => setCollectForm((p) => ({ ...p, evidence: vals }))}
-                hint="Tải lên biên lai thu tiền hoặc ảnh chụp chuyển khoản (tối đa 3 ảnh)"
-              />
-
-              <div className="flex justify-end gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowCollectForm(false)}
-                  disabled={submittingCollect}
-                >
-                  Hủy
-                </Button>
-                <Button variant="primary" size="sm" type="submit" loading={submittingCollect}>
-                  Xác nhận thu cọc
-                </Button>
-              </div>
-            </form>
+          {/* Chuyển đổi Sổ giao dịch | Lịch sử kiểm toán (GAP-07) */}
+          {!isResident ? (
+            <Tabs
+              activeTab={txnModalSubTab}
+              onChange={handleSwitchTxnSubTab}
+              tabs={[
+                {
+                  id: 'transactions',
+                  label: 'Sổ giao dịch',
+                  icon: History,
+                  count: transactions.length,
+                },
+                {
+                  id: 'audit',
+                  label: 'Lịch sử kiểm toán',
+                  icon: ScrollText,
+                  count:
+                    auditLoadedDepositId === selectedDepositForTxn?.id
+                      ? auditLogs.length
+                      : undefined,
+                },
+              ]}
+            />
           ) : null}
 
-          {/* Danh sách giao dịch */}
-          {loadingTxns ? (
-            <LoadingSpinner label="Đang tải lịch sử biến động sổ cọc..." />
-          ) : transactions.length === 0 ? (
-            <EmptyState
-              icon={History}
-              title="Chưa có biến động giao dịch cọc"
-              description="Sổ cọc chưa phát sinh giao dịch thu bổ sung, khấu trừ hoặc hoàn trả."
-            />
-          ) : (
-            <div className="space-y-3">
-              {transactions.map((tx) => {
-                const meta = resolveDepositTxnMeta(tx);
-                const evList = Array.isArray(tx.evidence) ? tx.evidence.filter(Boolean) : [];
-                return (
-                  <div
-                    key={tx.id}
-                    className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
+          {txnModalSubTab === 'audit' && !isResident ? (
+            loadingAuditLogs ? (
+              <LoadingSpinner label="Đang tải nhật ký kiểm toán xuyên suốt của sổ cọc..." />
+            ) : auditLogs.length === 0 ? (
+              <EmptyState
+                icon={ScrollText}
+                title="Chưa có nhật ký kiểm toán"
+                description="Mọi thao tác từ giữ chỗ gốc, thu cọc, cấn trừ đến duyệt và chi hoàn đều được tự động lưu vết tại đây."
+              />
+            ) : (
+              <div className="space-y-3">
+                {auditLogs.map((log) => {
+                  const entityMeta = AUDIT_ENTITY_META[log.entity] || {
+                    label: log.entity || 'Đối tượng',
+                    variant: 'slate',
+                  };
+                  const rolesLabel = Array.isArray(log.actor_roles) && log.actor_roles.length > 0
+                    ? log.actor_roles.join(', ')
+                    : '';
+                  const payloadPreview = log.after || log.before || null;
+                  return (
+                    <div
+                      key={log.id}
+                      className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <Badge variant={meta.variant} dot>
-                            {meta.label}
+                          <Badge variant={entityMeta.variant}>{entityMeta.label}</Badge>
+                          <Badge variant="indigo" dot>
+                            {log.action}
                           </Badge>
-                          {tx.category ? (
-                            <Badge variant="slate">
-                              {CATEGORY_LABEL_MAP[tx.category] || tx.category}
-                            </Badge>
-                          ) : null}
-                          {tx.reference_code ? (
-                            <Badge variant="indigo">Mã GD: {tx.reference_code}</Badge>
-                          ) : null}
-                          <span className="text-xs text-slate-500">
-                            • {PAYMENT_METHOD_LABELS[tx.method] || tx.method || 'Phương thức khác'}
+                        </div>
+                        <span className="text-xs font-mono text-slate-500">
+                          {formatDateTime(log.at || log.created_at)}
+                        </span>
+                      </div>
+
+                      <p className="text-xs text-slate-700">
+                        Thực hiện bởi:{' '}
+                        <strong className="text-slate-900">
+                          {log.actor_name || 'Hệ thống'}
+                        </strong>
+                        {rolesLabel ? (
+                          <span className="text-slate-500"> ({rolesLabel})</span>
+                        ) : null}
+                      </p>
+
+                      {payloadPreview ? (
+                        <pre className="text-[11px] font-mono bg-slate-50 border border-slate-100 rounded-lg p-2.5 text-slate-700 overflow-x-auto max-h-36">
+                          {JSON.stringify(payloadPreview, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          ) : (
+            <>
+              {/* Form Thu bổ sung cọc (type='collect') */}
+              {showCollectForm && canSettleDeposits ? (
+                <form
+                  onSubmit={handleSubmitCollect}
+                  className="p-4 rounded-xl border border-primary-200 bg-primary-50/20 space-y-4"
+                >
+                  <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
+                    <Banknote className="w-4 h-4 text-primary-600" />
+                    Ghi nhận thu bổ sung tiền đặt cọc
+                  </h4>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <MoneyInput
+                      label="Số tiền thu thêm (VND)"
+                      required
+                      placeholder="VD: 5.000.000"
+                      value={collectForm.amount}
+                      onChange={(e) => setCollectForm((p) => ({ ...p, amount: e.target.value }))}
+                    />
+                    <Select
+                      label="Phương thức thanh toán"
+                      required
+                      value={collectForm.method}
+                      onChange={(e) => setCollectForm((p) => ({ ...p, method: e.target.value }))}
+                      options={PAYMENT_METHOD_OPTIONS}
+                    />
+                  </div>
+
+                  <Input
+                    label="Nội dung diễn giải"
+                    placeholder="VD: Thu đủ phần cọc còn lại sau khi trừ tiền giữ chỗ..."
+                    value={collectForm.description}
+                    onChange={(e) => setCollectForm((p) => ({ ...p, description: e.target.value }))}
+                  />
+
+                  <FileUpload
+                    label="Ảnh chứng từ / Ủy nhiệm chi đính kèm"
+                    multiple
+                    maxFiles={3}
+                    value={collectForm.evidence}
+                    onChange={(vals) => setCollectForm((p) => ({ ...p, evidence: vals }))}
+                    hint="Tải lên biên lai thu tiền hoặc ảnh chụp chuyển khoản (tối đa 3 ảnh)"
+                  />
+
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setShowCollectForm(false)}
+                      disabled={submittingCollect}
+                    >
+                      Hủy
+                    </Button>
+                    <Button variant="primary" size="sm" type="submit" loading={submittingCollect}>
+                      Xác nhận thu cọc
+                    </Button>
+                  </div>
+                </form>
+              ) : null}
+
+              {/* Danh sách giao dịch */}
+              {loadingTxns ? (
+                <LoadingSpinner label="Đang tải lịch sử biến động sổ cọc..." />
+              ) : transactions.length === 0 ? (
+                <EmptyState
+                  icon={History}
+                  title="Chưa có biến động giao dịch cọc"
+                  description="Sổ cọc chưa phát sinh giao dịch thu bổ sung, khấu trừ hoặc hoàn trả."
+                />
+              ) : (
+                <div className="space-y-3">
+                  {transactions.map((tx) => {
+                    const meta = resolveDepositTxnMeta(tx);
+                    const evList = Array.isArray(tx.evidence) ? tx.evidence.filter(Boolean) : [];
+                    return (
+                      <div
+                        key={tx.id}
+                        className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge variant={meta.variant} dot>
+                                {meta.label}
+                              </Badge>
+                              {tx.category ? (
+                                <Badge variant="slate">
+                                  {CATEGORY_LABEL_MAP[tx.category] || tx.category}
+                                </Badge>
+                              ) : null}
+                              {tx.reference_code ? (
+                                <Badge variant="indigo">Mã GD: {tx.reference_code}</Badge>
+                              ) : null}
+                              <span className="text-xs text-slate-500">
+                                • {PAYMENT_METHOD_LABELS[tx.method] || tx.method || 'Phương thức khác'}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-700 mt-1.5 font-medium whitespace-pre-line break-words">
+                              {tx.description || '—'}
+                            </p>
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                              Thực hiện: {tx.created_by_name || 'Hệ thống'}
+                              {tx.approved_by_name ? ` • Phê duyệt: ${tx.approved_by_name}` : ''} •{' '}
+                              {formatDateTime(tx.created_at)}
+                            </p>
+                          </div>
+
+                          <span
+                            className={`text-sm font-bold shrink-0 ${
+                              meta.sign === '+' ? 'text-emerald-600' : 'text-rose-600'
+                            }`}
+                          >
+                            {meta.sign}
+                            {formatMoney(tx.amount)}
                           </span>
                         </div>
-                        <p className="text-xs text-slate-700 mt-1.5 font-medium whitespace-pre-line break-words">
-                          {tx.description || '—'}
-                        </p>
-                        <p className="text-[11px] text-slate-400 mt-0.5">
-                          Thực hiện: {tx.created_by_name || 'Hệ thống'}
-                          {tx.approved_by_name ? ` • Phê duyệt: ${tx.approved_by_name}` : ''} •{' '}
-                          {formatDateTime(tx.created_at)}
-                        </p>
-                      </div>
 
-                      <span
-                        className={`text-sm font-bold shrink-0 ${
-                          meta.sign === '+' ? 'text-emerald-600' : 'text-rose-600'
-                        }`}
-                      >
-                        {meta.sign}
-                        {formatMoney(tx.amount)}
-                      </span>
-                    </div>
-
-                    {evList.length > 0 ? (
-                      <div className="flex flex-wrap gap-2 pt-1">
-                        {evList.map((src, idx) => (
-                          <div
-                            key={idx}
-                            onClick={() => setPreviewImg(src)}
-                            className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden cursor-pointer hover:border-primary-400"
-                          >
-                            <AuthImage src={src} alt="Chứng từ" className="w-full h-full object-cover" />
+                        {evList.length > 0 ? (
+                          <div className="flex flex-wrap gap-2 pt-1">
+                            {evList.map((src, idx) => (
+                              <div
+                                key={idx}
+                                onClick={() => setPreviewImg(src)}
+                                className="w-14 h-14 rounded-lg border border-slate-200 overflow-hidden cursor-pointer hover:border-primary-400"
+                              >
+                                <AuthImage src={src} alt="Chứng từ" className="w-full h-full object-cover" />
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                        ) : null}
                       </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       </Modal>

@@ -21,6 +21,10 @@ import {
   CalendarClock,
   ArrowRight,
   RefreshCw,
+  Wallet,
+  ShieldAlert,
+  Clock,
+  CheckCircle2,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
@@ -173,6 +177,84 @@ export function DashboardPage() {
           color="amber"
           onClick={() => navigate('/admin/maintenance')}
         />
+      </div>
+
+      {/* Dải KPI Cảnh báo Sổ cọc & Giữ chỗ có Drill-down (GAP-05 / FR-024) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <button
+          type="button"
+          onClick={() => navigate('/admin/deposits?tab=pending')}
+          className="text-left p-3.5 rounded-xl border border-amber-200/80 bg-amber-50/50 hover:bg-amber-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-amber-800">Chờ duyệt tất toán cọc</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.pending_deposit_approvals || 0}
+            </p>
+            <p className="text-[11px] text-amber-700 mt-0.5">Duyệt Four-Eyes →</p>
+          </div>
+          <Clock className="w-6 h-6 text-amber-600 shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate('/admin/deposits?tab=payout')}
+          className="text-left p-3.5 rounded-xl border border-sky-200/80 bg-sky-50/50 hover:bg-sky-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-sky-800">Chờ chi hoàn / Trả lệnh</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.pending_deposit_payouts || 0}
+            </p>
+            <p className="text-[11px] text-sky-700 mt-0.5">Phát hành UNC →</p>
+          </div>
+          <Wallet className="w-6 h-6 text-sky-600 shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate('/admin/deposits?overdue=1')}
+          className="text-left p-3.5 rounded-xl border border-rose-200/80 bg-rose-50/50 hover:bg-rose-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-rose-800">Quá hạn hoàn cọc (5 ngày)</p>
+            <p className="text-xl font-bold text-rose-700 mt-0.5">
+              {kpis.overdue_deposit_refunds || 0}
+            </p>
+            <p className="text-[11px] text-rose-700 mt-0.5">Xử lý khẩn FR-068 →</p>
+          </div>
+          <AlertCircle className="w-6 h-6 text-rose-600 shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate('/admin/deposits?status=DISPUTED')}
+          className="text-left p-3.5 rounded-xl border border-purple-200/80 bg-purple-50/50 hover:bg-purple-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-purple-800">Sổ cọc đang tranh chấp</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.disputed_deposits || 0}
+            </p>
+            <p className="text-[11px] text-purple-700 mt-0.5">Giải quyết khiếu nại →</p>
+          </div>
+          <ShieldAlert className="w-6 h-6 text-purple-600 shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate('/admin/buildings/floor-plan?pending_confirm=1')}
+          className="text-left p-3.5 rounded-xl border border-emerald-200/80 bg-emerald-50/50 hover:bg-emerald-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-emerald-800">Giữ chỗ chờ sao kê</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.pending_reservation_confirms || 0}
+            </p>
+            <p className="text-[11px] text-emerald-700 mt-0.5">Đối chiếu chuyển khoản →</p>
+          </div>
+          <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" />
+        </button>
       </div>
 
       {/* Charts Row */}

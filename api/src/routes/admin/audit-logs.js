@@ -2,14 +2,25 @@ import express from 'express';
 import { adminPool, getUserClient } from '../../db/client.js';
 import { authenticateToken } from '../../middleware/auth.js';
 import { requireRole } from '../../middleware/rbac.js';
+import { toUtf8BomCsv } from '../../utils/csv.js';
 
 const router = express.Router();
 
+const FINANCIAL_AUDIT_ENTITIES = [
+  'invoice',
+  'payment',
+  'receivable',
+  'deposit',
+  'deposit_transaction',
+  'reservation',
+];
+
 /**
  * GET /api/v1/audit-logs
- * Tra cứu nhật ký hệ thống (R-24 / FR-005 / AC-019):
+ * Tra cứu nhật ký hệ thống & Xuất CSV Nhật ký thao tác tài chính RP-08 (R-24 / FR-005 / AC-019 / PRD 15.2):
  * - SYS_ADMIN: Xem toàn bộ nhật ký tổ chức (qua RLS rls_audit_log_select)
  * - OWNER: Xem nhật ký thuộc các tòa nhà mình sở hữu (qua RLS rls_audit_log_select)
+ * - Hỗ trợ scope=financial và format=csv (tối đa 5000 dòng, chống Formula Injection)
  */
 router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
   const {
@@ -21,8 +32,12 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
     from,
     to,
     search,
+    scope,
+    format,
   } = req.query;
 
+  const isCsv = String(format || '').toLowerCase() === 'csv';
+  const isFinancialScope = String(scope || '').toLowerCase() === 'financial';
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 30));
   const offset = (pageNum - 1) * limitNum;
@@ -34,6 +49,10 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
     const params = [];
     let whereSql = 'WHERE 1 = 1';
 
+    if (isFinancialScope) {
+      params.push(FINANCIAL_AUDIT_ENTITIES);
+      whereSql += ` AND al.entity = ANY($${params.length}::text[])`;
+    }
     if (entity && String(entity).trim()) {
       params.push(String(entity).trim());
       whereSql += ` AND al.entity = $${params.length}`;
@@ -65,31 +84,57 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
       )`;
     }
 
-    const countRes = await client.query(
-      `SELECT COUNT(*)::int AS total FROM audit_log al ${whereSql}`,
-      params
-    );
-    const total = countRes.rows[0]?.total || 0;
+    let total = 0;
+    let rowsRes;
 
-    const listParams = [...params, limitNum, offset];
-    const rowsRes = await client.query(
-      `SELECT al.id,
-              al.actor_id,
-              al.action,
-              al.entity,
-              al.entity_id,
-              al.before,
-              al.after,
-              al.ip,
-              al.user_agent,
-              al.at,
-              al.at AS created_at
-       FROM audit_log al
-       ${whereSql}
-       ORDER BY al.at DESC, al.id DESC
-       LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
-      listParams
-    );
+    if (isCsv) {
+      const csvParams = [...params, 5000];
+      rowsRes = await client.query(
+        `SELECT al.id,
+                al.actor_id,
+                al.action,
+                al.entity,
+                al.entity_id,
+                al.before,
+                al.after,
+                al.ip,
+                al.user_agent,
+                al.at,
+                al.at AS created_at
+         FROM audit_log al
+         ${whereSql}
+         ORDER BY al.at DESC, al.id DESC
+         LIMIT $${csvParams.length}`,
+        csvParams
+      );
+      total = rowsRes.rows.length;
+    } else {
+      const countRes = await client.query(
+        `SELECT COUNT(*)::int AS total FROM audit_log al ${whereSql}`,
+        params
+      );
+      total = countRes.rows[0]?.total || 0;
+
+      const listParams = [...params, limitNum, offset];
+      rowsRes = await client.query(
+        `SELECT al.id,
+                al.actor_id,
+                al.action,
+                al.entity,
+                al.entity_id,
+                al.before,
+                al.after,
+                al.ip,
+                al.user_agent,
+                al.at,
+                al.at AS created_at
+         FROM audit_log al
+         ${whereSql}
+         ORDER BY al.at DESC, al.id DESC
+         LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+        listParams
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -119,6 +164,36 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
       };
     });
 
+    if (isCsv) {
+      const headers = [
+        'Thời gian',
+        'Người thực hiện',
+        'Email',
+        'Hành động',
+        'Đối tượng',
+        'Mã bản ghi',
+        'IP',
+        'Trước thay đổi (Before)',
+        'Sau thay đổi (After)',
+      ];
+      const csvRows = enriched.map((row) => [
+        row.at ? new Date(row.at).toISOString() : '',
+        row.actor_name,
+        row.actor_email,
+        row.action || '',
+        row.entity || '',
+        row.entity_id ? String(row.entity_id) : '',
+        row.ip ? String(row.ip) : '',
+        row.before ? JSON.stringify(row.before) : '',
+        row.after ? JSON.stringify(row.after) : '',
+      ]);
+      const csvContent = toUtf8BomCsv(headers, csvRows);
+      const fileSlug = isFinancialScope ? 'nhat-ky-tai-chinh-rp08' : 'nhat-ky-kiem-toan';
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileSlug}.csv"`);
+      return res.status(200).send(csvContent);
+    }
+
     res.json({
       data: enriched,
       pagination: {
@@ -138,4 +213,3 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
 });
 
 export default router;
-

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -21,20 +22,26 @@ import {
   Download,
   RefreshCw,
   Star,
+  Wallet,
+  FileSpreadsheet,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
+import { Input } from '../../../components/ui/Input';
+import { Select } from '../../../components/ui/Select';
 import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Tabs } from '../../../components/ui/Tabs';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
+import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { reportsService } from '../../../services/reports.service';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
-import { SERVICE_REQUEST_CATEGORY } from '../../../constants/statuses';
-import { formatMoney, formatCompactMoney, exportToCsv } from '../../../utils/format';
+import { SERVICE_REQUEST_CATEGORY, DEPOSIT_STATUS } from '../../../constants/statuses';
+import { formatMoney, formatCompactMoney, formatDate, exportToCsv } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 
 ChartJS.register(
@@ -49,11 +56,38 @@ ChartJS.register(
   Filler
 );
 
+const VALID_REPORT_TABS = ['revenue', 'occupancy', 'aging', 'sla', 'deposit-ledger'];
+
+function getDefaultPeriodRange() {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return {
+    from_date: `${yyyy}-${mm}-01`,
+    to_date: `${yyyy}-${mm}-${dd}`,
+  };
+}
+
+const DEPOSIT_STATUS_FILTER_OPTIONS = [
+  { value: '', label: 'Tất cả trạng thái sổ cọc' },
+  ...Object.entries(DEPOSIT_STATUS).map(([value, meta]) => ({
+    value,
+    label: meta.label,
+  })),
+];
+
 export function ReportsPage() {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [activeTab, setActiveTab] = useState('revenue'); // revenue | occupancy | aging | sla
+  const defaultRange = useMemo(() => getDefaultPeriodRange(), []);
+  const initialTab = VALID_REPORT_TABS.includes(searchParams.get('tab'))
+    ? searchParams.get('tab')
+    : 'revenue';
+
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [revenueChartMode, setRevenueChartMode] = useState('line'); // 'line' | 'bar'
   const [loading, setLoading] = useState(true);
   const [reportData, setReportData] = useState({
@@ -62,6 +96,64 @@ export function ReportsPage() {
     aging_by_building: [],
     sla_by_category: [],
   });
+
+  // RP-07 — Sổ cọc state
+  const [ledgerFromDate, setLedgerFromDate] = useState(
+    () => searchParams.get('from_date') || defaultRange.from_date
+  );
+  const [ledgerToDate, setLedgerToDate] = useState(
+    () => searchParams.get('to_date') || defaultRange.to_date
+  );
+  const [ledgerStatus, setLedgerStatus] = useState(() => searchParams.get('status') || '');
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [exportingLedgerFormat, setExportingLedgerFormat] = useState('');
+  const [ledgerData, setLedgerData] = useState({
+    period: { from_date: defaultRange.from_date, to_date: defaultRange.to_date },
+    summary: {
+      opening_held: 0,
+      collected: 0,
+      transfer_in: 0,
+      refund_reversed: 0,
+      deducted: 0,
+      refunded: 0,
+      transfer_out: 0,
+      closing_held: 0,
+      disputed_count: 0,
+      disputed_amount: 0,
+      pending_payout_count: 0,
+      pending_payout_amount: 0,
+      returned_count: 0,
+      returned_amount: 0,
+      overdue_count: 0,
+    },
+    reservation_summary: {
+      active_held_count: 0,
+      active_held_amount: 0,
+      pending_confirm_count: 0,
+      pending_confirm_amount: 0,
+      refunded_in_period: 0,
+      forfeited_in_period: 0,
+    },
+    items: [],
+  });
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && VALID_REPORT_TABS.includes(tabParam) && tabParam !== activeTab) {
+      setActiveTab(tabParam);
+    }
+  }, [searchParams, activeTab]);
+
+  const handleTabChange = (nextTab) => {
+    setActiveTab(nextTab);
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextTab === 'revenue') {
+      nextParams.delete('tab');
+    } else {
+      nextParams.set('tab', nextTab);
+    }
+    setSearchParams(nextParams, { replace: true });
+  };
 
   const fetchSummary = useCallback(async () => {
     setLoading(true);
@@ -84,9 +176,38 @@ export function ReportsPage() {
     }
   }, [selectedBuildingId, toast]);
 
+  const fetchDepositLedger = useCallback(async () => {
+    if (ledgerFromDate && ledgerToDate && ledgerFromDate > ledgerToDate) {
+      toast.warning('Ngày bắt đầu kỳ sổ cọc không được lớn hơn ngày kết thúc.');
+      return;
+    }
+    setLedgerLoading(true);
+    try {
+      const res = await reportsService.getDepositLedger({
+        building_id: selectedBuildingId || undefined,
+        from_date: ledgerFromDate || undefined,
+        to_date: ledgerToDate || undefined,
+        status: ledgerStatus || undefined,
+      });
+      if (res?.data) {
+        setLedgerData(res.data);
+      }
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể tải Báo cáo Sổ cọc (RP-07).'));
+    } finally {
+      setLedgerLoading(false);
+    }
+  }, [selectedBuildingId, ledgerFromDate, ledgerToDate, ledgerStatus, toast]);
+
   useEffect(() => {
     fetchSummary();
   }, [fetchSummary]);
+
+  useEffect(() => {
+    if (activeTab === 'deposit-ledger') {
+      fetchDepositLedger();
+    }
+  }, [activeTab, fetchDepositLedger]);
 
   const overviewKpis = useMemo(() => {
     const rev = reportData.revenue_12m || [];
@@ -297,13 +418,60 @@ export function ReportsPage() {
     toast.success('Đã xuất báo cáo tuổi nợ theo tòa nhà ra CSV.');
   };
 
+  const handleExportDepositLedger = async (fmt) => {
+    if (ledgerFromDate && ledgerToDate && ledgerFromDate > ledgerToDate) {
+      toast.warning('Ngày bắt đầu kỳ sổ cọc không được lớn hơn ngày kết thúc.');
+      return;
+    }
+    setExportingLedgerFormat(fmt);
+    try {
+      const params = {
+        building_id: selectedBuildingId || undefined,
+        from_date: ledgerFromDate || undefined,
+        to_date: ledgerToDate || undefined,
+        status: ledgerStatus || undefined,
+      };
+      const blob =
+        fmt === 'xlsx'
+          ? await reportsService.exportDepositLedgerXlsx(params)
+          : await reportsService.exportDepositLedgerCsv(params);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `so-coc-rp07-${ledgerFromDate || 'ky'}-${ledgerToDate || 'nay'}.${fmt}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(
+        fmt === 'xlsx'
+          ? 'Đã xuất Báo cáo Sổ cọc (RP-07) ra tệp Excel (.xlsx).'
+          : 'Đã xuất Báo cáo Sổ cọc (RP-07) ra tệp CSV (UTF-8 BOM).'
+      );
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xuất tệp Báo cáo Sổ cọc (RP-07).'));
+    } finally {
+      setExportingLedgerFormat('');
+    }
+  };
+
+  const handleRefreshAll = () => {
+    fetchSummary();
+    if (activeTab === 'deposit-ledger') {
+      fetchDepositLedger();
+    }
+  };
+
+  const ledgerSummary = ledgerData.summary || {};
+  const ledgerRsv = ledgerData.reservation_summary || {};
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Báo cáo & Phân tích Quản trị"
-        subtitle="Tổng hợp chuyên sâu Doanh thu 12 tháng, Hiệu suất lấp đầy, Rủi ro tuổi nợ và Chất lượng SLA bảo trì."
+        subtitle="Tổng hợp chuyên sâu Doanh thu 12 tháng, Hiệu suất lấp đầy, Rủi ro tuổi nợ, Sổ cọc RP-07 và Chất lượng SLA bảo trì."
         actions={
-          <Button variant="outline" icon={RefreshCw} onClick={fetchSummary}>
+          <Button variant="outline" icon={RefreshCw} onClick={handleRefreshAll}>
             Làm mới số liệu
           </Button>
         }
@@ -342,14 +510,15 @@ export function ReportsPage() {
         />
       </div>
 
-      {/* 4 Tabs Báo cáo */}
+      {/* 5 Tabs Báo cáo */}
       <Tabs
         activeTab={activeTab}
-        onChange={setActiveTab}
+        onChange={handleTabChange}
         tabs={[
           { id: 'revenue', label: 'Doanh thu 12 tháng', icon: TrendingUp },
           { id: 'occupancy', label: 'Tỷ lệ lấp đầy', icon: Building2 },
           { id: 'aging', label: 'Báo cáo tuổi nợ', icon: Clock },
+          { id: 'deposit-ledger', label: 'Sổ cọc (RP-07)', icon: Wallet },
           { id: 'sla', label: 'SLA Báo hỏng', icon: Wrench },
         ]}
       />
@@ -650,7 +819,305 @@ export function ReportsPage() {
         </div>
       ) : null}
 
-      {/* TAB 4: SLA BÁO HỎNG */}
+      {/* TAB 4: SỔ CỌC RP-07 */}
+      {activeTab === 'deposit-ledger' ? (
+        <div className="space-y-5">
+          {/* Bộ lọc kỳ & Xuất Excel / CSV */}
+          <Card className="p-4">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1 min-w-[280px]">
+                <Input
+                  type="date"
+                  label="Từ ngày"
+                  value={ledgerFromDate}
+                  onChange={(e) => setLedgerFromDate(e.target.value)}
+                />
+                <Input
+                  type="date"
+                  label="Đến ngày"
+                  value={ledgerToDate}
+                  onChange={(e) => setLedgerToDate(e.target.value)}
+                />
+                <Select
+                  label="Trạng thái sổ cọc"
+                  value={ledgerStatus}
+                  onChange={(e) => setLedgerStatus(e.target.value)}
+                  options={DEPOSIT_STATUS_FILTER_OPTIONS}
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={FileSpreadsheet}
+                  loading={exportingLedgerFormat === 'xlsx'}
+                  onClick={() => handleExportDepositLedger('xlsx')}
+                >
+                  Xuất Excel (.xlsx)
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={Download}
+                  loading={exportingLedgerFormat === 'csv'}
+                  onClick={() => handleExportDepositLedger('csv')}
+                >
+                  Xuất CSV
+                </Button>
+              </div>
+            </div>
+          </Card>
+
+          {/* 6 Thẻ Cân đối Sổ cái Tiền cọc Hợp đồng */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+            <div className="p-3.5 rounded-xl border border-slate-200 bg-white">
+              <p className="text-xs font-medium text-slate-500">Đầu kỳ đang giữ</p>
+              <p className="text-base font-bold font-mono tabular-nums text-slate-900 mt-1">
+                {formatMoney(ledgerSummary.opening_held || 0)}
+              </p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Số dư mở sổ</p>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-emerald-200/80 bg-emerald-50/40">
+              <p className="text-xs font-medium text-emerald-800">Thu mới + Nhận KC</p>
+              <p className="text-base font-bold font-mono tabular-nums text-emerald-700 mt-1">
+                +{formatMoney((ledgerSummary.collected || 0) + (ledgerSummary.transfer_in || 0))}
+              </p>
+              <p className="text-[11px] text-emerald-700/80 mt-0.5">
+                Thu: {formatCompactMoney(ledgerSummary.collected || 0)} • KC đến:{' '}
+                {formatCompactMoney(ledgerSummary.transfer_in || 0)}
+                {Number(ledgerSummary.refund_reversed || 0) > 0
+                  ? ` • Trả lệnh: +${formatCompactMoney(ledgerSummary.refund_reversed)}`
+                  : ''}
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-amber-200/80 bg-amber-50/40">
+              <p className="text-xs font-medium text-amber-800">Đã khấu trừ cọc</p>
+              <p className="text-base font-bold font-mono tabular-nums text-amber-700 mt-1">
+                -{formatMoney(ledgerSummary.deducted || 0)}
+              </p>
+              <p className="text-[11px] text-amber-700/80 mt-0.5">Hư hỏng / Nợ dịch vụ</p>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-indigo-200/80 bg-indigo-50/40">
+              <p className="text-xs font-medium text-indigo-800">Hoàn chi + KC đi</p>
+              <p className="text-base font-bold font-mono tabular-nums text-indigo-700 mt-1">
+                -{formatMoney((ledgerSummary.refunded || 0) + (ledgerSummary.transfer_out || 0))}
+              </p>
+              <p className="text-[11px] text-indigo-700/80 mt-0.5">
+                Hoàn: {formatCompactMoney(ledgerSummary.refunded || 0)} • KC đi:{' '}
+                {formatCompactMoney(ledgerSummary.transfer_out || 0)}
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-sky-300 bg-sky-50/70">
+              <p className="text-xs font-semibold text-sky-900">Cuối kỳ đang giữ</p>
+              <p className="text-base font-bold font-mono tabular-nums text-sky-900 mt-1">
+                {formatMoney(ledgerSummary.closing_held || 0)}
+              </p>
+              <p className="text-[11px] text-sky-700 mt-0.5">Khớp cân đối sổ cái</p>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-rose-200/80 bg-rose-50/40">
+              <p className="text-xs font-medium text-rose-800 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                Cảnh báo tồn đọng
+              </p>
+              <p className="text-sm font-bold text-slate-900 mt-1">
+                {(ledgerSummary.pending_payout_count || 0) + (ledgerSummary.returned_count || 0)} chờ chi •{' '}
+                {ledgerSummary.overdue_count || 0} quá hạn
+              </p>
+              <p className="text-[11px] text-rose-700 mt-0.5">
+                Tranh chấp: {ledgerSummary.disputed_count || 0} sổ (
+                {formatCompactMoney(ledgerSummary.disputed_amount || 0)})
+              </p>
+            </div>
+          </div>
+
+          {/* Khối Đối soát Tiền Giữ chỗ Tách biệt (HELD vs PENDING_CONFIRM) */}
+          <Card>
+            <CardHeader
+              title="Đối soát Tiền đặt giữ chỗ ngoài Hợp đồng"
+              subtitle="Tách biệt tiền giữ chỗ đã đối chiếu thực thu (HELD) khỏi các phiếu khách đặt online đang chờ BQL xác nhận sao kê (PENDING_CONFIRM)."
+            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/70">
+                <p className="text-xs text-emerald-800 font-medium">
+                  Đang giữ chỗ đã xác nhận (HELD)
+                </p>
+                <p className="text-lg font-bold font-mono tabular-nums text-emerald-900 mt-0.5">
+                  {formatMoney(ledgerRsv.active_held_amount || 0)}
+                </p>
+                <p className="text-[11px] text-emerald-700">
+                  {ledgerRsv.active_held_count || 0} phiếu đang khóa phòng
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-amber-50/60 border border-amber-200/70">
+                <p className="text-xs text-amber-800 font-medium">
+                  Chờ đối chiếu sao kê (PENDING_CONFIRM)
+                </p>
+                <p className="text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5">
+                  {formatMoney(ledgerRsv.pending_confirm_amount || 0)}
+                </p>
+                <p className="text-[11px] text-amber-700">
+                  {ledgerRsv.pending_confirm_count || 0} phiếu chưa hạch toán thực thu
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-sky-50/60 border border-sky-200/70">
+                <p className="text-xs text-sky-800 font-medium">Hoàn trả giữ chỗ trong kỳ</p>
+                <p className="text-lg font-bold font-mono tabular-nums text-sky-900 mt-0.5">
+                  {formatMoney(ledgerRsv.refunded_in_period || 0)}
+                </p>
+                <p className="text-[11px] text-sky-700">Phiếu REFUNDED / PARTIALLY_REFUNDED</p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-rose-50/60 border border-rose-200/70">
+                <p className="text-xs text-rose-800 font-medium">Tịch thu giữ chỗ trong kỳ</p>
+                <p className="text-lg font-bold font-mono tabular-nums text-rose-900 mt-0.5">
+                  {formatMoney(ledgerRsv.forfeited_in_period || 0)}
+                </p>
+                <p className="text-[11px] text-rose-700">Doanh thu phạt hủy giữ chỗ</p>
+              </div>
+            </div>
+          </Card>
+
+          {/* Bảng Chi tiết Sổ cọc RP-07 */}
+          <DataTable
+            loading={ledgerLoading}
+            rowKey="deposit_id"
+            pageSize={15}
+            data={ledgerData.items || []}
+            emptyTitle="Không có sổ cọc nào trong phạm vi lọc"
+            columns={[
+              {
+                key: 'apartment_code',
+                label: 'Căn hộ / Tòa',
+                sortable: true,
+                render: (r) => (
+                  <div>
+                    <p className="font-semibold text-slate-900">{r.apartment_code}</p>
+                    <span className="text-xs font-mono text-slate-500">{r.building_code}</span>
+                  </div>
+                ),
+              },
+              {
+                key: 'tenant_name',
+                label: 'Khách thuê',
+                sortable: true,
+                render: (r) => (
+                  <div>
+                    <p className="font-medium text-slate-800">{r.tenant_name || '—'}</p>
+                    {r.tenant_phone ? (
+                      <p className="text-xs font-mono text-slate-500">{r.tenant_phone}</p>
+                    ) : null}
+                  </div>
+                ),
+              },
+              {
+                key: 'deposit_status',
+                label: 'Trạng thái sổ',
+                align: 'center',
+                render: (r) => <StatusBadge status={r.deposit_status} domain="deposit" />,
+              },
+              {
+                key: 'opening_held',
+                label: 'Đầu kỳ',
+                align: 'right',
+                sortable: true,
+                className: 'font-mono tabular-nums whitespace-nowrap text-slate-700',
+                render: (r) => formatMoney(r.opening_held || 0),
+              },
+              {
+                key: 'collected',
+                label: 'Thu mới / KC đến',
+                align: 'right',
+                className: 'font-mono tabular-nums whitespace-nowrap text-emerald-700',
+                render: (r) => {
+                  const totalIn =
+                    Number(r.collected || 0) +
+                    Number(r.transfer_in || 0) +
+                    Number(r.refund_reversed || 0);
+                  return (
+                    <div>
+                      <p className="font-semibold">+{formatMoney(totalIn)}</p>
+                      {Number(r.transfer_in || 0) > 0 ? (
+                        <p className="text-[10px] text-slate-500">
+                          KC đến: {formatCompactMoney(r.transfer_in)}
+                        </p>
+                      ) : null}
+                      {Number(r.refund_reversed || 0) > 0 ? (
+                        <p className="text-[10px] text-amber-700">
+                          Trả lệnh: +{formatCompactMoney(r.refund_reversed)}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'deducted',
+                label: 'Khấu trừ',
+                align: 'right',
+                className: 'font-mono tabular-nums whitespace-nowrap text-amber-700',
+                render: (r) =>
+                  Number(r.deducted || 0) > 0 ? `-${formatMoney(r.deducted)}` : formatMoney(0),
+              },
+              {
+                key: 'refunded',
+                label: 'Hoàn chi / KC đi',
+                align: 'right',
+                className: 'font-mono tabular-nums whitespace-nowrap text-indigo-700',
+                render: (r) => {
+                  const totalOut = Number(r.refunded || 0) + Number(r.transfer_out || 0);
+                  return (
+                    <div>
+                      <p>{totalOut > 0 ? `-${formatMoney(totalOut)}` : formatMoney(0)}</p>
+                      {Number(r.transfer_out || 0) > 0 ? (
+                        <p className="text-[10px] text-slate-500">
+                          KC đi: {formatCompactMoney(r.transfer_out)}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                },
+              },
+              {
+                key: 'closing_held',
+                label: 'Cuối kỳ đang giữ',
+                align: 'right',
+                sortable: true,
+                className: 'font-mono tabular-nums whitespace-nowrap font-bold text-slate-900',
+                render: (r) => formatMoney(r.closing_held || 0),
+              },
+              {
+                key: 'refund_due_date',
+                label: 'Hạn hoàn cọc',
+                align: 'center',
+                className: 'whitespace-nowrap',
+                render: (r) =>
+                  r.refund_due_date ? (
+                    <span
+                      className={`text-xs font-medium ${
+                        r.is_overdue ? 'text-rose-600 font-semibold' : 'text-slate-700'
+                      }`}
+                    >
+                      {formatDate(r.refund_due_date)}
+                      {r.is_overdue ? ' (Quá hạn)' : ''}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-slate-400">—</span>
+                  ),
+              },
+            ]}
+          />
+        </div>
+      ) : null}
+
+      {/* TAB 5: SLA BÁO HỎNG */}
       {activeTab === 'sla' ? (
         <div className="space-y-5">
           <Card>

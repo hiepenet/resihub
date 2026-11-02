@@ -8,6 +8,8 @@ import {
   AlertTriangle,
   ShieldAlert,
   RotateCcw,
+  Download,
+  Wallet,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -30,6 +32,7 @@ const ENTITY_OPTIONS = [
   { value: 'deposit_transaction', label: 'Giao dịch cọc (deposit_transaction)' },
   { value: 'invoice', label: 'Hóa đơn (invoice)' },
   { value: 'payment', label: 'Thanh toán (payment)' },
+  { value: 'receivable', label: 'Công nợ phải thu (receivable)' },
   { value: 'apartment', label: 'Căn hộ (apartment)' },
   { value: 'building', label: 'Tòa nhà (building)' },
   { value: 'reservation', label: 'Giữ chỗ (reservation)' },
@@ -102,10 +105,12 @@ export function AuditLogsView() {
   const [totalPages, setTotalPages] = useState(1);
 
   const [search, setSearch] = useState('');
+  const [scope, setScope] = useState('');
   const [entity, setEntity] = useState('');
   const [action, setAction] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [exportingCsv, setExportingCsv] = useState(false);
 
   const [selectedLog, setSelectedLog] = useState(null);
 
@@ -115,6 +120,7 @@ export function AuditLogsView() {
       const params = {
         page,
         limit,
+        ...(scope ? { scope } : {}),
         ...(entity ? { entity } : {}),
         ...(action ? { action } : {}),
         ...(fromDate ? { from: fromDate } : {}),
@@ -144,7 +150,7 @@ export function AuditLogsView() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, entity, action, fromDate, toDate, search, toast]);
+  }, [page, limit, scope, entity, action, fromDate, toDate, search, toast]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -155,11 +161,39 @@ export function AuditLogsView() {
 
   const handleResetFilters = () => {
     setSearch('');
+    setScope('');
     setEntity('');
     setAction('');
     setFromDate('');
     setToDate('');
     setPage(1);
+  };
+
+  const handleExportFinancialCsv = async () => {
+    setExportingCsv(true);
+    try {
+      const blob = await auditService.exportCsv({
+        scope: 'financial',
+        ...(entity ? { entity } : {}),
+        ...(action ? { action } : {}),
+        ...(fromDate ? { from: fromDate } : {}),
+        ...(toDate ? { to: toDate } : {}),
+        ...(search.trim() ? { search: search.trim() } : {}),
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nhat-ky-tai-chinh-rp08-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Đã xuất CSV Nhật ký thao tác tài chính (RP-08).');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xuất CSV Nhật ký tài chính (RP-08).'));
+    } finally {
+      setExportingCsv(false);
+    }
   };
 
   const columns = useMemo(
@@ -337,15 +371,37 @@ export function AuditLogsView() {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs text-slate-500">
-          <span>
-            Tổng cộng <strong className="text-slate-800">{total}</strong> bản ghi nhật ký kiểm toán
-          </span>
-          <div className="flex items-center gap-2">
-            {(search || entity || action || fromDate || toDate) ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span>
+              Tổng cộng <strong className="text-slate-800">{total}</strong> bản ghi nhật ký kiểm toán
+            </span>
+            <Button
+              variant={scope === 'financial' ? 'primary' : 'outline'}
+              size="xs"
+              icon={Wallet}
+              onClick={() => {
+                setScope((prev) => (prev === 'financial' ? '' : 'financial'));
+                setPage(1);
+              }}
+            >
+              {scope === 'financial' ? 'Đang lọc: Tất cả tài chính (RP-08)' : 'Tất cả tài chính (RP-08)'}
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {(search || scope || entity || action || fromDate || toDate) ? (
               <Button variant="ghost" size="xs" icon={RotateCcw} onClick={handleResetFilters}>
                 Xóa bộ lọc
               </Button>
             ) : null}
+            <Button
+              variant="outline"
+              size="xs"
+              icon={Download}
+              loading={exportingCsv}
+              onClick={handleExportFinancialCsv}
+            >
+              Xuất CSV Tài chính (RP-08)
+            </Button>
             <Button variant="outline" size="xs" icon={RefreshCw} onClick={fetchLogs}>
               Làm mới
             </Button>
