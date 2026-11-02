@@ -6,6 +6,8 @@ import {
   scopedBuildingFilter,
   checkBuildingAccess,
 } from '../services/ownerScope.js';
+import { getTodayVnDateStr } from '../services/depositSettlement.js';
+import { toUtf8BomCsv, toXlsxBuffer } from '../utils/csv.js';
 
 const router = express.Router();
 
@@ -24,6 +26,7 @@ function buildLast12MonthsPeriods() {
 /**
  * GET /api/v1/reports/dashboard
  * Tổng hợp KPI Dashboard + Biểu đồ doanh thu 12 tháng (AC-018) + Tỷ lệ trạng thái căn hộ + HĐ sắp hết hạn + Báo hỏng mới
+ * + 5 KPI cảnh báo Sổ cọc & Giữ chỗ chờ xác nhận (GAP-05)
  */
 router.get(
   '/dashboard',
@@ -159,7 +162,7 @@ router.get(
         ),
       ]);
 
-      // 5. Hợp đồng sắp hết hạn trong 30 ngày tới
+      // 5. Hợp đồng sắp hết hạn trong 30-45 ngày tới
       const expParams = [orgId];
       const { sql: expScope } = await scopedBuildingFilter(req, 'c.building_id', expParams);
       let expFilter = '';
@@ -189,6 +192,52 @@ router.get(
         expParams
       );
 
+      // 6. KPI cảnh báo Sổ cọc & Giữ chỗ chờ xác nhận (GAP-05)
+      const depKpiParams = [orgId, getTodayVnDateStr()];
+      const { sql: depKpiScope } = await scopedBuildingFilter(req, 'c.building_id', depKpiParams);
+      let depKpiFilter = '';
+      if (building_id) {
+        depKpiParams.push(building_id);
+        depKpiFilter = ` AND c.building_id = $${depKpiParams.length}`;
+      }
+      const rsvKpiParams = [orgId];
+      const { sql: rsvKpiScope } = await scopedBuildingFilter(req, 'r.building_id', rsvKpiParams);
+      let rsvKpiFilter = '';
+      if (building_id) {
+        rsvKpiParams.push(building_id);
+        rsvKpiFilter = ` AND r.building_id = $${rsvKpiParams.length}`;
+      }
+
+      const [depKpiRes, rsvKpiRes] = await Promise.all([
+        pool.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_deposit_approvals,
+             COUNT(*) FILTER (WHERE d.status IN ('APPROVED_PENDING_PAYOUT', 'RETURNED'))::int AS pending_deposit_payouts,
+             COUNT(*) FILTER (
+               WHERE d.refund_due_date IS NOT NULL
+                 AND d.refund_due_date < $2::date
+                 AND d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
+             )::int AS overdue_deposit_refunds,
+             COUNT(*) FILTER (WHERE d.status = 'DISPUTED')::int AS disputed_deposits
+           FROM deposit d
+           JOIN contract c ON c.id = d.contract_id
+           JOIN building b ON b.id = c.building_id
+           WHERE b.org_id = $1 ${depKpiScope} ${depKpiFilter}`,
+          depKpiParams
+        ),
+        pool.query(
+          `SELECT COUNT(*)::int AS pending_reservation_confirms
+           FROM reservation r
+           JOIN building b ON b.id = r.building_id
+           WHERE b.org_id = $1
+             AND r.status = 'PENDING_CONFIRM'
+             ${rsvKpiScope} ${rsvKpiFilter}`,
+          rsvKpiParams
+        ),
+      ]);
+
+      const depKpiRow = depKpiRes.rows[0] || {};
+
       res.json({
         data: {
           kpis: {
@@ -202,6 +251,11 @@ router.get(
             current_period: currentPeriod,
             unpaid_debt: unpaidDebt,
             pending_requests: srCountRes.rows[0]?.pending_count || 0,
+            pending_deposit_approvals: Number(depKpiRow.pending_deposit_approvals || 0),
+            pending_deposit_payouts: Number(depKpiRow.pending_deposit_payouts || 0),
+            overdue_deposit_refunds: Number(depKpiRow.overdue_deposit_refunds || 0),
+            disputed_deposits: Number(depKpiRow.disputed_deposits || 0),
+            pending_reservation_confirms: Number(rsvKpiRes.rows[0]?.pending_reservation_confirms || 0),
           },
           apartment_status_breakdown: statusCounts,
           revenue_12m: revenue12m,
@@ -212,6 +266,414 @@ router.get(
     } catch (err) {
       console.error('[Reports Dashboard Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tổng hợp dữ liệu Dashboard.' });
+    }
+  }
+);
+
+/**
+ * GET /api/v1/reports/deposit-ledger (RP-07 — Sổ cọc, PRD Mục 15.2)
+ * Hỗ trợ format = 'json' | 'csv' | 'xlsx'
+ * Bất biến kế toán:
+ *   opening_held + collected + transfer_in + refund_reversed - deducted - refunded - transfer_out === closing_held
+ *   (khi to_date >= hôm nay và không lọc status: closing_held === SUM(deposit.amount_held))
+ */
+router.get(
+  '/deposit-ledger',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
+  async (req, res) => {
+    const { building_id, status, format = 'json' } = req.query;
+    const orgId = req.user.org_id;
+    const todayStr = getTodayVnDateStr();
+    const fromDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.from_date || ''))
+      ? String(req.query.from_date)
+      : `${todayStr.slice(0, 7)}-01`;
+    const toDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.to_date || ''))
+      ? String(req.query.to_date)
+      : todayStr;
+
+    if (fromDate > toDate) {
+      return res.status(400).json({
+        code: 'INVALID_DATE_RANGE',
+        message: 'Ngày bắt đầu (from_date) không được lớn hơn ngày kết thúc (to_date).',
+      });
+    }
+
+    try {
+      if (building_id) {
+        const ok = await checkBuildingAccess(req, building_id, 'report');
+        if (!ok) {
+          return res.status(403).json({
+            code: 'ACCESS_DENIED',
+            message: 'Bạn không có quyền xem báo cáo sổ cọc của tòa nhà này.',
+          });
+        }
+      }
+
+      const ledgerParams = [orgId, fromDate, toDate];
+      const { sql: bldScope } = await scopedBuildingFilter(req, 'c.building_id', ledgerParams);
+      let extraFilter = '';
+      if (building_id) {
+        ledgerParams.push(building_id);
+        extraFilter += ` AND c.building_id = $${ledgerParams.length}`;
+      }
+      if (status) {
+        ledgerParams.push(String(status));
+        extraFilter += ` AND d.status = $${ledgerParams.length}`;
+      }
+
+      const ledgerSql = `
+        WITH txn_agg AS (
+          SELECT
+            dt.deposit_id,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'collect'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS collected_in_period,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'transfer'
+                AND COALESCE(dt.category, CASE WHEN dt.description ILIKE 'Chuyển kết dư%' THEN 'TRANSFER_OUT' ELSE 'TRANSFER_IN' END) = 'TRANSFER_IN'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS transfer_in_period,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'refund_reversal'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS refund_reversed_in_period,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'deduct'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS deducted_in_period,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'refund'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS refunded_in_period,
+            COALESCE(SUM(dt.amount) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND dt.type = 'transfer'
+                AND COALESCE(dt.category, CASE WHEN dt.description ILIKE 'Chuyển kết dư%' THEN 'TRANSFER_OUT' ELSE 'TRANSFER_IN' END) = 'TRANSFER_OUT'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+            ), 0)::bigint AS transfer_out_period,
+            COALESCE(SUM(
+              CASE
+                WHEN dt.type IN ('collect', 'refund_reversal') THEN dt.amount
+                WHEN dt.type = 'transfer' AND COALESCE(dt.category, CASE WHEN dt.description ILIKE 'Chuyển kết dư%' THEN 'TRANSFER_OUT' ELSE 'TRANSFER_IN' END) = 'TRANSFER_IN' THEN dt.amount
+                WHEN dt.type IN ('deduct', 'refund') THEN -dt.amount
+                WHEN dt.type = 'transfer' AND COALESCE(dt.category, CASE WHEN dt.description ILIKE 'Chuyển kết dư%' THEN 'TRANSFER_OUT' ELSE 'TRANSFER_IN' END) = 'TRANSFER_OUT' THEN -dt.amount
+                ELSE 0
+              END
+            ) FILTER (
+              WHERE dt.status = 'APPROVED'
+                AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > $3::date
+            ), 0)::bigint AS net_after_period
+          FROM deposit_transaction dt
+          GROUP BY dt.deposit_id
+        )
+        SELECT
+          d.id AS deposit_id,
+          d.contract_id,
+          d.status AS deposit_status,
+          d.amount_held,
+          d.refund_due_date,
+          d.updated_at,
+          c.building_id,
+          c.apartment_id,
+          c.status AS contract_status,
+          c.deposit_amount AS contract_deposit_amount,
+          b.code AS building_code,
+          b.name AS building_name,
+          a.code AS apartment_code,
+          p.full_name AS tenant_name,
+          p.phone AS tenant_phone,
+          COALESCE(ta.collected_in_period, 0)::bigint AS collected,
+          COALESCE(ta.transfer_in_period, 0)::bigint AS transfer_in,
+          COALESCE(ta.refund_reversed_in_period, 0)::bigint AS refund_reversed,
+          COALESCE(ta.deducted_in_period, 0)::bigint AS deducted,
+          COALESCE(ta.refunded_in_period, 0)::bigint AS refunded,
+          COALESCE(ta.transfer_out_period, 0)::bigint AS transfer_out,
+          COALESCE(ta.net_after_period, 0)::bigint AS net_after_period
+        FROM deposit d
+        JOIN contract c ON c.id = d.contract_id
+        JOIN building b ON b.id = c.building_id
+        JOIN apartment a ON a.id = c.apartment_id
+        LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+        LEFT JOIN person p ON p.id = t.person_id
+        LEFT JOIN txn_agg ta ON ta.deposit_id = d.id
+        WHERE b.org_id = $1 ${bldScope} ${extraFilter}
+        ORDER BY b.code ASC, a.code ASC, d.created_at DESC
+      `;
+
+      const rsvParams = [orgId, fromDate, toDate];
+      const { sql: rsvScope } = await scopedBuildingFilter(req, 'r.building_id', rsvParams);
+      let rsvFilter = '';
+      if (building_id) {
+        rsvParams.push(building_id);
+        rsvFilter = ` AND r.building_id = $${rsvParams.length}`;
+      }
+
+      const rsvSql = `
+        SELECT
+          COUNT(*) FILTER (WHERE r.status = 'HELD')::int AS active_held_count,
+          COALESCE(SUM(r.hold_amount) FILTER (WHERE r.status = 'HELD'), 0)::bigint AS active_held_amount,
+          COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_confirm_count,
+          COALESCE(SUM(r.hold_amount) FILTER (WHERE r.status = 'PENDING_CONFIRM'), 0)::bigint AS pending_confirm_amount,
+          COALESCE(SUM(
+            CASE
+              WHEN r.status = 'REFUNDED' THEN COALESCE(NULLIF(r.refunded_amount, 0), r.hold_amount)
+              WHEN r.status = 'PARTIALLY_REFUNDED' THEN r.refunded_amount
+              ELSE 0
+            END
+          ) FILTER (
+            WHERE r.status IN ('REFUNDED', 'PARTIALLY_REFUNDED')
+              AND (r.updated_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+          ), 0)::bigint AS refunded_in_period,
+          COALESCE(SUM(
+            CASE
+              WHEN r.status = 'FORFEITED' THEN COALESCE(NULLIF(r.forfeited_amount, 0), r.hold_amount)
+              WHEN r.status = 'PARTIALLY_REFUNDED' THEN r.forfeited_amount
+              ELSE 0
+            END
+          ) FILTER (
+            WHERE r.status IN ('FORFEITED', 'PARTIALLY_REFUNDED')
+              AND (r.updated_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+          ), 0)::bigint AS forfeited_in_period
+        FROM reservation r
+        JOIN building b ON b.id = r.building_id
+        WHERE b.org_id = $1 ${rsvScope} ${rsvFilter}
+      `;
+
+      const [ledgerRes, rsvRes] = await Promise.all([
+        pool.query(ledgerSql, ledgerParams),
+        pool.query(rsvSql, rsvParams),
+      ]);
+
+      const summary = {
+        opening_held: 0,
+        collected: 0,
+        transfer_in: 0,
+        refund_reversed: 0,
+        deducted: 0,
+        refunded: 0,
+        transfer_out: 0,
+        closing_held: 0,
+        disputed_count: 0,
+        disputed_amount: 0,
+        pending_payout_count: 0,
+        pending_payout_amount: 0,
+        returned_count: 0,
+        returned_amount: 0,
+        overdue_count: 0,
+      };
+
+      const items = ledgerRes.rows.map((row) => {
+        const currentHeld = Number(row.amount_held || 0);
+        const netAfter = Number(row.net_after_period || 0);
+        const collected = Number(row.collected || 0);
+        const transferIn = Number(row.transfer_in || 0);
+        const refundReversed = Number(row.refund_reversed || 0);
+        const deducted = Number(row.deducted || 0);
+        const refunded = Number(row.refunded || 0);
+        const transferOut = Number(row.transfer_out || 0);
+
+        const closingHeld = currentHeld - netAfter;
+        const netInPeriod =
+          collected + transferIn + refundReversed - deducted - refunded - transferOut;
+        const openingHeld = closingHeld - netInPeriod;
+
+        const dueStr = row.refund_due_date
+          ? row.refund_due_date.toISOString
+            ? row.refund_due_date.toISOString().slice(0, 10)
+            : String(row.refund_due_date).slice(0, 10)
+          : null;
+        const isOverdue = Boolean(
+          dueStr &&
+            dueStr < todayStr &&
+            !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(
+              row.deposit_status
+            )
+        );
+
+        summary.opening_held += openingHeld;
+        summary.collected += collected;
+        summary.transfer_in += transferIn;
+        summary.refund_reversed += refundReversed;
+        summary.deducted += deducted;
+        summary.refunded += refunded;
+        summary.transfer_out += transferOut;
+        summary.closing_held += closingHeld;
+
+        if (row.deposit_status === 'DISPUTED') {
+          summary.disputed_count += 1;
+          summary.disputed_amount += currentHeld;
+        }
+        if (row.deposit_status === 'APPROVED_PENDING_PAYOUT') {
+          summary.pending_payout_count += 1;
+          summary.pending_payout_amount += currentHeld;
+        }
+        if (row.deposit_status === 'RETURNED') {
+          summary.returned_count += 1;
+          summary.returned_amount += currentHeld;
+        }
+        if (isOverdue) {
+          summary.overdue_count += 1;
+        }
+
+        return {
+          deposit_id: row.deposit_id,
+          contract_id: row.contract_id,
+          building_id: row.building_id,
+          building_code: row.building_code,
+          building_name: row.building_name,
+          apartment_id: row.apartment_id,
+          apartment_code: row.apartment_code,
+          tenant_name: row.tenant_name || '',
+          tenant_phone: row.tenant_phone || '',
+          contract_status: row.contract_status,
+          deposit_status: row.deposit_status,
+          status: row.deposit_status,
+          contract_deposit_amount: Number(row.contract_deposit_amount || 0),
+          opening_held: openingHeld,
+          collected,
+          transfer_in: transferIn,
+          refund_reversed: refundReversed,
+          deducted,
+          refunded,
+          transfer_out: transferOut,
+          closing_held: closingHeld,
+          refund_due_date: dueStr,
+          is_overdue: isOverdue,
+          updated_at: row.updated_at,
+        };
+      });
+
+      const rsvRow = rsvRes.rows[0] || {};
+      const reservationSummary = {
+        active_held_count: Number(rsvRow.active_held_count || 0),
+        active_held_amount: Number(rsvRow.active_held_amount || 0),
+        pending_confirm_count: Number(rsvRow.pending_confirm_count || 0),
+        pending_confirm_amount: Number(rsvRow.pending_confirm_amount || 0),
+        refunded_in_period: Number(rsvRow.refunded_in_period || 0),
+        forfeited_in_period: Number(rsvRow.forfeited_in_period || 0),
+      };
+
+      const fmt = String(format || 'json').toLowerCase();
+      if (fmt === 'csv' || fmt === 'xlsx') {
+        const headers = [
+          'Mã tòa',
+          'Tên tòa nhà',
+          'Mã căn hộ',
+          'Khách thuê',
+          'Số điện thoại',
+          'Trạng thái HĐ',
+          'Trạng thái sổ cọc',
+          'Đầu kỳ (VND)',
+          'Thu mới (VND)',
+          'Nhận kết chuyển (VND)',
+          'Hoàn trả lệnh chi (VND)',
+          'Khấu trừ (VND)',
+          'Đã hoàn chi (VND)',
+          'Kết chuyển đi (VND)',
+          'Cuối kỳ đang giữ (VND)',
+          'Hạn hoàn cọc',
+          'Quá hạn',
+        ];
+
+        const exportRows = items.map((it) => [
+          it.building_code,
+          it.building_name,
+          it.apartment_code,
+          it.tenant_name,
+          String(it.tenant_phone || ''),
+          it.contract_status,
+          it.deposit_status,
+          it.opening_held,
+          it.collected,
+          it.transfer_in,
+          it.refund_reversed,
+          it.deducted,
+          it.refunded,
+          it.transfer_out,
+          it.closing_held,
+          it.refund_due_date || '',
+          it.is_overdue ? 'Quá hạn' : 'Bình thường',
+        ]);
+
+        // Tổng cộng dòng cuối trên Sheet 1
+        exportRows.push([
+          'TONG_CONG',
+          `Kỳ ${fromDate} -> ${toDate}`,
+          '',
+          '',
+          '',
+          '',
+          '',
+          summary.opening_held,
+          summary.collected,
+          summary.transfer_in,
+          summary.refund_reversed,
+          summary.deducted,
+          summary.refunded,
+          summary.transfer_out,
+          summary.closing_held,
+          '',
+          '',
+        ]);
+
+        if (fmt === 'csv') {
+          const csvContent = toUtf8BomCsv(headers, exportRows);
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+          res.setHeader(
+            'Content-Disposition',
+            `attachment; filename="so-coc-rp07-${fromDate}-${toDate}.csv"`
+          );
+          return res.status(200).send(csvContent);
+        }
+
+        const rsvHeaders = [
+          'Chỉ tiêu đối soát giữ chỗ',
+          'Số lượng phiếu',
+          'Số tiền (VND)',
+        ];
+        const rsvRows = [
+          ['Giữ chỗ đã xác nhận đang giữ (HELD)', reservationSummary.active_held_count, reservationSummary.active_held_amount],
+          ['Giữ chỗ chờ đối chiếu sao kê (PENDING_CONFIRM)', reservationSummary.pending_confirm_count, reservationSummary.pending_confirm_amount],
+          ['Hoàn trả giữ chỗ trong kỳ', '', reservationSummary.refunded_in_period],
+          ['Tịch thu giữ chỗ trong kỳ', '', reservationSummary.forfeited_in_period],
+        ];
+
+        const xlsxBuf = toXlsxBuffer([
+          { name: 'So coc RP-07', headers, rows: exportRows },
+          { name: 'Doi soat giu cho', headers: rsvHeaders, rows: rsvRows },
+        ]);
+        res.setHeader(
+          'Content-Type',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="so-coc-rp07-${fromDate}-${toDate}.xlsx"`
+        );
+        return res.status(200).send(xlsxBuf);
+      }
+
+      return res.json({
+        data: {
+          period: { from_date: fromDate, to_date: toDate },
+          summary,
+          reservation_summary: reservationSummary,
+          items,
+        },
+      });
+    } catch (err) {
+      console.error('[Reports Deposit Ledger Error]:', err);
+      return res.status(500).json({
+        code: 'DB_ERROR',
+        message: 'Lỗi khi tổng hợp Báo cáo Sổ cọc (RP-07).',
+      });
     }
   }
 );
@@ -366,4 +828,3 @@ router.get(
 );
 
 export default router;
-

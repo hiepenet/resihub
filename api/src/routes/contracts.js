@@ -2764,9 +2764,9 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
 
           await dbClient.query(
             `INSERT INTO deposit_transaction (
-               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
              )
-             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+             VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
             [
               parentDep.id,
               transferAmt.toString(),
@@ -2783,9 +2783,9 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
           );
           await dbClient.query(
             `INSERT INTO deposit_transaction (
-               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
              )
-             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+             VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
             [
               depRes.rows[0].id,
               transferAmt.toString(),
@@ -2820,9 +2820,9 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
         if (split.openHeld > 0n && matchedRsv) {
           await dbClient.query(
             `INSERT INTO deposit_transaction (
-               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
              )
-             VALUES ($1, 'transfer', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
+             VALUES ($1, 'transfer', 'TRANSFER_IN', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
             [newDepositId, split.openHeld.toString(), req.user.sub]
           );
         }
@@ -4772,9 +4772,9 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
         if (transferAmt > 0n) {
           await client.query(
             `INSERT INTO deposit_transaction (
-               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
              )
-             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+             VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
             [
               oldDep.id,
               transferAmt.toString(),
@@ -4796,9 +4796,9 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
           if (transferAmt > 0n) {
             await client.query(
               `INSERT INTO deposit_transaction (
-                 deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
                )
-               VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+               VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
               [
                 transferredDeposit.id,
                 transferAmt.toString(),

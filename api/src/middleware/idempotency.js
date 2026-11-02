@@ -49,9 +49,25 @@ export function idempotencyGuard(options = {}) {
       });
     }
 
-    const orgId = req.user?.org_id;
-    const actorId = req.user?.sub || req.user?.id;
-    if (!orgId || !actorId) {
+    let orgId = req.user?.org_id || null;
+    let actorId = req.user?.sub || req.user?.id || null;
+    let scopeKey = actorId ? `user:${actorId}` : null;
+
+    if ((!orgId || !scopeKey) && typeof options.resolveScope === 'function') {
+      try {
+        const resolved = await options.resolveScope(req);
+        if (resolved?.orgId && resolved?.scopeKey) {
+          orgId = resolved.orgId;
+          scopeKey = String(resolved.scopeKey);
+          actorId = resolved.actorId ?? null;
+        }
+      } catch (scopeErr) {
+        console.error('[Idempotency resolveScope Error]:', scopeErr);
+        return next(scopeErr);
+      }
+    }
+
+    if (!orgId || !scopeKey) {
       return next();
     }
 
@@ -63,20 +79,20 @@ export function idempotencyGuard(options = {}) {
       await adminPool.query(
         `DELETE FROM idempotency_key
          WHERE org_id = $1
-           AND actor_id = $2
+           AND scope_key = $2
            AND method = $3
            AND route_path = $4
            AND idem_key = $5
            AND expires_at <= NOW()`,
-        [orgId, actorId, method, routePath, idemKey]
+        [orgId, scopeKey, method, routePath, idemKey]
       );
 
       const claimRes = await adminPool.query(
-        `INSERT INTO idempotency_key (org_id, actor_id, idem_key, method, route_path, request_hash, state)
-         VALUES ($1, $2, $3, $4, $5, $6, 'IN_PROGRESS')
-         ON CONFLICT (org_id, actor_id, method, route_path, idem_key) DO NOTHING
+        `INSERT INTO idempotency_key (org_id, actor_id, scope_key, idem_key, method, route_path, request_hash, state)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'IN_PROGRESS')
+         ON CONFLICT (org_id, scope_key, method, route_path, idem_key) DO NOTHING
          RETURNING id`,
-        [orgId, actorId, idemKey, method, routePath, requestHash]
+        [orgId, actorId, scopeKey, idemKey, method, routePath, requestHash]
       );
 
       if (claimRes.rows.length === 0) {
@@ -84,12 +100,12 @@ export function idempotencyGuard(options = {}) {
           `SELECT id, request_hash, state, status_code, response_body
            FROM idempotency_key
            WHERE org_id = $1
-             AND actor_id = $2
-             AND method = $3
-             AND route_path = $4
-             AND idem_key = $5
+            AND scope_key = $2
+            AND method = $3
+            AND route_path = $4
+            AND idem_key = $5
            LIMIT 1`,
-          [orgId, actorId, method, routePath, idemKey]
+          [orgId, scopeKey, method, routePath, idemKey]
         );
 
         if (existingRes.rows.length > 0) {

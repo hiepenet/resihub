@@ -122,7 +122,22 @@ export async function runDailyJobs() {
     if (!expiredAptIds.has(r.apartment_id)) otherAffectedAptIds.add(r.apartment_id);
   });
 
-  // 3. Giữ chỗ quá hạn
+  // 3a. Giữ chỗ công khai chờ xác nhận sao kê (PENDING_CONFIRM) quá hạn -> chuyển sang REJECTED (không sang EXPIRED)
+  const rsvPendingRejected = await adminPool.query(
+    `UPDATE reservation
+     SET status = 'REJECTED',
+         rejected_reason = COALESCE(rejected_reason, 'Quá thời hạn đối chiếu sao kê xác nhận thanh toán'),
+         updated_at = NOW()
+     WHERE status = 'PENDING_CONFIRM'
+       AND hold_until IS NOT NULL
+       AND hold_until < CURRENT_DATE
+     RETURNING id`
+  );
+  if (rsvPendingRejected.rowCount > 0) {
+    console.log(`[DailyJob] unconfirmed public reservations rejected: ${rsvPendingRejected.rowCount}`);
+  }
+
+  // 3b. Giữ chỗ đã xác nhận tiền (HELD) quá hạn -> chuyển sang EXPIRED
   const rsvExpired = await adminPool.query(
     `UPDATE reservation SET status = 'EXPIRED', updated_at = NOW()
      WHERE status = 'HELD' AND hold_until IS NOT NULL AND hold_until < CURRENT_DATE
@@ -469,6 +484,123 @@ export async function runOverdueDepositSettlementAlerts() {
       );
     }
   }
+  // 9. Báo cáo tổng hợp Sổ cọc định kỳ đầu tháng gửi OWNER đang ACTIVE (1 lần/tháng/tòa — GAP-05, PRD 15.3)
+  try {
+    await sendMonthlyOwnerDepositReports(adminPool);
+  } catch (monthlyErr) {
+    console.error('[DailyJob] monthly owner deposit report error:', monthlyErr.message);
+  }
+}
+
+export async function sendMonthlyOwnerDepositReports(dbPool = adminPool, refDate = new Date()) {
+  const vnParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(refDate);
+  const year = Number(vnParts.find((p) => p.type === 'year')?.value || refDate.getUTCFullYear());
+  const month = Number(vnParts.find((p) => p.type === 'month')?.value || refDate.getUTCMonth() + 1);
+
+  const prevMonthDate = new Date(Date.UTC(year, month - 2, 1));
+  const prevYear = prevMonthDate.getUTCFullYear();
+  const prevMonthNum = prevMonthDate.getUTCMonth() + 1;
+  const prevPeriod = `${prevYear}-${String(prevMonthNum).padStart(2, '0')}`;
+  const prevStart = `${prevPeriod}-01`;
+  const lastDay = new Date(Date.UTC(prevYear, prevMonthNum, 0)).getUTCDate();
+  const prevEnd = `${prevPeriod}-${String(lastDay).padStart(2, '0')}`;
+
+  const buildingsRes = await dbPool.query(
+    `SELECT
+       b.id AS building_id,
+       b.org_id,
+       b.code AS building_code,
+       b.name AS building_name,
+       au.id AS owner_user_id
+     FROM building b
+     JOIN owner o ON o.id = b.owner_id
+     JOIN app_user au ON au.person_id = o.person_id
+     JOIN user_role ur ON ur.user_id = au.id
+     JOIN role r ON r.id = ur.role_id
+     WHERE au.status = 'ACTIVE'
+       AND r.code = 'OWNER'`
+  );
+
+  let sentCount = 0;
+  for (const bld of buildingsRes.rows) {
+    const aggRes = await dbPool.query(
+      `SELECT
+         COALESCE(SUM(d.amount_held), 0)::bigint AS closing_held,
+         COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_approvals,
+         COUNT(*) FILTER (WHERE d.status IN ('APPROVED_PENDING_PAYOUT', 'RETURNED'))::int AS pending_payouts,
+         COALESCE((
+           SELECT SUM(dt.amount)
+           FROM deposit_transaction dt
+           JOIN deposit d2 ON d2.id = dt.deposit_id
+           JOIN contract c2 ON c2.id = d2.contract_id
+           WHERE c2.building_id = $1
+             AND dt.status = 'APPROVED'
+             AND dt.type = 'collect'
+             AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+         ), 0)::bigint AS collected_in_period,
+         COALESCE((
+           SELECT SUM(dt.amount)
+           FROM deposit_transaction dt
+           JOIN deposit d2 ON d2.id = dt.deposit_id
+           JOIN contract c2 ON c2.id = d2.contract_id
+           WHERE c2.building_id = $1
+             AND dt.status = 'APPROVED'
+             AND dt.type = 'refund'
+             AND (dt.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date BETWEEN $2::date AND $3::date
+         ), 0)::bigint AS refunded_in_period
+       FROM deposit d
+       JOIN contract c ON c.id = d.contract_id
+       WHERE c.building_id = $1`,
+      [bld.building_id, prevStart, prevEnd]
+    );
+
+    const row = aggRes.rows[0] || {};
+    const title = `[BÁO CÁO SỔ CỌC THÁNG ${prevPeriod}] Tòa ${bld.building_code}`;
+    const content = `Tổng hợp Sổ cọc tòa ${bld.building_name} kỳ ${prevPeriod}: Thu mới ${Number(row.collected_in_period || 0).toLocaleString('vi-VN')} ₫, Hoàn chi ${Number(row.refunded_in_period || 0).toLocaleString('vi-VN')} ₫, Số dư cọc đang giữ hiện tại ${Number(row.closing_held || 0).toLocaleString('vi-VN')} ₫ (Chờ duyệt: ${Number(row.pending_approvals || 0)}, Chờ chi: ${Number(row.pending_payouts || 0)}).`;
+    const payload = {
+      building_id: bld.building_id,
+      building_code: bld.building_code,
+      period: prevPeriod,
+      from_date: prevStart,
+      to_date: prevEnd,
+      closing_held: Number(row.closing_held || 0),
+      collected: Number(row.collected_in_period || 0),
+      refunded: Number(row.refunded_in_period || 0),
+      link: `/admin/reports?tab=deposit-ledger&building_id=${bld.building_id}&from_date=${prevStart}&to_date=${prevEnd}`,
+    };
+
+    const ins = await dbPool.query(
+      `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+       SELECT $1::uuid, $2::uuid, $3::text, $4::text, 'MONTHLY_DEPOSIT_REPORT', $5::jsonb
+       WHERE NOT EXISTS (
+         SELECT 1 FROM notification n
+         WHERE n.user_id = $2::uuid
+           AND n.type = 'MONTHLY_DEPOSIT_REPORT'
+           AND (n.payload->>'building_id') = $6::text
+           AND (n.payload->>'period') = $7::text
+       )`,
+      [
+        bld.org_id,
+        bld.owner_user_id,
+        title,
+        content,
+        JSON.stringify(payload),
+        String(bld.building_id),
+        prevPeriod,
+      ]
+    );
+    sentCount += ins.rowCount || 0;
+  }
+
+  if (sentCount > 0) {
+    console.log(`[DailyJob] sent MONTHLY_DEPOSIT_REPORT notifications: ${sentCount}`);
+  }
+  return sentCount;
 }
 
 export function startDailyJobs() {
