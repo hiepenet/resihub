@@ -222,7 +222,7 @@ export async function generateInvoicesCore(
          AND (
            ss.status = 'ACTIVE'
            OR (
-             ss.status = 'CANCELLED'
+             (ss.status = 'CANCELLED' OR ss.status = 'TERMINATED')
              AND ss.end_date >= ($2 || '-01')::date
              AND ss.end_date < (($2 || '-01')::date + INTERVAL '1 month')::date
            )
@@ -246,7 +246,7 @@ export async function generateInvoicesCore(
       const qty = Number(sub.quantity || 1);
       const subStartPeriod = sub.start_date ? new Date(sub.start_date).toISOString().slice(0, 7) : '';
       const subEndPeriod = sub.end_date ? new Date(sub.end_date).toISOString().slice(0, 7) : '';
-      const isCancelledThisPeriod = sub.status === 'CANCELLED' && subEndPeriod === targetPeriod;
+      const isCancelledThisPeriod = (sub.status === 'CANCELLED' || sub.status === 'TERMINATED') && subEndPeriod === targetPeriod;
       const isStartedThisPeriod = subStartPeriod === targetPeriod && Number(sub.prorata_amount) > 0;
       const useProrata = isCancelledThisPeriod || isStartedThisPeriod;
 
