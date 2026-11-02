@@ -123,6 +123,15 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
     return overview?.reservation ? [overview.reservation] : [];
   }, [overview?.reservations, overview?.reservation]);
   const reservation = reservations[0] || null;
+  const reservationHistory = useMemo(
+    () =>
+      Array.isArray(overview?.reservation_history)
+        ? overview.reservation_history.filter(
+            (h) => !['HELD', 'PENDING_CONFIRM', 'CONVERTED'].includes(h.reservation_status)
+          )
+        : [],
+    [overview?.reservation_history]
+  );
   const onboardingApplication = overview?.onboarding_application || overview?.pending_application || null;
   const idImages = useMemo(
     () => (Array.isArray(overview?.id_images) ? overview.id_images : []),
@@ -561,24 +570,38 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
       <div className="space-y-3">
         {reservations.map((r) => {
           const rAmenities = parseAmenities(r.amenities);
+          const rStatus = r.reservation_status || 'HELD';
+          const isPendingConfirm = rStatus === 'PENDING_CONFIRM';
           return (
             <Card
               key={r.reservation_id || r.apartment_id}
-              className="border-sky-200 bg-gradient-to-br from-sky-50/70 via-white to-indigo-50/40 shadow-sm"
+              className={
+                isPendingConfirm
+                  ? 'border-amber-200 bg-gradient-to-br from-amber-50/70 via-white to-orange-50/40 shadow-sm'
+                  : 'border-sky-200 bg-gradient-to-br from-sky-50/70 via-white to-indigo-50/40 shadow-sm'
+              }
             >
               <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                 <div className="flex items-start gap-3.5 min-w-0">
-                  <div className="w-11 h-11 rounded-2xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
-                    <ShieldCheck className="w-5 h-5" />
+                  <div
+                    className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${
+                      isPendingConfirm ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'
+                    }`}
+                  >
+                    {isPendingConfirm ? <Clock className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
                   </div>
                   <div className="space-y-1.5 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-sky-700">
-                        Thông tin căn hộ đang giữ chỗ
+                      <span
+                        className={`text-xs font-semibold uppercase tracking-wide ${
+                          isPendingConfirm ? 'text-amber-700' : 'text-sky-700'
+                        }`}
+                      >
+                        {isPendingConfirm
+                          ? 'Phiếu đăng ký giữ chỗ đang chờ đối soát'
+                          : 'Thông tin căn hộ đang giữ chỗ'}
                       </span>
-                      <Badge variant="sky" dot>
-                        Đang giữ chỗ
-                      </Badge>
+                      <StatusBadge status={rStatus} domain="reservation" />
                     </div>
                     <h3 className="text-lg font-bold text-slate-900">
                       Căn hộ {r.apartment_code}
@@ -594,7 +617,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   </div>
                 </div>
 
-                {showActionButton ? (
+                {showActionButton && !isPendingConfirm ? (
                   <Button
                     size="sm"
                     icon={Send}
@@ -605,6 +628,12 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   </Button>
                 ) : null}
               </div>
+
+              {isPendingConfirm ? (
+                <div className="mt-3 p-3 rounded-xl bg-amber-50/90 border border-amber-200/80 text-xs text-amber-900 leading-relaxed">
+                  Ban Quản Lý đang đối soát chứng từ chuyển khoản của bạn (SLA 4 giờ làm việc). Căn hộ sẽ chính thức khóa giữ chỗ sau khi BQL xác nhận đã nhận tiền.
+                </div>
+              ) : null}
 
               <div className="mt-4 pt-3.5 border-t border-sky-100 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                 <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200/70">
@@ -1107,7 +1136,8 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
   }
 
   // Case: Resident DOES NOT have an active contract yet
-  const showInlineOnboardingForm = reservations.length > 0 && !onboardingApplication;
+  const hasHeldReservation = reservations.some((r) => (r.reservation_status || 'HELD') === 'HELD');
+  const showInlineOnboardingForm = hasHeldReservation && !onboardingApplication;
 
   return (
     <div className="space-y-6">
@@ -1123,7 +1153,9 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             </h1>
             <p className="text-sm text-sky-100 max-w-2xl">
               {reservation
-                ? `Bạn đang có phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}). Vui lòng kiểm tra thông tin căn hộ và hoàn tất hồ sơ nhận nhà bên dưới.`
+                ? reservation.reservation_status === 'PENDING_CONFIRM'
+                  ? `Phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}) của bạn đang chờ Ban Quản Lý đối soát sao kê ngân hàng.`
+                  : `Bạn đang có phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}). Vui lòng kiểm tra thông tin căn hộ và hoàn tất hồ sơ nhận nhà bên dưới.`
                 : 'Tài khoản của bạn hiện chưa có hợp đồng thuê đang hiệu lực. Bạn có thể theo dõi trạng thái hồ sơ giữ chỗ hoặc chọn căn hộ trống bên dưới để gửi đăng ký thuê trực tuyến.'}
             </p>
           </div>
@@ -1132,10 +1164,10 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
               variant="outline"
               size="lg"
               icon={Send}
-              onClick={() => openApplyModal(reservation?.apartment_id || '')}
+              onClick={() => openApplyModal(hasHeldReservation ? reservation?.apartment_id || '' : '')}
               className="!bg-white !text-primary-700 hover:!bg-sky-50 !border-white shrink-0 font-semibold"
             >
-              {reservation ? 'Đăng ký thông tin nhận nhà' : 'Đăng ký thuê trực tuyến'}
+              {hasHeldReservation ? 'Đăng ký thông tin nhận nhà' : 'Đăng ký thuê trực tuyến'}
             </Button>
           ) : null}
         </div>
@@ -1171,6 +1203,51 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           {renderOnboardingStatusCard()}
           {renderReservationsSection({ showActionButton: false })}
         </div>
+      ) : null}
+
+      {/* Reservation History (settled / cancelled / rejected reservations) */}
+      {reservationHistory.length > 0 ? (
+        <Card>
+          <CardHeader
+            title="Lịch sử phiếu đặt cọc giữ chỗ"
+            subtitle="Các phiếu giữ chỗ đã thanh lý, hoàn trả hoặc từ chối đối soát"
+          />
+          <div className="space-y-2.5">
+            {reservationHistory.map((h) => (
+              <div
+                key={h.reservation_id}
+                className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-slate-900">
+                      Căn {h.apartment_code} — {h.building_name}
+                    </span>
+                    <StatusBadge status={h.reservation_status} domain="reservation" />
+                  </div>
+                  <p className="text-slate-600">
+                    Số tiền cọc giữ chỗ: <strong className="text-slate-800">{formatMoney(h.hold_amount)}</strong>
+                    {h.reservation_status === 'PARTIALLY_REFUNDED' ||
+                    Number(h.refunded_amount || 0) > 0 ||
+                    Number(h.forfeited_amount || 0) > 0 ? (
+                      <>
+                        {' • '}Hoàn trả: <strong className="text-emerald-700">{formatMoney(h.refunded_amount || 0)}</strong>
+                        {' • '}Tịch thu/Khấu trừ:{' '}
+                        <strong className="text-rose-700">{formatMoney(h.forfeited_amount || 0)}</strong>
+                      </>
+                    ) : null}
+                  </p>
+                  {h.settlement_reason ? (
+                    <p className="text-slate-500 italic">Lý do: {h.settlement_reason}</p>
+                  ) : null}
+                </div>
+                <span className="text-[11px] text-slate-500 shrink-0">
+                  {h.settled_at ? formatDateTime(h.settled_at) : formatDate(h.hold_until)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
       ) : null}
 
       {/* Available Apartments */}
