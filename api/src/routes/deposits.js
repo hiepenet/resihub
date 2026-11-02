@@ -1,8 +1,9 @@
 import express from 'express';
-import { pool, adminPool, getUserClient } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
+import { saveBase64Image } from '../services/imageUpload.js';
 import {
   isPositiveSafeIntegerVnd,
   getTodayVnDateStr,
@@ -40,6 +41,66 @@ async function getDepositWriteBuildingIds(userId, orgId, roleCodes) {
     (await getManagerBuildingIds(userId, orgId)).forEach((id) => ids.add(id));
   }
   return Array.from(ids);
+}
+
+async function getDepositAccessMeta(client, depositId) {
+  const res = await client.query('SELECT * FROM fn_get_deposit_access_meta($1)', [depositId]);
+  return res.rows[0] || null;
+}
+
+async function verifyDepositReadAccess(req, meta, depositId, contextLabel) {
+  const roleCodes = getUserRoleCodes(req);
+  if (roleCodes.includes('SYS_ADMIN')) {
+    return true;
+  }
+  if (roleCodes.some((r) => ['OWNER', 'MANAGER'].includes(r))) {
+    const allowedIds = await getOperatorReadBuildingIds(req.user.sub, req.user.org_id, roleCodes);
+    if (!allowedIds.includes(meta.building_id)) {
+      await logAccessDenied(req, 'deposit', depositId, `Operator accessed ${contextLabel} outside building scope`);
+      return false;
+    }
+    return true;
+  }
+  if (roleCodes.includes('RESIDENT')) {
+    if (!meta.is_contract_resident) {
+      await logAccessDenied(req, 'deposit', depositId, `RESIDENT accessed another resident ${contextLabel}`);
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+async function canActAsDepositApprover(req, meta, depositId, actionLabel) {
+  const roleCodes = getUserRoleCodes(req);
+  if (roleCodes.includes('OWNER')) {
+    const ownerIds = await getOwnerBuildingIds(req.user.sub, req.user.org_id);
+    if (ownerIds.includes(meta.building_id)) return { ok: true };
+  }
+  if (roleCodes.includes('MANAGER')) {
+    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+    if (mgrIds.includes(meta.building_id)) return { ok: true };
+  }
+  if (roleCodes.includes('SYS_ADMIN')) {
+    if (!meta.building_has_active_owner) return { ok: true };
+    await logAccessDenied(
+      req,
+      'deposit',
+      depositId,
+      `SYS_ADMIN attempted ${actionLabel} on building with active OWNER`
+    );
+    return {
+      ok: false,
+      code: 'SYS_ADMIN_READ_ONLY_ON_OWNED_BUILDING',
+      message: 'Tòa nhà đã có Chủ sở hữu (OWNER) hoạt động; Quản trị hệ thống chỉ có quyền Xem (R) theo PRD Mục 6.2.',
+    };
+  }
+  await logAccessDenied(req, 'deposit', depositId, `Unauthorized ${actionLabel} outside building scope`);
+  return {
+    ok: false,
+    code: 'ACCESS_DENIED',
+    message: 'Bạn không có quyền phê duyệt hồ sơ cọc của tòa nhà này.',
+  };
 }
 
 /**
@@ -83,7 +144,6 @@ async function calculateContractOpenDebts(client, contractId) {
     let invServiceUnpaid = 0;
 
     if (rentGross === 0 && nonRentGross === 0) {
-      // Trường hợp hóa đơn không có dòng chi tiết -> coi như dịch vụ/khác
       invServiceUnpaid = remaining;
     } else if (nonRentGross === 0) {
       invRentUnpaid = remaining;
@@ -92,7 +152,6 @@ async function calculateContractOpenDebts(client, contractId) {
       invServiceUnpaid = remaining;
       invRentUnpaid = 0;
     } else {
-      // Phân bổ phần đã trả ưu tiên cho RENT trước; đảm bảo invRentUnpaid + invServiceUnpaid === remaining kể cả khi có chiết khấu/điều chỉnh âm
       const paidToRent = Math.min(paid, rentGross);
       invRentUnpaid = Math.max(0, Math.min(remaining, rentGross - paidToRent));
       invServiceUnpaid = Math.max(0, remaining - invRentUnpaid);
@@ -188,39 +247,60 @@ const VALID_COLLECT_METHODS = [
   'OTHER',
 ];
 
-async function insertDepositAttachments(
+async function normalizeAndPersistEvidence(
   client,
-  { ownerEntity = 'deposit', ownerId, evidenceUrls = [], uploadedBy = null }
+  { entity = 'deposit', ownerId, folder = 'deposits', evidence = [], req }
 ) {
-  if (!ownerId || !Array.isArray(evidenceUrls) || evidenceUrls.length === 0) return;
-  for (const rawUrl of evidenceUrls) {
-    const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';
-    if (!url || url.startsWith('/api/v1/attachments/')) continue;
-    await client.query(
-      `INSERT INTO attachment (owner_entity, owner_id, storage_path, uploaded_by)
-       SELECT $1::text, $2::uuid, $3::text, $4::uuid
-       WHERE NOT EXISTS (
-         SELECT 1 FROM attachment
-         WHERE owner_entity = $1 AND owner_id = $2 AND storage_path = $3
-       )`,
-      [ownerEntity, ownerId, url, uploadedBy]
-    );
+  if (!ownerId || !Array.isArray(evidence) || evidence.length === 0) return [];
+  const normalized = [];
+  for (const rawItem of evidence) {
+    const item = typeof rawItem === 'string' ? rawItem.trim() : '';
+    if (!item) continue;
+    if (item.startsWith('data:')) {
+      const saved = await saveBase64Image({
+        imageBase64: item,
+        folder,
+        entityId: ownerId,
+        entity,
+        ownerId,
+        req,
+        query: client.query.bind(client),
+        allowPdf: true,
+      });
+      if (saved.error) {
+        const err = new Error(saved.error.message);
+        err.status = 422;
+        err.code = saved.error.code;
+        throw err;
+      }
+      normalized.push(`/api/v1/attachments/${saved.attachment.id}/view`);
+    } else if (item.startsWith('/api/v1/attachments/')) {
+      normalized.push(item);
+    } else {
+      await client.query(
+        `INSERT INTO attachment (owner_entity, owner_id, storage_path, uploaded_by)
+         SELECT $1::text, $2::uuid, $3::text, $4::uuid
+         WHERE NOT EXISTS (
+           SELECT 1 FROM attachment
+           WHERE owner_entity = $1 AND owner_id = $2 AND storage_path = $3
+         )`,
+        [entity, ownerId, item, req?.user?.sub || null]
+      );
+      normalized.push(item);
+    }
   }
+  return normalized;
 }
 
 /**
  * GET /api/v1/deposits
- * Quyền theo mô hình 4 vai trò (R-01):
- * - SYS_ADMIN: R toàn tổ chức
- * - OWNER: R (100% Read-Only trên tòa sở hữu)
- * - MANAGER: R trên tòa được phân công
- * - RESIDENT: R sổ cọc của mình
  */
 router.get(
   '/',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']),
   async (req, res) => {
+    const { client, release } = await getUserClient(req);
     try {
       const orgId = req.user.org_id;
       const userRoles = getUserRoleCodes(req);
@@ -236,21 +316,22 @@ router.get(
           c.status as contract_status,
           c.terminated_at,
           c.building_id,
+          building_has_active_owner(c.building_id) AS building_has_active_owner,
           a.code as apartment_code, 
           b.name as building_name, 
           b.code as building_code,
-          p.full_name as tenant_name
+          COALESCE(p.full_name, 'Khách thuê') as tenant_name
          FROM deposit d
          JOIN contract c ON c.id = d.contract_id
          JOIN apartment a ON a.id = c.apartment_id
          JOIN building b ON b.id = c.building_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         JOIN person p ON p.id = t.person_id
+         LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+         LEFT JOIN person p ON p.id = t.person_id
          WHERE b.org_id = $1`;
       const params = [orgId];
 
       if (isSysAdmin) {
-        // SYS_ADMIN: Xem toàn bộ sổ cọc trong org
+        // SYS_ADMIN: R toàn bộ sổ cọc trong org
       } else if (isOperator) {
         const bIds = await getOperatorReadBuildingIds(req.user.sub, orgId, userRoles);
         if (bIds.length === 0) {
@@ -260,24 +341,18 @@ router.get(
           sql += ` AND c.building_id = ANY($${params.length}::uuid[])`;
         }
       } else if (isResident) {
-        params.push(req.user.person_id);
-        sql += ` AND (
-          p.id = $${params.length}
-          OR EXISTS (
-            SELECT 1 FROM contract_occupant co
-            JOIN tenant t_occ ON t_occ.id = co.tenant_id
-            WHERE co.contract_id = c.id AND t_occ.person_id = $${params.length}
-          )
-        )`;
+        sql += ` AND c.id IN (SELECT contract_id FROM get_resident_contract_ids())`;
       }
 
       sql += ` ORDER BY d.created_at DESC`;
-      const result = await pool.query(sql, params);
+      const result = await client.query(sql, params);
 
       res.json({ data: result.rows });
     } catch (err) {
       console.error('[Deposits Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách cọc.' });
+    } finally {
+      await release();
     }
   }
 );
@@ -292,45 +367,18 @@ router.get(
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']),
   async (req, res) => {
     const { id } = req.params;
+    const { client, release } = await getUserClient(req);
     try {
-      const existRes = await adminPool.query(
-        `SELECT d.id, d.contract_id, c.building_id, t.person_id
-         FROM deposit d
-         JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (existRes.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const meta = existRes.rows[0];
-      const roleCodes = getUserRoleCodes(req);
-
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        if (roleCodes.some((r) => ['OWNER', 'MANAGER'].includes(r))) {
-          const allowedIds = await getOperatorReadBuildingIds(req.user.sub, req.user.org_id, roleCodes);
-          if (!allowedIds.includes(meta.building_id)) {
-            await logAccessDenied(req, 'deposit', id, 'Operator accessed deposit transactions outside building scope');
-            return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền truy cập sổ cọc của tòa nhà này.' });
-          }
-        } else if (roleCodes.includes('RESIDENT') && meta.person_id !== req.user.person_id) {
-          const occCheck = await adminPool.query(
-            `SELECT 1 FROM contract_occupant co
-             JOIN tenant t_occ ON t_occ.id = co.tenant_id
-             WHERE co.contract_id = $1 AND t_occ.person_id = $2
-             LIMIT 1`,
-            [meta.contract_id, req.user.person_id]
-          );
-          if (occCheck.rows.length === 0) {
-            await logAccessDenied(req, 'deposit', id, 'RESIDENT accessed another resident deposit transactions');
-            return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem sổ cọc này.' });
-          }
-        }
+      const allowed = await verifyDepositReadAccess(req, meta, id, 'deposit transactions');
+      if (!allowed) {
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem sổ cọc này.' });
       }
 
-      const txns = await pool.query(
+      const txns = await client.query(
         `SELECT dt.*,
                 p_created.full_name AS created_by_name,
                 p_approved.full_name AS approved_by_name
@@ -347,13 +395,15 @@ router.get(
     } catch (err) {
       console.error('[Deposit Transactions List Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải lịch sử giao dịch cọc.' });
+    } finally {
+      await release();
     }
   }
 );
 
 /**
  * POST /api/v1/deposits/:id/transactions
- * Thu bổ sung cọc / chuyển cọc giữ chỗ: MANAGER, SYS_ADMIN (OWNER 100% Read-Only)
+ * Thu bổ sung cọc
  */
 router.post(
   '/:id/transactions',
@@ -409,23 +459,15 @@ router.post(
 
     const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminPool.query(
-        `SELECT d.id, c.building_id
-         FROM deposit d JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
       const roleCodes = getUserRoleCodes(req);
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
-        if (!writeIds.includes(depCheck.rows[0].building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'Operator attempted deposit transaction on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc của tòa nhà này.' });
-        }
+      const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
+      if (!writeIds.includes(meta.building_id)) {
+        await logAccessDenied(req, 'deposit', id, 'Operator attempted deposit transaction on unassigned building');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc của tòa nhà này.' });
       }
 
       await client.query('BEGIN');
@@ -466,12 +508,13 @@ router.post(
         });
       }
 
-      const evidenceList = Array.isArray(evidence) ? evidence.map((e) => String(e || '').trim()).filter(Boolean) : [];
-      await insertDepositAttachments(client, {
-        ownerEntity: 'deposit',
+      const rawEvidence = Array.isArray(evidence) ? evidence : [];
+      const evidenceList = await normalizeAndPersistEvidence(client, {
+        entity: 'deposit',
         ownerId: id,
-        evidenceUrls: evidenceList,
-        uploadedBy: req.user.sub,
+        folder: 'deposits',
+        evidence: rawEvidence,
+        req,
       });
 
       const txnRes = await client.query(
@@ -504,7 +547,10 @@ router.post(
       await client.query('COMMIT');
       res.status(201).json({ message: 'Ghi nhận giao dịch cọc thành công.', data: txnRes.rows[0] });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
+      if (err?.status) {
+        return res.status(err.status).json({ code: err.code || 'VALIDATION_ERROR', message: err.message });
+      }
       console.error('[Deposit Transaction Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận giao dịch cọc.' });
     } finally {
@@ -524,54 +570,27 @@ router.get(
     const { id } = req.params;
     const { client, release } = await getUserClient(req);
     try {
-      const existRes = await adminPool.query(
-        `SELECT d.id, d.contract_id, c.building_id, t.person_id
-         FROM deposit d
-         JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (existRes.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const meta = existRes.rows[0];
-      const roleCodes = getUserRoleCodes(req);
-
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        if (roleCodes.some((r) => ['OWNER', 'MANAGER'].includes(r))) {
-          const allowedIds = await getOperatorReadBuildingIds(req.user.sub, req.user.org_id, roleCodes);
-          if (!allowedIds.includes(meta.building_id)) {
-            await logAccessDenied(req, 'deposit', id, 'Operator accessed settlement outside building scope');
-            return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem hồ sơ tất toán của tòa nhà này.' });
-          }
-        } else if (roleCodes.includes('RESIDENT') && meta.person_id !== req.user.person_id) {
-          const occCheck = await adminPool.query(
-            `SELECT 1 FROM contract_occupant co
-             JOIN tenant t_occ ON t_occ.id = co.tenant_id
-             WHERE co.contract_id = $1 AND t_occ.person_id = $2
-             LIMIT 1`,
-            [meta.contract_id, req.user.person_id]
-          );
-          if (occCheck.rows.length === 0) {
-            await logAccessDenied(req, 'deposit', id, 'RESIDENT accessed another resident settlement');
-            return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem sổ cọc này.' });
-          }
-        }
+      const allowed = await verifyDepositReadAccess(req, meta, id, 'settlement');
+      if (!allowed) {
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền xem hồ sơ tất toán này.' });
       }
 
-      const q = await adminPool.query(
+      const q = await client.query(
         `SELECT d.id, d.contract_id, d.amount_held, d.status, d.settlement, d.refund_due_date,
                 c.deposit_amount, c.status as contract_status, c.building_id, c.apartment_id,
                 c.start_date, c.end_date, c.terminated_at,
-                a.code as apartment_code, b.name as building_name, p.full_name as tenant_name
+                a.code as apartment_code, b.name as building_name,
+                COALESCE(p.full_name, 'Khách thuê') as tenant_name
          FROM deposit d
          JOIN contract c ON c.id = d.contract_id
          JOIN apartment a ON a.id = c.apartment_id
          JOIN building b ON b.id = c.building_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         JOIN person p ON p.id = t.person_id
+         LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+         LEFT JOIN person p ON p.id = t.person_id
          WHERE d.id = $1`,
         [id]
       );
@@ -579,20 +598,22 @@ router.get(
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
       const row = q.rows[0];
-      const debts = await calculateContractOpenDebts(adminPool, row.contract_id);
-      const preconditions = await checkSettlementPreconditions(adminPool, row);
+      const debts = await calculateContractOpenDebts(client, row.contract_id);
+      const preconditions = await checkSettlementPreconditions(client, row);
 
-      // Khi sổ cọc đã tất toán (PARTIALLY_REFUNDED / REFUNDED / DEDUCTED_FULL), ưu tiên số liệu đã chốt trong settlement
-      const isSettled = ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(row.status);
-      const effectiveServiceDebt = isSettled && row.settlement
-        ? Number(row.settlement.outstanding_debt || 0)
+      const saved = row.settlement || null;
+      const isAccountingCommitted =
+        Boolean(saved?.accounting_committed_at) ||
+        ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL', 'RETURNED'].includes(row.status);
+      const effectiveServiceDebt = isAccountingCommitted && saved
+        ? Number(saved.outstanding_debt || 0)
         : debts.serviceDebt;
-      const effectiveRentDebt = isSettled && row.settlement?.rent_debt !== undefined
-        ? Number(row.settlement.rent_debt || 0)
+      const effectiveRentDebt = isAccountingCommitted && saved?.rent_debt !== undefined
+        ? Number(saved.rent_debt || 0)
         : debts.rentDebt;
       const snapshotStale =
-        row.status === 'PENDING_APPROVAL'
-          ? isSettlementSnapshotStale(row.settlement, {
+        ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(row.status) && !isAccountingCommitted
+          ? isSettlementSnapshotStale(saved, {
               serviceDebt: debts.serviceDebt,
               rentDebt: debts.rentDebt,
               heldAmount: row.amount_held,
@@ -613,6 +634,7 @@ router.get(
           refund_due_date: row.refund_due_date,
           apartment_code: row.apartment_code,
           building_name: row.building_name,
+          building_has_active_owner: Boolean(meta.building_has_active_owner),
           tenant_name: row.tenant_name,
           calculated_service_debt: effectiveServiceDebt,
           calculated_rent_debt: effectiveRentDebt,
@@ -640,23 +662,32 @@ router.get(
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']),
   async (req, res) => {
     const { id } = req.params;
+    const { client, release } = await getUserClient(req);
     try {
-      const q = await adminPool.query(
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
+        return res.status(404).send('<h1>404 Không tìm thấy sổ cọc</h1>');
+      }
+      const allowed = await verifyDepositReadAccess(req, meta, id, 'settlement PDF');
+      if (!allowed) {
+        return res.status(403).send('<h1>403 Bạn không có quyền truy cập biên bản tất toán này</h1>');
+      }
+
+      const q = await client.query(
         `SELECT d.*,
                 c.deposit_amount, c.rent_amount, c.start_date, c.end_date, c.terminated_at,
                 c.status AS contract_status, c.building_id,
                 a.code AS apartment_code,
                 b.name AS building_name, b.address AS building_address, b.org_id,
                 o.name AS org_name,
-                t.person_id,
                 p.full_name AS tenant_name, p.phone AS tenant_phone, p.id_number AS tenant_id_number
          FROM deposit d
          JOIN contract c ON c.id = d.contract_id
          JOIN apartment a ON a.id = c.apartment_id
          JOIN building b ON b.id = c.building_id
          JOIN organization o ON o.id = b.org_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         JOIN person p ON p.id = t.person_id
+         LEFT JOIN tenant t ON t.id = c.primary_tenant_id
+         LEFT JOIN person p ON p.id = t.person_id
          WHERE d.id = $1 AND b.org_id = $2`,
         [id, req.user.org_id]
       );
@@ -664,30 +695,6 @@ router.get(
         return res.status(404).send('<h1>404 Không tìm thấy sổ cọc</h1>');
       }
       const row = q.rows[0];
-      const roleCodes = getUserRoleCodes(req);
-
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        if (roleCodes.some((r) => ['OWNER', 'MANAGER'].includes(r))) {
-          const allowedIds = await getOperatorReadBuildingIds(req.user.sub, req.user.org_id, roleCodes);
-          if (!allowedIds.includes(row.building_id)) {
-            await logAccessDenied(req, 'deposit', id, 'Operator accessed settlement PDF outside building scope');
-            return res.status(403).send('<h1>403 Bạn không có quyền truy cập biên bản tất toán này</h1>');
-          }
-        } else if (roleCodes.includes('RESIDENT') && row.person_id !== req.user.person_id) {
-          const occCheck = await adminPool.query(
-            `SELECT 1 FROM contract_occupant co
-             JOIN tenant t_occ ON t_occ.id = co.tenant_id
-             WHERE co.contract_id = $1 AND t_occ.person_id = $2
-             LIMIT 1`,
-            [row.contract_id, req.user.person_id]
-          );
-          if (occCheck.rows.length === 0) {
-            await logAccessDenied(req, 'deposit', id, 'RESIDENT accessed another resident settlement PDF');
-            return res.status(403).send('<h1>403 Bạn không có quyền truy cập biên bản tất toán này</h1>');
-          }
-        }
-      }
-
       const settlement = row.settlement || {};
       const items = Array.isArray(settlement.items) ? settlement.items : [];
       const fmtMoney = (v) => `${Number(v || 0).toLocaleString('vi-VN')} ₫`;
@@ -698,7 +705,10 @@ router.get(
         return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
       };
 
-      const heldForCalc = ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(row.status)
+      const isAccountingCommitted =
+        Boolean(settlement.accounting_committed_at) ||
+        ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL', 'RETURNED'].includes(row.status);
+      const heldForCalc = isAccountingCommitted
         ? Number(settlement.deposit_held_before_settlement ?? row.deposit_amount ?? 0)
         : Number(row.amount_held || 0);
       const serviceDebt = Number(settlement.outstanding_debt || 0);
@@ -727,6 +737,10 @@ router.get(
             )
             .join('')
         : `<tr><td colspan="4" style="text-align:center; color:#64748b; font-style:italic;">Không phát sinh khấu trừ hư hỏng / vệ sinh bàn giao.</td></tr>`;
+
+      const displayTenantName = escapeHtml(row.tenant_name || 'Khách thuê');
+      const displayTenantPhone = escapeHtml(row.tenant_phone || '—');
+      const displayTenantIdNumber = escapeHtml(row.tenant_id_number || '—');
 
       const html = `<!DOCTYPE html>
 <html lang="vi">
@@ -773,7 +787,7 @@ router.get(
     <h3>I. Thông tin hợp đồng &amp; các bên</h3>
     <p><strong>Đơn vị quản lý:</strong> ${escapeHtml(row.org_name)} — Tòa nhà: <strong>${escapeHtml(row.building_name)}</strong> (${escapeHtml(row.building_address)})</p>
     <p><strong>Căn hộ:</strong> ${escapeHtml(row.apartment_code)} | <strong>Thời hạn HĐ:</strong> ${fmtDate(row.start_date)} – ${fmtDate(row.end_date)} | <strong>Ngày kết thúc thực tế:</strong> ${fmtDate(row.terminated_at || row.end_date)}</p>
-    <p><strong>Khách thuê đại diện:</strong> ${escapeHtml(row.tenant_name)} | <strong>SĐT:</strong> ${escapeHtml(row.tenant_phone)} | <strong>CCCD/HC:</strong> ${escapeHtml(row.tenant_id_number || '—')}</p>
+    <p><strong>Khách thuê đại diện:</strong> ${displayTenantName} | <strong>SĐT:</strong> ${displayTenantPhone} | <strong>CCCD/HC:</strong> ${displayTenantIdNumber}</p>
 
     <h3>II. Chi tiết khấu trừ biên bản bàn giao</h3>
     <table>
@@ -841,7 +855,7 @@ router.get(
         <strong>KHÁCH THUÊ XÁC NHẬN</strong><br />
         <em>(Ký và ghi rõ họ tên)</em>
         <div class="sig-space"></div>
-        <div><strong>${escapeHtml(row.tenant_name)}</strong></div>
+        <div><strong>${displayTenantName}</strong></div>
       </div>
     </div>
   </div>
@@ -853,16 +867,14 @@ router.get(
     } catch (err) {
       console.error('[Settlement PDF Error]:', err);
       res.status(500).send('<h1>500 Lỗi máy chủ khi xuất biên bản tất toán</h1>');
+    } finally {
+      await release();
     }
   }
 );
 
 /**
  * POST /api/v1/deposits/:id/settlement
- * Lập hồ sơ tất toán cọc (FR-024, R-06):
- * MANAGER / SYS_ADMIN lập hồ sơ -> SYS_ADMIN hoặc MANAGER khác phê duyệt nội bộ (Four-eyes).
- * OWNER 100% Read-Only.
- * Công nợ dịch vụ/điện nước được tự động tổng hợp từ CSDL; công nợ tiền thuê KHÔNG trừ vào cọc.
  */
 router.post(
   '/:id/settlement',
@@ -875,23 +887,15 @@ router.post(
 
     const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminPool.query(
-        `SELECT d.id, c.building_id
-         FROM deposit d JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
       const roleCodes = getUserRoleCodes(req);
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
-        if (!writeIds.includes(depCheck.rows[0].building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'Operator attempted settlement submit on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền lập tất toán cho tòa nhà này.' });
-        }
+      const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
+      if (!writeIds.includes(meta.building_id)) {
+        await logAccessDenied(req, 'deposit', id, 'Operator attempted settlement submit on unassigned building');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền lập tất toán cho tòa nhà này.' });
       }
 
       await client.query('BEGIN');
@@ -959,14 +963,22 @@ router.post(
         }
       }
 
-      const normalizedItems = items.map((item) => ({
-        ...item,
-        amount: Number(String(item.amount).trim()),
-        description: String(item.description).trim(),
-        evidence: Array.isArray(item.evidence)
-          ? item.evidence.map((u) => (typeof u === 'string' ? u.trim() : '')).filter(Boolean)
-          : [],
-      }));
+      const normalizedItems = [];
+      for (const item of items) {
+        const normEv = await normalizeAndPersistEvidence(client, {
+          entity: 'deposit',
+          ownerId: id,
+          folder: 'deposits',
+          evidence: Array.isArray(item.evidence) ? item.evidence : [],
+          req,
+        });
+        normalizedItems.push({
+          ...item,
+          amount: Number(String(item.amount).trim()),
+          description: String(item.description).trim(),
+          evidence: normEv,
+        });
+      }
 
       const { serviceDebt, rentDebt, openInvoices } = await calculateContractOpenDebts(client, dep.contract_id);
 
@@ -1000,6 +1012,9 @@ router.post(
         open_invoice_snapshot: normalizeOpenInvoiceSnapshot(openInvoices),
         created_by: req.user.sub,
         created_at: new Date().toISOString(),
+        approved_by: null,
+        approved_at: null,
+        accounting_committed_at: null,
         dispute_thread: Array.isArray(prevSettlement.dispute_thread) ? prevSettlement.dispute_thread : [],
       };
 
@@ -1008,55 +1023,33 @@ router.post(
         [JSON.stringify(settlementPayload), id]
       );
 
-      const allItemEvidence = normalizedItems.flatMap((it) => it.evidence || []);
-      if (allItemEvidence.length > 0) {
-        await insertDepositAttachments(client, {
-          ownerEntity: 'deposit',
-          ownerId: id,
-          evidenceUrls: allItemEvidence,
-          uploadedBy: req.user.sub,
-        });
-      }
-
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
          VALUES ($1, 'SETTLEMENT_SUBMIT', 'deposit', $2, $3)`,
         [req.user.sub, id, JSON.stringify(settlementPayload)]
       );
 
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'SETTLEMENT_STATEMENT_READY', $2, $3, $4::jsonb, NULL)`,
+        [
+          id,
+          'Bảng kê tất toán tiền cọc đã được lập',
+          `Ban Quản Lý đã lập bảng kê tất toán tiền cọc cho căn ${dep.apartment_code}. Vui lòng kiểm tra chi tiết bảng kê và gửi phản hồi nếu có thắc mắc trước khi chi hoàn cọc.`,
+          JSON.stringify({ deposit_id: id, contract_id: dep.contract_id, settlement: settlementPayload }),
+        ]
+      );
+
       await client.query('COMMIT');
 
-      // Thông báo trước chi hoàn cọc tới cư dân đứng tên HĐ (R-12, FR-024)
-      try {
-        const uRes = await adminPool.query(
-          `SELECT u.id AS user_id
-           FROM tenant t
-           JOIN app_user u ON u.person_id = t.person_id
-           WHERE t.id = $1`,
-          [dep.primary_tenant_id]
-        );
-        if (uRes.rows.length > 0) {
-          await adminPool.query(
-            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-             VALUES ($1, $2, 'Bảng kê tất toán tiền cọc đã được lập', $3, 'SETTLEMENT_STATEMENT_READY', $4)`,
-            [
-              req.user.org_id,
-              uRes.rows[0].user_id,
-              `Ban Quản Lý đã lập bảng kê tất toán tiền cọc cho căn ${dep.apartment_code}. Vui lòng kiểm tra chi tiết bảng kê và gửi phản hồi nếu có thắc mắc trước khi chi hoàn cọc.`,
-              JSON.stringify({ deposit_id: id, contract_id: dep.contract_id, settlement: settlementPayload }),
-            ]
-          );
-        }
-      } catch (nErr) {
-        console.warn('[Notification settlement submit warning]:', nErr.message);
-      }
-
       res.status(200).json({
-        message: 'Đã gửi hồ sơ tất toán cọc, chờ phê duyệt nội bộ (Quản lý / SYS_ADMIN).',
+        message: 'Đã gửi hồ sơ tất toán cọc, chờ phê duyệt hoàn cọc.',
         data: { settlement: settlementPayload, status: 'PENDING_APPROVAL' },
       });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
+      if (err?.status) {
+        return res.status(err.status).json({ code: err.code || 'VALIDATION_ERROR', message: err.message });
+      }
       console.error('[Settlement Submit Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lập hồ sơ tất toán.' });
     } finally {
@@ -1067,35 +1060,23 @@ router.post(
 
 /**
  * POST /api/v1/deposits/:id/settlement/approve
- * Phê duyệt nội bộ Four-eyes bởi SYS_ADMIN hoặc MANAGER (kiểm tra allow_self_approval — R-23).
- * Đối trừ tự động công nợ dịch vụ vào hóa đơn mở, giữ riêng công nợ tiền thuê (R-06).
  */
 router.post(
   '/:id/settlement/approve',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminPool.query(
-        `SELECT d.id, c.building_id
-         FROM deposit d JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const roleCodes = getUserRoleCodes(req);
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(depCheck.rows[0].building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'MANAGER attempted settlement approve on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của sổ cọc này.' });
-        }
+      const approverAccess = await canActAsDepositApprover(req, meta, id, 'settlement approve');
+      if (!approverAccess.ok) {
+        return res.status(403).json({ code: approverAccess.code, message: approverAccess.message });
       }
 
       await client.query('BEGIN');
@@ -1159,7 +1140,6 @@ router.post(
       const items = Array.isArray(settlement.items) ? settlement.items : [];
       const sumItems = items.reduce((s, it) => s + Math.max(0, Number(it.amount || 0)), 0);
 
-      // Khóa FOR UPDATE các hóa đơn mở của HĐ để chặn thanh toán / điều chỉnh song song khi đang phê duyệt
       await client.query(
         `SELECT id FROM invoice
          WHERE contract_id = $1
@@ -1168,7 +1148,6 @@ router.post(
         [dep.contract_id]
       );
 
-      // Tính lại công nợ thực tế ngay tại thời điểm duyệt và chặn nếu snapshot đã biến động
       const liveDebts = await calculateContractOpenDebts(client, dep.contract_id);
       if (
         isSettlementSnapshotStale(settlement, {
@@ -1197,7 +1176,6 @@ router.post(
       const refundAmount = Number(recomputedRefund);
       const shortfallAmount = Number(recomputedShortfall);
 
-      // 1. Ghi nhận khấu trừ hư hỏng / vệ sinh bàn giao (tổng deduct trên sổ cọc không được vượt quá heldBefore)
       let remainingDepositToDeduct = heldBefore;
       for (const item of items) {
         const itemAmt = Math.max(0, Math.round(Number(item.amount || 0)));
@@ -1222,7 +1200,6 @@ router.post(
         );
       }
 
-      // 2. Đối trừ tự động công nợ dịch vụ / điện / nước từ phần tiền cọc còn lại (KHÔNG đụng vào nợ tiền thuê)
       const coveredServiceDebt = Math.min(serviceDebt, remainingDepositToDeduct);
 
       if (coveredServiceDebt > 0) {
@@ -1242,76 +1219,13 @@ router.post(
         );
       }
 
-      // Gạch nợ phần dịch vụ được cọc chi trả trên các hóa đơn mở, và chuyển các khoản nợ hóa đơn còn lại (gồm nợ RENT hoặc phần dịch vụ vượt cọc) sang RECEIVABLE_AFTER_MOVE_OUT
-      let remainingCover = coveredServiceDebt;
-      for (const inv of liveDebts.openInvoices) {
-        let applyAmt = 0;
-        if (remainingCover > 0 && inv.service_unpaid > 0) {
-          applyAmt = Math.min(remainingCover, inv.service_unpaid);
-          remainingCover -= applyAmt;
-        }
-        const newPaid = inv.paid_amount + applyAmt;
-        const newStatus = newPaid >= inv.total_amount ? 'PAID' : applyAmt > 0 || inv.paid_amount > 0 ? 'PARTIALLY_PAID' : undefined;
+      const uncoveredItemsShortfall = Math.max(0, sumItems - heldBefore);
+      await client.query('SELECT fn_apply_deposit_settlement_accounting($1, $2, $3)', [
+        id,
+        Math.round(coveredServiceDebt),
+        Math.round(uncoveredItemsShortfall),
+      ]);
 
-        if (applyAmt > 0) {
-          await client.query(
-            `UPDATE invoice
-             SET paid_amount = $1,
-                 status = $2,
-                 updated_at = NOW()
-             WHERE id = $3`,
-            [newPaid, newStatus, inv.id]
-          );
-        }
-
-        const stillUnpaid = Math.max(0, inv.total_amount - newPaid);
-        if (stillUnpaid === 0) {
-          await client.query(
-            `UPDATE receivable
-             SET paid_amount = amount,
-                 status = 'PAID',
-                 deposit_id = COALESCE(deposit_id, $1),
-                 updated_at = NOW()
-             WHERE invoice_id = $2 AND status IN ('OPEN', 'PARTIALLY_PAID')`,
-            [id, inv.id]
-          );
-        } else {
-          const recUpd = await client.query(
-            `UPDATE receivable
-             SET paid_amount = LEAST(amount, $1),
-                 status = CASE WHEN $1 > 0 THEN 'PARTIALLY_PAID' ELSE 'OPEN' END,
-                 type = 'RECEIVABLE_AFTER_MOVE_OUT',
-                 deposit_id = COALESCE(deposit_id, $2),
-                 updated_at = NOW()
-             WHERE invoice_id = $3 AND status IN ('OPEN', 'PARTIALLY_PAID')
-             RETURNING id`,
-            [newPaid, id, inv.id]
-          );
-          if (recUpd.rows.length === 0) {
-            await client.query(
-              `INSERT INTO receivable (
-                 org_id, building_id, contract_id, tenant_id, invoice_id, deposit_id,
-                 type, amount, paid_amount, due_date, status, description
-               )
-               VALUES ($1, $2, $3, $4, $5, $6, 'RECEIVABLE_AFTER_MOVE_OUT', $7, $8, CURRENT_DATE + INTERVAL '7 days', $9, $10)`,
-              [
-                req.user.org_id,
-                dep.building_id,
-                dep.contract_id,
-                dep.primary_tenant_id,
-                inv.id,
-                id,
-                inv.total_amount,
-                newPaid,
-                newPaid > 0 ? 'PARTIALLY_PAID' : 'OPEN',
-                `Công nợ hóa đơn ${inv.invoice_code} còn tồn đọng sau trả phòng (gồm tiền thuê không cấn trừ cọc / dịch vụ vượt cọc)`,
-              ]
-            );
-          }
-        }
-      }
-
-      // 3. Ghi nhận hoàn trả tiền cọc còn dư
       if (refundAmount > 0) {
         await client.query(
           `INSERT INTO deposit_transaction (
@@ -1329,26 +1243,6 @@ router.post(
         );
       }
 
-      // 4. Khi riêng các khoản khấu trừ hư hỏng/vệ sinh đã vượt tiền cọc (uncoveredItemsShortfall > 0), sinh công nợ sau trả phòng không trùng lặp với hóa đơn
-      const uncoveredItemsShortfall = Math.max(0, sumItems - heldBefore);
-      if (uncoveredItemsShortfall > 0) {
-        await client.query(
-          `INSERT INTO receivable (
-             org_id, building_id, contract_id, tenant_id, deposit_id, type, amount, due_date, status, description
-           )
-           VALUES ($1, $2, $3, $4, $5, 'RECEIVABLE_AFTER_MOVE_OUT', $6, CURRENT_DATE + INTERVAL '7 days', 'OPEN', $7)`,
-          [
-            req.user.org_id,
-            dep.building_id,
-            dep.contract_id,
-            dep.primary_tenant_id,
-            id,
-            Math.round(uncoveredItemsShortfall),
-            'Công nợ phát sinh sau tất toán tiền cọc vượt mức cọc đang giữ (FR-024)',
-          ]
-        );
-      }
-
       const finalStatus = resolvePostSettlementStatus({
         refundAmount,
         outstandingDebt: serviceDebt,
@@ -1356,6 +1250,7 @@ router.post(
         shortfall: shortfallAmount,
       });
 
+      const nowIso = new Date().toISOString();
       const finalizedSettlement = {
         ...settlement,
         outstanding_debt: serviceDebt,
@@ -1366,7 +1261,8 @@ router.post(
         refund_amount: refundAmount,
         shortfall: shortfallAmount,
         approved_by: req.user.sub,
-        approved_at: new Date().toISOString(),
+        approved_at: nowIso,
+        accounting_committed_at: nowIso,
       };
 
       await client.query(
@@ -1380,29 +1276,23 @@ router.post(
         [req.user.sub, id, JSON.stringify({ ...finalizedSettlement, final_status: finalStatus })]
       );
 
-      try {
-        const uRes = await adminPool.query(
-          `SELECT u.id as user_id 
-           FROM tenant t
-           JOIN app_user u ON u.person_id = t.person_id
-           WHERE t.id = $1`,
-          [dep.primary_tenant_id]
-        );
-        if (uRes.rows.length > 0) {
-          await adminPool.query(
-            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-             VALUES ($1, $2, 'Hồ sơ tất toán cọc đã được phê duyệt', 'Ban Quản Lý đã phê duyệt tất toán cọc cho hợp đồng của bạn.', 'SETTLEMENT_APPROVED', $3)`,
-            [req.user.org_id, uRes.rows[0].user_id, JSON.stringify({ deposit_id: id, settlement: finalizedSettlement, status: finalStatus })]
-          );
-        }
-      } catch (nErr) {
-        console.warn('[Notification settlement approve warning]:', nErr.message);
-      }
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'SETTLEMENT_APPROVED', $2, $3, $4::jsonb, NULL)`,
+        [
+          id,
+          'Hồ sơ tất toán cọc đã được phê duyệt',
+          'Hồ sơ tất toán tiền cọc của hợp đồng thuê căn hộ đã được phê duyệt.',
+          JSON.stringify({ deposit_id: id, settlement: finalizedSettlement, status: finalStatus }),
+        ]
+      );
 
       await client.query('COMMIT');
-      res.json({ message: 'Phê duyệt hồ sơ tất toán thành công.', data: { id, status: finalStatus, settlement: finalizedSettlement } });
+      res.json({
+        message: 'Phê duyệt hồ sơ tất toán thành công.',
+        data: { id, status: finalStatus, settlement: finalizedSettlement },
+      });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[Settlement Approve Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phê duyệt hồ sơ tất toán.' });
     } finally {
@@ -1413,12 +1303,11 @@ router.post(
 
 /**
  * POST /api/v1/deposits/:id/settlement/reject
- * Từ chối hồ sơ tất toán (Four-eyes bởi SYS_ADMIN hoặc MANAGER). OWNER 100% Read-Only.
  */
 router.post(
   '/:id/settlement/reject',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -1430,23 +1319,13 @@ router.post(
 
     const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminPool.query(
-        `SELECT d.id, c.building_id
-         FROM deposit d JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const roleCodes = getUserRoleCodes(req);
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(depCheck.rows[0].building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'MANAGER attempted settlement reject on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của sổ cọc này.' });
-        }
+      const approverAccess = await canActAsDepositApprover(req, meta, id, 'settlement reject');
+      if (!approverAccess.ok) {
+        return res.status(403).json({ code: approverAccess.code, message: approverAccess.message });
       }
 
       await client.query('BEGIN');
@@ -1458,9 +1337,9 @@ router.post(
       }
 
       const dep = depRes.rows[0];
-      if (dep.status !== 'PENDING_APPROVAL') {
+      if (!['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(dep.status) || dep.settlement?.accounting_committed_at) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ code: 'NOT_PENDING_APPROVAL', message: 'Chỉ có thể từ chối hồ sơ đang chờ duyệt.' });
+        return res.status(409).json({ code: 'NOT_PENDING_APPROVAL', message: 'Chỉ có thể từ chối hồ sơ đang chờ duyệt hoặc chưa thực hiện chi tiền.' });
       }
 
       if (dep.settlement?.created_by && String(dep.settlement.created_by) === String(req.user.sub)) {
@@ -1483,6 +1362,8 @@ router.post(
 
       const updatedSettlement = {
         ...(dep.settlement || {}),
+        approved_by: null,
+        approved_at: null,
         rejected_by: req.user.sub,
         rejected_at: new Date().toISOString(),
         rejection_reason: reason.trim(),
@@ -1499,10 +1380,23 @@ router.post(
         [req.user.sub, id, JSON.stringify(updatedSettlement)]
       );
 
+      if (dep.settlement?.created_by) {
+        await client.query(
+          `SELECT fn_notify_deposit_event($1, 'SPECIFIC_USER', 'SETTLEMENT_REJECTED', $2, $3, $4::jsonb, $5::uuid)`,
+          [
+            id,
+            'Hồ sơ tất toán tiền cọc bị từ chối',
+            `Hồ sơ tất toán cọc cần được rà soát và lập lại: "${reason.trim()}"`,
+            JSON.stringify({ deposit_id: id, status: 'SETTLEMENT_DRAFT', reason: reason.trim() }),
+            dep.settlement.created_by,
+          ]
+        );
+      }
+
       await client.query('COMMIT');
       res.json({ message: 'Đã từ chối hồ sơ tất toán, chuyển về trạng thái nháp.', data: { id, status: 'SETTLEMENT_DRAFT' } });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[Settlement Reject Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối hồ sơ tất toán.' });
     } finally {
@@ -1513,9 +1407,6 @@ router.post(
 
 /**
  * POST /api/v1/deposits/:id/dispute
- * Khiếu nại / ghi nhận tranh chấp bảng kê tất toán cọc (R-07):
- * Mở cho SYS_ADMIN, MANAGER (tòa nhà) và RESIDENT (chính chủ hợp đồng).
- * Hỗ trợ từ PENDING_APPROVAL, PARTIALLY_REFUNDED hoặc REFUNDED.
  */
 router.post(
   '/:id/dispute',
@@ -1530,150 +1421,88 @@ router.post(
       return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng cung cấp lý do tranh chấp / khiếu nại.' });
     }
 
-    const adminClient = await adminPool.connect();
+    const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminClient.query(
-        `SELECT d.id, d.contract_id, c.building_id, t.person_id, a.code AS apartment_code
-         FROM deposit d
-         JOIN contract c ON c.id = d.contract_id
-         JOIN apartment a ON a.id = c.apartment_id
-         JOIN building b ON b.id = c.building_id
-         JOIN tenant t ON t.id = c.primary_tenant_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const meta = depCheck.rows[0];
+
       const roleCodes = getUserRoleCodes(req);
-
-      let actorRole = 'SYS_ADMIN';
-      if (roleCodes.includes('SYS_ADMIN')) {
-        actorRole = 'SYS_ADMIN';
+      let authorized = false;
+      if (roleCodes.includes('RESIDENT') && meta.is_contract_resident) {
+        authorized = true;
       } else if (roleCodes.includes('MANAGER')) {
-        actorRole = 'MANAGER';
         const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(meta.building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'MANAGER attempted dispute on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền quản lý sổ cọc của tòa nhà này.' });
-        }
-      } else if (roleCodes.includes('RESIDENT')) {
-        actorRole = 'RESIDENT';
-        if (meta.person_id !== req.user.person_id) {
-          await logAccessDenied(req, 'deposit', id, 'RESIDENT attempted dispute on another resident deposit');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Chỉ cư dân đại diện hợp đồng mới được gửi khiếu nại tất toán cọc.' });
+        if (mgrIds.includes(meta.building_id)) {
+          authorized = true;
         }
       }
-
-      await adminClient.query('BEGIN');
-
-      const depRes = await adminClient.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
-      if (depRes.rows.length === 0) {
-        await adminClient.query('ROLLBACK');
-        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
-      }
-
-      const dep = depRes.rows[0];
-      if (!['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(dep.status)) {
-        await adminClient.query('ROLLBACK');
-        return res.status(409).json({
-          code: 'INVALID_STATUS',
-          message: `Chỉ có thể gửi khiếu nại cho hồ sơ đang chờ duyệt hoặc vừa tất toán (hiện tại: ${dep.status}).`,
+      if (!authorized) {
+        await logAccessDenied(req, 'deposit', id, 'Unauthorized dispute submission attempt');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn không có quyền gửi khiếu nại cho sổ cọc này.',
         });
       }
 
-      const prevSettlement = dep.settlement || {};
-      const prevThread = Array.isArray(prevSettlement.dispute_thread) ? prevSettlement.dispute_thread : [];
-      const trimmedReason = String(reason).trim();
+      await client.query('BEGIN');
+      const rpcRes = await client.query('SELECT * FROM fn_submit_deposit_dispute($1, $2)', [
+        id,
+        String(reason).trim(),
+      ]);
+      await client.query('COMMIT');
 
-      const updatedSettlement = {
-        ...prevSettlement,
-        previous_status_before_dispute: dep.status,
-        disputed_by: req.user.sub,
-        disputed_by_role: actorRole,
-        disputed_at: new Date().toISOString(),
-        dispute_reason: trimmedReason,
-        dispute_thread: [
-          ...prevThread,
-          {
-            type: 'DISPUTE',
-            at: new Date().toISOString(),
-            by: req.user.sub,
-            role: actorRole,
-            message: trimmedReason,
-          },
-        ],
-      };
-
-      await adminClient.query(
-        `UPDATE deposit SET status = 'DISPUTED', settlement = $1, updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(updatedSettlement), id]
-      );
-
-      await adminClient.query(
-        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-         VALUES ($1, 'SETTLEMENT_DISPUTE', 'deposit', $2, $3)`,
-        [req.user.sub, id, JSON.stringify(updatedSettlement)]
-      );
-
-      // Thông báo cho các Quản lý tòa nhà khi cư dân gửi khiếu nại
-      if (actorRole === 'RESIDENT') {
-        try {
-          const mgrRes = await adminClient.query(
-            `SELECT DISTINCT ur.user_id
-             FROM user_role ur
-             JOIN role r ON r.id = ur.role_id
-             WHERE ur.building_id = $1 AND r.code = 'MANAGER'`,
-            [meta.building_id]
-          );
-          for (const mgr of mgrRes.rows) {
-            await adminClient.query(
-              `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-               VALUES ($1, $2, $3, $4, 'DEPOSIT_DISPUTED', $5)`,
-              [
-                req.user.org_id,
-                mgr.user_id,
-                `Khiếu nại tất toán cọc căn ${meta.apartment_code}`,
-                `Cư dân đã gửi ý kiến không đồng ý với bảng kê tất toán cọc: "${trimmedReason}"`,
-                JSON.stringify({ deposit_id: id, contract_id: meta.contract_id }),
-              ]
-            );
-          }
-        } catch (nErr) {
-          console.warn('[Dispute notification warning]:', nErr.message);
-        }
-      }
-
-      await adminClient.query('COMMIT');
+      const updated = rpcRes.rows[0];
       res.json({
         message: 'Đã ghi nhận khiếu nại và chuyển hồ sơ cọc sang trạng thái tranh chấp (DISPUTED).',
-        data: { id, status: 'DISPUTED', settlement: updatedSettlement },
+        data: { id: updated.id, status: updated.status, settlement: updated.settlement },
       });
     } catch (err) {
-      await adminClient.query('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch(() => {});
+      const msg = String(err?.message || '');
+      if (msg.includes('DISPUTE_WINDOW_EXPIRED')) {
+        return res.status(409).json({
+          code: 'DISPUTE_WINDOW_EXPIRED',
+          message: 'Đã quá thời hạn 7 ngày kể từ khi tất toán để gửi khiếu nại bảng kê tiền cọc (FR-024).',
+        });
+      }
+      if (msg.includes('DISPUTE_ALREADY_FINALIZED')) {
+        return res.status(409).json({
+          code: 'DISPUTE_ALREADY_FINALIZED',
+          message: 'Hồ sơ tất toán này đã hoàn tất chu kỳ giải quyết khiếu nại cuối cùng, không thể mở lại tranh chấp.',
+        });
+      }
+      if (msg.includes('DISPUTE_NOT_ALLOWED')) {
+        return res.status(409).json({
+          code: 'INVALID_STATUS_FOR_DISPUTE',
+          message: 'Chỉ có thể gửi khiếu nại cho hồ sơ đang chờ duyệt hoặc trong 7 ngày sau tất toán.',
+        });
+      }
+      if (msg.includes('ACCESS_DENIED')) {
+        await logAccessDenied(req, 'deposit', id, 'fn_submit_deposit_dispute rejected caller');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền gửi khiếu nại cho sổ cọc này.' });
+      }
       console.error('[Settlement Dispute Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi ghi nhận tranh chấp cọc.' });
     } finally {
-      adminClient.release();
+      await release();
     }
   }
 );
 
 /**
  * POST /api/v1/deposits/:id/resolve-dispute
- * Giải quyết tranh chấp tất toán cọc (R-07):
- * - resolution = 'ADJUST': Mở lại về SETTLEMENT_DRAFT để lập lại bảng kê (chỉ khi amount_held > 0, chưa chi hoàn cọc).
- * - resolution = 'CONFIRM': Giữ nguyên bảng kê & đóng tranh chấp (trả về PENDING_APPROVAL nếu chưa chi hoàn cọc để duyệt Four-eyes, hoặc REFUNDED/PARTIALLY_REFUNDED nếu đã chi hoàn cọc).
  */
 router.post(
   '/:id/resolve-dispute',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
-    const { resolution, reason } = req.body;
+    const { resolution } = req.body;
+    const trimmedReason = String(req.body?.reason ?? req.body?.notes ?? '').trim();
 
     if (!['ADJUST', 'CONFIRM'].includes(resolution)) {
       return res.status(400).json({
@@ -1681,7 +1510,7 @@ router.post(
         message: 'Phương án giải quyết không hợp lệ. Chỉ chấp nhận ADJUST (mở lại sửa bảng kê) hoặc CONFIRM (xác nhận giữ nguyên).',
       });
     }
-    if (!reason || !String(reason).trim()) {
+    if (!trimmedReason) {
       return res.status(400).json({
         code: 'REASON_REQUIRED',
         message: 'Vui lòng nhập nội dung phản hồi / biên bản giải quyết khiếu nại.',
@@ -1690,24 +1519,13 @@ router.post(
 
     const { client, release } = await getUserClient(req);
     try {
-      const depCheck = await adminPool.query(
-        `SELECT d.id, c.building_id, c.primary_tenant_id
-         FROM deposit d JOIN contract c ON c.id = d.contract_id
-         JOIN building b ON b.id = c.building_id
-         WHERE d.id = $1 AND b.org_id = $2`,
-        [id, req.user.org_id]
-      );
-      if (depCheck.rows.length === 0) {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
-      const meta = depCheck.rows[0];
-      const roleCodes = getUserRoleCodes(req);
-      if (!roleCodes.includes('SYS_ADMIN')) {
-        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-        if (!mgrIds.includes(meta.building_id)) {
-          await logAccessDenied(req, 'deposit', id, 'MANAGER attempted resolve-dispute on unassigned building');
-          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của sổ cọc này.' });
-        }
+      const approverAccess = await canActAsDepositApprover(req, meta, id, 'resolve dispute');
+      if (!approverAccess.ok) {
+        return res.status(403).json({ code: approverAccess.code, message: approverAccess.message });
       }
 
       await client.query('BEGIN');
@@ -1727,35 +1545,72 @@ router.post(
         });
       }
 
-      const heldNow = Number(dep.amount_held || 0);
-      if (resolution === 'ADJUST' && heldNow <= 0) {
+      const prevSettlement = dep.settlement || {};
+      const prevStatus = prevSettlement.previous_status_before_dispute || null;
+      const isAccountingCommitted =
+        Boolean(prevSettlement.accounting_committed_at) ||
+        ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL', 'RETURNED'].includes(prevStatus);
+
+      if (resolution === 'ADJUST' && isAccountingCommitted) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'ALREADY_PAID_OUT',
-          message: 'Sổ cọc đã thực hiện hạch toán chi trả (amount_held = 0), không thể mở lại bản nháp để sửa sổ cái bất biến. Vui lòng chọn xác nhận hoặc lập phiếu thu/chi điều chỉnh riêng.',
+          message: 'Sổ cọc đã thực hiện hạch toán đối trừ / chi trả, không thể mở lại bản nháp để sửa sổ cái bất biến.',
         });
       }
 
-      const prevSettlement = dep.settlement || {};
+      if (resolution === 'CONFIRM' && (Boolean(prevSettlement.approved_at) || isAccountingCommitted)) {
+        if (prevSettlement.created_by && String(prevSettlement.created_by) === String(req.user.sub)) {
+          const fourEyes = await checkFourEyesOrWarn({
+            orgId: req.user.org_id,
+            actorId: req.user.sub,
+            creatorId: prevSettlement.created_by,
+            entity: 'deposit',
+            entityId: id,
+            actionContext: 'RESOLVE_DISPUTE_CONFIRM',
+          });
+          if (!fourEyes.allowed) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({
+              code: 'SELF_APPROVAL',
+              message: 'Nguyên tắc Four-eyes: Người lập bảng kê tất toán không được tự đóng khiếu nại giữ nguyên kết quả đã duyệt.',
+            });
+          }
+        }
+      }
+
+      const roleCodes = getUserRoleCodes(req);
+      const actorRole = roleCodes.includes('OWNER')
+        ? 'OWNER'
+        : roleCodes.includes('SYS_ADMIN')
+          ? 'SYS_ADMIN'
+          : 'MANAGER';
       const prevThread = Array.isArray(prevSettlement.dispute_thread) ? prevSettlement.dispute_thread : [];
-      const trimmedReason = String(reason).trim();
 
       let nextStatus = 'SETTLEMENT_DRAFT';
-      if (resolution === 'CONFIRM') {
-        if (heldNow > 0) {
-          nextStatus = 'PENDING_APPROVAL';
-        } else {
-          nextStatus = resolvePostSettlementStatus({
-            refundAmount: prevSettlement.refund_amount,
-            outstandingDebt: prevSettlement.outstanding_debt,
-            items: prevSettlement.items || [],
-            shortfall: prevSettlement.shortfall,
-          });
-        }
+      const extraPatch = {};
+      if (resolution === 'ADJUST') {
+        extraPatch.approved_by = null;
+        extraPatch.approved_at = null;
+      } else if (isAccountingCommitted) {
+        nextStatus = ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL', 'RETURNED'].includes(prevStatus)
+          ? prevStatus
+          : resolvePostSettlementStatus({
+              refundAmount: prevSettlement.refund_amount,
+              outstandingDebt: prevSettlement.outstanding_debt,
+              items: prevSettlement.items || [],
+              shortfall: prevSettlement.shortfall,
+            });
+        extraPatch.post_settlement_dispute_closed = true;
+      } else if (prevStatus === 'APPROVED_PENDING_PAYOUT' || Boolean(prevSettlement.approved_at)) {
+        nextStatus = 'APPROVED_PENDING_PAYOUT';
+      } else {
+        nextStatus = 'PENDING_APPROVAL';
       }
 
       const updatedSettlement = {
         ...prevSettlement,
+        ...extraPatch,
         dispute_resolved_by: req.user.sub,
         dispute_resolved_at: new Date().toISOString(),
         dispute_resolution: resolution,
@@ -1767,7 +1622,7 @@ router.post(
             resolution,
             at: new Date().toISOString(),
             by: req.user.sub,
-            role: roleCodes.includes('SYS_ADMIN') ? 'SYS_ADMIN' : 'MANAGER',
+            role: actorRole,
             message: trimmedReason,
           },
         ],
@@ -1784,26 +1639,15 @@ router.post(
         [req.user.sub, id, JSON.stringify({ resolution, next_status: nextStatus, reason: trimmedReason })]
       );
 
-      try {
-        const uRes = await adminPool.query(
-          `SELECT u.id as user_id FROM tenant t JOIN app_user u ON u.person_id = t.person_id WHERE t.id = $1`,
-          [meta.primary_tenant_id]
-        );
-        if (uRes.rows.length > 0) {
-          await adminPool.query(
-            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-             VALUES ($1, $2, 'Phản hồi giải quyết khiếu nại tất toán cọc', $3, 'DISPUTE_RESOLVED', $4)`,
-            [
-              req.user.org_id,
-              uRes.rows[0].user_id,
-              `Ban Quản Lý đã xử lý khiếu nại tất toán cọc (${resolution === 'ADJUST' ? 'Mở lại điều chỉnh bảng kê' : 'Xác nhận giữ nguyên kết quả'}): "${trimmedReason}"`,
-              JSON.stringify({ deposit_id: id, status: nextStatus, resolution }),
-            ]
-          );
-        }
-      } catch (nErr) {
-        console.warn('[Resolve dispute notification warning]:', nErr.message);
-      }
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'DISPUTE_RESOLVED', $2, $3, $4::jsonb, NULL)`,
+        [
+          id,
+          'Phản hồi giải quyết khiếu nại tất toán cọc',
+          `Khiếu nại tất toán cọc đã được xử lý (${resolution === 'ADJUST' ? 'Mở lại điều chỉnh bảng kê' : 'Xác nhận giữ nguyên kết quả'}): "${trimmedReason}"`,
+          JSON.stringify({ deposit_id: id, status: nextStatus, resolution }),
+        ]
+      );
 
       await client.query('COMMIT');
       res.json({
@@ -1814,7 +1658,7 @@ router.post(
         data: { id, status: nextStatus, settlement: updatedSettlement },
       });
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[Resolve Dispute Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi giải quyết khiếu nại tất toán cọc.' });
     } finally {
