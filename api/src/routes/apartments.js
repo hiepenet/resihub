@@ -186,6 +186,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     const aptRes = await pool.query(
       `SELECT a.*,
+              building_has_active_owner(a.building_id) AS building_has_active_owner,
               b.name AS building_name, b.code AS building_code, b.address AS building_address,
               f.name AS floor_name, f.level AS floor_level,
               z.name AS zone_name, z.code AS zone_code

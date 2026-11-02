@@ -585,10 +585,22 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
     body: JSON.stringify({}),
   });
   assert.equal(approve1.status, 200);
-  assert.equal(approve1.body.data.status, 'PARTIALLY_REFUNDED');
+  assert.equal(approve1.body.data.status, 'APPROVED_PENDING_PAYOUT');
+  assert.equal(String(approve1.body.data.amount_held), '10000000');
   assert.equal(approve1.body.data.settlement.refund_amount, 8000000);
   assert.equal(approve1.body.data.settlement.covered_service_debt, 1200000);
   assert.equal(approve1.body.data.settlement.rent_debt, 5000000);
+
+  const payout1 = await apiFetch(`/api/v1/deposits/${dep1.id}/payout`, manager.token, {
+    method: 'POST',
+    body: JSON.stringify({
+      evidence: ['https://example.com/unc-dep1.png'],
+      reference_code: 'UNC-DEP1',
+    }),
+  });
+  assert.equal(payout1.status, 200);
+  assert.equal(payout1.body.data.status, 'PARTIALLY_REFUNDED');
+  assert.equal(String(payout1.body.data.amount_held), '0');
 
   // Đối chiếu DB sau khi phê duyệt hoàn cọc:
   // - Inv A (còn 700k dịch vụ) được gạch nợ thành PAID (11.000.000)

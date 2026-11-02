@@ -713,8 +713,8 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       }
       assert.equal(updCtrRows, 0, 'RLS must block OWNER from arbitrarily updating contract');
 
-      const updDepByOwner = await rls.query(`UPDATE deposit SET status = 'REFUNDED' RETURNING id`);
-      assert.equal(updDepByOwner.rowCount, 0, 'RLS must block OWNER from updating deposit');
+      const updDepByOwner = await rls.query(`UPDATE deposit SET status = 'REFUNDED' WHERE status = 'HELD' RETURNING id`);
+      assert.equal(updDepByOwner.rowCount, 0, 'RLS must block OWNER from updating HELD deposit bypassing settlement');
 
       // (c) Scoped MANAGER (mgr2VopA) chỉ thấy đúng tòa VOP-A ở tầng RLS (R-01: chỉ còn 4 vai trò trong role)
       const roleCheckRes = await adminPool.query('SELECT code FROM role ORDER BY code');

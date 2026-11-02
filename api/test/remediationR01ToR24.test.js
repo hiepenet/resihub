@@ -501,6 +501,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
       method: 'POST',
     });
     assert.equal(selfAppAllowed.status, 200, `Self-approval with allow_self_approval=true failed: ${JSON.stringify(selfAppAllowed.body)}`);
+    assert.equal(selfAppAllowed.body.data.status, 'APPROVED_PENDING_PAYOUT');
 
     const warnAudit = await adminPool.query(
       `SELECT * FROM audit_log WHERE entity = 'deposit' AND entity_id = $1 AND action = 'SELF_APPROVAL_WARNING'`,

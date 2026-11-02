@@ -722,7 +722,17 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(resub.status, 200);
     const appOk = await apiFetch(`/api/v1/deposits/${depId}/settlement/approve`, owner.token, { method: 'POST' });
     assert.equal(appOk.status, 200);
-    assert.equal(appOk.body.data.status, 'PARTIALLY_REFUNDED');
+    assert.equal(appOk.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+    const payoutOk = await apiFetch(`/api/v1/deposits/${depId}/payout`, manager.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        evidence: ['https://example.com/unc-p0-c.png'],
+        reference_code: 'UNC-P0-C',
+      }),
+    });
+    assert.equal(payoutOk.status, 200);
+    assert.equal(payoutOk.body.data.status, 'PARTIALLY_REFUNDED');
 
     // 9) Over-deposit settlement (held = 5M, DAMAGE = 6.5M -> DEDUCTED_FULL, deduct capped at 5M, PDF & resident overview & dispute)
     const phoneD = `0974${suffix}`;

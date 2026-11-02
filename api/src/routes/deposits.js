@@ -1131,6 +1131,70 @@ router.post(
   }
 );
 
+async function commitSettlementAccounting(client, { depositId, settlement, heldBefore, serviceDebt, actorId }) {
+  const items = Array.isArray(settlement.items) ? settlement.items : [];
+  const sumItems = items.reduce((s, it) => s + Math.max(0, Number(it.amount || 0)), 0);
+  const effectiveApprovedBy = settlement.approved_by || actorId;
+  const effectiveApprovedAt = settlement.approved_at || new Date().toISOString();
+  const effectiveCreatedBy = settlement.created_by || actorId;
+
+  let remainingDepositToDeduct = heldBefore;
+  for (const item of items) {
+    const itemAmt = Math.max(0, Math.round(Number(item.amount || 0)));
+    const appliedDeduct = Math.min(remainingDepositToDeduct, itemAmt);
+    remainingDepositToDeduct -= appliedDeduct;
+    if (appliedDeduct <= 0) continue;
+    await client.query(
+      `INSERT INTO deposit_transaction (
+         deposit_id, type, amount, category, description, evidence, status, method, approved_by, approved_at, created_by
+       )
+       VALUES ($1, 'deduct', $2, $3, $4, $5, 'APPROVED', $6, $7, $8::timestamptz, $9)`,
+      [
+        depositId,
+        appliedDeduct,
+        item.category,
+        item.description,
+        item.evidence || [],
+        item.method || 'OTHER',
+        effectiveApprovedBy,
+        effectiveApprovedAt,
+        effectiveCreatedBy,
+      ]
+    );
+  }
+
+  const coveredServiceDebt = Math.min(serviceDebt, remainingDepositToDeduct);
+  if (coveredServiceDebt > 0) {
+    await client.query(
+      `INSERT INTO deposit_transaction (
+         deposit_id, type, amount, category, description, evidence, status, method, approved_by, approved_at, created_by
+       )
+       VALUES ($1, 'deduct', $2, 'UTILITY_DEBT', $3, $4, 'APPROVED', 'TRANSFER', $5, $6::timestamptz, $7)`,
+      [
+        depositId,
+        Math.round(coveredServiceDebt),
+        'Đối trừ tự động công nợ dịch vụ/điện nước từ tiền đặt cọc (R-06)',
+        [],
+        effectiveApprovedBy,
+        effectiveApprovedAt,
+        effectiveCreatedBy,
+      ]
+    );
+  }
+
+  const uncoveredItemsShortfall = Math.max(0, sumItems - heldBefore);
+  await client.query('SELECT fn_apply_deposit_settlement_accounting($1, $2, $3)', [
+    depositId,
+    Math.round(coveredServiceDebt),
+    Math.round(uncoveredItemsShortfall),
+  ]);
+
+  return {
+    coveredServiceDebt: Math.round(coveredServiceDebt),
+    uncoveredItemsShortfall: Math.round(uncoveredItemsShortfall),
+  };
+}
+
 /**
  * POST /api/v1/deposits/:id/settlement/approve
  */
@@ -1155,9 +1219,10 @@ router.post(
       await client.query('BEGIN');
 
       const depRes = await client.query(
-        `SELECT d.*, c.primary_tenant_id, c.building_id
+        `SELECT d.*, c.primary_tenant_id, c.building_id, a.code AS apartment_code
          FROM deposit d
          JOIN contract c ON c.id = d.contract_id
+         JOIN apartment a ON a.id = c.apartment_id
          WHERE d.id = $1 FOR UPDATE OF d`,
         [id]
       );
@@ -1248,121 +1313,123 @@ router.post(
       });
       const refundAmount = Number(recomputedRefund);
       const shortfallAmount = Number(recomputedShortfall);
-
-      let remainingDepositToDeduct = heldBefore;
-      for (const item of items) {
-        const itemAmt = Math.max(0, Math.round(Number(item.amount || 0)));
-        const appliedDeduct = Math.min(remainingDepositToDeduct, itemAmt);
-        remainingDepositToDeduct -= appliedDeduct;
-        if (appliedDeduct <= 0) continue;
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, category, description, evidence, status, method, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'deduct', $2, $3, $4, $5, 'APPROVED', $6, $7, NOW(), $8)`,
-          [
-            id,
-            appliedDeduct,
-            item.category,
-            item.description,
-            item.evidence || [],
-            item.method || 'OTHER',
-            req.user.sub,
-            settlement.created_by || req.user.sub,
-          ]
-        );
-      }
-
-      const coveredServiceDebt = Math.min(serviceDebt, remainingDepositToDeduct);
-
-      if (coveredServiceDebt > 0) {
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, category, description, evidence, status, method, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'deduct', $2, 'UTILITY_DEBT', $3, $4, 'APPROVED', 'TRANSFER', $5, NOW(), $6)`,
-          [
-            id,
-            Math.round(coveredServiceDebt),
-            'Đối trừ tự động công nợ dịch vụ/điện nước từ tiền đặt cọc (R-06)',
-            [],
-            req.user.sub,
-            settlement.created_by || req.user.sub,
-          ]
-        );
-      }
-
-      const uncoveredItemsShortfall = Math.max(0, sumItems - heldBefore);
-      await client.query('SELECT fn_apply_deposit_settlement_accounting($1, $2, $3)', [
-        id,
-        Math.round(coveredServiceDebt),
-        Math.round(uncoveredItemsShortfall),
-      ]);
-
-      if (refundAmount > 0) {
-        await client.query(
-          `INSERT INTO deposit_transaction (
-             deposit_id, type, amount, description, status, method, approved_by, approved_at, created_by
-           )
-           VALUES ($1, 'refund', $2, $3, 'APPROVED', $4, $5, NOW(), $6)`,
-          [
-            id,
-            refundAmount,
-            'Hoàn trả tiền cọc sau tất toán',
-            settlement.refund_method || 'BANK_TRANSFER',
-            req.user.sub,
-            settlement.created_by || req.user.sub,
-          ]
-        );
-      }
-
-      const finalStatus = resolvePostSettlementStatus({
-        refundAmount,
-        outstandingDebt: serviceDebt,
-        items,
-        shortfall: shortfallAmount,
-      });
-
       const nowIso = new Date().toISOString();
-      const finalizedSettlement = {
+
+      if (refundAmount === 0) {
+        const { coveredServiceDebt } = await commitSettlementAccounting(client, {
+          depositId: id,
+          settlement: { ...settlement, approved_by: req.user.sub, approved_at: nowIso },
+          heldBefore,
+          serviceDebt,
+          actorId: req.user.sub,
+        });
+
+        const finalStatus = resolvePostSettlementStatus({
+          refundAmount: 0,
+          outstandingDebt: serviceDebt,
+          items,
+          shortfall: shortfallAmount,
+        });
+
+        const finalizedSettlement = {
+          ...settlement,
+          outstanding_debt: serviceDebt,
+          service_debt: serviceDebt,
+          rent_debt: rentDebt,
+          deposit_held_before_settlement: heldBefore,
+          covered_service_debt: coveredServiceDebt,
+          refund_amount: 0,
+          shortfall: shortfallAmount,
+          approved_by: req.user.sub,
+          approved_at: nowIso,
+          accounting_committed_at: nowIso,
+        };
+
+        await client.query(
+          `UPDATE deposit SET amount_held = 0, status = $1, settlement = $2, updated_at = NOW() WHERE id = $3`,
+          [finalStatus, JSON.stringify(finalizedSettlement), id]
+        );
+
+        await client.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+           VALUES ($1, 'SETTLEMENT_APPROVE', 'deposit', $2, $3)`,
+          [req.user.sub, id, JSON.stringify({ ...finalizedSettlement, final_status: finalStatus })]
+        );
+
+        await client.query(
+          `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'SETTLEMENT_APPROVED', $2, $3, $4::jsonb, NULL)`,
+          [
+            id,
+            'Hồ sơ tất toán cọc đã được phê duyệt',
+            'Hồ sơ tất toán tiền cọc của hợp đồng thuê căn hộ đã được phê duyệt.',
+            JSON.stringify({ deposit_id: id, settlement: finalizedSettlement, status: finalStatus }),
+          ]
+        );
+
+        await client.query('COMMIT');
+        return res.json({
+          message: 'Phê duyệt hồ sơ tất toán thành công.',
+          data: { id, status: finalStatus, amount_held: '0', settlement: finalizedSettlement },
+        });
+      }
+
+      const coveredServiceDebtPreview = Math.min(serviceDebt, Math.max(0, heldBefore - sumItems));
+      const approvedPendingSettlement = {
         ...settlement,
         outstanding_debt: serviceDebt,
         service_debt: serviceDebt,
         rent_debt: rentDebt,
         deposit_held_before_settlement: heldBefore,
-        covered_service_debt: coveredServiceDebt,
+        covered_service_debt: Math.round(coveredServiceDebtPreview),
         refund_amount: refundAmount,
         shortfall: shortfallAmount,
         approved_by: req.user.sub,
         approved_at: nowIso,
-        accounting_committed_at: nowIso,
+        accounting_committed_at: null,
       };
 
       await client.query(
-        `UPDATE deposit SET amount_held = 0, status = $1, settlement = $2, updated_at = NOW() WHERE id = $3`,
-        [finalStatus, JSON.stringify(finalizedSettlement), id]
+        `UPDATE deposit
+         SET amount_held = $1, status = 'APPROVED_PENDING_PAYOUT', settlement = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [heldBefore, JSON.stringify(approvedPendingSettlement), id]
       );
 
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
          VALUES ($1, 'SETTLEMENT_APPROVE', 'deposit', $2, $3)`,
-        [req.user.sub, id, JSON.stringify({ ...finalizedSettlement, final_status: finalStatus })]
+        [req.user.sub, id, JSON.stringify({ ...approvedPendingSettlement, final_status: 'APPROVED_PENDING_PAYOUT' })]
       );
 
       await client.query(
         `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'SETTLEMENT_APPROVED', $2, $3, $4::jsonb, NULL)`,
         [
           id,
-          'Hồ sơ tất toán cọc đã được phê duyệt',
-          'Hồ sơ tất toán tiền cọc của hợp đồng thuê căn hộ đã được phê duyệt.',
-          JSON.stringify({ deposit_id: id, settlement: finalizedSettlement, status: finalStatus }),
+          'Hồ sơ tất toán cọc đã được phê duyệt — Chờ chi hoàn',
+          `Bảng kê tất toán tiền cọc căn ${dep.apartment_code} đã được phê duyệt (số tiền hoàn trả: ${refundAmount.toLocaleString('vi-VN')} ₫). Ban Quản Lý sẽ thực hiện chi hoàn trong thời hạn quy định.`,
+          JSON.stringify({ deposit_id: id, settlement: approvedPendingSettlement, status: 'APPROVED_PENDING_PAYOUT' }),
+        ]
+      );
+
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'BUILDING_MANAGERS', 'SETTLEMENT_READY_FOR_PAYOUT', $2, $3, $4::jsonb, NULL)`,
+        [
+          id,
+          `Sẵn sàng chi hoàn cọc — Căn ${dep.apartment_code}`,
+          `Hồ sơ tất toán cọc căn ${dep.apartment_code} đã được phê duyệt. Vui lòng thực hiện chuyển khoản/chi tiền (${refundAmount.toLocaleString('vi-VN')} ₫) và tải lên chứng từ UNC.`,
+          JSON.stringify({
+            deposit_id: id,
+            contract_id: dep.contract_id,
+            refund_amount: refundAmount,
+            link: '/admin/deposits',
+          }),
         ]
       );
 
       await client.query('COMMIT');
       res.json({
-        message: 'Phê duyệt hồ sơ tất toán thành công.',
-        data: { id, status: finalStatus, settlement: finalizedSettlement },
+        message: 'Đã phê duyệt bảng kê tất toán cọc. Hồ sơ chuyển sang chờ Ban Quản Lý thực hiện chi hoàn (APPROVED_PENDING_PAYOUT).',
+        data: { id, status: 'APPROVED_PENDING_PAYOUT', amount_held: String(heldBefore), settlement: approvedPendingSettlement },
       });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
@@ -1734,6 +1801,526 @@ router.post(
       await client.query('ROLLBACK').catch(() => {});
       console.error('[Resolve Dispute Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi giải quyết khiếu nại tất toán cọc.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/deposits/:id/payout
+ * Thực thi chi hoàn tiền cọc (hoặc phát hành lại lệnh chi khi RETURNED) kèm chứng từ UNC (FR-024, R-12)
+ */
+router.post(
+  '/:id/payout',
+  authenticateToken,
+  requireRole(['MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { evidence, reference_code, method, note } = req.body || {};
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+      const roleCodes = getUserRoleCodes(req);
+      const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
+      if (!writeIds.includes(meta.building_id)) {
+        await logAccessDenied(req, 'deposit', id, 'MANAGER attempted payout on unassigned building');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền chi hoàn cọc trên tòa nhà này.' });
+      }
+
+      await client.query('BEGIN');
+
+      const depRes = await client.query(
+        `SELECT d.*, c.primary_tenant_id, c.building_id, a.code AS apartment_code
+         FROM deposit d
+         JOIN contract c ON c.id = d.contract_id
+         JOIN apartment a ON a.id = c.apartment_id
+         WHERE d.id = $1 FOR UPDATE OF d`,
+        [id]
+      );
+      if (depRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+
+      const dep = depRes.rows[0];
+      if (dep.status === 'DISPUTED') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SETTLEMENT_DISPUTED',
+          message: 'Hồ sơ tất toán đang có khiếu nại/tranh chấp mở, tạm khóa chi tiền cho đến khi được giải quyết (FR-024).',
+        });
+      }
+
+      if (!['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(dep.status) || BigInt(dep.amount_held || 0) <= 0n) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_STATUS_FOR_PAYOUT',
+          message: `Chỉ có thể chi hoàn cho sổ cọc ở trạng thái APPROVED_PENDING_PAYOUT hoặc RETURNED có số dư cần chi > 0 (hiện tại: ${dep.status}).`,
+        });
+      }
+
+      const settlement = dep.settlement || {};
+      const refundMethod = method || settlement.refund_method || 'BANK_TRANSFER';
+      if (!['BANK_TRANSFER', 'CASH'].includes(refundMethod)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'INVALID_METHOD',
+          message: 'Phương thức chi hoàn không hợp lệ (chỉ chấp nhận BANK_TRANSFER hoặc CASH).',
+        });
+      }
+
+      const rawEvidence = Array.isArray(evidence)
+        ? evidence.filter((item) => typeof item === 'string' && item.trim().length > 0)
+        : [];
+      if (refundMethod === 'BANK_TRANSFER' && rawEvidence.length < 1) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          code: 'PAYOUT_EVIDENCE_REQUIRED',
+          message: 'Chi hoàn cọc qua chuyển khoản bắt buộc đính kèm chứng từ UNC / sao kê ngân hàng (FR-024, R-12).',
+        });
+      }
+
+      const isAlreadyCommitted = Boolean(settlement.accounting_committed_at);
+      const wasReturned = dep.status === 'RETURNED';
+      const targetRefundAmount = isAlreadyCommitted
+        ? Math.round(Number(dep.amount_held || 0))
+        : Math.round(Number(settlement.refund_amount || 0));
+
+      const vBank = validateRefundBankInfo({
+        refundAmount: targetRefundAmount,
+        refundMethod,
+        bankInfo: settlement.bank_info || {},
+      });
+      if (!vBank.ok) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ code: vBank.code, message: vBank.message });
+      }
+
+      const nowIso = new Date().toISOString();
+      let coveredServiceDebt = Number(settlement.covered_service_debt || 0);
+      let committedAtIso = settlement.accounting_committed_at || nowIso;
+
+      if (!isAlreadyCommitted) {
+        const heldBefore = Math.max(0, Number(dep.amount_held || 0));
+        await client.query(
+          `SELECT id FROM invoice
+           WHERE contract_id = $1
+             AND status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
+           FOR UPDATE`,
+          [dep.contract_id]
+        );
+        const liveDebts = await calculateContractOpenDebts(client, dep.contract_id);
+        if (
+          isSettlementSnapshotStale(settlement, {
+            serviceDebt: liveDebts.serviceDebt,
+            rentDebt: liveDebts.rentDebt,
+            heldAmount: heldBefore,
+            openInvoices: liveDebts.openInvoices,
+          })
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            code: 'SETTLEMENT_SNAPSHOT_STALE',
+            message:
+              'Công nợ hóa đơn hoặc số dư tiền cọc đã biến động trước thời điểm chi hoàn. Vui lòng từ chối hồ sơ để lập lại bảng kê theo số liệu mới nhất.',
+          });
+        }
+
+        const accResult = await commitSettlementAccounting(client, {
+          depositId: id,
+          settlement,
+          heldBefore,
+          serviceDebt: liveDebts.serviceDebt,
+          actorId: req.user.sub,
+        });
+        coveredServiceDebt = accResult.coveredServiceDebt;
+        committedAtIso = nowIso;
+      }
+
+      const normalizedEvidence = await normalizeAndPersistEvidence(client, {
+        entity: 'deposit',
+        ownerId: id,
+        folder: 'deposits',
+        evidence: rawEvidence,
+        req,
+      });
+
+      const trimmedRef = reference_code ? String(reference_code).trim() : null;
+      const trimmedNote = note ? String(note).trim() : null;
+      const refundDescription = wasReturned
+        ? `Phát hành lại lệnh chi hoàn tiền cọc${trimmedNote ? ` — ${trimmedNote}` : ''}`
+        : `Chi hoàn tiền cọc sau tất toán${trimmedNote ? ` — ${trimmedNote}` : ''}`;
+
+      await client.query(
+        `INSERT INTO deposit_transaction (
+           deposit_id, type, amount, description, evidence, reference_code, status, method, approved_by, approved_at, created_by
+         )
+         VALUES ($1, 'refund', $2, $3, $4, $5, 'APPROVED', $6, $7, $8::timestamptz, $9)`,
+        [
+          id,
+          targetRefundAmount,
+          refundDescription,
+          normalizedEvidence,
+          trimmedRef,
+          refundMethod,
+          settlement.approved_by || req.user.sub,
+          settlement.approved_at || nowIso,
+          req.user.sub,
+        ]
+      );
+
+      const finalStatus = resolvePostSettlementStatus({
+        refundAmount: targetRefundAmount,
+        outstandingDebt: Number(settlement.outstanding_debt || 0),
+        items: Array.isArray(settlement.items) ? settlement.items : [],
+        shortfall: Number(settlement.shortfall || 0),
+      });
+
+      const prevReissues = Array.isArray(settlement.reissue_history) ? settlement.reissue_history : [];
+      const updatedSettlement = {
+        ...settlement,
+        refund_method: refundMethod,
+        bank_info: vBank.normalizedBankInfo,
+        covered_service_debt: coveredServiceDebt,
+        accounting_committed_at: committedAtIso,
+        payout_at: nowIso,
+        payout_by: req.user.sub,
+        payout_evidence: normalizedEvidence,
+        payout_reference_code: trimmedRef,
+        ...(trimmedNote ? { payout_note: trimmedNote } : {}),
+        ...(wasReturned
+          ? {
+              reissued_at: nowIso,
+              reissued_by: req.user.sub,
+              reissue_history: [
+                ...prevReissues,
+                {
+                  at: nowIso,
+                  by: req.user.sub,
+                  amount: targetRefundAmount,
+                  reference_code: trimmedRef,
+                  evidence: normalizedEvidence,
+                },
+              ],
+            }
+          : {}),
+      };
+
+      await client.query(
+        `UPDATE deposit SET amount_held = 0, status = $1, settlement = $2, updated_at = NOW() WHERE id = $3`,
+        [finalStatus, JSON.stringify(updatedSettlement), id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         VALUES ($1, $2, 'deposit', $3, $4)`,
+        [
+          req.user.sub,
+          wasReturned ? 'DEPOSIT_PAYOUT_REISSUE' : 'DEPOSIT_PAYOUT',
+          id,
+          JSON.stringify({
+            status: finalStatus,
+            amount: targetRefundAmount,
+            reference_code: trimmedRef,
+            evidence: normalizedEvidence,
+          }),
+        ]
+      );
+
+      const notifType = wasReturned ? 'DEPOSIT_PAYOUT_REISSUED' : 'DEPOSIT_PAYOUT_COMPLETED';
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'RESIDENT', $2, $3, $4, $5::jsonb, NULL)`,
+        [
+          id,
+          notifType,
+          wasReturned ? 'Đã phát hành lại lệnh chi hoàn tiền cọc' : 'Đã chi hoàn tiền đặt cọc',
+          `Ban Quản Lý đã thực hiện chi hoàn ${targetRefundAmount.toLocaleString('vi-VN')} ₫ cho căn ${dep.apartment_code}${trimmedRef ? ` (mã giao dịch: ${trimmedRef})` : ''}.`,
+          JSON.stringify({
+            deposit_id: id,
+            contract_id: dep.contract_id,
+            status: finalStatus,
+            amount: targetRefundAmount,
+            reference_code: trimmedRef,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({
+        message: wasReturned
+          ? 'Đã phát hành lại lệnh chi hoàn tiền cọc thành công.'
+          : 'Đã ghi nhận chi hoàn tiền cọc và lưu chứng từ UNC thành công.',
+        data: { id, status: finalStatus, amount_held: '0', settlement: updatedSettlement },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err?.status) {
+        return res.status(err.status).json({ code: err.code || 'VALIDATION_ERROR', message: err.message });
+      }
+      console.error('[Deposit Payout Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi thực hiện chi hoàn tiền cọc.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/deposits/:id/payout-returned
+ * Ghi nhận giao dịch chuyển khoản hoàn cọc bị ngân hàng trả lại (RETURNED) — bất biến sổ cái (FR-024)
+ */
+router.post(
+  '/:id/payout-returned',
+  authenticateToken,
+  requireRole(['MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { reason, reference_code } = req.body || {};
+    const trimmedReason = String(reason || '').trim();
+    if (!trimmedReason) {
+      return res.status(400).json({
+        code: 'REASON_REQUIRED',
+        message: 'Vui lòng cung cấp lý do ngân hàng trả lại giao dịch hoàn cọc.',
+      });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+      const roleCodes = getUserRoleCodes(req);
+      const writeIds = await getDepositWriteBuildingIds(req.user.sub, req.user.org_id, roleCodes);
+      if (!writeIds.includes(meta.building_id)) {
+        await logAccessDenied(req, 'deposit', id, 'MANAGER attempted payout-returned on unassigned building');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền thao tác trên tòa nhà này.' });
+      }
+
+      await client.query('BEGIN');
+
+      const depRes = await client.query(
+        `SELECT d.*, a.code AS apartment_code
+         FROM deposit d
+         JOIN contract c ON c.id = d.contract_id
+         JOIN apartment a ON a.id = c.apartment_id
+         WHERE d.id = $1 FOR UPDATE OF d`,
+        [id]
+      );
+      if (depRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+
+      const dep = depRes.rows[0];
+      const refundAmt = Math.round(Number(dep.settlement?.refund_amount || 0));
+      if (
+        !['REFUNDED', 'PARTIALLY_REFUNDED'].includes(dep.status) ||
+        BigInt(dep.amount_held || 0) !== 0n ||
+        refundAmt <= 0
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_DEPOSIT_STATUS_FOR_RETURN',
+          message:
+            'Chỉ có thể ghi nhận ngân hàng hoàn trả (RETURNED) đối với sổ cọc đã chi hoàn (REFUNDED / PARTIALLY_REFUNDED) có số tiền hoàn > 0.',
+        });
+      }
+
+      const trimmedRef = reference_code ? String(reference_code).trim() : null;
+      const nowIso = new Date().toISOString();
+
+      await client.query(
+        `INSERT INTO deposit_transaction (
+           deposit_id, type, amount, description, reference_code, status, method, approved_by, approved_at, created_by
+         )
+         VALUES ($1, 'refund_reversal', $2, $3, $4, 'APPROVED', $5, $6, NOW(), $6)`,
+        [
+          id,
+          refundAmt,
+          `Ngân hàng trả lại giao dịch hoàn cọc: ${trimmedReason}`,
+          trimmedRef,
+          dep.settlement?.refund_method || 'BANK_TRANSFER',
+          req.user.sub,
+        ]
+      );
+
+      const prevReturns = Array.isArray(dep.settlement?.return_history) ? dep.settlement.return_history : [];
+      const updatedSettlement = {
+        ...(dep.settlement || {}),
+        returned_at: nowIso,
+        returned_by: req.user.sub,
+        return_reason: trimmedReason,
+        return_reference_code: trimmedRef,
+        return_history: [
+          ...prevReturns,
+          {
+            at: nowIso,
+            by: req.user.sub,
+            amount: refundAmt,
+            reason: trimmedReason,
+            reference_code: trimmedRef,
+          },
+        ],
+      };
+
+      await client.query(
+        `UPDATE deposit SET amount_held = $1, status = 'RETURNED', settlement = $2, updated_at = NOW() WHERE id = $3`,
+        [refundAmt, JSON.stringify(updatedSettlement), id]
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         VALUES ($1, 'DEPOSIT_PAYOUT_RETURNED', 'deposit', $2, $3)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify({ status: 'RETURNED', amount_restored: refundAmt, reason: trimmedReason, reference_code: trimmedRef }),
+        ]
+      );
+
+      await client.query(
+        `SELECT fn_notify_deposit_event($1, 'RESIDENT', 'DEPOSIT_PAYOUT_RETURNED', $2, $3, $4::jsonb, NULL)`,
+        [
+          id,
+          'Giao dịch hoàn tiền đặt cọc bị ngân hàng trả lại',
+          `Giao dịch chuyển khoản hoàn tiền cọc căn ${dep.apartment_code} (${refundAmt.toLocaleString('vi-VN')} ₫) bị ngân hàng trả lại với lý do: "${trimmedReason}". Vui lòng kiểm tra và cập nhật lại thông tin tài khoản thụ hưởng.`,
+          JSON.stringify({
+            deposit_id: id,
+            contract_id: dep.contract_id,
+            status: 'RETURNED',
+            reason: trimmedReason,
+            refund_amount: refundAmt,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã ghi nhận giao dịch hoàn cọc bị trả lại (RETURNED) và khôi phục số dư chờ phát hành lại lệnh chi.',
+        data: { id, status: 'RETURNED', amount_held: String(refundAmt), settlement: updatedSettlement },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('[Deposit Payout Returned Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi ghi nhận giao dịch hoàn cọc bị trả lại.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/deposits/:id/bank-info
+ * Cập nhật thông tin tài khoản ngân hàng nhận hoàn cọc khi ở trạng thái APPROVED_PENDING_PAYOUT hoặc RETURNED
+ */
+router.patch(
+  '/:id/bank-info',
+  authenticateToken,
+  requireRole(['MANAGER', 'RESIDENT']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { bank_name, bank_code, bank_bin, account_number, account_holder } = req.body || {};
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const meta = await getDepositAccessMeta(client, id);
+      if (!meta) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
+      }
+
+      const roleCodes = getUserRoleCodes(req);
+      let isBuildingManager = false;
+      let isPrimaryResident = false;
+
+      if (roleCodes.includes('MANAGER')) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+        if (mgrIds.includes(meta.building_id)) {
+          isBuildingManager = true;
+        }
+      }
+      if (roleCodes.includes('RESIDENT') && meta.is_primary_resident) {
+        isPrimaryResident = true;
+      }
+
+      if (!isBuildingManager && !isPrimaryResident) {
+        await logAccessDenied(req, 'deposit', id, 'Unauthorized bank-info update attempt');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Chỉ Quản lý tòa nhà hoặc cư dân đứng tên chính trên hợp đồng mới được cập nhật tài khoản nhận hoàn cọc.',
+        });
+      }
+
+      const vBank = validateRefundBankInfo({
+        refundAmount: 1,
+        refundMethod: 'BANK_TRANSFER',
+        bankInfo: { bank_name, bank_code, bank_bin, account_number, account_holder },
+      });
+      if (!vBank.ok) {
+        return res.status(422).json({ code: vBank.code, message: vBank.message });
+      }
+
+      await client.query('BEGIN');
+      const rpcRes = await client.query('SELECT * FROM fn_update_deposit_refund_bank_info($1, $2::jsonb)', [
+        id,
+        JSON.stringify(vBank.normalizedBankInfo),
+      ]);
+      const updated = rpcRes.rows[0];
+
+      if (isPrimaryResident && !isBuildingManager) {
+        await client.query(
+          `SELECT fn_notify_deposit_event($1, 'BUILDING_MANAGERS', 'DEPOSIT_BANK_INFO_UPDATED', $2, $3, $4::jsonb, NULL)`,
+          [
+            id,
+            'Cư dân đã cập nhật tài khoản nhận hoàn cọc',
+            `Cư dân đã cập nhật thông tin tài khoản thụ hưởng mới (${vBank.normalizedBankInfo.bank_name} — ${vBank.normalizedBankInfo.account_number}). Vui lòng kiểm tra và thực hiện phát hành lệnh chi hoàn cọc.`,
+            JSON.stringify({
+              deposit_id: id,
+              contract_id: meta.contract_id,
+              bank_info: vBank.normalizedBankInfo,
+              link: '/admin/deposits',
+            }),
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã cập nhật thông tin tài khoản nhận hoàn cọc thành công.',
+        data: {
+          id: updated.id,
+          status: updated.status,
+          amount_held: updated.amount_held,
+          settlement: updated.settlement,
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      const msg = String(err?.message || '');
+      if (msg.includes('INVALID_STATUS_FOR_BANK_UPDATE')) {
+        return res.status(409).json({
+          code: 'INVALID_STATUS_FOR_BANK_UPDATE',
+          message:
+            'Chỉ có thể cập nhật tài khoản ngân hàng khi sổ cọc ở trạng thái APPROVED_PENDING_PAYOUT hoặc RETURNED có số tiền hoàn > 0.',
+        });
+      }
+      if (msg.includes('ACCESS_DENIED')) {
+        await logAccessDenied(req, 'deposit', id, 'fn_update_deposit_refund_bank_info rejected caller');
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn không có quyền cập nhật tài khoản nhận hoàn cọc cho sổ cọc này.',
+        });
+      }
+      console.error('[Deposit Bank Info Update Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật tài khoản ngân hàng nhận hoàn cọc.' });
     } finally {
       await release();
     }

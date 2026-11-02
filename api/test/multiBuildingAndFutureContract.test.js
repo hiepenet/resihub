@@ -666,13 +666,23 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(mgrSelfSettleApprove.status, 403, 'Settlement creator must be blocked by Four-eyes');
 
-    // Active building OWNER approves settlement -> 200
+    // Active building OWNER approves settlement -> 200 APPROVED_PENDING_PAYOUT, then MANAGER executes payout -> PARTIALLY_REFUNDED
     const ownerSettleApprove = await apiFetch(`/api/v1/deposits/${depositId}/settlement/approve`, ownerVop.token, {
       method: 'POST',
       body: JSON.stringify({}),
     });
     assert.equal(ownerSettleApprove.status, 200, `OWNER settlement approve failed: ${JSON.stringify(ownerSettleApprove.body)}`);
-    assert.equal(ownerSettleApprove.body.data.status, 'PARTIALLY_REFUNDED');
+    assert.equal(ownerSettleApprove.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+    const mgrPayout = await apiFetch(`/api/v1/deposits/${depositId}/payout`, mgrA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        evidence: [TINY_PNG_B64],
+        reference_code: 'UNC-MGR-A',
+      }),
+    });
+    assert.equal(mgrPayout.status, 200, `MANAGER payout failed: ${JSON.stringify(mgrPayout.body)}`);
+    assert.equal(mgrPayout.body.data.status, 'PARTIALLY_REFUNDED');
   });
 });
 
