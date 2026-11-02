@@ -4,7 +4,7 @@
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-import { toDateOnlyStr } from './dateRange';
+import { toDateOnlyStr } from './dateRange.js';
 
 export const DEFAULT_RESERVATION_CANCEL_POLICY = {
   max_hold_days: 30,
