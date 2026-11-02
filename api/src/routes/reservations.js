@@ -14,7 +14,7 @@ import {
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn } from '../services/pricing.js';
 import { saveBase64Image } from '../services/imageUpload.js';
-import { normalizeVnPhone, ensureResidentAccount } from '../services/residentAccount.js';
+import { normalizeVnPhone, ensureResidentAccount, isInternalPerson } from '../services/residentAccount.js';
 import {
   isPositiveSafeIntegerVnd,
   getTodayVnDateStr,
@@ -97,7 +97,13 @@ function parseNonNegativeSafeIntVnd(val) {
   return null;
 }
 
-export async function persistReservationEvidence(client, req, reservationId, rawList) {
+export async function persistReservationEvidence(
+  client,
+  req,
+  reservationId,
+  rawList,
+  { allowExistingAttachmentUrls = false } = {}
+) {
   if (!Array.isArray(rawList) || rawList.length === 0) return [];
   if (rawList.length > 5) {
     const err = new Error('Tối đa 5 tệp chứng từ cho mỗi phiếu giữ chỗ.');
@@ -110,6 +116,28 @@ export async function persistReservationEvidence(client, req, reservationId, raw
     const raw = String(item || '').trim();
     if (!raw) continue;
     if (ATTACHMENT_VIEW_URL_RE.test(raw)) {
+      if (!allowExistingAttachmentUrls) {
+        const err = new Error('Chứng từ tải lên phải là tệp ảnh/PDF hợp lệ (không chấp nhận đường dẫn sẵn có).');
+        err.httpStatus = 422;
+        err.code = 'INVALID_EVIDENCE';
+        throw err;
+      }
+      const idMatch = raw.match(/\/attachments\/([0-9a-f-]{36})\/view$/i);
+      const attachmentId = idMatch ? idMatch[1] : null;
+      const ownRes = attachmentId
+        ? await client.query(
+            `SELECT 1 FROM attachment
+             WHERE id = $1::uuid AND owner_entity = 'reservation' AND owner_id = $2::uuid
+             LIMIT 1`,
+            [attachmentId, reservationId]
+          )
+        : { rows: [] };
+      if (ownRes.rows.length === 0) {
+        const err = new Error('Chứng từ tham chiếu không thuộc về phiếu giữ chỗ này.');
+        err.httpStatus = 422;
+        err.code = 'INVALID_EVIDENCE';
+        throw err;
+      }
       normalized.push(raw);
       continue;
     }
@@ -281,8 +309,8 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
   }
 
   const todayStr = getTodayVnDateStr();
-  const holdFromStr = hold_from ? String(hold_from).slice(0, 10) : todayStr;
-  const holdUntilStr = String(hold_until).slice(0, 10);
+  const holdFromStr = hold_from ? getTodayVnDateStr(hold_from) : todayStr;
+  const holdUntilStr = getTodayVnDateStr(hold_until);
   const holdFromDate = new Date(`${holdFromStr}T00:00:00Z`);
   const holdUntilDate = new Date(`${holdUntilStr}T00:00:00Z`);
   const todayDate = new Date(`${todayStr}T00:00:00Z`);
@@ -360,7 +388,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
       const oc = overlapContract.rows[0];
       return res.status(409).json({
         code: 'APARTMENT_NOT_AVAILABLE',
-        message: `Khoảng thời gian giữ chỗ bị chồng lấn với hợp đồng thuê (${String(oc.start_date).slice(0, 10)} → ${String(oc.end_date).slice(0, 10)}).`,
+        message: `Khoảng thời gian giữ chỗ bị chồng lấn với hợp đồng thuê (${getTodayVnDateStr(oc.start_date)} → ${getTodayVnDateStr(oc.end_date)}).`,
       });
     }
 
@@ -427,6 +455,13 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
     );
     if (existingPersonRes.rows.length > 0) {
       prospectPersonId = existingPersonRes.rows[0].id;
+      if (await isInternalPerson(prospectPersonId, orgId)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INTERNAL_ACCOUNT_PHONE',
+          message: 'Số điện thoại này thuộc tài khoản nhân sự / quản trị nội bộ, không thể dùng cho hồ sơ cư dân giữ chỗ.',
+        });
+      }
     } else {
       const insPerson = await client.query(
         `INSERT INTO person (org_id, full_name, phone, created_by)
@@ -886,7 +921,9 @@ router.patch(
 
       let savedRefundEvidence = [];
       if (Array.isArray(refund_evidence) && refund_evidence.length > 0) {
-        savedRefundEvidence = await persistReservationEvidence(client, req, id, refund_evidence);
+        savedRefundEvidence = await persistReservationEvidence(client, req, id, refund_evidence, {
+          allowExistingAttachmentUrls: true,
+        });
       }
 
       const nextStatus =

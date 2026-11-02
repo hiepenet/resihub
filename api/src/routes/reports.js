@@ -484,11 +484,7 @@ router.get(
           collected + transferIn + refundReversed - deducted - refunded - transferOut;
         const openingHeld = closingHeld - netInPeriod;
 
-        const dueStr = row.refund_due_date
-          ? row.refund_due_date.toISOString
-            ? row.refund_due_date.toISOString().slice(0, 10)
-            : String(row.refund_due_date).slice(0, 10)
-          : null;
+        const dueStr = row.refund_due_date ? getTodayVnDateStr(row.refund_due_date) : null;
         const isOverdue = Boolean(
           dueStr &&
             dueStr < todayStr &&

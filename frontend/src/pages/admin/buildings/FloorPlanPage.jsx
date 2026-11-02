@@ -273,18 +273,9 @@ export function FloorPlanView({
     }
   };
 
-  const handleHandover = async (aptId) => {
-    setSubmitting(true);
-    try {
-      const res = await buildingsService.handoverApartment(aptId);
-      toast.success(res.message || 'Bàn giao phòng thành công.');
-      setSelectedApt(null);
-      loadFloorPlan();
-    } catch (err) {
-      toast.error(extractErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
+  const handleHandover = (aptId) => {
+    setSelectedApt(null);
+    navigate(`/admin/apartments/${aptId}`);
   };
 
   const handleChangeStatus = async (aptId, nextStatus) => {

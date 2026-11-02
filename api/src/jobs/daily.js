@@ -10,6 +10,7 @@ import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { refundDeadline } from '../services/deadlines.js';
 import { generateInvoicesCore } from '../routes/invoices.js';
 import { roundVND } from '../services/pricing.js';
+import { getTodayVnDateStr } from '../services/depositSettlement.js';
 
 export async function runDailyJobs() {
   const expiredAptIds = new Set();
@@ -26,12 +27,8 @@ export async function runDailyJobs() {
      RETURNING id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date`
   );
   for (const row of scheduledTerminated.rows) {
-    const termStr = row.eff_end_date?.toISOString
-      ? row.eff_end_date.toISOString().slice(0, 10)
-      : String(row.eff_end_date).slice(0, 10);
-    const sDateStr = row.start_date?.toISOString
-      ? row.start_date.toISOString().slice(0, 10)
-      : String(row.start_date).slice(0, 10);
+    const termStr = getTodayVnDateStr(row.eff_end_date);
+    const sDateStr = getTodayVnDateStr(row.start_date);
     const { dueAt } = refundDeadline(termStr);
     await adminPool.query(
       `UPDATE deposit
@@ -76,7 +73,7 @@ export async function runDailyJobs() {
      RETURNING id, apartment_id, end_date`
   );
   for (const row of expired.rows) {
-    const endDateStr = row.end_date?.toISOString ? row.end_date.toISOString().slice(0, 10) : String(row.end_date).slice(0, 10);
+    const endDateStr = getTodayVnDateStr(row.end_date);
     const { dueAt } = refundDeadline(endDateStr);
     await adminPool.query(
       `UPDATE deposit
@@ -407,9 +404,10 @@ export async function runOverdueDepositSettlementAlerts() {
 
   for (const dep of depositAlerts.rows) {
     const days = Number(dep.days_since_end);
+    const dueStr = dep.refund_due_date ? getTodayVnDateStr(dep.refund_due_date) : null;
     const isOverdue =
       days >= 5 ||
-      (dep.refund_due_date && new Date() >= new Date(`${String(dep.refund_due_date).slice(0, 10)}T00:00:00`));
+      Boolean(dueStr && getTodayVnDateStr() >= dueStr);
     const title = isOverdue
       ? `[QUÁ HẠN] Hoàn cọc căn ${dep.apartment_code} đã quá hạn 5 ngày`
       : `[CẢNH BÁO] Đến hạn hoàn cọc căn ${dep.apartment_code} (còn 2 ngày)`;

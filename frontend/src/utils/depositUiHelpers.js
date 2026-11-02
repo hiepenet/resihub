@@ -4,6 +4,8 @@
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+import { toDateOnlyStr } from './dateRange';
+
 export const DEFAULT_RESERVATION_CANCEL_POLICY = {
   max_hold_days: 30,
   public_max_hold_days: 7,
@@ -44,8 +46,8 @@ export function computeSuggestedCancelSplit({
     )
   );
 
-  const untilDateStr = String(holdUntil || '').slice(0, 10);
-  const anchorDateStr = String(todayStr || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const untilDateStr = toDateOnlyStr(holdUntil);
+  const anchorDateStr = toDateOnlyStr(todayStr || new Date());
   const untilMs = Date.parse(`${untilDateStr}T00:00:00Z`);
   const anchorMs = Date.parse(`${anchorDateStr}T00:00:00Z`);
 

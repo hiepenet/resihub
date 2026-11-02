@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';

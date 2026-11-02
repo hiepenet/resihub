@@ -1174,12 +1174,12 @@ export function ApartmentDetailPage() {
                         bank_code: settleModal.bank_code,
                         bank_bin: settleModal.bank_bin,
                       }}
-                      onBankChange={(bank, rawVal) =>
+                      onBankChange={(val, chosen) =>
                         setSettleModal((p) => ({
                           ...p,
-                          bank_name: bank?.shortName || bank?.short_name || rawVal || '',
-                          bank_code: bank?.code || '',
-                          bank_bin: bank?.bin || '',
+                          bank_name: val || chosen?.shortName || chosen?.short_name || '',
+                          bank_code: chosen?.code || '',
+                          bank_bin: chosen?.bin || '',
                         }))
                       }
                     />

@@ -51,6 +51,7 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, formatDateTime } from '../../../utils/format';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
+import { toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey, canCollectAdditionalDeposit } from '../../../utils/idempotency';
 import { canActorApproveDepositRow } from '../../../utils/depositUiHelpers';
@@ -368,7 +369,7 @@ export function DepositsPage() {
 
     return scopedDeposits.filter((d) => {
       if (overdueOnlyFilter) {
-        const dueStr = d.refund_due_date ? String(d.refund_due_date).slice(0, 10) : '';
+        const dueStr = d.refund_due_date ? toDateOnlyStr(d.refund_due_date) : '';
         if (
           !dueStr ||
           dueStr >= todayIso ||
