@@ -123,6 +123,7 @@ test('M05/M06 Task 3 — 4-Step Room Transfer & Deposit Carry-Over (DRAFT -> sca
       await adminPool.query("DELETE FROM attachment WHERE owner_entity = 'contract' AND owner_id = $1", [cId]).catch(() => {});
       await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]).catch(() => {});
       await adminPool.query('DELETE FROM contract_occupant WHERE contract_id = $1', [cId]).catch(() => {});
+      await adminPool.query('UPDATE contract SET parent_contract_id = NULL WHERE parent_contract_id = $1', [cId]).catch(() => {});
       await adminPool.query('DELETE FROM contract WHERE id = $1', [cId]).catch(() => {});
     }
     for (const aId of cleanup.apartmentIds) {

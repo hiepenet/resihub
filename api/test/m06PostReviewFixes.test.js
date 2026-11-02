@@ -195,6 +195,8 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
       await adminPool
         .query("DELETE FROM attachment WHERE owner_entity = 'contract' AND owner_id = $1", [cId])
         .catch(() => {});
+      await adminPool.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]).catch(() => {});
+      await adminPool.query('UPDATE contract SET parent_contract_id = NULL WHERE parent_contract_id = $1', [cId]).catch(() => {});
       await adminPool.query('DELETE FROM contract WHERE id = $1', [cId]).catch(() => {});
     }
     for (const aId of cleanup.apartmentIds) {

@@ -6,6 +6,10 @@ dotenv.config();
 
 const { Pool } = pg;
 
+// Giữ cột PostgreSQL DATE (OID 1082) ở định dạng chuỗi chuẩn 'YYYY-MM-DD'
+// tránh bị lệch -7h sang ngày hôm trước ('...T17:00:00.000Z') khi TZ=Asia/Ho_Chi_Minh
+pg.types.setTypeParser(1082, (val) => val);
+
 // 1. ADMIN POOL (Superuser - Dành cho migrations, seed, auth lookups)
 const adminConnectionConfig = {
   ...(process.env.DATABASE_URL
