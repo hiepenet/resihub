@@ -17,12 +17,14 @@ import {
   AlertTriangle,
   ArrowUpRight,
   ArrowDownLeft,
+  Landmark,
 } from 'lucide-react';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
 import { Input } from '../../../components/ui/Input';
 import { Select } from '../../../components/ui/Select';
+import { BankSelect } from '../../../components/common/BankSelect';
 import { Modal } from '../../../components/ui/Modal';
 import { Skeleton } from '../../../components/ui/Skeleton';
 import { AuthImage } from '../../../components/ui/FileUpload';
@@ -30,8 +32,10 @@ import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
 import { contractsService } from '../../../services/contracts.service';
+import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate, maskIdNumber } from '../../../utils/format';
+import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import {
   addDaysStr,
   addMonthsClampedStr,
@@ -42,6 +46,10 @@ import {
 } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
+import {
+  getResidentDisputeWindowState,
+  canResidentUpdateRefundBankInfo,
+} from '../../../utils/depositUiHelpers';
 
 const DIFF_FIELD_LABELS = {
   rent_amount: 'Giá thuê hàng tháng',
@@ -57,6 +65,7 @@ const DEPOSIT_TX_LABELS = {
   collect: { label: 'Thu tiền cọc', sign: '+', variant: 'emerald' },
   transfer: { label: 'Kết chuyển cọc', sign: '+', variant: 'sky' },
   refund: { label: 'Hoàn trả cọc', sign: '-', variant: 'indigo' },
+  refund_reversal: { label: 'Ngân hàng trả lại lệnh chi', sign: '+', variant: 'amber' },
   deduct: { label: 'Khấu trừ cọc', sign: '-', variant: 'amber' },
   forfeit: { label: 'Thu hồi cọc vi phạm', sign: '-', variant: 'red' },
 };
@@ -124,6 +133,7 @@ function formatDiffValue(key, val) {
 
 export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
   const toast = useToast();
+  const { banks } = useVietQrBanks();
   const iframeRef = useRef(null);
 
   const contract = overview?.active_contract || overview?.contract || null;
@@ -156,6 +166,19 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
   const [submittingDispute, setSubmittingDispute] = useState(false);
   const [printingSettlementId, setPrintingSettlementId] = useState(null);
   const [previewEvidenceSrc, setPreviewEvidenceSrc] = useState(null);
+
+  // Resident Refund Bank Info Update Modal (Phase 2 — APPROVED_PENDING_PAYOUT / RETURNED)
+  const [bankModalOpen, setBankModalOpen] = useState(false);
+  const [bankDepositTarget, setBankDepositTarget] = useState(null);
+  const [bankForm, setBankForm] = useState({
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
+    account_number: '',
+    account_holder: '',
+  });
+  const [submittingBankInfo, setSubmittingBankInfo] = useState(false);
 
   const loadContractDetails = useCallback(async () => {
     setLoadingExtra(true);
@@ -312,6 +335,65 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
   };
 
   const disputeIdemKeyRef = useRef(createIdempotencyKey());
+  const bankIdemKeyRef = useRef(createIdempotencyKey());
+
+  const handleOpenBankModal = (sd) => {
+    bankIdemKeyRef.current = createIdempotencyKey();
+    const existingBank = sd?.settlement?.bank_info || {};
+    const matched = matchVietQrBank(banks, existingBank);
+    setBankDepositTarget(sd);
+    setBankForm({
+      bank_name: matched ? matched.shortName : existingBank.bank_name || '',
+      bank_code: existingBank.bank_code || matched?.code || '',
+      bank_bin: existingBank.bank_bin || matched?.bin || '',
+      bank_logo: existingBank.bank_logo || matched?.logo || '',
+      account_number: existingBank.account_number || existingBank.account_no || '',
+      account_holder: existingBank.account_holder || existingBank.account_name || overview?.profile?.full_name || '',
+    });
+    setBankModalOpen(true);
+  };
+
+  const handleSubmitBankInfo = async (e) => {
+    e?.preventDefault();
+    if (!bankDepositTarget?.deposit_id) return;
+    const bName = String(bankForm.bank_name || '').trim();
+    const accNo = String(bankForm.account_number || '').trim();
+    const accHolder = String(bankForm.account_holder || '').trim();
+    if (!bName || !accNo || !accHolder) {
+      toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn cọc.');
+      return;
+    }
+    if (!/^[A-Za-z0-9]{4,25}$/.test(accNo)) {
+      toast.warning('Số tài khoản ngân hàng chỉ gồm chữ và số (4–25 ký tự, không khoảng trắng).');
+      return;
+    }
+    setSubmittingBankInfo(true);
+    try {
+      const res = await residentService.updateDepositRefundBankInfo(
+        bankDepositTarget.deposit_id,
+        {
+          bank_info: {
+            bank_name: bName,
+            bank_code: bankForm.bank_code || undefined,
+            bank_bin: bankForm.bank_bin || undefined,
+            bank_logo: bankForm.bank_logo || undefined,
+            account_number: accNo,
+            account_holder: accHolder,
+          },
+        },
+        { idempotencyKey: bankIdemKeyRef.current }
+      );
+      bankIdemKeyRef.current = createIdempotencyKey();
+      toast.success(res?.message || 'Đã cập nhật thông tin tài khoản nhận hoàn cọc.');
+      setBankModalOpen(false);
+      setBankDepositTarget(null);
+      await Promise.allSettled([loadContractDetails(), onRefreshOverview?.()]);
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể cập nhật tài khoản nhận hoàn cọc.'));
+    } finally {
+      setSubmittingBankInfo(false);
+    }
+  };
 
   const handleOpenDisputeModal = (depEntry) => {
     disputeIdemKeyRef.current = createIdempotencyKey();
@@ -384,9 +466,11 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
       const inSettlementStatus = [
         'SETTLEMENT_DRAFT',
         'PENDING_APPROVAL',
+        'APPROVED_PENDING_PAYOUT',
         'PARTIALLY_REFUNDED',
         'REFUNDED',
         'DEDUCTED_FULL',
+        'RETURNED',
         'DISPUTED',
       ].includes(entry.deposit_status);
       if (!hasSettlement && !inSettlementStatus) return;
@@ -788,12 +872,8 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                 : Array.isArray(stObj.thread)
                 ? stObj.thread
                 : [];
-              const canDispute = [
-                'PENDING_APPROVAL',
-                'PARTIALLY_REFUNDED',
-                'REFUNDED',
-                'DEDUCTED_FULL',
-              ].includes(sd.deposit_status);
+              const disputeWindow = getResidentDisputeWindowState(sd);
+              const canUpdateBank = canResidentUpdateRefundBankInfo(sd);
 
               return (
                 <div
@@ -826,18 +906,58 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                       >
                         Xem / In bảng kê
                       </Button>
-                      {canDispute ? (
+                      {canUpdateBank ? (
+                        <Button
+                          variant={sd.deposit_status === 'RETURNED' ? 'primary' : 'outline'}
+                          size="xs"
+                          icon={Landmark}
+                          onClick={() => handleOpenBankModal(sd)}
+                        >
+                          Cập nhật TK nhận hoàn cọc
+                        </Button>
+                      ) : null}
+                      {disputeWindow.canDispute ? (
                         <Button
                           variant="danger"
                           size="xs"
                           icon={ShieldAlert}
                           onClick={() => handleOpenDisputeModal(sd)}
                         >
-                          Không đồng ý / Khiếu nại
+                          {disputeWindow.daysRemaining !== null
+                            ? `Khiếu nại bảng kê (còn ${disputeWindow.daysRemaining} ngày)`
+                            : 'Không đồng ý / Khiếu nại'}
                         </Button>
+                      ) : disputeWindow.lockedReason === 'FINALIZED' ? (
+                        <Badge variant="slate">Đã chốt giải quyết khiếu nại</Badge>
+                      ) : disputeWindow.lockedReason === 'EXPIRED' ? (
+                        <Badge variant="slate">Đã hết thời hạn khiếu nại 7 ngày</Badge>
                       ) : null}
                     </div>
                   </div>
+
+                  {sd.deposit_status === 'APPROVED_PENDING_PAYOUT' ? (
+                    <div className="p-3.5 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-900 space-y-1">
+                      <p className="font-semibold">
+                        Chủ nhà đã duyệt bảng kê — Ban quản lý đang thực hiện chuyển khoản hoàn cọc
+                      </p>
+                      <p className="text-indigo-800">
+                        Vui lòng kiểm tra kỹ thông tin tài khoản thụ hưởng bên dưới. Khi chuyển khoản hoàn tất, chứng từ Ủy nhiệm chi (UNC) sẽ được cập nhật tại đây.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {sd.deposit_status === 'RETURNED' ? (
+                    <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-1.5">
+                      <p className="font-semibold">
+                        Ngân hàng hoàn trả lệnh chuyển tiền — vui lòng cập nhật lại tài khoản thụ hưởng
+                      </p>
+                      {stObj.return_reason ? (
+                        <p className="text-amber-800">
+                          <strong>Lý do ngân hàng thông báo:</strong> {stObj.return_reason}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {/* Danh sách khoản khấu trừ biên bản bàn giao */}
                   {items.length === 0 ? (
@@ -945,25 +1065,48 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                                 Tài khoản nhận hoàn cọc:{' '}
                                 <strong className="text-slate-800">
                                   {typeof stObj.bank_info === 'object'
-                                    ? [
-                                        stObj.bank_info.bank_name || stObj.bank_info.bank,
-                                        stObj.bank_info.account_no || stObj.bank_info.account_number,
-                                        stObj.bank_info.account_name || stObj.bank_info.holder_name,
-                                      ]
-                                        .filter(Boolean)
-                                        .join(' • ')
-                                    : stObj.bank_info}
-                                </strong>
-                              </p>
-                            ) : null}
-                            {stObj.approved_at ? (
-                              <p>
-                                Xác nhận quyết toán lúc:{' '}
-                                <strong className="text-slate-800">{formatDateTime(stObj.approved_at)}</strong>
-                              </p>
-                            ) : null}
-                          </div>
-                        ) : null}
+                                      ? [
+                                          stObj.bank_info.bank_name || stObj.bank_info.bank,
+                                          stObj.bank_info.account_no || stObj.bank_info.account_number,
+                                          stObj.bank_info.account_holder || stObj.bank_info.account_name || stObj.bank_info.holder_name,
+                                        ]
+                                          .filter(Boolean)
+                                          .join(' • ')
+                                      : stObj.bank_info}
+                                  </strong>
+                                </p>
+                              ) : null}
+                              {stObj.approved_at ? (
+                                <p>
+                                  Xác nhận quyết toán lúc:{' '}
+                                  <strong className="text-slate-800">{formatDateTime(stObj.approved_at)}</strong>
+                                </p>
+                              ) : null}
+                              {stObj.payout_reference_code ? (
+                                <p>
+                                  Mã tham chiếu chuyển khoản (UNC):{' '}
+                                  <strong className="font-mono text-indigo-700">{stObj.payout_reference_code}</strong>
+                                </p>
+                              ) : null}
+                              {Array.isArray(stObj.payout_evidence) && stObj.payout_evidence.length > 0 ? (
+                                <div className="pt-1.5 space-y-1">
+                                  <p className="font-medium text-slate-700">Chứng từ chuyển khoản hoàn cọc (UNC):</p>
+                                  <div className="flex flex-wrap gap-2">
+                                    {stObj.payout_evidence.map((ev, pIdx) => (
+                                      <button
+                                        key={pIdx}
+                                        type="button"
+                                        onClick={() => setPreviewEvidenceSrc(ev)}
+                                        className="w-14 h-14 rounded-lg border border-indigo-200 overflow-hidden hover:border-primary-500"
+                                      >
+                                        <AuthImage src={ev} alt="Chứng từ hoàn cọc UNC" className="w-full h-full object-cover" />
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                         {stObj.rejection_reason ? (
                           <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 whitespace-pre-line break-words">
                             <span className="font-semibold">Ghi chú yêu cầu điều chỉnh lại bảng kê: </span>
@@ -1085,6 +1228,9 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                               <Badge variant="amber">
                                 {DEDUCT_CATEGORY_LABELS[tx.category] || tx.category}
                               </Badge>
+                            ) : null}
+                            {tx.reference_code ? (
+                              <Badge variant="indigo">Mã GD: {tx.reference_code}</Badge>
                             ) : null}
                           </div>
                           <p className="text-[11px] text-slate-500 mt-0.5">
@@ -1514,6 +1660,81 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
             value={disputeReason}
             onChange={(e) => setDisputeReason(e.target.value)}
           />
+        </form>
+      </Modal>
+
+      {/* Modal Cập nhật TK nhận hoàn cọc (Phase 2 — APPROVED_PENDING_PAYOUT / RETURNED) */}
+      <Modal
+        open={bankModalOpen}
+        onClose={() => {
+          if (!submittingBankInfo) setBankModalOpen(false);
+        }}
+        title="Cập nhật tài khoản nhận hoàn cọc"
+        subtitle={
+          bankDepositTarget
+            ? `Căn hộ ${bankDepositTarget.apartment_code || ''}${
+                bankDepositTarget.building_name ? ` — ${bankDepositTarget.building_name}` : ''
+              }`
+            : ''
+        }
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setBankModalOpen(false)}
+              disabled={submittingBankInfo}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              icon={Landmark}
+              loading={submittingBankInfo}
+              onClick={handleSubmitBankInfo}
+            >
+              Lưu tài khoản nhận cọc
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmitBankInfo} className="space-y-3.5">
+          <BankSelect
+            label="Ngân hàng thụ hưởng (VietQR)"
+            required
+            placeholder="-- Chọn ngân hàng thụ hưởng --"
+            value={bankForm.bank_name}
+            bankMeta={{
+              bank_code: bankForm.bank_code,
+              bank_bin: bankForm.bank_bin,
+              bank_logo: bankForm.bank_logo,
+            }}
+            onBankChange={(val, chosen) =>
+              setBankForm((p) => ({
+                ...p,
+                bank_name: val,
+                bank_code: chosen?.code || '',
+                bank_bin: chosen?.bin || '',
+                bank_logo: chosen?.logo || '',
+              }))
+            }
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Input
+              label="Số tài khoản"
+              required
+              placeholder="Số TK nhận hoàn cọc"
+              value={bankForm.account_number}
+              onChange={(e) => setBankForm((p) => ({ ...p, account_number: e.target.value }))}
+            />
+            <Input
+              label="Chủ tài khoản"
+              required
+              placeholder="Họ tên in hoa"
+              value={bankForm.account_holder}
+              onChange={(e) => setBankForm((p) => ({ ...p, account_holder: e.target.value }))}
+            />
+          </div>
         </form>
       </Modal>
 

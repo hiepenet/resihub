@@ -19,6 +19,8 @@ import {
   FileCheck2,
   Printer,
   MessageSquareWarning,
+  RotateCcw,
+  Landmark,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -48,6 +50,7 @@ import { formatMoney, formatDate, formatDateTime } from '../../../utils/format';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey, canCollectAdditionalDeposit } from '../../../utils/idempotency';
+import { canActorApproveDepositRow } from '../../../utils/depositUiHelpers';
 
 // Khớp 100% với DEDUCT_CATEGORIES trong api/src/services/depositSettlement.js
 const DEDUCT_CATEGORY_OPTIONS = [
@@ -69,6 +72,7 @@ const TXN_TYPE_META = {
   transfer: { label: 'Kết chuyển cọc', variant: 'sky', sign: '+' },
   deduct: { label: 'Khấu trừ cọc', variant: 'amber', sign: '-' },
   refund: { label: 'Hoàn trả cọc', variant: 'indigo', sign: '-' },
+  refund_reversal: { label: 'Ngân hàng trả lại lệnh chi', variant: 'amber', sign: '+' },
 };
 
 function resolveDepositTxnMeta(tx) {
@@ -105,7 +109,15 @@ function createEmptyDeductionItem() {
 export function DepositsPage() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { isSysAdmin, isManager, canSettleDeposits, canApproveDepositRefund, user } = usePermission();
+  const {
+    isSysAdmin,
+    isOwner,
+    isManager,
+    canSettleDeposits,
+    canExecuteDepositPayout,
+    canApproveDepositRefund,
+    user,
+  } = usePermission();
   const { banks } = useVietQrBanks();
   const currentUserId = user?.id || user?.sub;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
@@ -141,6 +153,7 @@ export function DepositsPage() {
   // Manager Settlement Form state
   const [outstandingDebt, setOutstandingDebt] = useState('0');
   const [deductionItems, setDeductionItems] = useState([]);
+  const [inspectionEvidence, setInspectionEvidence] = useState([]);
   const [refundMethod, setRefundMethod] = useState('BANK_TRANSFER');
   const [bankInfo, setBankInfo] = useState({
     bank_name: '',
@@ -175,6 +188,40 @@ export function DepositsPage() {
   const [resolveReason, setResolveReason] = useState('');
   const [resolvingAction, setResolvingAction] = useState('');
 
+  // Payout Execution Modal state (MANAGER UNC execution — Phase 2)
+  const [payoutModalOpen, setPayoutModalOpen] = useState(false);
+  const [payoutTarget, setPayoutTarget] = useState(null);
+  const [payoutDetail, setPayoutDetail] = useState(null);
+  const [loadingPayoutDetail, setLoadingPayoutDetail] = useState(false);
+  const [payoutForm, setPayoutForm] = useState({
+    evidence: [],
+    reference_code: '',
+    note: '',
+  });
+  const [submittingPayout, setSubmittingPayout] = useState(false);
+
+  // Mark Returned Modal state (Bank reversal — Phase 2)
+  const [returnedModalOpen, setReturnedModalOpen] = useState(false);
+  const [returnedTarget, setReturnedTarget] = useState(null);
+  const [returnedForm, setReturnedForm] = useState({
+    reason: '',
+    reference_code: '',
+  });
+  const [submittingReturned, setSubmittingReturned] = useState(false);
+
+  // Update Refund Bank Info Modal state (Phase 2)
+  const [bankUpdateModalOpen, setBankUpdateModalOpen] = useState(false);
+  const [bankUpdateTarget, setBankUpdateTarget] = useState(null);
+  const [bankUpdateForm, setBankUpdateForm] = useState({
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
+    account_number: '',
+    account_holder: '',
+  });
+  const [submittingBankUpdate, setSubmittingBankUpdate] = useState(false);
+
   // Rotating Idempotency-Key refs per modal/form session (GAP-04)
   const collectIdemKeyRef = useRef(createIdempotencyKey());
   const settlementIdemKeyRef = useRef(createIdempotencyKey());
@@ -182,6 +229,9 @@ export function DepositsPage() {
   const rejectIdemKeyRef = useRef(createIdempotencyKey());
   const disputeIdemKeyRef = useRef(createIdempotencyKey());
   const resolveIdemKeyRef = useRef(createIdempotencyKey());
+  const payoutIdemKeyRef = useRef(createIdempotencyKey());
+  const returnedIdemKeyRef = useRef(createIdempotencyKey());
+  const bankUpdateIdemKeyRef = useRef(createIdempotencyKey());
 
   const fetchDeposits = useCallback(async () => {
     setLoading(true);
@@ -212,23 +262,38 @@ export function DepositsPage() {
 
   const tabCounts = useMemo(() => {
     const held = scopedDeposits.filter((d) => ['HELD', 'SETTLEMENT_DRAFT'].includes(d.status)).length;
-    const pending = scopedDeposits.filter((d) => d.status === 'PENDING_APPROVAL').length;
+    const pending = scopedDeposits.filter((d) =>
+      ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(d.status)
+    ).length;
+    const returned = scopedDeposits.filter((d) => d.status === 'RETURNED').length;
     const refunded = scopedDeposits.filter((d) =>
       ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
     ).length;
     const disputed = scopedDeposits.filter((d) => d.status === 'DISPUTED').length;
     const totalHeldAmount = scopedDeposits
-      .filter((d) => ['HELD', 'SETTLEMENT_DRAFT', 'PENDING_APPROVAL', 'DISPUTED'].includes(d.status))
+      .filter((d) =>
+        [
+          'HELD',
+          'SETTLEMENT_DRAFT',
+          'PENDING_APPROVAL',
+          'APPROVED_PENDING_PAYOUT',
+          'RETURNED',
+          'DISPUTED',
+        ].includes(d.status)
+      )
       .reduce((sum, d) => sum + Number(d.amount_held || 0), 0);
 
-    return { held, pending, refunded, disputed, totalHeldAmount };
+    return { held, pending, returned, refunded, disputed, totalHeldAmount };
   }, [scopedDeposits]);
 
   const filteredDeposits = useMemo(() => {
     const q = search.trim().toLowerCase();
     return scopedDeposits.filter((d) => {
       if (activeTab === 'held' && !['HELD', 'SETTLEMENT_DRAFT'].includes(d.status)) return false;
-      if (activeTab === 'pending' && d.status !== 'PENDING_APPROVAL') return false;
+      if (activeTab === 'pending' && !['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(d.status)) {
+        return false;
+      }
+      if (activeTab === 'returned' && d.status !== 'RETURNED') return false;
       if (
         activeTab === 'refunded' &&
         !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
@@ -253,6 +318,29 @@ export function DepositsPage() {
       return true;
     });
   }, [scopedDeposits, activeTab, search]);
+
+  const canActAsApproverOnRow = useCallback(
+    (depRow, settlementObj = null) =>
+      canActorApproveDepositRow({
+        isOwner,
+        isManager,
+        isSysAdmin,
+        currentUserId,
+        createdBy: settlementObj?.created_by ?? depRow?.settlement?.created_by,
+        buildingHasActiveOwner: Boolean(depRow?.building_has_active_owner),
+        allowSelfApproval,
+      }),
+    [isOwner, isManager, isSysAdmin, currentUserId, allowSelfApproval]
+  );
+
+  const canResolveDisputeRow = useCallback(
+    (depRow) => {
+      if (isOwner || isManager) return true;
+      if (isSysAdmin && !depRow?.building_has_active_owner) return true;
+      return false;
+    },
+    [isOwner, isManager, isSysAdmin]
+  );
 
   // Mở Modal Lịch sử giao dịch & Thu bổ sung cọc
   const handleOpenTransactions = useCallback(async (dep, defaultOpenCollect = false) => {
@@ -371,6 +459,9 @@ export function DepositsPage() {
         )
       );
       setOutstandingDebt(String(calcServiceDebt));
+      setInspectionEvidence(
+        Array.isArray(existing?.inspection_evidence) ? existing.inspection_evidence : []
+      );
       if (existing) {
         setDeductionItems(
           Array.isArray(existing.items)
@@ -473,6 +564,14 @@ export function DepositsPage() {
     e?.preventDefault();
     if (!settlementDeposit) return;
 
+    const alreadyInspected = settlementDetail?.preconditions?.apartment_inspected !== false;
+    if (!alreadyInspected && (!Array.isArray(inspectionEvidence) || inspectionEvidence.length === 0)) {
+      toast.warning(
+        'Vui lòng đính kèm ít nhất 01 ảnh biên bản kiểm tra bàn giao căn hộ hoặc thực hiện nghiệm thu phòng trước khi tất toán.'
+      );
+      return;
+    }
+
     for (let i = 0; i < deductionItems.length; i += 1) {
       const it = deductionItems[i];
       const numAmt = Number(String(it.amount ?? '').trim());
@@ -514,6 +613,7 @@ export function DepositsPage() {
     try {
       const payload = {
         outstanding_debt: liveCalc.serviceDebt,
+        inspection_evidence: Array.isArray(inspectionEvidence) ? inspectionEvidence : [],
         items: deductionItems.map((it) => ({
           category: it.category,
           amount: Number(String(it.amount).trim()),
@@ -538,7 +638,7 @@ export function DepositsPage() {
         idempotencyKey: settlementIdemKeyRef.current,
       });
       toast.success(
-        res?.message || 'Đã trình hồ sơ tất toán cọc chờ cấp thẩm quyền nội bộ (Four-Eyes) phê duyệt.'
+        res?.message || 'Đã trình hồ sơ tất toán cọc chờ Chủ nhà / cấp thẩm quyền Four-Eyes phê duyệt.'
       );
       setSettlementOpen(false);
       setActiveTab('pending');
@@ -550,7 +650,7 @@ export function DepositsPage() {
     }
   };
 
-  // OWNER phê duyệt hoàn cọc (Four-Eyes)
+  // OWNER / Approver phê duyệt bảng kê tất toán (Four-Eyes)
   const handleConfirmApproveSettlement = async () => {
     if (!settlementDeposit) return;
     setApprovingSettlement(true);
@@ -560,10 +660,16 @@ export function DepositsPage() {
         {},
         { idempotencyKey: approveIdemKeyRef.current }
       );
-      toast.success(res?.message || 'Đã phê duyệt tất toán và hoàn cọc thành công.');
+      const nextStatus = res?.data?.status;
+      toast.success(
+        res?.message ||
+          (nextStatus === 'APPROVED_PENDING_PAYOUT'
+            ? 'Đã phê duyệt bảng kê tất toán — chờ BQL tải UNC chi hoàn tiền cọc.'
+            : 'Đã phê duyệt tất toán cọc thành công.')
+      );
       setApproveConfirmOpen(false);
       setSettlementOpen(false);
-      setActiveTab('refunded');
+      setActiveTab(nextStatus === 'APPROVED_PENDING_PAYOUT' ? 'pending' : 'refunded');
       await fetchDeposits();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể phê duyệt tất toán cọc.'));
@@ -572,7 +678,7 @@ export function DepositsPage() {
     }
   };
 
-  // OWNER từ chối biên bản tất toán
+  // OWNER / Approver từ chối biên bản tất toán
   const handleConfirmRejectSettlement = async (e) => {
     e?.preventDefault();
     if (!settlementDeposit) return;
@@ -591,6 +697,7 @@ export function DepositsPage() {
       setRejectModalOpen(false);
       setSettlementOpen(false);
       setRejectReason('');
+      setActiveTab('held');
       await fetchDeposits();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể từ chối hồ sơ tất toán.'));
@@ -658,14 +765,22 @@ export function DepositsPage() {
     []
   );
 
+  const isResolveAccountingCommitted = useMemo(() => {
+    const prevSt = resolveSettlementData?.previous_status_before_dispute || null;
+    return (
+      Boolean(resolveSettlementData?.accounting_committed_at) ||
+      ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL', 'RETURNED'].includes(prevSt)
+    );
+  }, [resolveSettlementData]);
+
   const handleSubmitResolveDispute = async (resolution) => {
     if (!resolveTarget) return;
     if (!resolveReason.trim()) {
       toast.warning('Vui lòng nhập nội dung / lý do giải quyết khiếu nại.');
       return;
     }
-    if (resolution === 'ADJUST' && Number(resolveTarget.amount_held || 0) === 0) {
-      toast.warning('Không thể mở lại sửa bảng kê vì tiền cọc đã được chi hoàn hết (số dư = 0).');
+    if (resolution === 'ADJUST' && isResolveAccountingCommitted) {
+      toast.warning('Sổ cọc đã thực hiện hạch toán đối trừ / chi trả, không thể mở lại bản nháp.');
       return;
     }
     setResolvingAction(resolution);
@@ -690,17 +805,196 @@ export function DepositsPage() {
       setResolveTarget(null);
       setResolveReason('');
       setActiveTab(
-        nextStatus === 'PENDING_APPROVAL'
+        ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(nextStatus)
           ? 'pending'
+          : nextStatus === 'RETURNED'
+          ? 'returned'
           : nextStatus === 'SETTLEMENT_DRAFT' || resolution === 'ADJUST'
-            ? 'held'
-            : 'refunded'
+          ? 'held'
+          : 'refunded'
       );
       await fetchDeposits();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể giải quyết khiếu nại sổ cọc.'));
     } finally {
       setResolvingAction('');
+    }
+  };
+
+  // Mở Modal Thực hiện chi hoàn tiền cọc (Payout Execution — MANAGER)
+  const handleOpenPayoutModal = useCallback(
+    async (dep) => {
+      payoutIdemKeyRef.current = createIdempotencyKey();
+      setPayoutTarget(dep);
+      setPayoutDetail(null);
+      setPayoutForm({
+        evidence: [],
+        reference_code: '',
+        note: '',
+      });
+      setPayoutModalOpen(true);
+      setLoadingPayoutDetail(true);
+      try {
+        const res = await depositsService.getSettlement(dep.id);
+        setPayoutDetail(res?.data || null);
+      } catch (err) {
+        toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu đối soát trước khi chi hoàn.'));
+      } finally {
+        setLoadingPayoutDetail(false);
+      }
+    },
+    [toast]
+  );
+
+  const handleSubmitPayout = async (e) => {
+    e?.preventDefault();
+    if (!payoutTarget) return;
+    const st = payoutDetail?.settlement || payoutTarget?.settlement || {};
+    const method = st.refund_method || 'BANK_TRANSFER';
+    if (
+      payoutDetail?.snapshot_stale &&
+      payoutTarget.status === 'APPROVED_PENDING_PAYOUT' &&
+      !st.accounting_committed_at
+    ) {
+      toast.warning(
+        'Công nợ hoặc số dư cọc đã biến động kể từ khi duyệt. Vui lòng từ chối bảng kê để tính lại trước khi chi.'
+      );
+      return;
+    }
+    if (method === 'BANK_TRANSFER' && (!Array.isArray(payoutForm.evidence) || payoutForm.evidence.length === 0)) {
+      toast.warning('Bắt buộc đính kèm ít nhất 01 ảnh chứng từ Ủy nhiệm chi (UNC) khi chuyển khoản hoàn cọc.');
+      return;
+    }
+
+    setSubmittingPayout(true);
+    try {
+      const res = await depositsService.executePayout(
+        payoutTarget.id,
+        {
+          evidence: Array.isArray(payoutForm.evidence) ? payoutForm.evidence : [],
+          reference_code: payoutForm.reference_code.trim() || undefined,
+          note: payoutForm.note.trim() || undefined,
+        },
+        { idempotencyKey: payoutIdemKeyRef.current }
+      );
+      payoutIdemKeyRef.current = createIdempotencyKey();
+      toast.success(res?.message || 'Đã ghi nhận chi hoàn tiền cọc và lưu chứng từ UNC thành công.');
+      setPayoutModalOpen(false);
+      setSettlementOpen(false);
+      setPayoutTarget(null);
+      setActiveTab('refunded');
+      await fetchDeposits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể thực hiện chi hoàn tiền cọc.'));
+    } finally {
+      setSubmittingPayout(false);
+    }
+  };
+
+  // Mở Modal Ghi nhận ngân hàng trả lại lệnh chuyển khoản (RETURNED)
+  const handleOpenReturnedModal = useCallback((dep) => {
+    returnedIdemKeyRef.current = createIdempotencyKey();
+    setReturnedTarget(dep);
+    setReturnedForm({ reason: '', reference_code: '' });
+    setReturnedModalOpen(true);
+  }, []);
+
+  const handleSubmitReturned = async (e) => {
+    e?.preventDefault();
+    if (!returnedTarget) return;
+    if (!returnedForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do ngân hàng hoàn trả lệnh chuyển tiền.');
+      return;
+    }
+    setSubmittingReturned(true);
+    try {
+      const res = await depositsService.markPayoutReturned(
+        returnedTarget.id,
+        {
+          reason: returnedForm.reason.trim(),
+          reference_code: returnedForm.reference_code.trim() || undefined,
+        },
+        { idempotencyKey: returnedIdemKeyRef.current }
+      );
+      returnedIdemKeyRef.current = createIdempotencyKey();
+      toast.success(
+        res?.message || 'Đã ghi nhận giao dịch ngân hàng trả lại (RETURNED) và thông báo cư dân cập nhật tài khoản.'
+      );
+      setReturnedModalOpen(false);
+      setSettlementOpen(false);
+      setReturnedTarget(null);
+      setActiveTab('returned');
+      await fetchDeposits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể ghi nhận trạng thái hoàn trả lệnh chi.'));
+    } finally {
+      setSubmittingReturned(false);
+    }
+  };
+
+  // Mở Modal Cập nhật tài khoản thụ hưởng nhận hoàn cọc (APPROVED_PENDING_PAYOUT / RETURNED)
+  const handleOpenBankUpdateModal = useCallback(
+    (dep, settlementOverride = null) => {
+      bankUpdateIdemKeyRef.current = createIdempotencyKey();
+      const st = settlementOverride || dep?.settlement || {};
+      const matched = matchVietQrBank(banks, st.bank_info || {});
+      setBankUpdateTarget(dep);
+      setBankUpdateForm({
+        bank_name: matched ? matched.shortName : st.bank_info?.bank_name || '',
+        bank_code: st.bank_info?.bank_code || matched?.code || '',
+        bank_bin: st.bank_info?.bank_bin || matched?.bin || '',
+        bank_logo: st.bank_info?.bank_logo || matched?.logo || '',
+        account_number: st.bank_info?.account_number || '',
+        account_holder: st.bank_info?.account_holder || dep?.tenant_name || '',
+      });
+      setBankUpdateModalOpen(true);
+    },
+    [banks]
+  );
+
+  const handleSubmitBankUpdate = async (e) => {
+    e?.preventDefault();
+    if (!bankUpdateTarget) return;
+    const bName = String(bankUpdateForm.bank_name || '').trim();
+    const accNo = String(bankUpdateForm.account_number || '').trim();
+    const accHolder = String(bankUpdateForm.account_holder || '').trim();
+    if (!bName || !accNo || !accHolder) {
+      toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản thụ hưởng.');
+      return;
+    }
+    if (!/^[A-Za-z0-9]{4,25}$/.test(accNo)) {
+      toast.warning('Số tài khoản ngân hàng chỉ được chứa chữ và số (4–25 ký tự).');
+      return;
+    }
+    setSubmittingBankUpdate(true);
+    try {
+      const res = await depositsService.updateRefundBankInfo(
+        bankUpdateTarget.id,
+        {
+          bank_info: {
+            bank_name: bName,
+            bank_code: bankUpdateForm.bank_code || undefined,
+            bank_bin: bankUpdateForm.bank_bin || undefined,
+            bank_logo: bankUpdateForm.bank_logo || undefined,
+            account_number: accNo,
+            account_holder: accHolder,
+          },
+        },
+        { idempotencyKey: bankUpdateIdemKeyRef.current }
+      );
+      bankUpdateIdemKeyRef.current = createIdempotencyKey();
+      const updatedSettlement = res?.data?.settlement || null;
+      toast.success(res?.message || 'Đã cập nhật thông tin tài khoản thụ hưởng hoàn cọc.');
+      setBankUpdateModalOpen(false);
+      if (updatedSettlement) {
+        setSettlementDetail((prev) => (prev ? { ...prev, settlement: updatedSettlement } : prev));
+        setPayoutDetail((prev) => (prev ? { ...prev, settlement: updatedSettlement } : prev));
+      }
+      await fetchDeposits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể cập nhật thông tin tài khoản thụ hưởng.'));
+    } finally {
+      setSubmittingBankUpdate(false);
     }
   };
 
@@ -803,8 +1097,12 @@ export function DepositsPage() {
               ) : null}
               {row.settlement?.refund_amount !== undefined ? (
                 <p className="text-[11px] font-sans text-emerald-600 font-medium">
-                  {isSettledRow ? 'Đã hoàn trả' : 'Dự kiến hoàn'}:{' '}
-                  {formatMoney(row.settlement.refund_amount)}
+                  {isSettledRow
+                    ? 'Đã hoàn trả'
+                    : row.status === 'RETURNED'
+                    ? 'Cần phát hành lại'
+                    : 'Dự kiến hoàn'}
+                  : {formatMoney(row.settlement.refund_amount)}
                 </p>
               ) : null}
             </div>
@@ -821,8 +1119,13 @@ export function DepositsPage() {
             return <span className="text-xs text-slate-400">—</span>;
           }
           const isOverdue =
-            ['HELD', 'SETTLEMENT_DRAFT', 'PENDING_APPROVAL'].includes(row.status) &&
-            new Date(row.refund_due_date) < new Date();
+            [
+              'HELD',
+              'SETTLEMENT_DRAFT',
+              'PENDING_APPROVAL',
+              'APPROVED_PENDING_PAYOUT',
+              'RETURNED',
+            ].includes(row.status) && new Date(row.refund_due_date) < new Date();
           return (
             <span
               className={`text-xs font-medium ${
@@ -846,118 +1149,175 @@ export function DepositsPage() {
         key: 'actions',
         label: 'Thao tác',
         align: 'center',
-        render: (row) => (
-          <div
-            className="inline-flex flex-wrap items-center justify-center gap-1.5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Button
-              variant="ghost"
-              size="xs"
-              icon={History}
-              onClick={() => handleOpenTransactions(row, false)}
+        render: (row) => {
+          const canApproveThis = canActAsApproverOnRow(row);
+          const hasPositiveRefund = Number(row.settlement?.refund_amount || 0) > 0;
+          return (
+            <div
+              className="inline-flex flex-wrap items-center justify-center gap-1.5"
+              onClick={(e) => e.stopPropagation()}
             >
-              Sổ giao dịch
-            </Button>
-
-            {canSettleDeposits && canCollectAdditionalDeposit(row) ? (
               <Button
-                variant="outline"
+                variant="ghost"
                 size="xs"
-                icon={Plus}
-                onClick={() => handleOpenTransactions(row, true)}
+                icon={History}
+                onClick={() => handleOpenTransactions(row, false)}
               >
-                Thu bổ sung
+                Sổ giao dịch
               </Button>
-            ) : null}
 
-            {canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) ? (
-              <Button
-                variant="primary"
-                size="xs"
-                icon={FileCheck2}
-                onClick={() => handleOpenSettlement(row)}
-              >
-                {row.status === 'SETTLEMENT_DRAFT' ? 'Sửa tất toán' : 'Tất toán cọc'}
-              </Button>
-            ) : null}
-
-            {row.status === 'PENDING_APPROVAL' ? (
-              <>
+              {canSettleDeposits && canCollectAdditionalDeposit(row) ? (
                 <Button
-                  variant={canApproveDepositRefund ? 'success' : 'soft'}
+                  variant="outline"
                   size="xs"
-                  icon={ShieldCheck}
+                  icon={Plus}
+                  onClick={() => handleOpenTransactions(row, true)}
+                >
+                  Thu bổ sung
+                </Button>
+              ) : null}
+
+              {canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) ? (
+                <Button
+                  variant="primary"
+                  size="xs"
+                  icon={FileCheck2}
                   onClick={() => handleOpenSettlement(row)}
                 >
-                  {canApproveDepositRefund ? 'Xem & Duyệt hoàn cọc' : 'Xem biên bản'}
+                  {row.status === 'SETTLEMENT_DRAFT' ? 'Sửa tất toán' : 'Tất toán cọc'}
                 </Button>
-                {(isSysAdmin || isManager) ? (
+              ) : null}
+
+              {row.status === 'PENDING_APPROVAL' ? (
+                <>
                   <Button
-                    variant="outline"
+                    variant={canApproveThis ? 'success' : 'soft'}
                     size="xs"
-                    icon={ShieldAlert}
-                    className="text-rose-600 border-rose-200 hover:bg-rose-50"
-                    onClick={() => handleOpenDispute(row)}
+                    icon={ShieldCheck}
+                    onClick={() => handleOpenSettlement(row)}
                   >
-                    Tranh chấp
+                    {canApproveThis ? 'Xem & Duyệt hoàn cọc' : 'Xem biên bản'}
                   </Button>
-                ) : null}
-              </>
-            ) : null}
+                  {isManager ? (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      icon={ShieldAlert}
+                      className="text-rose-600 border-rose-200 hover:bg-rose-50"
+                      onClick={() => handleOpenDispute(row)}
+                    >
+                      Tranh chấp
+                    </Button>
+                  ) : null}
+                </>
+              ) : null}
 
-            {['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'DISPUTED'].includes(row.status) ? (
-              <Button
-                variant="soft"
-                size="xs"
-                icon={Receipt}
-                onClick={() => handleOpenSettlement(row)}
-              >
-                Biên bản tất toán
-              </Button>
-            ) : null}
+              {['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(row.status) ? (
+                <>
+                  <Button
+                    variant="soft"
+                    size="xs"
+                    icon={Receipt}
+                    onClick={() => handleOpenSettlement(row)}
+                  >
+                    Biên bản tất toán
+                  </Button>
+                  {canExecuteDepositPayout && hasPositiveRefund ? (
+                    <>
+                      <Button
+                        variant="success"
+                        size="xs"
+                        icon={Banknote}
+                        onClick={() => handleOpenPayoutModal(row)}
+                      >
+                        {row.status === 'RETURNED' ? 'Chi hoàn lại (UNC)' : 'Thực hiện chi hoàn (UNC)'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        icon={Landmark}
+                        onClick={() => handleOpenBankUpdateModal(row)}
+                      >
+                        Đổi TK nhận
+                      </Button>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
 
-            {row.status === 'DISPUTED' && (isSysAdmin || isManager) ? (
-              <Button
-                variant="primary"
-                size="xs"
-                icon={MessageSquareWarning}
-                onClick={() => handleOpenResolveDispute(row)}
-              >
-                Giải quyết khiếu nại
-              </Button>
-            ) : null}
+              {['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'DISPUTED'].includes(row.status) ? (
+                <Button
+                  variant="soft"
+                  size="xs"
+                  icon={Receipt}
+                  onClick={() => handleOpenSettlement(row)}
+                >
+                  Biên bản tất toán
+                </Button>
+              ) : null}
 
-            {[
-              'PENDING_APPROVAL',
-              'PARTIALLY_REFUNDED',
-              'REFUNDED',
-              'DEDUCTED_FULL',
-              'DISPUTED',
-              'SETTLEMENT_DRAFT',
-            ].includes(row.status) ? (
-              <Button
-                variant="outline"
-                size="xs"
-                icon={Printer}
-                loading={printingDepositId === row.id}
-                onClick={() => handlePrintSettlementPdf(row)}
-              >
-                In bảng kê A4
-              </Button>
-            ) : null}
-          </div>
-        ),
+              {canExecuteDepositPayout &&
+              ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(row.status) &&
+              hasPositiveRefund ? (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  icon={RotateCcw}
+                  className="text-amber-700 border-amber-200 hover:bg-amber-50"
+                  onClick={() => handleOpenReturnedModal(row)}
+                >
+                  Ngân hàng trả lại
+                </Button>
+              ) : null}
+
+              {row.status === 'DISPUTED' && canResolveDisputeRow(row) ? (
+                <Button
+                  variant="primary"
+                  size="xs"
+                  icon={MessageSquareWarning}
+                  onClick={() => handleOpenResolveDispute(row)}
+                >
+                  Giải quyết khiếu nại
+                </Button>
+              ) : null}
+
+              {[
+                'PENDING_APPROVAL',
+                'APPROVED_PENDING_PAYOUT',
+                'RETURNED',
+                'PARTIALLY_REFUNDED',
+                'REFUNDED',
+                'DEDUCTED_FULL',
+                'DISPUTED',
+                'SETTLEMENT_DRAFT',
+              ].includes(row.status) ? (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  icon={Printer}
+                  loading={printingDepositId === row.id}
+                  onClick={() => handlePrintSettlementPdf(row)}
+                >
+                  In bảng kê A4
+                </Button>
+              ) : null}
+            </div>
+          );
+        },
       },
     ],
     [
-      isSysAdmin,
       isManager,
       canSettleDeposits,
-      canApproveDepositRefund,
+      canExecuteDepositPayout,
+      canActAsApproverOnRow,
+      canResolveDisputeRow,
       printingDepositId,
       handleOpenTransactions,
       handleOpenSettlement,
+      handleOpenPayoutModal,
+      handleOpenReturnedModal,
+      handleOpenBankUpdateModal,
       handleOpenResolveDispute,
       handlePrintSettlementPdf,
     ]
@@ -965,10 +1325,11 @@ export function DepositsPage() {
 
   const tabs = [
     { id: 'held', label: 'Đang giữ cọc', icon: Wallet, count: tabCounts.held },
-    { id: 'pending', label: 'Chờ duyệt hoàn cọc', icon: Clock, count: tabCounts.pending },
+    { id: 'pending', label: 'Chờ duyệt / Chi hoàn', icon: Clock, count: tabCounts.pending },
+    { id: 'returned', label: 'Hoàn trả lệnh chi', icon: RotateCcw, count: tabCounts.returned },
     {
       id: 'refunded',
-      label: 'Đã hoàn / Hoàn một phần',
+      label: 'Đã hoàn / Tất toán',
       icon: CheckCircle2,
       count: tabCounts.refunded,
     },
@@ -976,7 +1337,6 @@ export function DepositsPage() {
   ];
 
   // Xác định chế độ hiển thị trong Settlement Modal:
-  // MANAGER / SYS_ADMIN có thể lập/sửa khi status thuộc ['HELD', 'SETTLEMENT_DRAFT']
   const effectiveDepositStatus = settlementDetail?.status || settlementDeposit?.status;
   const effectiveContractStatus =
     settlementDetail?.contract_status || settlementDeposit?.contract_status;
@@ -984,8 +1344,16 @@ export function DepositsPage() {
     canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(effectiveDepositStatus);
   const isContractReadyForSettlement = ['TERMINATED', 'EXPIRED'].includes(effectiveContractStatus);
   const settlementPreconditions = settlementDetail?.preconditions || null;
+  const isInspectionSatisfied =
+    (settlementPreconditions ? settlementPreconditions.apartment_inspected !== false : true) ||
+    inspectionEvidence.length > 0;
   const isPreconditionsReady = settlementPreconditions
-    ? Boolean(settlementPreconditions.ready)
+    ? Boolean(
+        settlementPreconditions.contract_ended !== false &&
+          settlementPreconditions.final_meters_recorded !== false &&
+          settlementPreconditions.no_draft_invoices !== false &&
+          isInspectionSatisfied
+      )
     : isContractReadyForSettlement;
   const readonlySettlementData = settlementDetail?.settlement || settlementDeposit?.settlement || null;
   const settlementDisputeThread = Array.isArray(readonlySettlementData?.dispute_thread)
@@ -993,13 +1361,26 @@ export function DepositsPage() {
     : Array.isArray(readonlySettlementData?.thread)
     ? readonlySettlementData.thread
     : [];
+  const effectiveBuildingHasActiveOwner = Boolean(
+    settlementDetail?.building_has_active_owner ?? settlementDeposit?.building_has_active_owner
+  );
+  const canApproveCurrentModal = canActorApproveDepositRow({
+    isOwner,
+    isManager,
+    isSysAdmin,
+    currentUserId,
+    createdBy: readonlySettlementData?.created_by,
+    buildingHasActiveOwner: effectiveBuildingHasActiveOwner,
+    allowSelfApproval,
+  });
   const isSettlementCreator = Boolean(
     readonlySettlementData?.created_by &&
       currentUserId &&
       String(readonlySettlementData.created_by) === String(currentUserId)
   );
   const isSnapshotStale =
-    effectiveDepositStatus === 'PENDING_APPROVAL' &&
+    ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(effectiveDepositStatus) &&
+    !readonlySettlementData?.accounting_committed_at &&
     (Boolean(settlementDetail?.snapshot_stale) ||
       Boolean(
         readonlySettlementData &&
@@ -1012,11 +1393,17 @@ export function DepositsPage() {
               Number(readonlySettlementData.deposit_held_before_settlement ?? 0))
       ));
 
+  const payoutSettlementData = payoutDetail?.settlement || payoutTarget?.settlement || null;
+  const isPayoutSnapshotStale =
+    payoutTarget?.status === 'APPROVED_PENDING_PAYOUT' &&
+    !payoutSettlementData?.accounting_committed_at &&
+    Boolean(payoutDetail?.snapshot_stale);
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Quản lý Tiền đặt cọc & Tất toán"
-        subtitle="Theo dõi sổ tiền cọc bảo đảm, thu bổ sung cọc và phê duyệt hoàn cọc theo nguyên tắc Four-Eyes (FR-024)"
+        subtitle="Theo dõi sổ tiền cọc bảo đảm, Chủ nhà / cấp thẩm quyền phê duyệt Four-Eyes và BQL chi hoàn chứng từ UNC (FR-024)"
         actions={
           <Button variant="outline" size="md" icon={RefreshCw} onClick={fetchDeposits}>
             Làm mới dữ liệu
@@ -1029,15 +1416,15 @@ export function DepositsPage() {
         <StatsCard
           title="Tổng tiền cọc đang giữ"
           value={formatMoney(tabCounts.totalHeldAmount)}
-          subtext={`${tabCounts.held} sổ cọc đang bảo lưu`}
+          subtext={`${tabCounts.held} sổ đang bảo lưu${tabCounts.returned > 0 ? ` • ${tabCounts.returned} hoàn trả lệnh chi` : ''}`}
           icon={Wallet}
           color="sky"
           onClick={() => setActiveTab('held')}
         />
         <StatsCard
-          title="Chờ duyệt hoàn cọc"
+          title="Chờ duyệt / Chi hoàn"
           value={tabCounts.pending}
-          subtext="Biên bản tất toán chờ Four-Eyes"
+          subtext="Chờ Four-Eyes hoặc chờ UNC chi hoàn"
           icon={Clock}
           color="amber"
           onClick={() => setActiveTab('pending')}
@@ -1045,7 +1432,7 @@ export function DepositsPage() {
         <StatsCard
           title="Đã hoàn / Tất toán"
           value={tabCounts.refunded}
-          subtext="Hoàn đủ hoặc hoàn một phần"
+          subtext="Hoàn đủ, hoàn một phần hoặc cấn trừ hết"
           icon={CheckCircle2}
           color="emerald"
           onClick={() => setActiveTab('refunded')}
@@ -1053,7 +1440,7 @@ export function DepositsPage() {
         <StatsCard
           title="Hồ sơ tranh chấp"
           value={tabCounts.disputed}
-          subtext="Đang tạm khóa phê duyệt hoàn"
+          subtext="Đang tạm khóa phê duyệt / chi hoàn"
           icon={ShieldAlert}
           color="rose"
           onClick={() => setActiveTab('disputed')}
@@ -1234,6 +1621,9 @@ export function DepositsPage() {
                               {CATEGORY_LABEL_MAP[tx.category] || tx.category}
                             </Badge>
                           ) : null}
+                          {tx.reference_code ? (
+                            <Badge variant="indigo">Mã GD: {tx.reference_code}</Badge>
+                          ) : null}
                           <span className="text-xs text-slate-500">
                             • {PAYMENT_METHOD_LABELS[tx.method] || tx.method || 'Phương thức khác'}
                           </span>
@@ -1288,7 +1678,7 @@ export function DepositsPage() {
             ? `Biên bản Tất toán & Hoàn cọc — Căn ${settlementDeposit.apartment_code}`
             : 'Hồ sơ tất toán tiền cọc'
         }
-        subtitle="Quy trình kiểm soát chéo nội bộ Four-Eyes: Quản lý tòa nhà lập biên bản & bằng chứng → SYS_ADMIN / Quản lý khác phê duyệt (FR-024)"
+        subtitle="Quy trình Four-Eyes: BQL lập biên bản & ảnh nghiệm thu → Chủ nhà / cấp thẩm quyền duyệt → BQL chi hoàn chứng từ UNC (FR-024)"
         size="xl"
         footer={
           <div className="flex items-center justify-between w-full flex-wrap gap-2">
@@ -1296,6 +1686,8 @@ export function DepositsPage() {
               {settlementDeposit &&
               [
                 'PENDING_APPROVAL',
+                'APPROVED_PENDING_PAYOUT',
+                'RETURNED',
                 'PARTIALLY_REFUNDED',
                 'REFUNDED',
                 'DEDUCTED_FULL',
@@ -1312,8 +1704,8 @@ export function DepositsPage() {
                 </Button>
               ) : null}
 
-              {(isSysAdmin || isManager) &&
-              effectiveDepositStatus === 'PENDING_APPROVAL' &&
+              {isManager &&
+              ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(effectiveDepositStatus) &&
               settlementDeposit ? (
                 <Button
                   variant="outline"
@@ -1325,15 +1717,42 @@ export function DepositsPage() {
                 </Button>
               ) : null}
 
-              {(isSysAdmin || isManager) &&
-              effectiveDepositStatus === 'DISPUTED' &&
-              settlementDeposit ? (
+              {effectiveDepositStatus === 'DISPUTED' &&
+              settlementDeposit &&
+              canResolveDisputeRow(settlementDetail || settlementDeposit) ? (
                 <Button
                   variant="primary"
                   icon={MessageSquareWarning}
                   onClick={() => handleOpenResolveDispute(settlementDeposit)}
                 >
                   Giải quyết khiếu nại
+                </Button>
+              ) : null}
+
+              {canExecuteDepositPayout &&
+              settlementDeposit &&
+              ['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(effectiveDepositStatus) &&
+              Number(readonlySettlementData?.refund_amount || 0) > 0 ? (
+                <Button
+                  variant="outline"
+                  icon={Landmark}
+                  onClick={() => handleOpenBankUpdateModal(settlementDeposit, readonlySettlementData)}
+                >
+                  Cập nhật TK nhận cọc
+                </Button>
+              ) : null}
+
+              {canExecuteDepositPayout &&
+              settlementDeposit &&
+              ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(effectiveDepositStatus) &&
+              Number(readonlySettlementData?.refund_amount || 0) > 0 ? (
+                <Button
+                  variant="outline"
+                  icon={RotateCcw}
+                  className="text-amber-700 border-amber-200 hover:bg-amber-50"
+                  onClick={() => handleOpenReturnedModal(settlementDeposit)}
+                >
+                  Ngân hàng trả lại (RETURNED)
                 </Button>
               ) : null}
             </div>
@@ -1355,40 +1774,64 @@ export function DepositsPage() {
                 </Button>
               ) : null}
 
-              {canApproveDepositRefund &&
-              (!isSettlementCreator || allowSelfApproval) &&
-              effectiveDepositStatus === 'PENDING_APPROVAL' ? (
-                <>
-                  <Button
-                    variant="danger"
-                    icon={XCircle}
-                    onClick={() => {
-                      rejectIdemKeyRef.current = createIdempotencyKey();
-                      setRejectReason('');
-                      setRejectModalOpen(true);
-                    }}
-                  >
-                    Từ chối biên bản
-                  </Button>
-                  <Button
-                    variant="success"
-                    icon={ShieldCheck}
-                    disabled={isSnapshotStale}
-                    onClick={() => {
-                      approveIdemKeyRef.current = createIdempotencyKey();
-                      setApproveConfirmOpen(true);
-                    }}
-                  >
-                    Phê duyệt hoàn cọc
-                  </Button>
-                </>
+              {canApproveCurrentModal &&
+              ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(effectiveDepositStatus) &&
+              !readonlySettlementData?.accounting_committed_at ? (
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    rejectIdemKeyRef.current = createIdempotencyKey();
+                    setRejectReason('');
+                    setRejectModalOpen(true);
+                  }}
+                >
+                  Từ chối biên bản
+                </Button>
+              ) : null}
+
+              {canApproveCurrentModal && effectiveDepositStatus === 'PENDING_APPROVAL' ? (
+                <Button
+                  variant="success"
+                  icon={ShieldCheck}
+                  disabled={isSnapshotStale}
+                  onClick={() => {
+                    approveIdemKeyRef.current = createIdempotencyKey();
+                    setApproveConfirmOpen(true);
+                  }}
+                >
+                  Phê duyệt bảng kê
+                </Button>
+              ) : canApproveDepositRefund &&
+                isSysAdmin &&
+                effectiveBuildingHasActiveOwner &&
+                effectiveDepositStatus === 'PENDING_APPROVAL' ? (
+                <span className="text-xs font-medium text-slate-600 bg-slate-100 border border-slate-200 px-2.5 py-1.5 rounded-lg">
+                  Tòa nhà có Chủ nhà hoạt động — SYS_ADMIN chỉ xem (PRD 6.2)
+                </span>
               ) : canApproveDepositRefund &&
                 isSettlementCreator &&
                 !allowSelfApproval &&
                 effectiveDepositStatus === 'PENDING_APPROVAL' ? (
                 <span className="text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg">
-                  Chờ Quản lý khác / SYS_ADMIN duyệt (Four-Eyes)
+                  Chờ Chủ nhà / Quản lý khác phê duyệt (Four-Eyes)
                 </span>
+              ) : null}
+
+              {canExecuteDepositPayout &&
+              settlementDeposit &&
+              ['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(effectiveDepositStatus) &&
+              Number(readonlySettlementData?.refund_amount || 0) > 0 ? (
+                <Button
+                  variant="success"
+                  icon={Banknote}
+                  disabled={isSnapshotStale}
+                  onClick={() => handleOpenPayoutModal(settlementDeposit)}
+                >
+                  {effectiveDepositStatus === 'RETURNED'
+                    ? 'Phát hành lại lệnh chi (UNC)'
+                    : 'Thực hiện chi hoàn (UNC)'}
+                </Button>
               ) : null}
             </div>
           </div>
@@ -1431,6 +1874,11 @@ export function DepositsPage() {
                       settlementPreconditions.no_draft_invoices === false ? (
                         <li>
                           Còn hóa đơn bản nháp (<strong>DRAFT</strong>) chưa phát hành hoặc chưa hủy. Vui lòng phát hành hoặc hủy hóa đơn nháp trước khi tất toán.
+                        </li>
+                      ) : null}
+                      {!isInspectionSatisfied ? (
+                        <li>
+                          Chưa có biên bản nghiệm thu bàn giao căn hộ có ảnh chụp hiện trạng — vui lòng nghiệm thu phòng hoặc tải lên ít nhất 01 ảnh biên bản kiểm tra ngay bên dưới.
                         </li>
                       ) : null}
                     </ul>
@@ -1481,6 +1929,24 @@ export function DepositsPage() {
                       Kiểm tra Hóa đơn nháp
                     </Button>
                   ) : null}
+                  {(settlementDetail?.apartment_id || settlementDeposit?.apartment_id) &&
+                  !isInspectionSatisfied ? (
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      rightIcon={ExternalLink}
+                      onClick={() => {
+                        setSettlementOpen(false);
+                        navigate(
+                          `/admin/apartments/${
+                            settlementDetail?.apartment_id || settlementDeposit?.apartment_id
+                          }`
+                        );
+                      }}
+                    >
+                      Nghiệm thu tại trang Căn hộ
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -1494,6 +1960,43 @@ export function DepositsPage() {
                 <p className="mt-1">{readonlySettlementData.rejection_reason}</p>
               </div>
             ) : null}
+
+            {/* Hạng mục 0: Biên bản nghiệm thu bàn giao phòng */}
+            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h4 className="text-sm font-semibold text-slate-900">
+                  Biên bản kiểm tra &amp; Nghiệm thu bàn giao căn hộ
+                </h4>
+                {settlementPreconditions?.apartment_inspected ? (
+                  <Badge variant="emerald" dot>
+                    Đã nghiệm thu phòng
+                    {settlementPreconditions.handover_recorded_at
+                      ? ` (${formatDateTime(settlementPreconditions.handover_recorded_at)})`
+                      : ''}
+                  </Badge>
+                ) : inspectionEvidence.length > 0 ? (
+                  <Badge variant="sky" dot>
+                    Đã đính kèm {inspectionEvidence.length} ảnh biên bản kiểm tra
+                  </Badge>
+                ) : (
+                  <Badge variant="amber" dot>
+                    Chưa có ảnh nghiệm thu bàn giao
+                  </Badge>
+                )}
+              </div>
+              <FileUpload
+                label={
+                  settlementPreconditions?.apartment_inspected
+                    ? 'Ảnh biên bản kiểm tra bàn giao bổ sung (tùy chọn)'
+                    : 'Ảnh biên bản kiểm tra bàn giao căn hộ (Bắt buộc ≥ 1 ảnh nếu chưa nghiệm thu căn hộ)'
+                }
+                multiple
+                maxFiles={5}
+                value={inspectionEvidence}
+                onChange={setInspectionEvidence}
+                hint="Đính kèm ảnh biên bản bàn giao có chữ ký hoặc ảnh chụp hiện trạng phòng khi nhận lại từ cư dân"
+              />
+            </div>
 
             {/* Quy tắc nghiệp vụ FR-023: Cấm khấu trừ tiền thuê */}
             <div className="p-3.5 rounded-xl bg-sky-50 border border-sky-200 flex items-start gap-2.5 text-xs text-sky-900">
@@ -1740,7 +2243,7 @@ export function DepositsPage() {
                       Phát sinh thiếu hụt sau trả phòng (Shortfall): {formatMoney(liveCalc.shortfall)}
                     </p>
                     <p className="mt-0.5">
-                      Tổng khấu trừ &amp; công nợ vượt số cọc đang giữ. Khi phê duyệt tất toán, hệ thống tự động tạo khoản phải thu sau trả phòng (<code>RECEIVABLE_AFTER_MOVE_OUT</code>).
+                      Tổng khấu trừ &amp; công nợ vượt số cọc đang giữ. Khi phê duyệt / chi hoàn tất toán, hệ thống tự động tạo khoản phải thu sau trả phòng (<code>RECEIVABLE_AFTER_MOVE_OUT</code>).
                     </p>
                   </div>
                 ) : null}
@@ -1762,6 +2265,30 @@ export function DepositsPage() {
               <StatusBadge status={effectiveDepositStatus} domain="deposit" />
             </div>
 
+            {effectiveDepositStatus === 'APPROVED_PENDING_PAYOUT' ? (
+              <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-900 space-y-1">
+                <p className="font-bold text-sm">
+                  Đã phê duyệt bảng kê (APPROVED_PENDING_PAYOUT) — Chờ Ban Quản Lý thực hiện chi hoàn &amp; tải chứng từ UNC
+                </p>
+                <p>
+                  Số dư cọc vẫn được bảo lưu nguyên vẹn trên sổ cái cho tới khi BQL hoàn tất chuyển khoản và đính kèm chứng từ UNC.
+                </p>
+              </div>
+            ) : null}
+
+            {effectiveDepositStatus === 'RETURNED' ? (
+              <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900 space-y-1">
+                <p className="font-bold text-sm">
+                  Ngân hàng hoàn trả lệnh chi (RETURNED) — Chờ cập nhật tài khoản &amp; phát hành lại UNC
+                </p>
+                {readonlySettlementData?.return_reason ? (
+                  <p>
+                    <strong>Lý do hoàn trả:</strong> {readonlySettlementData.return_reason}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             {isSnapshotStale ? (
               <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 flex items-start gap-2.5 text-xs text-amber-900">
                 <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
@@ -1771,7 +2298,7 @@ export function DepositsPage() {
                   </p>
                   <p className="mt-1">
                     Hóa đơn mở hoặc tiền cọc bảo lưu hiện tại không còn khớp với bản chụp lúc lập biên bản. Nút{' '}
-                    <strong>Phê duyệt hoàn cọc</strong> đã được khóa an toàn — vui lòng bấm{' '}
+                    <strong>Phê duyệt / Chi hoàn</strong> đã được khóa an toàn — vui lòng bấm{' '}
                     <strong>Từ chối biên bản</strong> để Quản lý tòa nhà cập nhật lại bảng kê mới nhất.
                   </p>
                 </div>
@@ -1802,7 +2329,7 @@ export function DepositsPage() {
                       >
                         <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
                           <Badge variant={msg.role === 'RESIDENT' ? 'amber' : 'indigo'}>
-                            {msg.role === 'RESIDENT' ? 'Cư dân khiếu nại' : `BQL (${msg.role || 'ADMIN'})`}
+                            {msg.role === 'RESIDENT' ? 'Cư dân khiếu nại' : `BQL / Chủ nhà (${msg.role || 'ADMIN'})`}
                           </Badge>
                           <span>{formatDateTime(msg.at)}</span>
                         </div>
@@ -1827,6 +2354,27 @@ export function DepositsPage() {
                     <p className="mt-1 whitespace-pre-line">{readonlySettlementData.rejection_reason}</p>
                   </div>
                 ) : null}
+
+                {Array.isArray(readonlySettlementData.inspection_evidence) &&
+                readonlySettlementData.inspection_evidence.length > 0 ? (
+                  <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-2 text-xs">
+                    <p className="font-semibold text-slate-800">
+                      Ảnh biên bản kiểm tra bàn giao căn hộ ({readonlySettlementData.inspection_evidence.length})
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {readonlySettlementData.inspection_evidence.map((ev, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => setPreviewImg(ev)}
+                          className="w-16 h-16 rounded-lg border border-slate-200 overflow-hidden cursor-pointer hover:border-primary-400"
+                        >
+                          <AuthImage src={ev} alt="Biên bản bàn giao" className="w-full h-full object-cover" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
                 {Array.isArray(settlementDetail?.open_invoices) && settlementDetail.open_invoices.length > 0 ? (
                   <div className="p-3.5 rounded-xl bg-amber-50/60 border border-amber-200 space-y-1.5 text-xs">
                     <p className="font-semibold text-amber-900">
@@ -1849,6 +2397,7 @@ export function DepositsPage() {
                     ))}
                   </div>
                 ) : null}
+
                 <div className="space-y-3">
                   <h4 className="text-sm font-semibold text-slate-900">
                     Chi tiết các khoản khấu trừ &amp; Bằng chứng nghiệm thu (
@@ -1977,6 +2526,33 @@ export function DepositsPage() {
                           </strong>
                         </div>
                       ) : null}
+                      {readonlySettlementData.payout_reference_code ? (
+                        <div className="flex justify-between text-slate-700">
+                          <span>Mã tham chiếu Ủy nhiệm chi (UNC):</span>
+                          <strong className="font-mono text-indigo-700">
+                            {readonlySettlementData.payout_reference_code}
+                          </strong>
+                        </div>
+                      ) : null}
+                      {Array.isArray(readonlySettlementData.payout_evidence) &&
+                      readonlySettlementData.payout_evidence.length > 0 ? (
+                        <div className="pt-1 space-y-1.5">
+                          <span className="text-slate-700 font-medium block">
+                            Chứng từ Ủy nhiệm chi (UNC) đã thực hiện:
+                          </span>
+                          <div className="flex flex-wrap gap-2">
+                            {readonlySettlementData.payout_evidence.map((ev, pIdx) => (
+                              <div
+                                key={pIdx}
+                                onClick={() => setPreviewImg(ev)}
+                                className="w-16 h-16 rounded-lg border border-sky-200 overflow-hidden cursor-pointer hover:border-primary-500"
+                              >
+                                <AuthImage src={ev} alt="Chứng từ UNC" className="w-full h-full object-cover" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                       <div className="border-t border-sky-200 pt-2.5 flex justify-between items-center text-sm">
                         <span className="font-bold text-slate-900">
                           {isFinalized ? 'Số tiền hoàn trả thực tế:' : 'Số tiền hoàn trả dự kiến:'}
@@ -2023,22 +2599,24 @@ export function DepositsPage() {
         </div>
       </Modal>
 
-      {/* Confirm OWNER phê duyệt hoàn cọc */}
+      {/* Confirm OWNER phê duyệt bảng kê tất toán */}
       <ConfirmDialog
         open={approveConfirmOpen}
         onClose={() => setApproveConfirmOpen(false)}
         onConfirm={handleConfirmApproveSettlement}
         loading={approvingSettlement}
         variant="success"
-        title="Phê duyệt tất toán & Hoàn trả tiền cọc"
+        title="Phê duyệt bảng kê tất toán tiền cọc"
         confirmLabel="Xác nhận phê duyệt"
         message={
           settlementDeposit
-            ? `Xác nhận phê duyệt biên bản tất toán cọc cho căn hộ ${
-                settlementDeposit.apartment_code
-              } với số tiền hoàn trả là ${formatMoney(
-                readonlySettlementData?.refund_amount || 0
-              )}? Hệ thống sẽ tự động ghi sổ giao dịch và gửi thông báo cho cư dân.`
+            ? Number(readonlySettlementData?.refund_amount || 0) > 0
+              ? `Xác nhận phê duyệt bảng kê tất toán cọc cho căn hộ ${
+                  settlementDeposit.apartment_code
+                } với số tiền hoàn dự kiến ${formatMoney(
+                  readonlySettlementData?.refund_amount || 0
+                )}? Hồ sơ sẽ chuyển sang trạng thái APPROVED_PENDING_PAYOUT để Ban Quản Lý chuyển khoản và tải chứng từ UNC.`
+              : `Xác nhận phê duyệt tất toán cọc cho căn hộ ${settlementDeposit.apartment_code} (hoàn trả 0 ₫)? Hệ thống sẽ hạch toán đối trừ công nợ ngay lập tức.`
             : ''
         }
       />
@@ -2085,7 +2663,7 @@ export function DepositsPage() {
         open={disputeModalOpen}
         onClose={() => setDisputeModalOpen(false)}
         title="Ghi nhận tranh chấp tiền đặt cọc"
-        subtitle="Hồ sơ sẽ chuyển sang trạng thái DISPUTED và tạm khóa phê duyệt hoàn cọc cho đến khi giải quyết xong"
+        subtitle="Hồ sơ sẽ chuyển sang trạng thái DISPUTED và tạm khóa phê duyệt / chi hoàn cọc cho đến khi giải quyết xong"
         size="sm"
         footer={
           <>
@@ -2143,17 +2721,15 @@ export function DepositsPage() {
             <div className="flex flex-wrap items-center gap-2">
               <span
                 title={
-                  Number(resolveTarget?.amount_held || 0) === 0
-                    ? 'Không thể mở lại sửa bảng kê vì tiền cọc đã được chi hoàn hết (số dư cọc = 0)'
+                  isResolveAccountingCommitted
+                    ? 'Không thể mở lại sửa bảng kê vì tiền cọc đã được hạch toán đối trừ / chi trả'
                     : 'Đưa sổ cọc về trạng thái SETTLEMENT_DRAFT để chỉnh sửa lại bảng kê khấu trừ'
                 }
               >
                 <Button
                   variant="outline"
                   loading={resolvingAction === 'ADJUST'}
-                  disabled={
-                    Number(resolveTarget?.amount_held || 0) === 0 || Boolean(resolvingAction)
-                  }
+                  disabled={isResolveAccountingCommitted || Boolean(resolvingAction)}
                   onClick={() => handleSubmitResolveDispute('ADJUST')}
                 >
                   Mở lại sửa bảng kê
@@ -2219,11 +2795,11 @@ export function DepositsPage() {
               );
             })()}
 
-            {Number(resolveTarget?.amount_held || 0) === 0 ? (
+            {isResolveAccountingCommitted ? (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
-                Lưu ý: Sổ cọc này đã được chi hoàn hết (<strong>số dư đang giữ = 0 ₫</strong>), nên nút{' '}
-                <strong>Mở lại sửa bảng kê</strong> bị vô hiệu hóa. Bạn chỉ có thể ghi nhận giải trình và{' '}
-                <strong>Xác nhận kết quả</strong>.
+                Lưu ý: Sổ cọc này đã thực hiện hạch toán đối trừ / chi trả nên nút{' '}
+                <strong>Mở lại sửa bảng kê</strong> bị vô hiệu hóa để bảo toàn sổ cái bất biến. Bạn chỉ có thể ghi nhận giải trình và{' '}
+                <strong>Xác nhận kết quả</strong> (đóng chu kỳ khiếu nại cuối cùng).
               </div>
             ) : null}
 
@@ -2238,6 +2814,246 @@ export function DepositsPage() {
             />
           </div>
         )}
+      </Modal>
+
+      {/* Modal Thực hiện chi hoàn tiền cọc có chứng từ UNC (Phase 2 — MANAGER) */}
+      <Modal
+        open={payoutModalOpen}
+        onClose={() => {
+          if (!submittingPayout) setPayoutModalOpen(false);
+        }}
+        title={
+          payoutTarget
+            ? `${
+                payoutTarget.status === 'RETURNED'
+                  ? 'Phát hành lại lệnh chi hoàn cọc'
+                  : 'Thực hiện chi hoàn tiền cọc (UNC)'
+              } — Căn ${payoutTarget.apartment_code}`
+            : 'Thực hiện chi hoàn tiền cọc'
+        }
+        subtitle="Ghi nhận chuyển khoản hoàn tiền đặt cọc thực tế kèm chứng từ Ủy nhiệm chi (UNC)"
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setPayoutModalOpen(false)}
+              disabled={submittingPayout}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="success"
+              icon={Banknote}
+              loading={submittingPayout}
+              disabled={loadingPayoutDetail || isPayoutSnapshotStale}
+              onClick={handleSubmitPayout}
+            >
+              Xác nhận đã chi hoàn
+            </Button>
+          </>
+        }
+      >
+        {loadingPayoutDetail ? (
+          <LoadingSpinner label="Đang kiểm tra đối soát công nợ & thông tin thụ hưởng..." />
+        ) : (
+          <form onSubmit={handleSubmitPayout} className="space-y-4">
+            {isPayoutSnapshotStale ? (
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-xs text-amber-900">
+                <p className="font-bold">
+                  Công nợ hoặc số dư cọc đã biến động kể từ khi duyệt bảng kê!
+                </p>
+                <p className="mt-1">
+                  Không thể chi hoàn trên bản chụp cũ. Vui lòng từ chối biên bản để tính lại số tiền hoàn trả chính xác.
+                </p>
+              </div>
+            ) : null}
+
+            <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-1.5 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-slate-700 font-medium">Số tiền thực chi hoàn cho cư dân:</span>
+                <strong className="text-base font-bold text-emerald-700">
+                  {formatMoney(payoutSettlementData?.refund_amount || 0)}
+                </strong>
+              </div>
+              <div className="flex justify-between items-center text-slate-600">
+                <span>Phương thức hoàn trả:</span>
+                <strong>
+                  {payoutSettlementData?.refund_method === 'CASH'
+                    ? 'Tiền mặt (CASH)'
+                    : 'Chuyển khoản ngân hàng (BANK_TRANSFER)'}
+                </strong>
+              </div>
+              {payoutSettlementData?.bank_info?.account_number ? (
+                <div className="pt-1 border-t border-emerald-200/80 flex items-center justify-between gap-2 text-slate-700">
+                  <span>Tài khoản thụ hưởng:</span>
+                  <strong className="text-right">
+                    {payoutSettlementData.bank_info.bank_name} •{' '}
+                    {payoutSettlementData.bank_info.account_number} (
+                    {payoutSettlementData.bank_info.account_holder})
+                  </strong>
+                </div>
+              ) : null}
+            </div>
+
+            <FileUpload
+              label={
+                (payoutSettlementData?.refund_method || 'BANK_TRANSFER') === 'BANK_TRANSFER'
+                  ? 'Ảnh chứng từ Ủy nhiệm chi / Biên lai chuyển khoản (Bắt buộc ≥ 1 ảnh)'
+                  : 'Ảnh phiếu chi tiền mặt có chữ ký cư dân (Khuyến nghị)'
+              }
+              multiple
+              maxFiles={3}
+              value={payoutForm.evidence}
+              onChange={(vals) => setPayoutForm((p) => ({ ...p, evidence: vals }))}
+            />
+
+            <Input
+              label="Mã giao dịch ngân hàng / Số UNC"
+              placeholder="VD: FT26306123456789"
+              value={payoutForm.reference_code}
+              onChange={(e) => setPayoutForm((p) => ({ ...p, reference_code: e.target.value }))}
+            />
+
+            <Input
+              label="Ghi chú chi hoàn (tùy chọn)"
+              multiline
+              rows={2}
+              placeholder="Ghi chú bổ sung trên bút toán chi hoàn..."
+              value={payoutForm.note}
+              onChange={(e) => setPayoutForm((p) => ({ ...p, note: e.target.value }))}
+            />
+          </form>
+        )}
+      </Modal>
+
+      {/* Modal Ghi nhận Ngân hàng trả lại lệnh chi (RETURNED — Phase 2) */}
+      <Modal
+        open={returnedModalOpen}
+        onClose={() => {
+          if (!submittingReturned) setReturnedModalOpen(false);
+        }}
+        title={
+          returnedTarget
+            ? `Ghi nhận hoàn trả lệnh chi — Căn ${returnedTarget.apartment_code}`
+            : 'Ngân hàng trả lại giao dịch hoàn cọc'
+        }
+        subtitle="Tạo bút toán đảo dương (refund_reversal) bất biến, khôi phục số dư chờ chi và thông báo cư dân cập nhật tài khoản"
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setReturnedModalOpen(false)}
+              disabled={submittingReturned}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              icon={RotateCcw}
+              loading={submittingReturned}
+              onClick={handleSubmitReturned}
+            >
+              Xác nhận hoàn trả lệnh chi
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmitReturned} className="space-y-3.5">
+          <Input
+            label="Lý do ngân hàng từ chối / hoàn trả lệnh chi"
+            required
+            multiline
+            rows={3}
+            placeholder="VD: Sai tên chủ tài khoản thụ hưởng / Tài khoản đã đóng..."
+            value={returnedForm.reason}
+            onChange={(e) => setReturnedForm((p) => ({ ...p, reason: e.target.value }))}
+          />
+          <Input
+            label="Mã giao dịch hoàn trả ngân hàng (nếu có)"
+            placeholder="VD: REV-FT26306999"
+            value={returnedForm.reference_code}
+            onChange={(e) => setReturnedForm((p) => ({ ...p, reference_code: e.target.value }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Cập nhật Tài khoản nhận hoàn cọc (APPROVED_PENDING_PAYOUT / RETURNED — Phase 2) */}
+      <Modal
+        open={bankUpdateModalOpen}
+        onClose={() => {
+          if (!submittingBankUpdate) setBankUpdateModalOpen(false);
+        }}
+        title={
+          bankUpdateTarget
+            ? `Cập nhật TK nhận hoàn cọc — Căn ${bankUpdateTarget.apartment_code}`
+            : 'Cập nhật tài khoản thụ hưởng hoàn cọc'
+        }
+        subtitle="Chỉ cập nhật thông tin ngân hàng thụ hưởng mà không làm thay đổi công thức hay số tiền tất toán đã duyệt"
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setBankUpdateModalOpen(false)}
+              disabled={submittingBankUpdate}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              icon={Landmark}
+              loading={submittingBankUpdate}
+              onClick={handleSubmitBankUpdate}
+            >
+              Lưu tài khoản thụ hưởng
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmitBankUpdate} className="space-y-3.5">
+          <BankSelect
+            label="Ngân hàng thụ hưởng (VietQR)"
+            required
+            placeholder="-- Chọn ngân hàng thụ hưởng --"
+            value={bankUpdateForm.bank_name}
+            bankMeta={{
+              bank_code: bankUpdateForm.bank_code,
+              bank_bin: bankUpdateForm.bank_bin,
+              bank_logo: bankUpdateForm.bank_logo,
+            }}
+            onBankChange={(val, chosen) =>
+              setBankUpdateForm((p) => ({
+                ...p,
+                bank_name: val,
+                bank_code: chosen?.code || '',
+                bank_bin: chosen?.bin || '',
+                bank_logo: chosen?.logo || '',
+              }))
+            }
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Input
+              label="Số tài khoản"
+              required
+              placeholder="Số TK nhận hoàn cọc"
+              value={bankUpdateForm.account_number}
+              onChange={(e) =>
+                setBankUpdateForm((p) => ({ ...p, account_number: e.target.value }))
+              }
+            />
+            <Input
+              label="Chủ tài khoản"
+              required
+              placeholder="Họ tên in hoa"
+              value={bankUpdateForm.account_holder}
+              onChange={(e) =>
+                setBankUpdateForm((p) => ({ ...p, account_holder: e.target.value }))
+              }
+            />
+          </div>
+        </form>
       </Modal>
     </div>
   );

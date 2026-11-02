@@ -53,11 +53,13 @@ export const DEPOSIT_STATUS = {
   HELD: { label: 'Đang giữ cọc', variant: 'sky' },
   SETTLEMENT_DRAFT: { label: 'Nháp tất toán', variant: 'slate' },
   PENDING_APPROVAL: { label: 'Chờ duyệt hoàn cọc', variant: 'amber' },
+  APPROVED_PENDING_PAYOUT: { label: 'Đã duyệt - Chờ chi tiền', variant: 'amber' },
   PARTIALLY_REFUNDED: { label: 'Hoàn cọc một phần', variant: 'indigo' },
   REFUNDED: { label: 'Đã hoàn đủ 100%', variant: 'emerald' },
   DEDUCTED_FULL: { label: 'Đã khấu trừ hết cọc', variant: 'amber' },
   TRANSFERRED: { label: 'Đã kết chuyển', variant: 'indigo' },
   DISPUTED: { label: 'Đang tranh chấp', variant: 'red' },
+  RETURNED: { label: 'Ngân hàng hoàn trả lệnh chi', variant: 'red' },
 };
 
 export const PAYMENT_METHOD_LABELS = {

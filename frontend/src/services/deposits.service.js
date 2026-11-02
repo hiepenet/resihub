@@ -17,6 +17,12 @@ export const depositsService = {
     api.post(`/api/v1/deposits/${id}/dispute`, payload, withIdempotency(options)).then((r) => r.data),
   resolveDispute: (id, payload, options = {}) =>
     api.post(`/api/v1/deposits/${id}/resolve-dispute`, payload, withIdempotency(options)).then((r) => r.data),
+  executePayout: (id, payload, options = {}) =>
+    api.post(`/api/v1/deposits/${id}/payout`, payload, withIdempotency(options)).then((r) => r.data),
+  markPayoutReturned: (id, payload, options = {}) =>
+    api.post(`/api/v1/deposits/${id}/payout-returned`, payload, withIdempotency(options)).then((r) => r.data),
+  updateRefundBankInfo: (id, payload, options = {}) =>
+    api.patch(`/api/v1/deposits/${id}/bank-info`, payload, withIdempotency(options)).then((r) => r.data),
   getSettlementPdfHtml: (id) =>
     api.get(`/api/v1/deposits/${id}/settlement/pdf`, { responseType: 'text' }).then((r) => r.data),
 };

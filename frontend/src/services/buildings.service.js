@@ -29,7 +29,8 @@ export const buildingsService = {
   createApartment: (payload) => api.post('/api/v1/apartments', payload).then((r) => r.data),
   updateApartment: (id, payload) => api.patch(`/api/v1/apartments/${id}`, payload).then((r) => r.data),
   deleteApartment: (id) => api.delete(`/api/v1/apartments/${id}`).then((r) => r.data),
-  handoverApartment: (id) => api.patch(`/api/v1/apartments/${id}/handover`).then((r) => r.data),
+  handoverApartment: (id, payload = {}) =>
+    api.patch(`/api/v1/apartments/${id}/handover`, payload).then((r) => r.data),
 
   listReservations: (params) => api.get('/api/v1/reservations', { params }).then((r) => r.data),
   createReservation: (payload, options = {}) =>

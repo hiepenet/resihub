@@ -33,6 +33,8 @@ export const residentService = {
     api.get('/api/v1/resident/deposit-transactions', withContractParam(contractId)).then((r) => r.data),
   disputeDeposit: (depositId, payload, options = {}) =>
     api.post(`/api/v1/deposits/${depositId}/dispute`, payload, withIdempotency(options)).then((r) => r.data),
+  updateDepositRefundBankInfo: (depositId, payload, options = {}) =>
+    api.patch(`/api/v1/deposits/${depositId}/bank-info`, payload, withIdempotency(options)).then((r) => r.data),
   getDepositSettlementPdfHtml: (depositId) =>
     api
       .get(`/api/v1/deposits/${depositId}/settlement/pdf`, { responseType: 'text' })

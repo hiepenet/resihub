@@ -64,7 +64,7 @@ test('Sprint 1 Bug 3 — resolvePostSettlementStatus phân biệt chuẩn REFUND
     'PARTIALLY_REFUNDED'
   );
 
-  // Hoàn 0đ (khấu trừ vượt cọc, shortfall > 0) -> REFUNDED (đã tất toán hết cọc, phần thiếu chuyển sang receivable)
+  // Hoàn 0đ (khấu trừ vượt cọc, shortfall > 0) -> DEDUCTED_FULL (khấu trừ 100% tiền cọc theo FR-038 / M06 Phase 1, phần thiếu chuyển sang receivable)
   assert.equal(
     resolvePostSettlementStatus({
       refundAmount: 0n,
@@ -72,7 +72,7 @@ test('Sprint 1 Bug 3 — resolvePostSettlementStatus phân biệt chuẩn REFUND
       items: [{ amount: 4000000n }],
       shortfall: 2000000n,
     }),
-    'REFUNDED'
+    'DEDUCTED_FULL'
   );
 });
 

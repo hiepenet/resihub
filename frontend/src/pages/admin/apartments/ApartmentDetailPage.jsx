@@ -20,6 +20,7 @@ import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
+import { FileUpload } from '../../../components/ui/FileUpload';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { buildingsService } from '../../../services/buildings.service';
@@ -28,6 +29,7 @@ import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
+import { canActorApproveReservationRow } from '../../../utils/depositUiHelpers';
 
 const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
 
@@ -35,7 +37,8 @@ export function ApartmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { canEditRealEstate, isManager, isSysAdmin } = usePermission();
+  const { canEditRealEstate, isOwner, isManager, isSysAdmin, user } = usePermission();
+  const currentUserId = user?.id || user?.sub;
 
   const [apt, setApt] = useState(null);
   const [zones, setZones] = useState([]);
@@ -157,11 +160,33 @@ export function ApartmentDetailPage() {
     }
   };
 
-  const handleHandover = async () => {
+  const [handoverModalOpen, setHandoverModalOpen] = useState(false);
+  const [handoverForm, setHandoverForm] = useState({
+    note: '',
+    evidence: [],
+    keep_maintenance: false,
+  });
+
+  const handleOpenHandoverModal = () => {
+    setHandoverForm({
+      note: '',
+      evidence: [],
+      keep_maintenance: false,
+    });
+    setHandoverModalOpen(true);
+  };
+
+  const handleHandover = async (e) => {
+    e?.preventDefault();
     setSaving(true);
     try {
-      const res = await buildingsService.handoverApartment(id);
+      const res = await buildingsService.handoverApartment(id, {
+        note: String(handoverForm.note || '').trim() || undefined,
+        evidence: Array.isArray(handoverForm.evidence) ? handoverForm.evidence : [],
+        keep_maintenance: Boolean(handoverForm.keep_maintenance),
+      });
       toast.success(res.message || 'Nghiệm thu & bàn giao phòng thành công.');
+      setHandoverModalOpen(false);
       loadApartment();
     } catch (err) {
       toast.error(extractErrorMessage(err));
@@ -244,7 +269,7 @@ export function ApartmentDetailPage() {
         actions={
           <>
             {canEditRealEstate && apt.status === 'MAINTENANCE' ? (
-              <Button variant="success" size="sm" icon={CheckCircle2} onClick={handleHandover} loading={saving}>
+              <Button variant="success" size="sm" icon={CheckCircle2} onClick={handleOpenHandoverModal} loading={saving}>
                 Nghiệm thu & Bàn giao
               </Button>
             ) : null}
@@ -482,7 +507,16 @@ export function ApartmentDetailPage() {
                     <StatusBadge status={r.status} domain="reservation" />
                     {['HELD', 'EXPIRED'].includes(r.status) &&
                     Number(r.hold_amount || 0) > 0 &&
-                    (canEditRealEstate || isSysAdmin) ? (
+                    canActorApproveReservationRow({
+                      isOwner,
+                      isManager,
+                      isSysAdmin,
+                      currentUserId,
+                      createdBy: r.created_by,
+                      buildingHasActiveOwner: Boolean(
+                        r.building_has_active_owner ?? apt.building_has_active_owner
+                      ),
+                    }) ? (
                       <div className="inline-flex items-center justify-center gap-1">
                         <Button
                           size="xs"
@@ -543,6 +577,63 @@ export function ApartmentDetailPage() {
           />
         </Card>
       ) : null}
+
+      {/* Handover Inspection Modal (FR-024, R-12) */}
+      <Modal
+        open={handoverModalOpen}
+        onClose={() => {
+          if (!saving) setHandoverModalOpen(false);
+        }}
+        title={`Nghiệm thu & Bàn giao căn ${apt.code}`}
+        subtitle="Đính kèm hình ảnh hiện trạng bàn giao để đủ điều kiện tất toán tiền đặt cọc (FR-024, R-12)"
+        size="md"
+      >
+        <form onSubmit={handleHandover} className="space-y-4">
+          <FileUpload
+            label="Ảnh biên bản / hiện trạng bàn giao phòng (Khuyến nghị ≥ 1 ảnh cho tất toán cọc)"
+            multiple
+            maxFiles={5}
+            value={handoverForm.evidence}
+            onChange={(vals) => setHandoverForm((p) => ({ ...p, evidence: vals }))}
+            hint="Ảnh chụp hiện trạng nội thất, đồng hồ điện nước hoặc biên bản có chữ ký hai bên"
+          />
+          <Input
+            label="Ghi chú kiểm tra bàn giao"
+            multiline
+            rows={3}
+            placeholder="VD: Đã kiểm tra điều hòa, tủ bếp, sàn gỗ — nguyên trạng tốt..."
+            value={handoverForm.note}
+            onChange={(e) => setHandoverForm((p) => ({ ...p, note: e.target.value }))}
+          />
+          <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200 cursor-pointer text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={Boolean(handoverForm.keep_maintenance)}
+              onChange={(e) =>
+                setHandoverForm((p) => ({ ...p, keep_maintenance: e.target.checked }))
+              }
+              className="mt-0.5 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+            />
+            <span>
+              <strong>Giữ căn hộ ở trạng thái Đang bảo trì (MAINTENANCE)</strong> — chỉ ghi nhận biên bản nghiệm thu kèm ảnh để tất toán tiền cọc trước, chưa mở bán phòng ngay.
+            </span>
+          </label>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setHandoverModalOpen(false)}
+              disabled={saving}
+            >
+              Hủy
+            </Button>
+            <Button type="submit" variant="success" loading={saving}>
+              {handoverForm.keep_maintenance
+                ? 'Lưu biên bản nghiệm thu'
+                : 'Nghiệm thu & Mở bán (AVAILABLE)'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Reservation Refund / Forfeit Reason Modal */}
       <Modal
