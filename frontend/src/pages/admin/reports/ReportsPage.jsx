@@ -936,13 +936,13 @@ export function ReportsPage() {
             </div>
           </div>
 
-          {/* Khối Đối soát Tiền Giữ chỗ Tách biệt (HELD vs PENDING_CONFIRM) */}
+          {/* Khối Đối soát Tiền Giữ chỗ Tách biệt (HELD vs APPROVED_PENDING_PAYOUT vs PENDING_CONFIRM) */}
           <Card>
             <CardHeader
               title="Đối soát Tiền đặt giữ chỗ ngoài Hợp đồng"
-              subtitle="Tách biệt tiền giữ chỗ đã đối chiếu thực thu (HELD) khỏi các phiếu khách đặt online đang chờ BQL xác nhận sao kê (PENDING_CONFIRM)."
+              subtitle="Bảo toàn 100% số dư VND: tách biệt tiền đang giữ chỗ (HELD / chờ duyệt hủy), tiền đã duyệt chờ BQL chi hoàn (APPROVED_PENDING_PAYOUT) và phiếu chờ xác nhận sao kê (PENDING_CONFIRM)."
             />
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/70">
                 <p className="text-xs text-emerald-800 font-medium">
                   Đang giữ chỗ đã xác nhận (HELD)
@@ -952,6 +952,18 @@ export function ReportsPage() {
                 </p>
                 <p className="text-[11px] text-emerald-700">
                   {ledgerRsv.active_held_count || 0} phiếu đang khóa phòng
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-indigo-50/60 border border-indigo-200/70">
+                <p className="text-xs text-indigo-800 font-medium">
+                  Đã duyệt chờ chi hoàn
+                </p>
+                <p className="text-lg font-bold font-mono tabular-nums text-indigo-900 mt-0.5">
+                  {formatMoney(ledgerRsv.pending_payout_amount || 0)}
+                </p>
+                <p className="text-[11px] text-indigo-700">
+                  {ledgerRsv.pending_payout_count || 0} phiếu chờ BQL chi &amp; tải UNC
                 </p>
               </div>
 

@@ -137,6 +137,53 @@ export function canActorApproveReservationRow({
   return false;
 }
 
+export function canProposeReservationCancel(reservation, { isManager = false } = {}) {
+  return Boolean(isManager && canSettleReservationCancel(reservation));
+}
+
+export function canApproveReservationCancel(
+  reservation,
+  {
+    isOwner = false,
+    isManager = false,
+    isSysAdmin = false,
+    currentUserId = null,
+    buildingHasActiveOwner = false,
+    allowSelfApproval = false,
+  } = {}
+) {
+  if (reservation?.status !== 'CANCEL_PENDING_APPROVAL') {
+    return false;
+  }
+  const proposerId =
+    reservation?.cancel_settlement?.proposed_by ||
+    reservation?.confirmed_by ||
+    reservation?.created_by ||
+    null;
+  return canActorApproveReservationRow({
+    isOwner,
+    isManager,
+    isSysAdmin,
+    currentUserId,
+    createdBy: proposerId,
+    buildingHasActiveOwner,
+    allowSelfApproval,
+  });
+}
+
+export function canPayoutReservationCancel(reservation, { isManager = false } = {}) {
+  return Boolean(
+    isManager &&
+      reservation?.status === 'APPROVED_PENDING_PAYOUT' &&
+      Number(reservation?.refunded_amount || 0) > 0
+  );
+}
+
+export function canResidentUpdateReservationBankInfo(reservation) {
+  const st = reservation?.reservation_status || reservation?.status || null;
+  return Boolean(st === 'APPROVED_PENDING_PAYOUT' && Number(reservation?.refunded_amount || 0) > 0);
+}
+
 export function getResidentDisputeWindowState(deposit, nowMs = Date.now()) {
   const status = deposit?.status || deposit?.deposit_status || null;
   const settlement = deposit?.settlement || {};

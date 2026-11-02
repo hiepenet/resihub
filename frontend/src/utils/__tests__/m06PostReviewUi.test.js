@@ -7,18 +7,18 @@ import { canActorApproveReservationRow } from '../depositUiHelpers.js';
 const readSrc = (relPath) =>
   fs.readFileSync(fileURLToPath(new URL(relPath, import.meta.url)), 'utf8');
 
-test('M06 Post-Review UI (3.4) — ApartmentDetailPage wires allowSelfApproval & enforces UNC on BANK_TRANSFER cancel-settle', () => {
+test('M06 Post-Review UI (3.4) — ApartmentDetailPage wires allowSelfApproval on cancel-approve & enforces UNC on BANK_TRANSFER cancel-payout', () => {
   const src = readSrc('../../pages/admin/apartments/ApartmentDetailPage.jsx');
   assert.match(src, /usersService\s*\.getSettings\s*\(/, 'Must load org settings for allow_self_approval');
   assert.match(
     src,
-    /canActorApproveReservationRow\s*\(\s*\{[\s\S]*?allowSelfApproval[\s\S]*?\}\s*\)/,
-    'Must pass allowSelfApproval into canActorApproveReservationRow'
+    /canApproveReservationCancel\s*\(\s*r\s*,\s*\{[\s\S]*?allowSelfApproval[\s\S]*?\}\s*\)/,
+    'Must pass allowSelfApproval into canApproveReservationCancel'
   );
   assert.match(
     src,
-    /Hoàn tiền giữ chỗ qua chuyển khoản bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC/,
-    'Must validate UNC evidence client-side when refund_method === BANK_TRANSFER and refAmt > 0'
+    /(Chi hoàn|Hoàn) tiền giữ chỗ qua chuyển khoản bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC/,
+    'Must validate UNC evidence client-side when refund_method === BANK_TRANSFER on payout'
   );
 
   // Confirm helper honors allowSelfApproval = true for creator Manager on ownerless building

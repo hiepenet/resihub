@@ -114,7 +114,7 @@ function addMonthsStr(dateStr, months) {
   return addMonthsClampedStr(dateStr, months);
 }
 
-function ContractTimeline({ status }) {
+function ContractTimeline({ status, isRoomTransfer = false }) {
   const terminalStep = useMemo(() => {
     if (status === 'RENEWAL_PENDING') {
       return { id: 'RENEWAL_PENDING', label: 'Chờ duyệt gia hạn', state: 'warning' };
@@ -156,8 +156,10 @@ function ContractTimeline({ status }) {
       },
       {
         key: 'PENDING_APPROVAL',
-        label: '2. Phê duyệt giá',
-        desc: 'Chủ sở hữu tòa nhà duyệt nếu giảm > 10%',
+        label: isRoomTransfer ? '2. Phê duyệt đổi phòng' : '2. Phê duyệt giá',
+        desc: isRoomTransfer
+          ? 'Chủ sở hữu duyệt đổi phòng & kết chuyển cọc'
+          : 'Chủ sở hữu tòa nhà duyệt nếu giảm > 10%',
         state:
           status === 'PENDING_APPROVAL'
             ? 'warning'
@@ -178,7 +180,7 @@ function ContractTimeline({ status }) {
         state: terminalStep.state,
       },
     ];
-  }, [status, terminalStep]);
+  }, [status, terminalStep, isRoomTransfer]);
 
   const styleByState = {
     done: {
@@ -482,7 +484,16 @@ export function ContractDetailPage() {
     () => (Array.isArray(contract?.invoice_schedule) ? contract.invoice_schedule : []),
     [contract]
   );
-  const canApprovePrice = isOwner || (isSysAdmin && contract?.has_building_owner === false);
+  const isContractDiscounted =
+    Number(contract?.apartment_base_rent || 0) > 0 &&
+    Number(contract?.rent_amount || 0) < Number(contract?.apartment_base_rent || 0) * 0.9;
+  const canApprovePrice =
+    isOwner ||
+    (isSysAdmin && contract?.has_building_owner === false) ||
+    (isManager &&
+      Boolean(contract?.is_room_transfer) &&
+      contract?.has_building_owner === false &&
+      !isContractDiscounted);
 
   // Xem & In hợp đồng A4 chuẩn pháp lý
   const handlePrintA4 = async () => {
@@ -568,6 +579,14 @@ export function ContractDetailPage() {
       } else if (actionType === 'approve') {
         const res = await contractsService.approve(id, {}, idemOpts);
         toast.success(res?.message || 'Đã phê duyệt và kích hoạt hợp đồng thành công!');
+        const surplusAmt = Number(
+          res?.surplus_deposit_amount ?? res?.data?.surplus_deposit_amount ?? 0
+        );
+        if (surplusAmt > 0) {
+          toast.warning(
+            `Sổ cọc căn cũ còn dư ${formatMoney(surplusAmt)} — vui lòng lập hồ sơ tất toán hoàn trả phần cọc dư cho cư dân đúng hạn.`
+          );
+        }
       } else if (actionType === 'approve_termination') {
         const res = await contractsService.approveTermination(id);
         toast.success(res?.message || 'Đã phê duyệt chấm dứt hợp đồng.');
@@ -576,11 +595,13 @@ export function ContractDetailPage() {
       await loadAll();
     } catch (err) {
       const errCode = err?.response?.data?.code;
-      if (errCode === 'PRICE_NEEDS_APPROVAL') {
+      if (errCode === 'PRICE_NEEDS_APPROVAL' || errCode === 'TRANSFER_NEEDS_APPROVAL') {
         // Backend đã commit chuyển hợp đồng sang PENDING_APPROVAL chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt
         toast.warning(
           err?.response?.data?.message ||
-            'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt.'
+            (errCode === 'TRANSFER_NEEDS_APPROVAL'
+              ? 'Hợp đồng đổi phòng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt kết chuyển cọc.'
+              : 'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt.')
         );
         setConfirmState({ open: false, type: '' });
         await loadAll();
@@ -1219,20 +1240,7 @@ export function ContractDetailPage() {
       toast.warning('Ngày kết thúc hợp đồng mới phải sau ngày chuyển phòng.');
       return;
     }
-    const chosenApt = availableApts.find(
-      (a) => String(a.id) === String(transferForm.new_apartment_id)
-    );
     const proposedRent = Math.round(Number(transferForm.new_rent_amount || 0));
-    if (
-      chosenApt?.base_rent &&
-      Number(chosenApt.base_rent) > 0 &&
-      proposedRent < Number(chosenApt.base_rent) * 0.9
-    ) {
-      toast.warning(
-        'Giá thuê căn hộ mới giảm quá 10% so với giá niêm yết cần Chủ nhà phê duyệt (FR-013). Vui lòng tạo hợp đồng mới trình duyệt.'
-      );
-      return;
-    }
     setSubmittingTransfer(true);
     try {
       const res = await contractsService.transferRoom(
@@ -1250,13 +1258,10 @@ export function ContractDetailPage() {
         },
         { idempotencyKey: actionIdemKeyRef.current || createIdempotencyKey() }
       );
-      toast.success(res?.message || 'Chuyển phòng thành công!');
-      const surplusAmt = Number(res?.data?.surplus_deposit_amount || 0);
-      if (surplusAmt > 0) {
-        toast.warning(
-          `Sổ cọc căn cũ còn dư ${formatMoney(surplusAmt)} — vui lòng lập hồ sơ tất toán hoàn trả phần cọc dư cho cư dân đúng hạn.`
-        );
-      }
+      toast.success(
+        res?.message ||
+          'Đã tạo hợp đồng nháp đổi phòng! Vui lòng in hợp đồng A4, tải bản scan đã ký và trình Chủ sở hữu phê duyệt.'
+      );
       setTransferOpen(false);
       const newContractId = res?.data?.new_contract?.id;
       if (newContractId) {
@@ -1265,7 +1270,7 @@ export function ContractDetailPage() {
         await loadAll();
       }
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể thực hiện chuyển phòng.'));
+      toast.error(extractErrorMessage(err, 'Không thể khởi tạo hợp đồng đổi phòng.'));
     } finally {
       setSubmittingTransfer(false);
     }
@@ -1589,7 +1594,9 @@ export function ContractDetailPage() {
                   icon={ShieldCheck}
                   onClick={() => setConfirmState({ open: true, type: 'approve' })}
                 >
-                  Phê duyệt HĐ giá ưu đãi
+                  {contract.is_room_transfer
+                    ? 'Phê duyệt đổi phòng & kết chuyển cọc'
+                    : 'Phê duyệt HĐ giá ưu đãi'}
                 </Button>
               </>
             ) : null}
@@ -1613,7 +1620,24 @@ export function ContractDetailPage() {
       />
 
       {/* Timeline trạng thái */}
-      <ContractTimeline status={contract.status} />
+      <ContractTimeline status={contract.status} isRoomTransfer={Boolean(contract.is_room_transfer)} />
+
+      {/* Hướng dẫn quy trình 4 bước khi là Hợp đồng Đổi phòng (FR-013, FR-025, AC-009.2) */}
+      {contract.is_room_transfer && ['DRAFT', 'PENDING_APPROVAL'].includes(contract.status) ? (
+        <div className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 flex items-start gap-3 text-xs text-indigo-950">
+          <ArrowRightLeft className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+          <div className="leading-relaxed space-y-1">
+            <p className="font-semibold">
+              Hợp đồng Đổi phòng có kết chuyển cọc — Quy trình kiểm soát 4 mắt (FR-013, FR-025, AC-009.2)
+            </p>
+            <p className="text-indigo-800">
+              {contract.status === 'DRAFT'
+                ? 'Bước 1: In bản cứng A4 ký kết & tải lên bản scan hợp đồng mới → Bước 2: Bấm "Kích hoạt HĐ" để gửi trình duyệt → Bước 3: Chủ sở hữu phê duyệt để đóng hợp đồng căn cũ và kết chuyển sổ cọc sang căn mới.'
+                : 'Hợp đồng đổi phòng đã có bản scan ký kết và đang chờ Chủ sở hữu tòa nhà phê duyệt. Hợp đồng căn cũ vẫn giữ hiệu lực (ACTIVE) cho tới khi được phê duyệt.'}
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Cảnh báo điều kiện kích hoạt khi DRAFT */}
       {contract.status === 'DRAFT' && attachments.length === 0 ? (
@@ -2924,12 +2948,12 @@ export function ContractDetailPage() {
         />
       </Modal>
 
-      {/* Modal Chuyển phòng Atomic (FR-013) */}
+      {/* Modal Khởi tạo Hợp đồng Đổi phòng (FR-013, FR-025, AC-009.2) */}
       <Modal
         open={transferOpen}
         onClose={() => setTransferOpen(false)}
-        title="Chuyển phòng (Atomic Transaction)"
-        subtitle={`Đóng hợp đồng căn ${contract.apartment_code} (chuyển sang Bảo trì) và mở hợp đồng mới ACTIVE trên căn đích cùng tòa (FR-013)`}
+        title="Đổi phòng & Kết chuyển cọc (Quy trình 4 mắt)"
+        subtitle={`Khởi tạo hợp đồng nháp (DRAFT) cho căn mới cùng tòa; hợp đồng căn ${contract.apartment_code} vẫn giữ hiệu lực cho tới khi tải bản scan ký kết và Chủ sở hữu phê duyệt (FR-013, AC-009.2)`}
         size="md"
         footer={
           <>
@@ -2943,7 +2967,7 @@ export function ContractDetailPage() {
               disabled={Boolean(transferStartDateError || transferEndDateError)}
               icon={ArrowRightLeft}
             >
-              Thực hiện chuyển phòng
+              Tạo nháp HĐ đổi phòng
             </Button>
           </>
         }
@@ -3036,6 +3060,29 @@ export function ContractDetailPage() {
             />
           </div>
 
+          {(() => {
+            const chosenApt = availableApts.find(
+              (a) => String(a.id) === String(transferForm.new_apartment_id)
+            );
+            const propRent = Math.round(Number(transferForm.new_rent_amount || 0));
+            if (
+              chosenApt?.base_rent &&
+              Number(chosenApt.base_rent) > 0 &&
+              propRent > 0 &&
+              propRent < Number(chosenApt.base_rent) * 0.9
+            ) {
+              return (
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    Giá thuê đề xuất thấp hơn 90% giá niêm yết ({formatMoney(chosenApt.base_rent)}). Bản nháp vẫn được tạo và sẽ do <strong>Chủ sở hữu tòa nhà (OWNER)</strong> phê duyệt đồng thời ở bước duyệt đổi phòng (FR-013).
+                  </span>
+                </div>
+              );
+            }
+            return null;
+          })()}
+
           <label className="flex items-start gap-2.5 p-3 rounded-xl bg-sky-50 border border-sky-200 cursor-pointer">
             <input
               type="checkbox"
@@ -3046,9 +3093,9 @@ export function ContractDetailPage() {
               className="mt-0.5 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
             />
             <div className="text-xs text-sky-900">
-              <p className="font-semibold">Tự động kết chuyển sổ cọc hiện tại sang hợp đồng mới</p>
+              <p className="font-semibold">Tự động kết chuyển sổ cọc hiện tại sang hợp đồng mới khi được phê duyệt</p>
               <p className="text-sky-700 mt-0.5">
-                Sổ cọc cũ sẽ ghi nhận trạng thái TRANSFERRED và mở sổ cọc mới giữ nguyên số dư đang giữ.
+                Khi Chủ sở hữu phê duyệt, hệ thống tự động kết chuyển cọc sang hợp đồng mới (phần cọc dư nếu hạ cấp phòng sẽ giữ trên sổ cọc cũ kèm hạn hoàn 5 ngày).
               </p>
             </div>
           </label>
@@ -3363,17 +3410,25 @@ export function ContractDetailPage() {
         variant={confirmState.type === 'approve_termination' ? 'warning' : 'success'}
         title={
           confirmState.type === 'activate'
-            ? 'Kích hoạt hợp đồng thuê'
+            ? contract.is_room_transfer
+              ? 'Trình phê duyệt hợp đồng đổi phòng'
+              : 'Kích hoạt hợp đồng thuê'
             : confirmState.type === 'approve'
-            ? 'Phê duyệt hợp đồng giá ưu đãi'
+            ? contract.is_room_transfer
+              ? 'Phê duyệt đổi phòng & kết chuyển cọc'
+              : 'Phê duyệt hợp đồng giá ưu đãi'
             : 'Phê duyệt chấm dứt hợp đồng'
         }
         confirmLabel="Xác nhận thực hiện"
         message={
           confirmState.type === 'activate'
-            ? `Xác nhận kích hoạt hợp đồng ${contractCode} cho căn hộ ${contract.apartment_code}? Hệ thống sẽ chuyển trạng thái căn hộ và tự động mở sổ cọc bảo đảm.`
+            ? contract.is_room_transfer
+              ? `Xác nhận gửi hợp đồng đổi phòng ${contractCode} (căn ${contract.apartment_code}) sang trạng thái Chờ phê duyệt (PENDING_APPROVAL)? Hợp đồng căn cũ vẫn giữ hiệu lực cho tới khi được phê duyệt.`
+              : `Xác nhận kích hoạt hợp đồng ${contractCode} cho căn hộ ${contract.apartment_code}? Hệ thống sẽ chuyển trạng thái căn hộ và tự động mở sổ cọc bảo đảm.`
             : confirmState.type === 'approve'
-            ? `Xác nhận phê duyệt mức giá thuê ${formatMoney(contract.rent_amount)}/tháng cho căn hộ ${contract.apartment_code} và kích hoạt hợp đồng sang ACTIVE?`
+            ? contract.is_room_transfer
+              ? `Xác nhận phê duyệt đổi phòng sang căn ${contract.apartment_code} (giá thuê ${formatMoney(contract.rent_amount)}/tháng)? Hệ thống sẽ đồng thời chấm dứt hợp đồng căn cũ (chuyển sang Bảo trì), kích hoạt hợp đồng mới sang ACTIVE và kết chuyển sổ cọc.`
+              : `Xác nhận phê duyệt mức giá thuê ${formatMoney(contract.rent_amount)}/tháng cho căn hộ ${contract.apartment_code} và kích hoạt hợp đồng sang ACTIVE?`
             : `Xác nhận phê duyệt chấm dứt hợp đồng ${contractCode}? Căn hộ ${contract.apartment_code} sẽ chuyển sang trạng thái Bảo trì chờ nghiệm thu và thiết lập hạn hoàn cọc 5 ngày.`
         }
       />

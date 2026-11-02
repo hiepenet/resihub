@@ -12,6 +12,8 @@ import {
   Layers,
   XCircle,
   Scale,
+  ShieldCheck,
+  Wallet,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -41,9 +43,10 @@ import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
 import {
   DEFAULT_RESERVATION_CANCEL_POLICY,
-  canActorApproveReservationRow,
   canManagerConfirmReservationPayment,
-  canSettleReservationCancel,
+  canProposeReservationCancel,
+  canApproveReservationCancel,
+  canPayoutReservationCancel,
   computeSuggestedCancelSplit,
 } from '../../../utils/depositUiHelpers';
 
@@ -352,7 +355,7 @@ export function ApartmentDetailPage() {
     }
   };
 
-  // Policy-based Cancel Settlement Modal (Four-Eyes + ROUND(x, -3) + BankSelect)
+  // Step 1: MANAGER Proposal Modal (ROUND(x, -3) + BankSelect, without UNC)
   const settleIdemKeyRef = useRef(createIdempotencyKey());
   const [settleModal, setSettleModal] = useState({
     open: false,
@@ -364,9 +367,9 @@ export function ApartmentDetailPage() {
     bank_name: '',
     bank_code: '',
     bank_bin: '',
+    bank_logo: '',
     account_number: '',
     account_holder: '',
-    refund_evidence: [],
     reason: '',
   });
 
@@ -389,9 +392,9 @@ export function ApartmentDetailPage() {
       bank_name: existingBank.bank_name || '',
       bank_code: existingBank.bank_code || '',
       bank_bin: existingBank.bank_bin || '',
+      bank_logo: existingBank.bank_logo || '',
       account_number: existingBank.account_number || '',
       account_holder: existingBank.account_holder || reservation.prospect_name || '',
-      refund_evidence: [],
       reason: '',
     });
   };
@@ -419,7 +422,7 @@ export function ApartmentDetailPage() {
     }
     const trimmedReason = String(settleModal.reason || '').trim();
     if (!trimmedReason) {
-      toast.warning('Vui lòng nhập lý do thanh lý hủy giữ chỗ.');
+      toast.warning('Vui lòng nhập lý do đề xuất thanh lý hủy giữ chỗ.');
       return;
     }
     if (refAmt > 0 && settleModal.refund_method === 'BANK_TRANSFER') {
@@ -431,15 +434,6 @@ export function ApartmentDetailPage() {
         toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn.');
         return;
       }
-      const evList = Array.isArray(settleModal.refund_evidence)
-        ? settleModal.refund_evidence.filter(Boolean)
-        : [];
-      if (evList.length === 0) {
-        toast.warning(
-          'Hoàn tiền giữ chỗ qua chuyển khoản bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC.'
-        );
-        return;
-      }
     }
 
     setSaving(true);
@@ -449,15 +443,13 @@ export function ApartmentDetailPage() {
         forfeited_amount: forfAmt,
         reason: trimmedReason,
         refund_method: settleModal.refund_method,
-        refund_evidence: Array.isArray(settleModal.refund_evidence)
-          ? settleModal.refund_evidence
-          : [],
       };
       if (refAmt > 0 && settleModal.refund_method === 'BANK_TRANSFER') {
         payload.refund_bank_info = {
           bank_name: String(settleModal.bank_name).trim(),
           bank_code: settleModal.bank_code || undefined,
           bank_bin: settleModal.bank_bin || undefined,
+          bank_logo: settleModal.bank_logo || undefined,
           account_number: String(settleModal.account_number).trim(),
           account_holder: String(settleModal.account_holder).trim(),
         };
@@ -465,8 +457,233 @@ export function ApartmentDetailPage() {
       const res = await buildingsService.cancelSettleReservation(rsv.id, payload, {
         idempotencyKey: settleIdemKeyRef.current,
       });
-      toast.success(res?.message || 'Đã thanh lý hủy giữ chỗ thành công.');
+      toast.success(res?.message || 'Đã gửi đề xuất thanh lý hủy giữ chỗ chờ phê duyệt.');
       setSettleModal((p) => ({ ...p, open: false, reservation: null }));
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Step 2: OWNER / Four-Eyes Approver Review Modal (Approve or Reject)
+  const reviewCancelIdemRef = useRef(createIdempotencyKey());
+  const [reviewCancelModal, setReviewCancelModal] = useState({
+    open: false,
+    reservation: null,
+    mode: 'approve',
+    note: '',
+    rejectReason: '',
+  });
+
+  const handleOpenReviewCancelModal = (reservation, mode = 'approve') => {
+    reviewCancelIdemRef.current = createIdempotencyKey();
+    setReviewCancelModal({
+      open: true,
+      reservation,
+      mode,
+      note: '',
+      rejectReason: '',
+    });
+  };
+
+  const handleSubmitReviewCancel = async (e) => {
+    e?.preventDefault();
+    const rsv = reviewCancelModal.reservation;
+    if (!rsv?.id) return;
+
+    if (reviewCancelModal.mode === 'reject') {
+      const trimmedReason = String(reviewCancelModal.rejectReason || '').trim();
+      if (!trimmedReason) {
+        toast.warning('Vui lòng nhập lý do từ chối đề xuất thanh lý giữ chỗ.');
+        return;
+      }
+      setSaving(true);
+      try {
+        const res = await buildingsService.rejectReservationCancel(
+          rsv.id,
+          { reason: trimmedReason },
+          { idempotencyKey: reviewCancelIdemRef.current }
+        );
+        toast.success(res?.message || 'Đã từ chối đề xuất thanh lý hủy giữ chỗ.');
+        setReviewCancelModal({ open: false, reservation: null, mode: 'approve', note: '', rejectReason: '' });
+        loadApartment();
+      } catch (err) {
+        toast.error(extractErrorMessage(err));
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const res = await buildingsService.approveReservationCancel(
+        rsv.id,
+        { note: String(reviewCancelModal.note || '').trim() || undefined },
+        { idempotencyKey: reviewCancelIdemRef.current }
+      );
+      toast.success(res?.message || 'Đã phê duyệt phương án thanh lý hủy giữ chỗ.');
+      setReviewCancelModal({ open: false, reservation: null, mode: 'approve', note: '', rejectReason: '' });
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Step 3: MANAGER Payout with UNC & Edit Refund Bank Info Modals
+  const payoutCancelIdemRef = useRef(createIdempotencyKey());
+  const [payoutCancelModal, setPayoutCancelModal] = useState({
+    open: false,
+    reservation: null,
+    refund_method: 'BANK_TRANSFER',
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
+    account_number: '',
+    account_holder: '',
+    refund_evidence: [],
+    reference_code: '',
+    note: '',
+  });
+
+  const handleOpenPayoutCancelModal = (reservation) => {
+    payoutCancelIdemRef.current = createIdempotencyKey();
+    const existingBank = reservation.refund_bank_info || {};
+    setPayoutCancelModal({
+      open: true,
+      reservation,
+      refund_method: reservation.refund_method || 'BANK_TRANSFER',
+      bank_name: existingBank.bank_name || '',
+      bank_code: existingBank.bank_code || '',
+      bank_bin: existingBank.bank_bin || '',
+      bank_logo: existingBank.bank_logo || '',
+      account_number: existingBank.account_number || '',
+      account_holder: existingBank.account_holder || reservation.prospect_name || '',
+      refund_evidence: [],
+      reference_code: '',
+      note: '',
+    });
+  };
+
+  const handleSubmitPayoutCancel = async (e) => {
+    e?.preventDefault();
+    const rsv = payoutCancelModal.reservation;
+    if (!rsv?.id) return;
+    const method = payoutCancelModal.refund_method || 'BANK_TRANSFER';
+    const evList = Array.isArray(payoutCancelModal.refund_evidence)
+      ? payoutCancelModal.refund_evidence.filter(Boolean)
+      : [];
+
+    if (method === 'BANK_TRANSFER') {
+      if (
+        !String(payoutCancelModal.bank_name || '').trim() ||
+        !String(payoutCancelModal.account_number || '').trim() ||
+        !String(payoutCancelModal.account_holder || '').trim()
+      ) {
+        toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn.');
+        return;
+      }
+      if (evList.length === 0) {
+        toast.warning(
+          'Chi hoàn tiền giữ chỗ qua chuyển khoản bắt buộc đính kèm ít nhất 01 ảnh chứng từ UNC.'
+        );
+        return;
+      }
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        refund_method: method,
+        refund_evidence: evList,
+        reference_code: String(payoutCancelModal.reference_code || '').trim() || undefined,
+        note: String(payoutCancelModal.note || '').trim() || undefined,
+      };
+      if (method === 'BANK_TRANSFER') {
+        payload.refund_bank_info = {
+          bank_name: String(payoutCancelModal.bank_name).trim(),
+          bank_code: payoutCancelModal.bank_code || undefined,
+          bank_bin: payoutCancelModal.bank_bin || undefined,
+          bank_logo: payoutCancelModal.bank_logo || undefined,
+          account_number: String(payoutCancelModal.account_number).trim(),
+          account_holder: String(payoutCancelModal.account_holder).trim(),
+        };
+      }
+      const res = await buildingsService.payoutReservationCancel(rsv.id, payload, {
+        idempotencyKey: payoutCancelIdemRef.current,
+      });
+      toast.success(res?.message || 'Đã xác nhận chi hoàn tiền giữ chỗ và lưu chứng từ UNC.');
+      setPayoutCancelModal((p) => ({ ...p, open: false, reservation: null }));
+      loadApartment();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const editRsvBankIdemRef = useRef(createIdempotencyKey());
+  const [editRsvBankModal, setEditRsvBankModal] = useState({
+    open: false,
+    reservation: null,
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
+    account_number: '',
+    account_holder: '',
+  });
+
+  const handleOpenEditRsvBankModal = (reservation) => {
+    editRsvBankIdemRef.current = createIdempotencyKey();
+    const existingBank = reservation.refund_bank_info || {};
+    setEditRsvBankModal({
+      open: true,
+      reservation,
+      bank_name: existingBank.bank_name || '',
+      bank_code: existingBank.bank_code || '',
+      bank_bin: existingBank.bank_bin || '',
+      bank_logo: existingBank.bank_logo || '',
+      account_number: existingBank.account_number || '',
+      account_holder: existingBank.account_holder || reservation.prospect_name || '',
+    });
+  };
+
+  const handleSubmitEditRsvBank = async (e) => {
+    e?.preventDefault();
+    const rsv = editRsvBankModal.reservation;
+    if (!rsv?.id) return;
+    if (
+      !String(editRsvBankModal.bank_name || '').trim() ||
+      !String(editRsvBankModal.account_number || '').trim() ||
+      !String(editRsvBankModal.account_holder || '').trim()
+    ) {
+      toast.warning('Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await buildingsService.updateReservationBankInfo(
+        rsv.id,
+        {
+          bank_info: {
+            bank_name: String(editRsvBankModal.bank_name).trim(),
+            bank_code: editRsvBankModal.bank_code || undefined,
+            bank_bin: editRsvBankModal.bank_bin || undefined,
+            bank_logo: editRsvBankModal.bank_logo || undefined,
+            account_number: String(editRsvBankModal.account_number).trim(),
+            account_holder: String(editRsvBankModal.account_holder).trim(),
+          },
+        },
+        { idempotencyKey: editRsvBankIdemRef.current }
+      );
+      toast.success(res?.message || 'Đã cập nhật tài khoản nhận hoàn tiền giữ chỗ.');
+      setEditRsvBankModal((p) => ({ ...p, open: false, reservation: null }));
       loadApartment();
     } catch (err) {
       toast.error(extractErrorMessage(err));
@@ -748,6 +965,18 @@ export function ApartmentDetailPage() {
                         Lý do thanh lý: {r.cancel_reason}
                       </p>
                     ) : null}
+                    {r.cancel_settlement?.rejected_reason &&
+                    ['HELD', 'EXPIRED'].includes(r.status) ? (
+                      <p className="text-[11px] text-rose-600">
+                        Lý do từ chối đề xuất hủy: {r.cancel_settlement.rejected_reason}
+                      </p>
+                    ) : null}
+                    {r.refund_bank_info?.account_number ? (
+                      <p className="text-[11px] text-slate-600">
+                        STK hoàn: {r.refund_bank_info.bank_name} • {r.refund_bank_info.account_number} (
+                        {r.refund_bank_info.account_holder})
+                      </p>
+                    ) : null}
                     {Array.isArray(r.evidence) && r.evidence.length > 0 ? (
                       <div className="flex flex-wrap gap-1.5 pt-1">
                         {r.evidence.map((url, idx) => (
@@ -756,6 +985,19 @@ export function ApartmentDetailPage() {
                             src={url}
                             alt="Biên lai giữ chỗ"
                             className="w-10 h-10 rounded-lg object-cover border border-slate-200"
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                    {Array.isArray(r.refund_evidence) && r.refund_evidence.length > 0 ? (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        <span className="text-[10px] font-semibold text-emerald-700">UNC hoàn:</span>
+                        {r.refund_evidence.map((url, idx) => (
+                          <AuthImage
+                            key={`${r.id}-ref-ev-${idx}`}
+                            src={url}
+                            alt="UNC hoàn giữ chỗ"
+                            className="w-10 h-10 rounded-lg object-cover border border-emerald-200"
                           />
                         ))}
                       </div>
@@ -794,20 +1036,20 @@ export function ApartmentDetailPage() {
                 className: 'whitespace-nowrap',
                 render: (r) => {
                   const canConfirm = canManagerConfirmReservationPayment(r, { isManager });
-                  const canSettle =
-                    canSettleReservationCancel(r) &&
-                    Number(r.hold_amount || 0) > 0 &&
-                    canActorApproveReservationRow({
-                      isOwner,
-                      isManager,
-                      isSysAdmin,
-                      currentUserId,
-                      createdBy: r.confirmed_by || r.created_by,
-                      buildingHasActiveOwner: Boolean(
-                        r.building_has_active_owner ?? apt.building_has_active_owner
-                      ),
-                      allowSelfApproval,
-                    });
+                  const canPropose =
+                    canProposeReservationCancel(r, { isManager }) &&
+                    Number(r.hold_amount || 0) > 0;
+                  const canApprove = canApproveReservationCancel(r, {
+                    isOwner,
+                    isManager,
+                    isSysAdmin,
+                    currentUserId,
+                    buildingHasActiveOwner: Boolean(
+                      r.building_has_active_owner ?? apt.building_has_active_owner
+                    ),
+                    allowSelfApproval,
+                  });
+                  const canPayout = canPayoutReservationCancel(r, { isManager });
 
                   return (
                     <div className="inline-flex flex-col items-center gap-1.5">
@@ -835,15 +1077,61 @@ export function ApartmentDetailPage() {
                         </div>
                       ) : null}
 
-                      {canSettle ? (
+                      {canPropose ? (
                         <Button
                           size="xs"
                           variant="outline"
                           icon={Scale}
                           onClick={() => handleOpenCancelSettleModal(r)}
                         >
-                          Thanh lý hủy theo chính sách
+                          Đề xuất thanh lý hủy
                         </Button>
+                      ) : null}
+
+                      {canApprove ? (
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <Button
+                            size="xs"
+                            variant="success"
+                            icon={ShieldCheck}
+                            disabled={saving}
+                            onClick={() => handleOpenReviewCancelModal(r, 'approve')}
+                          >
+                            Duyệt thanh lý hủy
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="danger"
+                            icon={XCircle}
+                            disabled={saving}
+                            onClick={() => handleOpenReviewCancelModal(r, 'reject')}
+                          >
+                            Từ chối
+                          </Button>
+                        </div>
+                      ) : null}
+
+                      {canPayout ? (
+                        <div className="inline-flex items-center justify-center gap-1">
+                          <Button
+                            size="xs"
+                            variant="primary"
+                            icon={Wallet}
+                            disabled={saving}
+                            onClick={() => handleOpenPayoutCancelModal(r)}
+                          >
+                            Chi hoàn &amp; Tải UNC
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            icon={Edit3}
+                            disabled={saving}
+                            onClick={() => handleOpenEditRsvBankModal(r)}
+                          >
+                            Sửa STK
+                          </Button>
+                        </div>
                       ) : null}
                     </div>
                   );
@@ -1085,13 +1373,13 @@ export function ApartmentDetailPage() {
         </form>
       </Modal>
 
-      {/* Policy-Based Cancel Settlement Modal (Four-Eyes + ROUND(x, -3)) */}
+      {/* Step 1: MANAGER Proposal Modal (ROUND(x, -3), no UNC) */}
       <Modal
         open={settleModal.open}
         onClose={() => {
           if (!saving) setSettleModal((p) => ({ ...p, open: false }));
         }}
-        title="Thanh lý hủy giữ chỗ theo chính sách (Four-Eyes)"
+        title="Đề xuất thanh lý hủy giữ chỗ (Bước 1 — BQL lập đề xuất)"
         subtitle={
           settleModal.reservation
             ? `Khách: ${settleModal.reservation.prospect_name} • Tiền giữ chỗ: ${formatMoney(
@@ -1154,7 +1442,7 @@ export function ApartmentDetailPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <MoneyInput
-                label="Số tiền hoàn lại khách (VND)"
+                label="Số tiền đề xuất hoàn khách (VND)"
                 required
                 value={settleModal.refunded_amount}
                 onChange={(e) => handleChangeSettleRefunded(e.target.value)}
@@ -1169,7 +1457,7 @@ export function ApartmentDetailPage() {
             {Number(settleModal.refunded_amount || 0) > 0 ? (
               <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3.5">
                 <Select
-                  label="Phương thức hoàn tiền giữ chỗ"
+                  label="Phương thức hoàn tiền dự kiến"
                   value={settleModal.refund_method}
                   onChange={(e) =>
                     setSettleModal((p) => ({ ...p, refund_method: e.target.value }))
@@ -1177,8 +1465,6 @@ export function ApartmentDetailPage() {
                   options={[
                     { value: 'BANK_TRANSFER', label: 'Chuyển khoản ngân hàng' },
                     { value: 'CASH', label: 'Tiền mặt tại quầy' },
-                    { value: 'QR_CODE', label: 'QR Code' },
-                    { value: 'E_WALLET', label: 'Ví điện tử' },
                   ]}
                 />
 
@@ -1191,6 +1477,7 @@ export function ApartmentDetailPage() {
                       bankMeta={{
                         bank_code: settleModal.bank_code,
                         bank_bin: settleModal.bank_bin,
+                        bank_logo: settleModal.bank_logo,
                       }}
                       onBankChange={(val, chosen) =>
                         setSettleModal((p) => ({
@@ -1198,6 +1485,7 @@ export function ApartmentDetailPage() {
                           bank_name: val || chosen?.shortName || chosen?.short_name || '',
                           bank_code: chosen?.code || '',
                           bank_bin: chosen?.bin || '',
+                          bank_logo: chosen?.logo || '',
                         }))
                       }
                     />
@@ -1227,24 +1515,14 @@ export function ApartmentDetailPage() {
                   </>
                 ) : null}
 
-                <FileUpload
-                  label={
-                    settleModal.refund_method === 'BANK_TRANSFER'
-                      ? 'Ảnh chứng từ UNC chuyển khoản hoàn tiền (bắt buộc ≥ 1 ảnh)'
-                      : 'Chứng từ hoàn tiền / biên nhận (tùy chọn)'
-                  }
-                  multiple
-                  maxFiles={3}
-                  value={settleModal.refund_evidence}
-                  onChange={(vals) =>
-                    setSettleModal((p) => ({ ...p, refund_evidence: vals }))
-                  }
-                />
+                <p className="text-[11px] text-slate-600 bg-white p-2.5 rounded-lg border border-slate-200">
+                  Chưa cần tải chứng từ UNC ở bước đề xuất. Sau khi Chủ nhà phê duyệt phương án hoàn trả, BQL sẽ thực hiện chuyển khoản và đính kèm ảnh UNC ở bước chi hoàn (PRD 6.2 &amp; 7.5).
+                </p>
               </div>
             ) : null}
 
             <Input
-              label="Lý do xử lý (bắt buộc lưu vết kiểm toán)"
+              label="Lý do đề xuất thanh lý hủy (bắt buộc lưu vết kiểm toán)"
               required
               multiline
               rows={3}
@@ -1262,7 +1540,366 @@ export function ApartmentDetailPage() {
                 Hủy
               </Button>
               <Button type="submit" variant="primary" loading={saving}>
-                Xác nhận thanh lý giữ chỗ
+                Gửi đề xuất phê duyệt
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
+
+      {/* Step 2: OWNER / Four-Eyes Approver Review Modal */}
+      <Modal
+        open={reviewCancelModal.open}
+        onClose={() => {
+          if (!saving) {
+            setReviewCancelModal({
+              open: false,
+              reservation: null,
+              mode: 'approve',
+              note: '',
+              rejectReason: '',
+            });
+          }
+        }}
+        title={
+          reviewCancelModal.mode === 'reject'
+            ? 'Từ chối đề xuất thanh lý hủy giữ chỗ'
+            : 'Phê duyệt thanh lý hủy giữ chỗ (Bước 2 — Kiểm soát 4 mắt)'
+        }
+        subtitle={
+          reviewCancelModal.reservation
+            ? `Khách: ${reviewCancelModal.reservation.prospect_name} • Tiền giữ chỗ: ${formatMoney(
+                reviewCancelModal.reservation.hold_amount
+              )}`
+            : ''
+        }
+        size="md"
+      >
+        {reviewCancelModal.reservation ? (
+          <form onSubmit={handleSubmitReviewCancel} className="space-y-4">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div>
+                  <span className="text-slate-500">Tổng giữ chỗ:</span>
+                  <p className="font-bold text-slate-900">
+                    {formatMoney(reviewCancelModal.reservation.hold_amount)}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-slate-500">Đề xuất hoàn khách:</span>
+                  <p className="font-bold text-emerald-700">
+                    {formatMoney(reviewCancelModal.reservation.refunded_amount)}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-slate-500">Đề xuất thu phạt:</span>
+                  <p className="font-bold text-rose-700">
+                    {formatMoney(reviewCancelModal.reservation.forfeited_amount)}
+                  </p>
+                </div>
+              </div>
+              {reviewCancelModal.reservation.cancel_reason ? (
+                <p className="text-slate-700 pt-1 border-t border-slate-200/80">
+                  <strong>Lý do BQL đề xuất:</strong> {reviewCancelModal.reservation.cancel_reason}
+                </p>
+              ) : null}
+              {Number(reviewCancelModal.reservation.refunded_amount || 0) > 0 ? (
+                <p className="text-slate-600">
+                  <strong>Phương thức hoàn:</strong>{' '}
+                  {PAYMENT_METHOD_LABELS[reviewCancelModal.reservation.refund_method] ||
+                    reviewCancelModal.reservation.refund_method ||
+                    'Chuyển khoản'}
+                  {reviewCancelModal.reservation.refund_bank_info?.account_number
+                    ? ` — ${reviewCancelModal.reservation.refund_bank_info.bank_name} • ${reviewCancelModal.reservation.refund_bank_info.account_number} (${reviewCancelModal.reservation.refund_bank_info.account_holder})`
+                    : ''}
+                </p>
+              ) : null}
+            </div>
+
+            {reviewCancelModal.reservation.cancel_settlement?.policy_override ? (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                <strong>Cảnh báo lệch chính sách chuẩn:</strong> Mức đề xuất khác với gợi ý tự động của hệ thống (Hoàn{' '}
+                {formatMoney(
+                  reviewCancelModal.reservation.cancel_settlement?.policy_suggested_split
+                    ?.refunded_amount || 0
+                )}{' '}
+                • Phạt{' '}
+                {formatMoney(
+                  reviewCancelModal.reservation.cancel_settlement?.policy_suggested_split
+                    ?.forfeited_amount || 0
+                )}
+                ). Vui lòng kiểm tra kỹ lý do trước khi phê duyệt.
+              </div>
+            ) : null}
+
+            <div className="flex gap-2">
+              <Button
+                size="xs"
+                variant={reviewCancelModal.mode === 'approve' ? 'success' : 'outline'}
+                onClick={() => setReviewCancelModal((p) => ({ ...p, mode: 'approve' }))}
+              >
+                Chế độ: Phê duyệt
+              </Button>
+              <Button
+                size="xs"
+                variant={reviewCancelModal.mode === 'reject' ? 'danger' : 'outline'}
+                onClick={() => setReviewCancelModal((p) => ({ ...p, mode: 'reject' }))}
+              >
+                Chế độ: Từ chối đề xuất
+              </Button>
+            </div>
+
+            {reviewCancelModal.mode === 'reject' ? (
+              <Input
+                label="Lý do từ chối đề xuất (bắt buộc)"
+                required
+                multiline
+                rows={3}
+                placeholder="VD: Mức hoàn chưa đúng chính sách giữ chỗ, đề nghị áp dụng phạt 100%..."
+                value={reviewCancelModal.rejectReason}
+                onChange={(e) =>
+                  setReviewCancelModal((p) => ({ ...p, rejectReason: e.target.value }))
+                }
+              />
+            ) : (
+              <Input
+                label="Ghi chú phê duyệt (tùy chọn)"
+                multiline
+                rows={2}
+                placeholder="VD: Đồng ý hoàn theo đề xuất, mở lại phòng để chào khách mới..."
+                value={reviewCancelModal.note}
+                onChange={(e) => setReviewCancelModal((p) => ({ ...p, note: e.target.value }))}
+              />
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                disabled={saving}
+                onClick={() =>
+                  setReviewCancelModal({
+                    open: false,
+                    reservation: null,
+                    mode: 'approve',
+                    note: '',
+                    rejectReason: '',
+                  })
+                }
+              >
+                Đóng
+              </Button>
+              <Button
+                type="submit"
+                variant={reviewCancelModal.mode === 'reject' ? 'danger' : 'success'}
+                loading={saving}
+              >
+                {reviewCancelModal.mode === 'reject'
+                  ? 'Xác nhận từ chối đề xuất'
+                  : Number(reviewCancelModal.reservation.refunded_amount || 0) === 0
+                  ? 'Phê duyệt & Tịch thu 100%'
+                  : 'Phê duyệt phương án & Mở phòng'}
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
+
+      {/* Step 3: MANAGER Payout with UNC Modal */}
+      <Modal
+        open={payoutCancelModal.open}
+        onClose={() => {
+          if (!saving) setPayoutCancelModal((p) => ({ ...p, open: false }));
+        }}
+        title="Thực chi hoàn tiền giữ chỗ & Tải UNC (Bước 3 — BQL thực chi)"
+        subtitle={
+          payoutCancelModal.reservation
+            ? `Khách: ${payoutCancelModal.reservation.prospect_name} • Đã duyệt hoàn: ${formatMoney(
+                payoutCancelModal.reservation.refunded_amount
+              )}`
+            : ''
+        }
+        size="md"
+      >
+        {payoutCancelModal.reservation ? (
+          <form onSubmit={handleSubmitPayoutCancel} className="space-y-4">
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+              Số tiền đã được phê duyệt hoàn trả:{' '}
+              <strong>{formatMoney(payoutCancelModal.reservation.refunded_amount)}</strong> (Thu giữ phạt:{' '}
+              <strong>{formatMoney(payoutCancelModal.reservation.forfeited_amount)}</strong>). Số tiền này đã khóa theo quyết định phê duyệt.
+            </div>
+
+            <Select
+              label="Phương thức chi hoàn thực tế"
+              value={payoutCancelModal.refund_method}
+              onChange={(e) =>
+                setPayoutCancelModal((p) => ({ ...p, refund_method: e.target.value }))
+              }
+              options={[
+                { value: 'BANK_TRANSFER', label: 'Chuyển khoản ngân hàng (bắt buộc UNC)' },
+                { value: 'CASH', label: 'Tiền mặt tại quầy' },
+              ]}
+            />
+
+            {payoutCancelModal.refund_method === 'BANK_TRANSFER' ? (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <BankSelect
+                  label="Ngân hàng nhận hoàn (bắt buộc)"
+                  required
+                  value={payoutCancelModal.bank_name}
+                  bankMeta={{
+                    bank_code: payoutCancelModal.bank_code,
+                    bank_bin: payoutCancelModal.bank_bin,
+                    bank_logo: payoutCancelModal.bank_logo,
+                  }}
+                  onBankChange={(val, chosen) =>
+                    setPayoutCancelModal((p) => ({
+                      ...p,
+                      bank_name: val || chosen?.shortName || chosen?.short_name || '',
+                      bank_code: chosen?.code || '',
+                      bank_bin: chosen?.bin || '',
+                      bank_logo: chosen?.logo || '',
+                    }))
+                  }
+                />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Input
+                    label="Số tài khoản nhận hoàn"
+                    required
+                    value={payoutCancelModal.account_number}
+                    onChange={(e) =>
+                      setPayoutCancelModal((p) => ({ ...p, account_number: e.target.value }))
+                    }
+                  />
+                  <Input
+                    label="Chủ tài khoản (IN HOA)"
+                    required
+                    value={payoutCancelModal.account_holder}
+                    onChange={(e) =>
+                      setPayoutCancelModal((p) => ({
+                        ...p,
+                        account_holder: e.target.value.toUpperCase(),
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            <FileUpload
+              label={
+                payoutCancelModal.refund_method === 'BANK_TRANSFER'
+                  ? 'Ảnh chứng từ UNC chuyển khoản hoàn tiền (bắt buộc ≥ 1 ảnh — PRD 7.5)'
+                  : 'Ảnh phiếu chi tiền mặt / biên nhận (tùy chọn)'
+              }
+              multiple
+              maxFiles={3}
+              value={payoutCancelModal.refund_evidence}
+              onChange={(vals) =>
+                setPayoutCancelModal((p) => ({ ...p, refund_evidence: vals }))
+              }
+            />
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input
+                label="Mã tham chiếu giao dịch / UNC"
+                placeholder="VD: FT26308..."
+                value={payoutCancelModal.reference_code}
+                onChange={(e) =>
+                  setPayoutCancelModal((p) => ({ ...p, reference_code: e.target.value }))
+                }
+              />
+              <Input
+                label="Ghi chú chi hoàn"
+                placeholder="VD: Đã chuyển khoản hoàn giữ chỗ"
+                value={payoutCancelModal.note}
+                onChange={(e) =>
+                  setPayoutCancelModal((p) => ({ ...p, note: e.target.value }))
+                }
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                disabled={saving}
+                onClick={() => setPayoutCancelModal((p) => ({ ...p, open: false }))}
+              >
+                Hủy
+              </Button>
+              <Button type="submit" variant="primary" loading={saving}>
+                Xác nhận đã chi hoàn &amp; Lưu UNC
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </Modal>
+
+      {/* Edit Reservation Refund Bank Info Modal */}
+      <Modal
+        open={editRsvBankModal.open}
+        onClose={() => {
+          if (!saving) setEditRsvBankModal((p) => ({ ...p, open: false }));
+        }}
+        title="Cập nhật tài khoản nhận hoàn giữ chỗ"
+        subtitle={
+          editRsvBankModal.reservation
+            ? `Khách: ${editRsvBankModal.reservation.prospect_name} • Số tiền hoàn: ${formatMoney(
+                editRsvBankModal.reservation.refunded_amount
+              )}`
+            : ''
+        }
+        size="sm"
+      >
+        {editRsvBankModal.reservation ? (
+          <form onSubmit={handleSubmitEditRsvBank} className="space-y-3.5">
+            <BankSelect
+              label="Ngân hàng nhận hoàn"
+              required
+              value={editRsvBankModal.bank_name}
+              bankMeta={{
+                bank_code: editRsvBankModal.bank_code,
+                bank_bin: editRsvBankModal.bank_bin,
+                bank_logo: editRsvBankModal.bank_logo,
+              }}
+              onBankChange={(val, chosen) =>
+                setEditRsvBankModal((p) => ({
+                  ...p,
+                  bank_name: val || chosen?.shortName || chosen?.short_name || '',
+                  bank_code: chosen?.code || '',
+                  bank_bin: chosen?.bin || '',
+                  bank_logo: chosen?.logo || '',
+                }))
+              }
+            />
+            <Input
+              label="Số tài khoản nhận hoàn"
+              required
+              value={editRsvBankModal.account_number}
+              onChange={(e) =>
+                setEditRsvBankModal((p) => ({ ...p, account_number: e.target.value }))
+              }
+            />
+            <Input
+              label="Chủ tài khoản (IN HOA)"
+              required
+              value={editRsvBankModal.account_holder}
+              onChange={(e) =>
+                setEditRsvBankModal((p) => ({
+                  ...p,
+                  account_holder: e.target.value.toUpperCase(),
+                }))
+              }
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                disabled={saving}
+                onClick={() => setEditRsvBankModal((p) => ({ ...p, open: false }))}
+              >
+                Hủy
+              </Button>
+              <Button type="submit" loading={saving}>
+                Lưu tài khoản
               </Button>
             </div>
           </form>

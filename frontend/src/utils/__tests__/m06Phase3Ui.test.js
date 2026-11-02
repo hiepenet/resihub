@@ -139,6 +139,8 @@ test('M06 Phase 3 UI — canSettleReservationCancel enforces settleable states a
   // Non-settleable statuses -> false
   for (const st of [
     'PENDING_CONFIRM',
+    'CANCEL_PENDING_APPROVAL',
+    'APPROVED_PENDING_PAYOUT',
     'REJECTED',
     'PARTIALLY_REFUNDED',
     'REFUNDED',

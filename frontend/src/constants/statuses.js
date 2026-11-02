@@ -167,6 +167,8 @@ export const USER_STATUS = {
 export const RESERVATION_STATUS = {
   PENDING_CONFIRM: { label: 'Chờ xác nhận chuyển khoản', variant: 'amber' },
   HELD: { label: 'Đang giữ chỗ', variant: 'amber' },
+  CANCEL_PENDING_APPROVAL: { label: 'Chờ duyệt hủy giữ chỗ', variant: 'amber' },
+  APPROVED_PENDING_PAYOUT: { label: 'Chờ chi hoàn giữ chỗ', variant: 'sky' },
   CONVERTED: { label: 'Đã lên hợp đồng', variant: 'emerald' },
   EXPIRED: { label: 'Hết hạn giữ chỗ', variant: 'slate' },
   CANCELLED: { label: 'Đã hủy giữ chỗ', variant: 'slate' },

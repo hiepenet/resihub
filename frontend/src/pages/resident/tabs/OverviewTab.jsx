@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Building2,
   Maximize2,
@@ -19,6 +19,7 @@ import {
   Home,
   AlertCircle,
   XCircle,
+  Edit3,
 } from 'lucide-react';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -27,6 +28,7 @@ import { Input } from '../../../components/ui/Input';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
 import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
+import { BankSelect } from '../../../components/common/BankSelect';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { residentService } from '../../../services/resident.service';
@@ -34,6 +36,8 @@ import { useNotificationStore } from '../../../stores/notificationStore';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
 import { isValidIdNumber, extractErrorMessage } from '../../../utils/validation';
+import { createIdempotencyKey } from '../../../utils/idempotency';
+import { canResidentUpdateReservationBankInfo } from '../../../utils/depositUiHelpers';
 
 const AMENITY_LABELS = {
   wifi: 'Wi-Fi tốc độ cao',
@@ -127,7 +131,14 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
     () =>
       Array.isArray(overview?.reservation_history)
         ? overview.reservation_history.filter(
-            (h) => !['HELD', 'PENDING_CONFIRM', 'CONVERTED'].includes(h.reservation_status)
+            (h) =>
+              ![
+                'HELD',
+                'PENDING_CONFIRM',
+                'CANCEL_PENDING_APPROVAL',
+                'APPROVED_PENDING_PAYOUT',
+                'CONVERTED',
+              ].includes(h.reservation_status)
           )
         : [],
     [overview?.reservation_history]
@@ -153,7 +164,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
   const apartmentSelectOptions = useMemo(() => {
     const map = new Map();
     reservations.forEach((r) => {
-      if (r.apartment_id) {
+      if (r.apartment_id && (r.reservation_status || 'HELD') === 'HELD') {
         map.set(r.apartment_id, {
           value: r.apartment_id,
           label: `Căn ${r.apartment_code} — ${r.building_name} (${r.area_m2 || 0}m² • ${formatMoney(r.base_rent)}/tháng) [Đang giữ chỗ]`,
@@ -563,6 +574,149 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
     return null;
   };
 
+  const rsvBankIdemRef = useRef(createIdempotencyKey());
+  const [rsvBankSaving, setRsvBankSaving] = useState(false);
+  const [rsvBankModal, setRsvBankModal] = useState({
+    open: false,
+    reservation: null,
+    bank_name: '',
+    bank_code: '',
+    bank_bin: '',
+    bank_logo: '',
+    account_number: '',
+    account_holder: '',
+  });
+
+  const openRsvBankModal = (r) => {
+    rsvBankIdemRef.current = createIdempotencyKey();
+    const existingBank = r?.refund_bank_info || {};
+    setRsvBankModal({
+      open: true,
+      reservation: r,
+      bank_name: existingBank.bank_name || '',
+      bank_code: existingBank.bank_code || '',
+      bank_bin: existingBank.bank_bin || '',
+      bank_logo: existingBank.bank_logo || '',
+      account_number: existingBank.account_number || '',
+      account_holder:
+        existingBank.account_holder ||
+        (user?.full_name || r?.prospect_name || '').toUpperCase(),
+    });
+  };
+
+  const handleSubmitRsvBankInfo = async (e) => {
+    e?.preventDefault?.();
+    const rsvId = rsvBankModal.reservation?.reservation_id || rsvBankModal.reservation?.id;
+    if (!rsvId) return;
+    if (
+      !String(rsvBankModal.bank_name || '').trim() ||
+      !String(rsvBankModal.account_number || '').trim() ||
+      !String(rsvBankModal.account_holder || '').trim()
+    ) {
+      toast.warning('Vui lòng chọn Ngân hàng và nhập đầy đủ Số tài khoản, Chủ tài khoản nhận hoàn.');
+      return;
+    }
+    setRsvBankSaving(true);
+    try {
+      const res = await residentService.updateReservationRefundBankInfo(
+        rsvId,
+        {
+          bank_info: {
+            bank_name: String(rsvBankModal.bank_name).trim(),
+            bank_code: rsvBankModal.bank_code || undefined,
+            bank_bin: rsvBankModal.bank_bin || undefined,
+            bank_logo: rsvBankModal.bank_logo || undefined,
+            account_number: String(rsvBankModal.account_number).trim(),
+            account_holder: String(rsvBankModal.account_holder).trim(),
+          },
+        },
+        { idempotencyKey: rsvBankIdemRef.current }
+      );
+      toast.success(
+        res?.message || 'Đã cập nhật tài khoản nhận hoàn tiền giữ chỗ. Ban Quản Lý sẽ chuyển khoản cho bạn.'
+      );
+      setRsvBankModal((p) => ({ ...p, open: false, reservation: null }));
+      onRefreshOverview?.();
+    } catch (err) {
+      toast.error(extractErrorMessage(err));
+    } finally {
+      setRsvBankSaving(false);
+    }
+  };
+
+  const renderReservationBankModal = () => (
+    <Modal
+      open={rsvBankModal.open}
+      onClose={() => {
+        if (!rsvBankSaving) setRsvBankModal((p) => ({ ...p, open: false, reservation: null }));
+      }}
+      title="Cập nhật tài khoản nhận hoàn tiền giữ chỗ"
+      subtitle={
+        rsvBankModal.reservation
+          ? `Căn ${rsvBankModal.reservation.apartment_code} • Số tiền được hoàn: ${formatMoney(
+              rsvBankModal.reservation.refunded_amount
+            )}`
+          : ''
+      }
+      size="sm"
+    >
+      <form onSubmit={handleSubmitRsvBankInfo} className="space-y-3.5">
+        <BankSelect
+          label="Ngân hàng nhận hoàn"
+          required
+          value={rsvBankModal.bank_name}
+          bankMeta={{
+            bank_code: rsvBankModal.bank_code,
+            bank_bin: rsvBankModal.bank_bin,
+            bank_logo: rsvBankModal.bank_logo,
+          }}
+          onBankChange={(val, chosen) =>
+            setRsvBankModal((p) => ({
+              ...p,
+              bank_name: val || chosen?.shortName || chosen?.short_name || '',
+              bank_code: chosen?.code || '',
+              bank_bin: chosen?.bin || '',
+              bank_logo: chosen?.logo || '',
+            }))
+          }
+        />
+        <Input
+          label="Số tài khoản nhận hoàn"
+          required
+          placeholder="Nhập số tài khoản ngân hàng"
+          value={rsvBankModal.account_number}
+          onChange={(e) =>
+            setRsvBankModal((p) => ({ ...p, account_number: e.target.value }))
+          }
+        />
+        <Input
+          label="Chủ tài khoản (IN HOA không dấu)"
+          required
+          placeholder="NGUYEN VAN A"
+          value={rsvBankModal.account_holder}
+          onChange={(e) =>
+            setRsvBankModal((p) => ({
+              ...p,
+              account_holder: e.target.value.toUpperCase(),
+            }))
+          }
+        />
+        <div className="flex justify-end gap-2 pt-2">
+          <Button
+            variant="outline"
+            disabled={rsvBankSaving}
+            onClick={() => setRsvBankModal((p) => ({ ...p, open: false, reservation: null }))}
+          >
+            Hủy
+          </Button>
+          <Button type="submit" loading={rsvBankSaving}>
+            Lưu tài khoản nhận hoàn
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+
   const renderReservationsSection = ({ showActionButton = true } = {}) => {
     if (reservations.length === 0) return null;
 
@@ -572,11 +726,15 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           const rAmenities = parseAmenities(r.amenities);
           const rStatus = r.reservation_status || 'HELD';
           const isPendingConfirm = rStatus === 'PENDING_CONFIRM';
+          const isCancelPending = rStatus === 'CANCEL_PENDING_APPROVAL';
+          const isPendingPayout = rStatus === 'APPROVED_PENDING_PAYOUT';
+          const canUpdateBank = canResidentUpdateReservationBankInfo(r);
+          const isAmberTone = isPendingConfirm || isCancelPending;
           return (
             <Card
               key={r.reservation_id || r.apartment_id}
               className={
-                isPendingConfirm
+                isAmberTone
                   ? 'border-amber-200 bg-gradient-to-br from-amber-50/70 via-white to-orange-50/40 shadow-sm'
                   : 'border-sky-200 bg-gradient-to-br from-sky-50/70 via-white to-indigo-50/40 shadow-sm'
               }
@@ -585,20 +743,24 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                 <div className="flex items-start gap-3.5 min-w-0">
                   <div
                     className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${
-                      isPendingConfirm ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'
+                      isAmberTone ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'
                     }`}
                   >
-                    {isPendingConfirm ? <Clock className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
+                    {isAmberTone ? <Clock className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
                   </div>
                   <div className="space-y-1.5 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span
                         className={`text-xs font-semibold uppercase tracking-wide ${
-                          isPendingConfirm ? 'text-amber-700' : 'text-sky-700'
+                          isAmberTone ? 'text-amber-700' : 'text-sky-700'
                         }`}
                       >
                         {isPendingConfirm
                           ? 'Phiếu đăng ký giữ chỗ đang chờ đối soát'
+                          : isCancelPending
+                          ? 'Đề xuất thanh lý hủy giữ chỗ đang chờ phê duyệt'
+                          : isPendingPayout
+                          ? 'Đã duyệt hoàn tiền giữ chỗ — Chờ BQL chuyển khoản'
                           : 'Thông tin căn hộ đang giữ chỗ'}
                       </span>
                       <StatusBadge status={rStatus} domain="reservation" />
@@ -617,7 +779,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   </div>
                 </div>
 
-                {showActionButton && !isPendingConfirm ? (
+                {showActionButton && rStatus === 'HELD' ? (
                   <Button
                     size="sm"
                     icon={Send}
@@ -627,11 +789,57 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                     Đăng ký thông tin nhận nhà
                   </Button>
                 ) : null}
+
+                {canUpdateBank ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={Edit3}
+                    onClick={() => openRsvBankModal(r)}
+                    className="shrink-0 bg-white"
+                  >
+                    Cập nhật STK nhận hoàn
+                  </Button>
+                ) : null}
               </div>
 
               {isPendingConfirm ? (
                 <div className="mt-3 p-3 rounded-xl bg-amber-50/90 border border-amber-200/80 text-xs text-amber-900 leading-relaxed">
                   Ban Quản Lý đang đối soát chứng từ chuyển khoản của bạn (SLA 4 giờ làm việc). Căn hộ sẽ chính thức khóa giữ chỗ sau khi BQL xác nhận đã nhận tiền.
+                </div>
+              ) : null}
+
+              {isCancelPending ? (
+                <div className="mt-3 p-3 rounded-xl bg-amber-50/90 border border-amber-200/80 text-xs text-amber-900 leading-relaxed">
+                  Ban Quản Lý đã lập đề xuất thanh lý hủy giữ chỗ (Hoàn khách{' '}
+                  <strong>{formatMoney(r.refunded_amount || 0)}</strong> • Thu giữ phạt{' '}
+                  <strong>{formatMoney(r.forfeited_amount || 0)}</strong>) và đang trình Chủ nhà phê duyệt.
+                </div>
+              ) : null}
+
+              {isPendingPayout ? (
+                <div className="mt-3 p-3 rounded-xl bg-sky-50/90 border border-sky-200/80 text-xs text-sky-900 space-y-1.5 leading-relaxed">
+                  <p>
+                    Chủ nhà đã phê duyệt hoàn trả{' '}
+                    <strong className="text-emerald-700">{formatMoney(r.refunded_amount || 0)}</strong>
+                    {Number(r.forfeited_amount || 0) > 0
+                      ? ` (thu giữ phạt ${formatMoney(r.forfeited_amount)})`
+                      : ''}
+                    . Ban Quản Lý đang thực hiện thủ tục chi hoàn tiền cho bạn.
+                  </p>
+                  {r.refund_bank_info?.account_number ? (
+                    <p className="text-slate-700">
+                      Tài khoản nhận hoàn:{' '}
+                      <strong>
+                        {r.refund_bank_info.bank_name} • {r.refund_bank_info.account_number} (
+                        {r.refund_bank_info.account_holder})
+                      </strong>
+                    </p>
+                  ) : (
+                    <p className="text-amber-800 font-medium">
+                      Bạn chưa cung cấp tài khoản ngân hàng nhận hoàn. Vui lòng bấm &ldquo;Cập nhật STK nhận hoàn&rdquo; để Ban Quản Lý chuyển khoản nhanh chóng.
+                    </p>
+                  )}
                 </div>
               ) : null}
 
@@ -1131,6 +1339,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
         </div>
 
         {renderApplicationModal()}
+        {renderReservationBankModal()}
       </div>
     );
   }
@@ -1155,6 +1364,10 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
               {reservation
                 ? reservation.reservation_status === 'PENDING_CONFIRM'
                   ? `Phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}) của bạn đang chờ Ban Quản Lý đối soát sao kê ngân hàng.`
+                  : reservation.reservation_status === 'CANCEL_PENDING_APPROVAL'
+                  ? `Đề xuất thanh lý hủy giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}) của bạn đang chờ Chủ nhà phê duyệt.`
+                  : reservation.reservation_status === 'APPROVED_PENDING_PAYOUT'
+                  ? `Phiếu giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}) đã được duyệt hoàn tiền — vui lòng kiểm tra tài khoản ngân hàng nhận hoàn bên dưới.`
                   : `Bạn đang có phiếu đặt cọc giữ chỗ căn hộ ${reservation.apartment_code} (${reservation.building_name}). Vui lòng kiểm tra thông tin căn hộ và hoàn tất hồ sơ nhận nhà bên dưới.`
                 : 'Tài khoản của bạn hiện chưa có hợp đồng thuê đang hiệu lực. Bạn có thể theo dõi trạng thái hồ sơ giữ chỗ hoặc chọn căn hộ trống bên dưới để gửi đăng ký thuê trực tuyến.'}
             </p>
@@ -1240,6 +1453,19 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   {h.settlement_reason ? (
                     <p className="text-slate-500 italic">Lý do: {h.settlement_reason}</p>
                   ) : null}
+                  {Array.isArray(h.refund_evidence) && h.refund_evidence.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span className="text-[11px] font-medium text-emerald-700">Chứng từ UNC hoàn tiền:</span>
+                      {h.refund_evidence.map((url, idx) => (
+                        <AuthImage
+                          key={`${h.reservation_id}-unc-${idx}`}
+                          src={url}
+                          alt="UNC hoàn tiền giữ chỗ"
+                          className="w-10 h-10 rounded-lg object-cover border border-emerald-200"
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <span className="text-[11px] text-slate-500 shrink-0">
                   {h.settled_at ? formatDateTime(h.settled_at) : formatDate(h.hold_until)}
@@ -1273,7 +1499,11 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             {availableApartments.map((apt) => {
               const aptAmenities = parseAmenities(apt.amenities);
               const isReservedApt =
-                reservations.some((r) => r.apartment_id === apt.id) || apt.status === 'RESERVED';
+                reservations.some(
+                  (r) =>
+                    r.apartment_id === apt.id &&
+                    ['HELD', 'CANCEL_PENDING_APPROVAL'].includes(r.reservation_status || 'HELD')
+                ) || apt.status === 'RESERVED';
               return (
                 <div
                   key={apt.id}
@@ -1362,6 +1592,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
       </Card>
 
       {renderApplicationModal()}
+      {renderReservationBankModal()}
     </div>
   );
 }

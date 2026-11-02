@@ -35,6 +35,10 @@ export const residentService = {
     api.post(`/api/v1/deposits/${depositId}/dispute`, payload, withIdempotency(options)).then((r) => r.data),
   updateDepositRefundBankInfo: (depositId, payload, options = {}) =>
     api.patch(`/api/v1/deposits/${depositId}/bank-info`, payload, withIdempotency(options)).then((r) => r.data),
+  updateReservationRefundBankInfo: (reservationId, payload, options = {}) =>
+    api
+      .patch(`/api/v1/reservations/${reservationId}/bank-info`, payload, withIdempotency(options))
+      .then((r) => r.data),
   getDepositSettlementPdfHtml: (depositId) =>
     api
       .get(`/api/v1/deposits/${depositId}/settlement/pdf`, { responseType: 'text' })
