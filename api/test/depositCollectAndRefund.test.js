@@ -218,6 +218,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   // Người tạo tự duyệt hoàn cọc giữ chỗ -> bị chặn 403 FOUR_EYES_VIOLATION
   const selfRefundRsv = await apiFetch(`/api/v1/reservations/${rsv1Id}/refund`, manager.token, {
     method: 'PATCH',
+    body: JSON.stringify({ reason: 'Tự hoàn cọc giữ chỗ' }),
   });
   assert.equal(selfRefundRsv.status, 403);
   assert.equal(selfRefundRsv.body.code, 'FOUR_EYES_VIOLATION');
@@ -225,11 +226,12 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   // SYS_ADMIN duyệt hoàn cọc giữ chỗ -> 200 REFUNDED
   const okRefundRsv = await apiFetch(`/api/v1/reservations/${rsv1Id}/refund`, sysAdmin.token, {
     method: 'PATCH',
+    body: JSON.stringify({ reason: 'Hoàn cọc giữ chỗ theo thỏa thuận' }),
   });
   assert.equal(okRefundRsv.status, 200);
   assert.equal(okRefundRsv.body.data.status, 'REFUNDED');
 
-  // Khách 2 đặt giữ chỗ rồi bỏ cọc -> FORFEITED
+  // Khách 2 đặt giữ chỗ rồi bỏ cọc -> FORFEITED (Four-Eyes + reason)
   const rsv2Res = await apiFetch('/api/v1/reservations', manager.token, {
     method: 'POST',
     body: JSON.stringify({
@@ -244,8 +246,16 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(rsv2Res.status, 201);
   cleanup.reservationIds.push(rsv2Res.body.data.id);
 
-  const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv2Res.body.data.id}/forfeit`, manager.token, {
+  const selfForfeitRsv = await apiFetch(`/api/v1/reservations/${rsv2Res.body.data.id}/forfeit`, manager.token, {
     method: 'PATCH',
+    body: JSON.stringify({ reason: 'Tự tịch thu cọc' }),
+  });
+  assert.equal(selfForfeitRsv.status, 403);
+  assert.equal(selfForfeitRsv.body.code, 'FOUR_EYES_VIOLATION');
+
+  const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv2Res.body.data.id}/forfeit`, sysAdmin.token, {
+    method: 'PATCH',
+    body: JSON.stringify({ reason: 'Khách hủy giữ chỗ quá hạn ký HĐ' }),
   });
   assert.equal(forfeitRes.status, 200);
   assert.equal(forfeitRes.body.data.status, 'FORFEITED');

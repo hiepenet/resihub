@@ -847,9 +847,10 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
     assert.equal(rsvDup.status, 409);
     assert.equal(rsvDup.body.code, 'APARTMENT_NOT_AVAILABLE');
 
-    // Khách hủy giữ chỗ -> forfeit -> phòng về lại AVAILABLE
-    const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv1.body.data.id}/forfeit`, mgrVopA.token, {
+    // Khách hủy giữ chỗ -> forfeit (Four-Eyes + reason) -> phòng về lại AVAILABLE
+    const forfeitRes = await apiFetch(`/api/v1/reservations/${rsv1.body.data.id}/forfeit`, mgr2VopA.token, {
       method: 'PATCH',
+      body: JSON.stringify({ reason: 'Khách báo hủy giữ chỗ trước khi ký HĐ' }),
     });
     assert.equal(forfeitRes.status, 200);
     const aptAfterForfeit = await adminPool.query('SELECT status FROM apartment WHERE id = $1', [testApt1Id]);

@@ -2,6 +2,7 @@ import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -13,6 +14,9 @@ import {
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn } from '../services/pricing.js';
 import { normalizeVnPhone, ensureResidentAccount } from '../services/residentAccount.js';
+import { isPositiveSafeIntegerVnd, getTodayVnDateStr } from '../services/depositSettlement.js';
+
+export { getTodayVnDateStr };
 
 const router = express.Router();
 
@@ -87,7 +91,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
       sql += ` AND r.status = $${params.length}`;
     }
 
-    sql += ` ORDER BY COALESCE(r.hold_from, r.created_at::date) ASC, r.hold_until ASC, r.created_at DESC`;
+    sql += ` ORDER BY COALESCE(r.hold_from, (r.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) ASC, r.hold_until ASC, r.created_at DESC`;
 
     const result = await pool.query(sql, params);
     res.json({ data: result.rows });
@@ -102,7 +106,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
  * Tạo đặt cọc giữ chỗ cho khách tiềm năng (NV-06 / FR-067)
  * Quyền theo PRD 6.2 & FR-067: Chỉ MANAGER của tòa chứa căn hộ (OWNER là R)
  */
-router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { apartment_id, prospect_name, phone, hold_amount, hold_from, hold_until, note } = req.body;
   const orgId = req.user.org_id;
 
@@ -121,6 +125,14 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     });
   }
 
+  if (!isPositiveSafeIntegerVnd(hold_amount)) {
+    return res.status(400).json({
+      code: 'INVALID_HOLD_AMOUNT',
+      message: 'Số tiền đặt cọc giữ chỗ phải là số nguyên dương VND.',
+    });
+  }
+  const normalizedHoldAmount = Number(String(hold_amount).trim());
+
   if (!hold_until) {
     return res.status(400).json({
       code: 'VALIDATION_ERROR',
@@ -128,7 +140,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
     });
   }
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayVnDateStr();
   const holdFromStr = hold_from ? String(hold_from).slice(0, 10) : todayStr;
   const holdUntilStr = String(hold_until).slice(0, 10);
   const holdFromDate = new Date(`${holdFromStr}T00:00:00Z`);
@@ -212,11 +224,11 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
     // Kiểm tra chồng lấn với các phiếu giữ chỗ đang hiệu lực (HELD) khác trên cùng căn hộ
     const overlapRes = await client.query(
-      `SELECT prospect_name, COALESCE(hold_from, created_at::date) AS hold_from, hold_until
+      `SELECT prospect_name, COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) AS hold_from, hold_until
        FROM reservation
        WHERE apartment_id = $1
          AND status = 'HELD'
-         AND COALESCE(hold_from, created_at::date) <= $2::date
+         AND COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) <= $2::date
          AND hold_until >= $3::date
        ORDER BY hold_until ASC
        LIMIT 1`,
@@ -242,7 +254,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
         apartment_id,
         prospect_name.trim(),
         cleanPhone,
-        hold_amount || 0,
+        normalizedHoldAmount,
         holdFromStr,
         holdUntilStr,
         note || '',
@@ -303,212 +315,250 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), async (req, res) =
 
 /**
  * PATCH /api/v1/reservations/:id/convert
+ * Chặn chuyển đổi thủ công rời rạc để đảm bảo tiền cọc giữ chỗ luôn kết chuyển nguyên tử khi kích hoạt HĐ (FR-067).
  */
 router.patch('/:id/convert', authenticateToken, requireRole(['MANAGER']), async (req, res) => {
-  const { id } = req.params;
-  const { client, release } = await getUserClient(req);
-  try {
-    const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
-    if (rsvExist.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
-    }
-    const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-    if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-      await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation convert on unassigned building');
-      return res.status(403).json({
-        code: 'FORBIDDEN_BUILDING',
-        message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-      });
-    }
-
-    await client.query('BEGIN');
-
-    const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
-    const currentRes = resCheck.rows[0];
-
-    if (currentRes.status !== 'HELD') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        code: 'INVALID_STATUS',
-        message: `Hồ sơ giữ chỗ đang ở trạng thái ${currentRes.status}, không thể chuyển đổi.`,
-      });
-    }
-
-    const updated = await client.query(
-      `UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [id]
-    );
-
-    await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES ($1, 'UPDATE', 'reservation', $2, $3, $4)`,
-      [req.user.sub, id, JSON.stringify(currentRes), JSON.stringify(updated.rows[0])]
-    );
-
-    await client.query('COMMIT');
-    res.json({ message: 'Đã chuyển cọc giữ chỗ sang hợp đồng.', data: updated.rows[0] });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('[Convert Reservation Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi chuyển đổi cọc giữ chỗ.' });
-  } finally {
-    await release();
-  }
+  return res.status(409).json({
+    code: 'MUST_CONVERT_VIA_CONTRACT_ACTIVATION',
+    message:
+      'Phiếu giữ chỗ chỉ được kết chuyển tự động sang sổ cọc hợp đồng khi kích hoạt hợp đồng thuê (POST /api/v1/contracts/:id/activate).',
+  });
 });
 
 /**
  * PATCH /api/v1/reservations/:id/forfeit
  */
-router.patch('/:id/forfeit', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { id } = req.params;
-  const { client, release } = await getUserClient(req);
-  try {
-    const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
-    if (rsvExist.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
-    }
-    const userRoles = getUserRoleCodes(req);
-    if (!userRoles.includes('SYS_ADMIN')) {
-      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-      if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation forfeit on unassigned building');
-        return res.status(403).json({
-          code: 'FORBIDDEN_BUILDING',
-          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
-        });
-      }
-    }
-
-    await client.query('BEGIN');
-
-    const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
-    const currentRes = resCheck.rows[0];
-
-    if (currentRes.status !== 'HELD') {
-      await client.query('ROLLBACK');
+router.patch(
+  '/:id/forfeit',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const trimmedReason = String(req.body?.reason || '').trim();
+    if (!trimmedReason) {
       return res.status(400).json({
-        code: 'INVALID_STATUS',
-        message: `Hồ sơ giữ chỗ đang ở trạng thái ${currentRes.status}.`,
+        code: 'REASON_REQUIRED',
+        message: 'Vui lòng cung cấp lý do hủy / tịch thu cọc giữ chỗ (NFR-016).',
       });
     }
 
-    const updated = await client.query(
-      `UPDATE reservation SET status = 'FORFEITED', updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [id]
-    );
+    const { client, release } = await getUserClient(req);
+    try {
+      const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
+      if (rsvExist.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const userRoles = getUserRoleCodes(req);
+      if (!userRoles.includes('SYS_ADMIN')) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+        if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
+          await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation forfeit on unassigned building');
+          return res.status(403).json({
+            code: 'FORBIDDEN_BUILDING',
+            message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+          });
+        }
+      }
 
-    await syncApartmentStatus(client, currentRes.apartment_id);
+      await client.query('BEGIN');
 
-    await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES ($1, 'FORFEIT', 'reservation', $2, $3, $4)`,
-      [
-        req.user.sub,
-        id,
-        JSON.stringify(currentRes),
-        JSON.stringify({
-          reservation: updated.rows[0],
-          forfeited_amount: currentRes.hold_amount,
-          note: 'Khách hủy giữ chỗ, mất tiền cọc giữ chỗ',
-        }),
-      ]
-    );
+      const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
+      if (resCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const currentRes = resCheck.rows[0];
 
-    await client.query('COMMIT');
-    res.json({ message: 'Đã ghi nhận khách hủy giữ chỗ (mất cọc). Phòng đã mở lại có sẵn.', data: updated.rows[0] });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('[Forfeit Reservation Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận hủy giữ chỗ.' });
-  } finally {
-    await release();
+      if (!['HELD', 'EXPIRED'].includes(currentRes.status)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'INVALID_STATUS',
+          message: `Hồ sơ giữ chỗ đang ở trạng thái ${currentRes.status}, chỉ phiếu HELD hoặc EXPIRED mới được xử lý.`,
+        });
+      }
+
+      if (BigInt(currentRes.hold_amount ?? 0) <= 0n) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_HOLD_AMOUNT',
+          message: 'Phiếu giữ chỗ không có số dư tiền cọc hợp lệ để tịch thu.',
+        });
+      }
+
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: currentRes.created_by,
+        entity: 'reservation',
+        entityId: id,
+        actionContext: 'RESERVATION_FORFEIT',
+      });
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FOUR_EYES_VIOLATION',
+          message: 'Quy tắc 4 mắt (Four-eyes): Người duyệt tịch thu cọc giữ chỗ phải khác người đã tạo phiếu giữ chỗ.',
+        });
+      }
+
+      const updated = await client.query(
+        `UPDATE reservation
+         SET status = 'FORFEITED',
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $2,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [id, `[Tịch thu cọc]: ${trimmedReason}`]
+      );
+
+      await syncApartmentStatus(client, currentRes.apartment_id);
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'FORFEIT', 'reservation', $2, $3, $4)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify(currentRes),
+          JSON.stringify({
+            reservation: updated.rows[0],
+            forfeited_amount: currentRes.hold_amount,
+            approved_by: req.user.sub,
+            reason: trimmedReason,
+            note: 'Khách hủy giữ chỗ / quá hạn, tịch thu tiền cọc giữ chỗ',
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({ message: 'Đã ghi nhận khách hủy giữ chỗ (mất cọc). Phòng đã mở lại có sẵn.', data: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Forfeit Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận hủy giữ chỗ.' });
+    } finally {
+      await release();
+    }
   }
-});
+);
 
 /**
  * PATCH /api/v1/reservations/:id/refund
  */
-router.patch('/:id/refund', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { id } = req.params;
-  const { client, release } = await getUserClient(req);
-  try {
-    const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
-    if (rsvExist.rows.length === 0) {
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+router.patch(
+  '/:id/refund',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const trimmedReason = String(req.body?.reason || '').trim();
+    if (!trimmedReason) {
+      return res.status(400).json({
+        code: 'REASON_REQUIRED',
+        message: 'Vui lòng cung cấp lý do hoàn trả cọc giữ chỗ (NFR-016).',
+      });
     }
-    const userRoles = getUserRoleCodes(req);
-    if (!userRoles.includes('SYS_ADMIN')) {
-      const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
-      if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
-        await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation refund on unassigned building');
-        return res.status(403).json({
-          code: 'FORBIDDEN_BUILDING',
-          message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const rsvExist = await adminPool.query('SELECT * FROM reservation WHERE id = $1 AND org_id = $2', [id, req.user.org_id]);
+      if (rsvExist.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const userRoles = getUserRoleCodes(req);
+      if (!userRoles.includes('SYS_ADMIN')) {
+        const mgrIds = await getManagerBuildingIds(req.user.sub, req.user.org_id);
+        if (!mgrIds.includes(rsvExist.rows[0].building_id)) {
+          await logAccessDenied(req, 'reservation', id, 'MANAGER attempted reservation refund on unassigned building');
+          return res.status(403).json({
+            code: 'FORBIDDEN_BUILDING',
+            message: 'Bạn không có quyền thao tác trên tòa nhà của hồ sơ giữ chỗ này.',
+          });
+        }
+      }
+
+      await client.query('BEGIN');
+
+      const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
+      if (resCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ giữ chỗ.' });
+      }
+      const currentRes = resCheck.rows[0];
+
+      if (!['HELD', 'EXPIRED'].includes(currentRes.status)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          code: 'INVALID_STATUS',
+          message: `Hồ sơ giữ chỗ đang ở trạng thái ${currentRes.status}, chỉ phiếu HELD hoặc EXPIRED mới được xử lý.`,
         });
       }
-    }
 
-    await client.query('BEGIN');
+      if (BigInt(currentRes.hold_amount ?? 0) <= 0n) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'INVALID_HOLD_AMOUNT',
+          message: 'Phiếu giữ chỗ không có số dư tiền cọc hợp lệ để hoàn trả.',
+        });
+      }
 
-    const resCheck = await client.query('SELECT * FROM reservation WHERE id = $1 FOR UPDATE', [id]);
-    const currentRes = resCheck.rows[0];
-
-    const fourEyes = await checkFourEyesOrWarn({
-      orgId: req.user.org_id,
-      actorId: req.user.sub,
-      creatorId: currentRes.created_by,
-      entity: 'reservation',
-      entityId: id,
-      actionContext: 'RESERVATION_REFUND',
-    });
-    if (!fourEyes.allowed) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({
-        code: 'FOUR_EYES_VIOLATION',
-        message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (Quản lý khác hoặc SYS_ADMIN).',
+      const fourEyes = await checkFourEyesOrWarn({
+        orgId: req.user.org_id,
+        actorId: req.user.sub,
+        creatorId: currentRes.created_by,
+        entity: 'reservation',
+        entityId: id,
+        actionContext: 'RESERVATION_REFUND',
       });
-    }
+      if (!fourEyes.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({
+          code: 'FOUR_EYES_VIOLATION',
+          message: 'Quy tắc 4 mắt (AC-017 / Four-eyes): Người duyệt hoàn cọc giữ chỗ phải khác người đã tạo hồ sơ giữ chỗ (Quản lý khác hoặc SYS_ADMIN).',
+        });
+      }
 
-    if (currentRes.status !== 'HELD') {
+      const updated = await client.query(
+        `UPDATE reservation
+         SET status = 'REFUNDED',
+             note = COALESCE(NULLIF(note, '') || E'\n', '') || $2,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [id, `[Hoàn cọc giữ chỗ]: ${trimmedReason}`]
+      );
+
+      await syncApartmentStatus(client, currentRes.apartment_id);
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'REFUND', 'reservation', $2, $3, $4)`,
+        [
+          req.user.sub,
+          id,
+          JSON.stringify(currentRes),
+          JSON.stringify({
+            reservation: updated.rows[0],
+            refunded_amount: currentRes.hold_amount,
+            approved_by: req.user.sub,
+            reason: trimmedReason,
+            note: 'Hoàn trả tiền đặt cọc giữ chỗ cho khách',
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.json({ message: 'Đã hoàn tiền giữ chỗ cho khách. Phòng đã mở lại có sẵn.', data: updated.rows[0] });
+    } catch (err) {
       await client.query('ROLLBACK');
-      return res.status(400).json({
-        code: 'INVALID_STATUS',
-        message: `Hồ sơ giữ chỗ đang ở trạng thái ${currentRes.status}.`,
-      });
+      console.error('[Refund Reservation Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi hoàn tiền giữ chỗ.' });
+    } finally {
+      await release();
     }
-
-    const updated = await client.query(
-      `UPDATE reservation SET status = 'REFUNDED', updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [id]
-    );
-
-    await syncApartmentStatus(client, currentRes.apartment_id);
-
-    await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES ($1, 'REFUND', 'reservation', $2, $3, $4)`,
-      [
-        req.user.sub,
-        id,
-        JSON.stringify(currentRes),
-        JSON.stringify({
-          reservation: updated.rows[0],
-          refunded_amount: currentRes.hold_amount,
-          approved_by: req.user.sub,
-          note: 'Hoàn trả tiền đặt cọc giữ chỗ cho khách',
-        }),
-      ]
-    );
-
-    await client.query('COMMIT');
-    res.json({ message: 'Đã hoàn tiền giữ chỗ cho khách. Phòng đã mở lại có sẵn.', data: updated.rows[0] });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('[Refund Reservation Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi hoàn tiền giữ chỗ.' });
-  } finally {
-    await release();
   }
-});
+);
 
 export default router;

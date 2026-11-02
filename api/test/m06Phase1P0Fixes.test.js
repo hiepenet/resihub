@@ -821,4 +821,179 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(confD.status, 200);
     assert.equal(confD.body.data.status, 'DEDUCTED_FULL');
   });
+
+  // =========================================================================
+  // Task 3: Reservation Guards (hold_amount > 0, convert blocked, Four-Eyes + reason, EXPIRED cancel, Idempotency)
+  // =========================================================================
+  await t.test('P0-Task3: Reservation positive hold_amount, convert blocked, Four-Eyes + reason, EXPIRED cancel & idempotency', async () => {
+    const { runDailyJobs } = await import('../src/jobs/daily.js');
+    const aptR = await createApt('P0-APTR', 9000000);
+
+    // 1) Invalid hold_amount: 0, -500000, 1000.5, omitted -> 400 INVALID_HOLD_AMOUNT
+    for (const badHold of [0, -500000, 1000.5, undefined]) {
+      const payload = {
+        apartment_id: aptR.id,
+        prospect_name: `Khách Sai Cọc ${suffix}`,
+        phone: `0975${suffix}`,
+        hold_from: todayStr,
+        hold_until: plus7Str,
+      };
+      if (badHold !== undefined) payload.hold_amount = badHold;
+      const badRsv = await apiFetch('/api/v1/reservations', manager.token, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      assert.equal(badRsv.status, 400, `Expected 400 for hold_amount=${badHold}, got ${badRsv.status}`);
+      assert.equal(badRsv.body.code, 'INVALID_HOLD_AMOUNT');
+    }
+
+    // 5) Idempotent POST /api/v1/reservations
+    const rsvIdemKey = `idem-rsv-${crypto.randomUUID()}`;
+    const rsv1 = await apiFetch('/api/v1/reservations', manager.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': rsvIdemKey },
+      body: JSON.stringify({
+        apartment_id: aptR.id,
+        prospect_name: `Khách Giữ Chỗ Chuẩn ${suffix}`,
+        phone: `0976${suffix}`,
+        hold_amount: 2000000,
+        hold_from: todayStr,
+        hold_until: plus7Str,
+        note: 'Ghi chú gốc của khách',
+      }),
+    });
+    assert.equal(rsv1.status, 201);
+    const rsv1Id = rsv1.body.data.id;
+    cleanup.reservationIds.push(rsv1Id);
+    await trackPhone(`0976${suffix}`);
+
+    const rsv1Replay = await apiFetch('/api/v1/reservations', manager.token, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': rsvIdemKey },
+      body: JSON.stringify({
+        apartment_id: aptR.id,
+        prospect_name: `Khách Giữ Chỗ Chuẩn ${suffix}`,
+        phone: `0976${suffix}`,
+        hold_amount: 2000000,
+        hold_from: todayStr,
+        hold_until: plus7Str,
+        note: 'Ghi chú gốc của khách',
+      }),
+    });
+    assert.equal(rsv1Replay.status, 201);
+    assert.equal(rsv1Replay.headers.get('idempotent-replayed'), 'true');
+    assert.equal(rsv1Replay.body.data.id, rsv1Id);
+
+    // 2) Manual PATCH /:id/convert -> 409 MUST_CONVERT_VIA_CONTRACT_ACTIVATION (stays HELD)
+    const convRes = await apiFetch(`/api/v1/reservations/${rsv1Id}/convert`, manager.token, {
+      method: 'PATCH',
+    });
+    assert.equal(convRes.status, 409);
+    assert.equal(convRes.body.code, 'MUST_CONVERT_VIA_CONTRACT_ACTIVATION');
+    const stillHeld = await adminPool.query('SELECT status FROM reservation WHERE id = $1', [rsv1Id]);
+    assert.equal(stillHeld.rows[0].status, 'HELD');
+
+    // 3) Missing reason -> 400 REASON_REQUIRED; creator self-approve -> 403 FOUR_EYES_VIOLATION; SYS_ADMIN + reason -> 200 preserving original note
+    const noReasonForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({}),
+    });
+    assert.equal(noReasonForfeit.status, 400);
+    assert.equal(noReasonForfeit.body.code, 'REASON_REQUIRED');
+
+    const selfForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, manager.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Tự duyệt tịch thu' }),
+    });
+    assert.equal(selfForfeit.status, 403);
+    assert.equal(selfForfeit.body.code, 'FOUR_EYES_VIOLATION');
+
+    const okForfeit = await apiFetch(`/api/v1/reservations/${rsv1Id}/forfeit`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Khách báo không thuê nữa' }),
+    });
+    assert.equal(okForfeit.status, 200);
+    assert.equal(okForfeit.body.data.status, 'FORFEITED');
+    assert.match(okForfeit.body.data.note, /Ghi chú gốc của khách/);
+    assert.match(okForfeit.body.data.note, /\[Tịch thu cọc\]: Khách báo không thuê nữa/);
+
+    // 4) EXPIRED reservation after runDailyJobs() still supports refund & forfeit with Four-Eyes + reason
+    const rsvExpRefund = await apiFetch('/api/v1/reservations', manager.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptR.id,
+        prospect_name: `Khách Quá Hạn Hoàn ${suffix}`,
+        phone: `0977${suffix}`,
+        hold_amount: 1500000,
+        hold_from: todayStr,
+        hold_until: plus7Str,
+        note: 'Phiếu chờ hoàn sau hết hạn',
+      }),
+    });
+    assert.equal(rsvExpRefund.status, 201);
+    const rsvExpRefundId = rsvExpRefund.body.data.id;
+    cleanup.reservationIds.push(rsvExpRefundId);
+    await trackPhone(`0977${suffix}`);
+
+    await adminPool.query(
+      `UPDATE reservation SET hold_from = CURRENT_DATE - 5, hold_until = CURRENT_DATE - 1 WHERE id = $1`,
+      [rsvExpRefundId]
+    );
+    await runDailyJobs();
+
+    const expRow = await adminPool.query('SELECT status FROM reservation WHERE id = $1', [rsvExpRefundId]);
+    assert.equal(expRow.rows[0].status, 'EXPIRED');
+
+    const noReasonRefund = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({}),
+    });
+    assert.equal(noReasonRefund.status, 400);
+    assert.equal(noReasonRefund.body.code, 'REASON_REQUIRED');
+
+    const selfRefundExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, manager.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Tự hoàn cọc quá hạn' }),
+    });
+    assert.equal(selfRefundExp.status, 403);
+    assert.equal(selfRefundExp.body.code, 'FOUR_EYES_VIOLATION');
+
+    const okRefundExp = await apiFetch(`/api/v1/reservations/${rsvExpRefundId}/refund`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Hoàn thiện chí do chủ nhà chậm bàn giao' }),
+    });
+    assert.equal(okRefundExp.status, 200);
+    assert.equal(okRefundExp.body.data.status, 'REFUNDED');
+    assert.match(okRefundExp.body.data.note, /Phiếu chờ hoàn sau hết hạn/);
+    assert.match(okRefundExp.body.data.note, /\[Hoàn cọc giữ chỗ\]: Hoàn thiện chí do chủ nhà chậm bàn giao/);
+
+    const rsvExpForfeit = await apiFetch('/api/v1/reservations', manager.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        apartment_id: aptR.id,
+        prospect_name: `Khách Quá Hạn Tịch Thu ${suffix}`,
+        phone: `0978${suffix}`,
+        hold_amount: 1500000,
+        hold_from: todayStr,
+        hold_until: plus7Str,
+      }),
+    });
+    assert.equal(rsvExpForfeit.status, 201);
+    const rsvExpForfeitId = rsvExpForfeit.body.data.id;
+    cleanup.reservationIds.push(rsvExpForfeitId);
+    await trackPhone(`0978${suffix}`);
+
+    await adminPool.query(
+      `UPDATE reservation SET hold_from = CURRENT_DATE - 5, hold_until = CURRENT_DATE - 1 WHERE id = $1`,
+      [rsvExpForfeitId]
+    );
+    await runDailyJobs();
+
+    const okForfeitExp = await apiFetch(`/api/v1/reservations/${rsvExpForfeitId}/forfeit`, sysAdmin.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ reason: 'Quá hạn giữ chỗ khách không ký HĐ' }),
+    });
+    assert.equal(okForfeitExp.status, 200);
+    assert.equal(okForfeitExp.body.data.status, 'FORFEITED');
+  });
 });
