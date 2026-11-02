@@ -3,7 +3,7 @@
 **Ngày:** 2026-11-02  
 **Phiên bản:** v3 (Đã rà soát đối chiếu toàn diện theo PRD v2.0)  
 **Quy mô:** Dự án liên phân hệ (Migration CSDL & RLS chuẩn `PRD Mục 6.2` + Engine tính phí 3 tầng & đồng bộ hóa đơn 3 kịch bản cho cả `SERVICE` và `RENT` khi kết thúc hợp đồng sớm + Phê duyệt 4 mắt sau phát hành qua RPC hẹp `SECURITY DEFINER` + Sổ `credit_balance`, KPI `Mục 15.3` & Quyết toán cuối kỳ + Tab Audit & Giao diện Quản trị / Chủ nhà / Cư dân)  
-**Tài liệu tham chiếu chuẩn:** `PRD - Quan ly Can ho va Nha cho thue v2.0.md` (`FR-006`, `FR-013`, `FR-029`, `FR-033`, `FR-034`, `FR-035`, `FR-040`, `FR-065`, `FR-066`, `FR-068`, `AC-003.2`, `AC-015.3`, `AC-017.3`, `AC-019.1`, `AC-020.1`, Mục `6.1`, `6.2`, `7.5`, `8.2`, `10.3`, `13`, `13.2`, `13.3`, `13.4`, `14.3`, `14.5`, `15.1–15.3`, `16.1–16.2`, `NFR-008`, `NFR-016`)
+**Tài liệu tham chiếu chuẩn:** `PRD - Quan ly Can ho va Nha cho thue v2.0.md` (`FR-006`, `FR-013`, `FR-024`, `FR-029`, `FR-033`, `FR-034`, `FR-035`, `FR-040`, `FR-064`, `FR-065`, `FR-066`, `FR-068`, `AC-003.2`, `AC-015.3`, `AC-017.3`, `AC-019.1`, `AC-020.1`, Mục `6.1`, `6.2`, `7.5`, `8.2`, `10.3`, `13`, `13.2`, `13.3`, `13.4`, `14.3`, `14.5`, `15.1–15.3`, `16.1–16.2`, `NFR-008`, `NFR-010`, `NFR-016`)
 
 ---
 
@@ -138,7 +138,7 @@ Hệ thống hiện đang tồn tại các bất cập nghiệp vụ liên kết
    - `adjustment_id UUID` (gắn FK tới `invoice_adjustment(id) ON DELETE SET NULL`)
    - `formula_meta JSONB` (lưu chi tiết công thức tính để giải trình trên UI/PDF: `{ billing_mode, price_source, unit_price, quantity, active_days, days_in_month, overlap_start, overlap_end, raw_amount, rounded_amount }`)
 
-5. **Tạo bảng `invoice_adjustment` (Phê duyệt 4 mắt cho điều chỉnh / hủy hóa đơn sau phát hành — `FR-034`, `FR-035`, `Mục 13`):**
+5. **Tạo bảng `invoice_adjustment` (Phê duyệt 4 mắt cho điều chỉnh / miễn giảm phạt chậm / hủy hóa đơn sau phát hành — `FR-034`, `FR-035`, `FR-064`, `Mục 13`):**
    ```sql
    CREATE TABLE IF NOT EXISTS invoice_adjustment (
      id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -147,7 +147,7 @@ Hệ thống hiện đang tồn tại các bất cập nghiệp vụ liên kết
      invoice_id        UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
      subscription_id   UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
      adjustment_target TEXT NOT NULL DEFAULT 'MANUAL'
-                       CHECK (adjustment_target IN ('SERVICE', 'RENT', 'MANUAL')),
+                       CHECK (adjustment_target IN ('SERVICE', 'RENT', 'LATE_FEE', 'MANUAL')),
      action_type       TEXT NOT NULL CHECK (action_type IN ('ADJUST', 'VOID')),
      delta_amount      BIGINT NOT NULL DEFAULT 0,
      reason            TEXT NOT NULL,
@@ -170,37 +170,47 @@ Hệ thống hiện đang tồn tại các bất cập nghiệp vụ liên kết
    - Partial Unique Index chống sinh trùng đề nghị đang chờ duyệt:
      - `idx_invoice_adj_pending_sub ON invoice_adjustment(invoice_id, subscription_id) WHERE subscription_id IS NOT NULL AND status = 'PENDING_APPROVAL'`
      - `idx_invoice_adj_pending_rent ON invoice_adjustment(invoice_id) WHERE adjustment_target = 'RENT' AND status = 'PENDING_APPROVAL'`
+     - `idx_invoice_adj_pending_late_fee ON invoice_adjustment(invoice_id) WHERE adjustment_target = 'LATE_FEE' AND status = 'PENDING_APPROVAL'`
      - `idx_invoice_adj_pending_void ON invoice_adjustment(invoice_id) WHERE action_type = 'VOID' AND status = 'PENDING_APPROVAL'`
 
 6. **Tạo bảng `credit_balance` (Sổ số dư tạm giữ hợp đồng — `Mục 13`, `Mục 13.2`, `FR-033`, `FR-040`):**
    ```sql
    CREATE TABLE IF NOT EXISTS credit_balance (
-     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-     org_id                UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-     building_id           UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-     contract_id           UUID NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
-     tenant_id             UUID REFERENCES tenant(id) ON DELETE SET NULL,
-     subscription_id       UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
-     source_invoice_id     UUID REFERENCES invoice(id) ON DELETE SET NULL,
-     source_adjustment_id  UUID REFERENCES invoice_adjustment(id) ON DELETE SET NULL,
-     source_payment_id     UUID REFERENCES payment(id) ON DELETE SET NULL,
-     settlement_deposit_id UUID REFERENCES deposit(id) ON DELETE SET NULL,
-     reason_type           TEXT NOT NULL CHECK (reason_type IN (
-                             'SERVICE_TERMINATION',
-                             'CONTRACT_TERMINATION_RENT',
-                             'INVOICE_ADJUSTMENT',
-                             'OVERPAYMENT',
-                             'TRANSFERRED_IN'
-                           )),
-     amount                BIGINT NOT NULL CHECK (amount > 0),
-     applied_amount        BIGINT NOT NULL DEFAULT 0 CHECK (applied_amount >= 0 AND applied_amount <= amount),
-     status                TEXT NOT NULL DEFAULT 'AVAILABLE'
-                           CHECK (status IN ('AVAILABLE', 'PARTIALLY_APPLIED', 'APPLIED', 'REFUNDED_IN_SETTLEMENT', 'TRANSFERRED', 'VOID')),
-     description           TEXT NOT NULL,
-     created_by            UUID REFERENCES app_user(id) ON DELETE SET NULL,
-     updated_by            UUID REFERENCES app_user(id) ON DELETE SET NULL,
-     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-     updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+     org_id                   UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+     building_id              UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
+     contract_id              UUID NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+     tenant_id                UUID REFERENCES tenant(id) ON DELETE SET NULL,
+     subscription_id          UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
+     source_invoice_id        UUID REFERENCES invoice(id) ON DELETE SET NULL,
+     source_adjustment_id     UUID REFERENCES invoice_adjustment(id) ON DELETE SET NULL,
+     source_payment_id        UUID REFERENCES payment(id) ON DELETE SET NULL,
+     settlement_deposit_id    UUID REFERENCES deposit(id) ON DELETE SET NULL,
+     settlement_refund_amount BIGINT NOT NULL DEFAULT 0 CHECK (settlement_refund_amount >= 0 AND settlement_refund_amount <= amount),
+     reason_type              TEXT NOT NULL CHECK (reason_type IN (
+                                'SERVICE_TERMINATION',
+                                'CONTRACT_TERMINATION_RENT',
+                                'INVOICE_ADJUSTMENT',
+                                'OVERPAYMENT',
+                                'TRANSFERRED_IN'
+                              )),
+     amount                   BIGINT NOT NULL CHECK (amount > 0),
+     applied_amount           BIGINT NOT NULL DEFAULT 0 CHECK (applied_amount >= 0 AND applied_amount <= amount),
+     status                   TEXT NOT NULL DEFAULT 'AVAILABLE'
+                              CHECK (status IN (
+                                'AVAILABLE',
+                                'PARTIALLY_APPLIED',
+                                'APPLIED',
+                                'PENDING_SETTLEMENT_PAYOUT',
+                                'REFUNDED_IN_SETTLEMENT',
+                                'TRANSFERRED',
+                                'VOID'
+                              )),
+     description              TEXT NOT NULL,
+     created_by               UUID REFERENCES app_user(id) ON DELETE SET NULL,
+     updated_by               UUID REFERENCES app_user(id) ON DELETE SET NULL,
+     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
    );
    ```
    - Partial Unique Index chống nhân đôi tuyệt đối (Idempotency ở tầng DB):
@@ -222,11 +232,12 @@ Hệ thống hiện đang tồn tại các bất cập nghiệp vụ liên kết
        2. `MANAGER` được gán tòa (`adj.building_id IN (SELECT building_id FROM get_manager_building_ids())`), hoặc
        3. `SYS_ADMIN` (`is_org_admin()`) **chỉ khi** `NOT building_has_active_owner(adj.building_id)`.
      - Kiểm tra nguyên tắc 4 mắt ngay trong hàm: nếu `adj.created_by IS NOT NULL AND adj.created_by = v_actor_id AND NOT p_allow_self_approval` → raise lỗi `SELF_APPROVAL`.
-     - Thực thi nguyên tử toàn bộ cập nhật `invoice_adjustment`, chèn dòng `invoice_line` mới (`ADJUSTMENT`), cập nhật `invoice` (`total_amount`, `paid_amount`, `credit_offset_amount`, `status`), đồng bộ `receivable`, tạo bản ghi `credit_balance` (nếu dư tiền đã đóng) và ghi `audit_log` giá trị `before`/`after`. Nhờ đó `OWNER` và `SYS_ADMIN` duyệt 4 mắt an toàn mà **vẫn bị chặn 100% nếu cố tình chạy câu lệnh `UPDATE invoice` trực tiếp**!
+     - Thực thi nguyên tử toàn bộ cập nhật `invoice_adjustment`, chèn dòng `invoice_line` mới (`ADJUSTMENT`; nếu `adj.adjustment_target = 'LATE_FEE'` thì tự động gộp `{"adjusts_item_type":"LATE_FEE"}` vào `formula_meta`), cập nhật `invoice` (`total_amount`, `paid_amount`, `credit_offset_amount`, `status`), đồng bộ `receivable`, tạo bản ghi `credit_balance` (nếu dư tiền đã đóng) và ghi `audit_log` giá trị `before`/`after`. Nhờ đó `OWNER` và `SYS_ADMIN` duyệt 4 mắt an toàn mà **vẫn bị chặn 100% nếu cố tình chạy câu lệnh `UPDATE invoice` trực tiếp**!
    - **Mở rộng hàm `SECURITY DEFINER` tất toán cọc của M06 (`045`) & `rls_audit_log_select` (`046` + `RP-08` + Tab Audit Hóa đơn):**
-     - Nâng cấp `fn_apply_deposit_settlement_accounting` (`045`): bổ sung `'ADJUSTED'` vào tập hóa đơn công nợ mở `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`, thực thi **Bước 1 đối trừ `credit_balance` FIFO** (`rentDebt` → `serviceDebt` → hư hỏng vượt cọc) và đánh dấu `'REFUNDED_IN_SETTLEMENT'` ngay bên trong `SECURITY DEFINER` để khi `OWNER` / `SYS_ADMIN` dự phòng bấm duyệt ca `total_payout_amount === 0` không bao giờ bị chặn RLS trên `credit_balance`, `invoice`, `receivable`.
+     - Nâng cấp `fn_apply_deposit_settlement_accounting` (`045`): bổ sung `'ADJUSTED'` vào tập hóa đơn công nợ mở `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`; dùng `LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id` kết hợp phân bổ `i.credit_offset_amount` ưu tiên giảm `rent_net` trước rồi đến `service_net` để tách chính xác `rent_effective` (gồm dòng `'RENT'` cộng dòng `'ADJUSTMENT'` có `ia.adjustment_target = 'RENT'`) và `service_effective` (các dòng phí/điều chỉnh phi-`RENT` và phi-`credit_id`), tuyệt đối không để dòng điều chỉnh giảm `RENT` cấn nhầm sang `serviceDebt`; thực thi **Bước 1 đối trừ `credit_balance` FIFO** (`rentDebt` → `serviceDebt` → hư hỏng vượt cọc) và đánh dấu `'REFUNDED_IN_SETTLEMENT'` ngay bên trong `SECURITY DEFINER` để khi `OWNER` / `SYS_ADMIN` dự phòng bấm duyệt ca `total_payout_amount === 0` không bao giờ bị chặn RLS trên `credit_balance`, `invoice`, `receivable`.
      - Nâng cấp `fn_update_deposit_refund_bank_info` (`045`): cho phép cập nhật STK ngân hàng khi `COALESCE((v_settlement->>'total_payout_amount')::bigint, (v_settlement->>'refund_amount')::bigint, 0) > 0` (bao phủ cả trường hợp `deposit_refund_amount = 0` nhưng `credit_refund_amount > 0`).
-     - Bảo toàn toàn bộ tập thực thể hiện có của `046_m06_p2_audit_rls_reservation_policy_and_public.sql` (`building`, `apartment`, `reservation`, `contract`, `deposit`, `deposit_transaction`, `receivable`) và bổ sung đầy đủ `invoice`, `invoice_line`, `invoice_adjustment`, `payment`, `credit_balance`, `service_subscription` cho **cả `is_owner()` (trên `get_owner_building_ids()`) lẫn `is_manager()` (trên `get_manager_building_ids()`)** để Quản lý và Chủ nhà xem được trọn vẹn lịch sử kiểm toán của hóa đơn và tất toán.
+     - Bổ sung cặp hàm `SECURITY DEFINER` xử lý giao dịch chi hoàn bị ngân hàng trả lại (`RETURNED`): `fn_restore_returned_settlement_credits(p_deposit_id UUID, p_reason TEXT)` chuyển các dòng `credit_balance` gắn `settlement_deposit_id = p_deposit_id AND status = 'REFUNDED_IN_SETTLEMENT'` sang trạng thái khóa riêng `'PENDING_SETTLEMENT_PAYOUT'` (giữ nguyên `applied_amount = amount` và `settlement_deposit_id` để không luồng sinh hóa đơn hay chuyển phòng nào tiêu nhầm trong lúc chờ chi lại), và `fn_recommit_returned_settlement_credits(p_deposit_id UUID)` chốt lại sang `'REFUNDED_IN_SETTLEMENT'` khi `POST /:id/payout` phát hành lại lệnh chi thành công.
+     - Bảo toàn toàn bộ tập thực thể hiện có của `046_m06_p2_audit_rls_reservation_policy_and_public.sql` (`building`, `apartment`, `reservation`, `contract`, `deposit`, `deposit_transaction`, `receivable`) và bổ sung đầy đủ `invoice`, `invoice_line`, `invoice_adjustment`, `payment`, `credit_balance`, `service_subscription`, `service_catalog` cho **cả `is_owner()` (trên `get_owner_building_ids()`) lẫn `is_manager()` (trên `get_manager_building_ids()`, với `service_catalog` mở thêm `building_id IS NULL` thuộc `org_id` cho `MANAGER`)** để Quản lý và Chủ nhà xem được trọn vẹn lịch sử kiểm toán của hóa đơn, biểu phí và tất toán.
 
 ---
 
@@ -286,7 +297,7 @@ Tập trung toàn bộ logic múi giờ `Asia/Ho_Chi_Minh`, định giá 3 tần
        - Cho phép chọn `end_date` bàn giao thực tế (`subStart <= end_date <= contractEnd`), hoặc tích chọn *"Chưa phát sinh sử dụng thực tế (0 ₫)"* (`end_date = addDaysYmd(subStart, -1)`, `prorata_amount = 0`).
        - Cho phép Quản lý từ chối hủy (giữ lại dịch vụ): `'CANCELLATION_PENDING'` → `'ACTIVE'`, `end_date = NULL`.
      - Chặn sửa đổi các bản ghi đã kết thúc (`'TERMINATED'` hoặc `'REJECTED'` → `409 INVALID_STATUS`).
-     - Mọi thao tác cập nhật trên `PATCH /api/v1/service-subscriptions/:id` đều bắt buộc ghi `audit_log` (`before` / `after`).
+     - Mọi thao tác cập nhật trên `PATCH /api/v1/service-subscriptions/:id` và mọi thao tác tạo/sửa danh mục biểu phí trên `POST /api/v1/service-catalog`, `PATCH /api/v1/service-catalog/:id` (kèm kiểm tra `checkBuildingAccess` khi `building_id IS NOT NULL` và `idempotencyGuard()`) đều bắt buộc ghi `audit_log` (`before` / `after`) theo `FR-006`, `NFR-010`.
 
 2. **Đóng tự động đăng ký dịch vụ & Đồng bộ cả `SERVICE` lẫn `RENT` khi Hợp đồng kết thúc (`closeContractBillingAndSubscriptionsInTx` — Quyết định `6A`):**
    - Gắn vào cùng DB transaction của toàn bộ 6 luồng kết thúc hợp đồng:
@@ -338,7 +349,9 @@ Khi một gói `service_subscription` chuyển sang `'TERMINATED'` (hoặc khi `
     - `PATCH /api/v1/invoices/:id/lines/:lineId` (sửa mô tả, số lượng, đơn giá dòng phí nháp — tự làm tròn `roundVND`).
     - `DELETE /api/v1/invoices/:id/lines/:lineId` (xóa dòng phí nháp; nếu xóa dòng `credit_id`, hoàn trả ngay `applied_amount` về `credit_balance`).
     - `POST /api/v1/invoices/:id/issue` (có `idempotencyGuard()` — alias chuẩn REST theo PRD Mục `14.3` bên cạnh `PATCH /api/v1/invoices/:id/status` với `status = 'ISSUED'`).
-  - Mọi thao tác thêm/sửa/xóa dòng trên bản `DRAFT` đều ghi `audit_log` đầy đủ giá trị `before` và `after` (`AC-020.1`).
+  - Trên `PATCH /api/v1/invoices/:id/status` khi sửa `adjustment_amount` thủ công trên bản `DRAFT`: **chỉ xóa dòng điều chỉnh thủ công (`DELETE FROM invoice_line WHERE invoice_id = $1 AND item_type = 'ADJUSTMENT' AND credit_id IS NULL`)** (tuyệt đối không xóa dòng cấn trừ `credit_id IS NOT NULL`), sau đó gọi `recalculateDraftInvoiceTotalsInTx` để nếu `subtotal_amount + manualAdj < credit_offset_amount` thì tự động hoàn trả phần `credit_balance` dư về `'AVAILABLE'` / `'PARTIALLY_APPLIED'`.
+  - Đồng bộ phát hành hóa đơn `0 ₫` trên cả 3 lối vào (`generate-batch` có `auto_issue`, `POST /api/v1/invoices/:id/issue`, và `PATCH /api/v1/invoices/:id/status` chuyển `DRAFT → ISSUED` qua helper dùng chung `issueDraftInvoiceInTx`): khi `nextTotal === 0` (ví dụ `credit_balance` hoặc chiết khấu đã bù trừ đủ `100%`), chuyển thẳng `invoice.status = 'PAID'`, ghi `issued_by` + `issued_at = NOW()`, **không tạo `receivable` `0 ₫`** (bảo toàn `receivable_amount_check` và tránh treo hóa đơn `ISSUED` `0 ₫` không thể thanh toán), gửi thông báo `INVOICE_ISSUED` nêu rõ `0 ₫ (đã bù trừ đủ)` và ghi `audit_log`.
+  - Mọi thao tác thêm/sửa/xóa dòng hoặc cập nhật chiết khấu trên bản `DRAFT` đều ghi `audit_log` đầy đủ giá trị `before` và `after` (`AC-020.1`).
   - Khi hủy một hóa đơn `DRAFT` (`status = 'VOID'`): cho phép `MANAGER` tòa nhà thực hiện trực tiếp kèm lý do bắt buộc và mã xác nhận `confirm_invoice_code === invoice.invoice_code` (khi gọi từ thao tác hủy chủ động trên UI theo `PRD Mục 16.2`), hoàn trả toàn bộ `credit_balance` đã tạm gắn trên bản `DRAFT` và ghi `audit_log`.
 
 #### 5.4.3. Kịch bản 3 — Hóa đơn kỳ hiện tại ĐÃ phát hành (`ISSUED`, `PARTIALLY_PAID`, `PAID`, `OVERDUE`, `ADJUSTED`)
@@ -348,9 +361,9 @@ Khi một gói `service_subscription` chuyển sang `'TERMINATED'` (hoặc khi `
     2. Nếu `inv.status !== 'DRAFT'` mà request truyền `adjustment_amount` hoặc `targetStatus === 'VOID'`: trả `409 REQUIRES_FOUR_EYES_ADJUSTMENT` hướng dẫn lập đề nghị qua `POST /api/v1/invoices/:id/adjust`.
 - **Tạo đề nghị điều chỉnh / hủy chờ phê duyệt 4 mắt (`invoice_adjustment`):**
   1. **Tự động khi xác nhận `TERMINATED` dịch vụ hoặc kết thúc hợp đồng sớm:** chèn bản ghi `invoice_adjustment` (`adjustment_target = 'SERVICE' | 'RENT'`, `action_type = 'ADJUST' | 'VOID'`, `delta_amount`, `reason` giải trình rõ ngày kết thúc & công thức Pro-rata, `formula_meta`, `status = 'PENDING_APPROVAL'`, `created_by = actorId`, `updated_by = actorId`). Gửi thông báo `INVOICE_ADJUSTMENT_PENDING` tới `OWNER` của tòa nhà và các `MANAGER` khác cùng tòa (hoặc `SYS_ADMIN` nếu tòa chưa có `OWNER`).
-  2. **Thủ công qua `POST /api/v1/invoices/:id/adjust` (`FR-035`, `Mục 14.3`, `Mục 16.2`):**
+  2. **Thủ công qua `POST /api/v1/invoices/:id/adjust` (`FR-035`, `FR-064`, `Mục 14.3`, `Mục 16.2`):**
      - Bắt buộc qua `idempotencyGuard()` (`Idempotency-Key`), chỉ mở cho `MANAGER` của tòa nhà.
-     - Nhận `{ action_type: 'ADJUST' | 'VOID', delta_amount, reason, confirm_invoice_code }`, bắt buộc có `reason` không rỗng.
+     - Nhận `{ action_type: 'ADJUST' | 'VOID', adjustment_target = 'MANUAL' | 'LATE_FEE' | 'SERVICE' | 'RENT', delta_amount, reason, confirm_invoice_code }`, bắt buộc có `reason` không rỗng (riêng khi miễn/giảm phí phạt chậm theo `FR-064` với `adjustment_target = 'LATE_FEE'`, kiểm tra `delta_amount < 0` và `ABS(delta_amount) <= net_existing_late_fee`).
      - Nếu `action_type = 'VOID'`: kiểm tra `inv.paid_amount === 0` (`409 ALREADY_PAID` nếu đã thu tiền) và nếu có truyền `confirm_invoice_code` (bắt buộc trên UI theo `PRD Mục 16.2`) thì phải khớp chính xác `inv.invoice_code`.
      - Lưu `invoice_adjustment (status = 'PENDING_APPROVAL', created_by = req.user.sub, updated_by = req.user.sub)`, ghi `audit_log` và gửi thông báo chờ duyệt.
   3. **Danh sách & Phê duyệt / Từ chối 4 mắt (`OWNER` tòa nhà / `MANAGER` thứ hai cùng tòa / `SYS_ADMIN` dự phòng):**
@@ -364,8 +377,8 @@ Khi một gói `service_subscription` chuyển sang `'TERMINATED'` (hoặc khi `
            - Hoàn trả toàn bộ `credit_balance` đã cấn trừ trên hóa đơn đó (`applied_amount -= ABS(line.amount)`, cập nhật `status` về `'AVAILABLE'` / `'PARTIALLY_APPLIED'`, đặt `invoice.credit_offset_amount = 0`).
            - Chuyển `invoice.status = 'VOID'`, chuyển `receivable` đang mở sang `'WRITTEN_OFF'`.
          - **Khi duyệt `action_type = 'ADJUST'`:**
-           - Khóa `invoice FOR UPDATE`. **Giữ nguyên bất biến 100% các dòng `invoice_line` cũ**; chỉ `INSERT` thêm dòng `invoice_line` mới (`item_type = 'ADJUSTMENT'`, `subscription_id = adj.subscription_id`, `adjustment_id = adj.id`, `amount = adj.delta_amount`, `description = adj.reason`, `formula_meta = adj.formula_meta`).
-           - Nếu hóa đơn chưa thu tiền (`paid_amount === 0`), đang có dòng `LATE_FEE` cũ nhưng sau khi giảm phí gốc thì phần gốc `<= 0`: tự động ghi thêm dòng `ADJUSTMENT` triệt tiêu phần `LATE_FEE` đó (không xóa dòng cũ để giữ bất biến append-only).
+           - Khóa `invoice FOR UPDATE`. **Giữ nguyên bất biến 100% các dòng `invoice_line` cũ**; chỉ `INSERT` thêm dòng `invoice_line` mới (`item_type = 'ADJUSTMENT'`, `subscription_id = adj.subscription_id`, `adjustment_id = adj.id`, `amount = adj.delta_amount`, `description = adj.reason`, `formula_meta = COALESCE(adj.formula_meta, '{}'::jsonb) || CASE WHEN adj.adjustment_target = 'LATE_FEE' THEN '{"adjusts_item_type":"LATE_FEE"}'::jsonb ELSE '{}'::jsonb END`).
+           - Nếu hóa đơn chưa thu tiền (`paid_amount === 0`), đang có phần phạt chậm ròng còn lại `net_existing_late_fee > 0` nhưng sau khi giảm phí gốc thì phần gốc `<= 0`: tự động ghi thêm dòng `ADJUSTMENT` (`-net_existing_late_fee`, gắn `formula_meta->>'adjusts_item_type' = 'LATE_FEE'`) triệt tiêu phần phạt chậm còn lại đó mà không xóa dòng cũ để giữ bất biến append-only.
            - Nếu hóa đơn có `credit_offset_amount > 0` mà tổng phí sau điều chỉnh âm (`rawTotal < 0`), tự động hoàn lại phần `Math.min(credit_offset_amount, Math.abs(rawTotal))` về bản ghi `credit_balance` gốc và ghi thêm dòng điều chỉnh cân bằng để không làm thất thoát tín dụng của cư dân.
            - Tính `nextTotal = Math.max(0, subtotal_amount + adjustment_amount)` và đối chiếu với `oldPaid = Number(inv.paid_amount)`:
              - **Nếu `oldPaid < nextTotal`:** đặt `invoice.total_amount = nextTotal`, `invoice.status = 'ADJUSTED'`; đồng bộ `receivable.amount = nextTotal`, `receivable.paid_amount = oldPaid`, `receivable.status = (oldPaid > 0 ? 'PARTIALLY_PAID' : 'OPEN')`.
@@ -400,26 +413,30 @@ Khi một gói `service_subscription` chuyển sang `'TERMINATED'` (hoặc khi `
    - Lưu trên `invoice`: `subtotal_amount = subtotal`, `adjustment_amount = -totalCreditUsed`, `credit_offset_amount = totalCreditUsed`, `total_amount = subtotal - totalCreditUsed`.
    - Nếu phát hành mà `total_amount === 0` (số dư `credit_balance` bù trừ trọn 100% hóa đơn kỳ mới): chuyển `invoice.status = 'PAID'` ngay khi phát hành, không tạo `receivable` `0 ₫`.
 
-3. **Cập nhật truy vấn công nợ, quá hạn (bất biến `LATE_FEE`), KPI báo cáo (`PRD Mục 15.1–15.3`) & `RP-08`:**
-   - `daily.js` (Bước 6 & 7): xét `status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED') AND paid_amount < total_amount` theo ngày Việt Nam `Asia/Ho_Chi_Minh`. Tại Bước 7 (`LATE_FEE`), **bỏ hoàn toàn câu lệnh `DELETE FROM invoice_line WHERE item_type = 'LATE_FEE'`** (giữ bất biến append-only sau phát hành theo `FR-034`, `NFR-016`): tính `net_existing_late_fee` gồm cả các dòng `LATE_FEE` và các dòng `ADJUSTMENT` gắn `formula_meta->>'adjusts_item_type' = 'LATE_FEE'`, chỉ tính phạt khi nợ gốc chưa thanh toán `unpaid_principal > 0`, và chỉ `INSERT` nối tiếp phần chênh lệch tăng thêm `deltaFee = expectedFee - net_existing_late_fee > 0`.
-   - `resident.js` (`current_amount_due`, `reportPayment`, `latestInvRes` lọc `status NOT IN ('DRAFT', 'VOID')`), `deposits.js` (`calculateContractOpenDebts`, `checkSettlementPreconditions` — bổ sung điều kiện `no_pending_invoice_adjustments` đảm bảo không còn `invoice_adjustment` đang `PENDING_APPROVAL` trước khi tất toán cọc): tính dư nợ mở bằng `GREATEST(0, total_amount - paid_amount)` trên tập trạng thái `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`.
+3. **Cập nhật truy vấn công nợ, quá hạn (bất biến `LATE_FEE` & bảo toàn miễn/giảm `FR-064`), KPI báo cáo (`PRD Mục 15.1–15.3`) & `RP-08`:**
+   - `daily.js` (Bước 6 & 7): xét `status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED') AND paid_amount < total_amount` theo ngày Việt Nam `Asia/Ho_Chi_Minh`. Tại Bước 7 (`LATE_FEE`), **bỏ hoàn toàn câu lệnh `DELETE FROM invoice_line WHERE item_type = 'LATE_FEE'`** (giữ bất biến append-only sau phát hành theo `FR-034`, `NFR-016`) và tách bạch hai đại lượng:
+     1. `gross_accrued_late_fee = COALESCE(SUM(il.amount) FILTER (WHERE il.item_type = 'LATE_FEE'), 0)` (tổng phí phạt chậm lũy kế đã ghi nhận qua các đêm — không bị giảm bởi các bút toán miễn/giảm).
+     2. `net_existing_late_fee = COALESCE(SUM(il.amount) FILTER (WHERE il.item_type = 'LATE_FEE' OR il.formula_meta->>'adjusts_item_type' = 'LATE_FEE'), 0)` (phí phạt ròng thực tế đang nằm trong `i.total_amount`).
+     - Chỉ tính phạt khi nợ gốc chưa thanh toán `unpaid_principal = GREATEST(0, (i.total_amount - GREATEST(0, net_existing_late_fee)) - i.paid_amount) > 0`, và chỉ `INSERT` nối tiếp phần chênh lệch ngày mới `deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee) > 0` (nhờ đó khoản miễn/giảm phí phạt chậm đã được `APPROVER` duyệt theo `FR-064` được bảo toàn vĩnh viễn, không bao giờ bị job đêm hôm sau thu bù lại!).
+   - `resident.js` (`current_amount_due`, `reportPayment`, `latestInvRes` lọc `status NOT IN ('DRAFT', 'VOID')`), `deposits.js` (`calculateContractOpenDebts` dùng cùng công thức `LEFT JOIN invoice_adjustment ia` + phân bổ `credit_offset_amount` như `fn_apply_deposit_settlement_accounting` để tách chuẩn `rentDebt` và `serviceDebt` trên hóa đơn `'ADJUSTED'`; `checkSettlementPreconditions` bổ sung điều kiện `no_pending_invoice_adjustments` đảm bảo không còn `invoice_adjustment` đang `PENDING_APPROVAL` trước khi tất toán cọc): tính dư nợ mở bằng `GREATEST(0, total_amount - paid_amount)` trên tập trạng thái `('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`.
    - `reports.js` (`/dashboard`, `/summary` — thực thi qua `getUserClient(req)` dưới RLS) & `admin/audit-logs.js` (`/api/v1/audit-logs?scope=financial` — `RP-08`):
      - Loại cả `'DRAFT'` và `'VOID'` khỏi doanh thu phát hành (`status NOT IN ('DRAFT', 'VOID')` theo `PRD Mục 15.3` dòng 1060).
      - `billed` (*Doanh thu ghi nhận kỳ*, `PRD 15.3` dòng 1060) = `SUM(i.total_amount + i.credit_offset_amount) FILTER (WHERE i.status NOT IN ('DRAFT', 'VOID'))` gom theo `i.period`.
      - `collected` (*Tiền thực thu*, `PRD 15.3` dòng 1061) = `SUM(p.amount)` của các giao dịch `payment` có `p.status = 'CONFIRMED'` gom theo tháng thanh toán múi giờ Việt Nam `TO_CHAR(p.paid_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM')` (nhờ vậy KPI `monthly_revenue` trên Dashboard Chủ nhà / Quản lý phản ánh đúng 100% dòng tiền thực thu xác nhận trong tháng, không bị cộng ảo bởi khoản cấn trừ nội bộ `credit_offset_amount`).
      - `invoice_settled` (*Giá trị hóa đơn kỳ đã tất toán*, phục vụ biểu đồ Kế toán *"Đã thu vs phải thu theo kỳ"* `PRD 15.1` dòng 1028) = `SUM(i.paid_amount + i.credit_offset_amount) FILTER (WHERE i.status NOT IN ('DRAFT', 'VOID'))` gom theo `i.period`, bảo toàn đẳng thức đối chiếu công nợ kỳ `billed === invoice_settled + outstanding`.
      - `outstanding` (*Tổng công nợ đang mở*, `PRD 15.3` dòng 1062) = `SUM(GREATEST(0, i.total_amount - i.paid_amount)) FILTER (WHERE i.status IN ('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE'))`.
-     - Báo cáo `RP-08` (*Nhật ký thao tác tài chính*, `PRD 15.2` dòng 1051 & `PRD 6.2` dòng 205): dùng chung một hằng số `FINANCIAL_AUDIT_ENTITIES` gồm đủ 10 thực thể `('invoice', 'invoice_line', 'invoice_adjustment', 'payment', 'credit_balance', 'receivable', 'deposit', 'deposit_transaction', 'reservation', 'service_subscription')` ngay tại `GET /api/v1/audit-logs?scope=financial` (hỗ trợ cả JSON + `format=csv`, mở cho `SYS_ADMIN`, `OWNER` và `MANAGER` trong phạm vi tòa nhà được phân công khi `scope=financial`).
+     - Báo cáo `RP-08` (*Nhật ký thao tác tài chính*, `PRD 15.2` dòng 1051 & `PRD 6.2` dòng 205): dùng chung một hằng số `FINANCIAL_AUDIT_ENTITIES` gồm đủ 11 thực thể `('invoice', 'invoice_line', 'invoice_adjustment', 'payment', 'credit_balance', 'receivable', 'deposit', 'deposit_transaction', 'reservation', 'service_subscription', 'service_catalog')` ngay tại `GET /api/v1/audit-logs?scope=financial` (hỗ trợ cả JSON + `format=csv`, mở cho `SYS_ADMIN`, `OWNER` và `MANAGER` trong phạm vi tòa nhà được phân công khi `scope=financial`).
 
-4. **Quyết toán cuối kỳ 2 bước chuẩn M06 khi chấm dứt hợp đồng & Kết chuyển khi chuyển phòng / gia hạn (`deposits.js`, `contracts.js` — `FR-040`, `FR-068`, `RP-07`):**
-   - **Tách bạch hoàn toàn `credit_balance` và Tiền cọc gốc (`deposit`) xuyên suốt cả 2 bước Duyệt (`APPROVED_PENDING_PAYOUT`) — Thực chi (`payout` / `payout-returned`):**
+4. **Quyết toán cuối kỳ 2 bước chuẩn M06 khi chấm dứt hợp đồng & Kết chuyển khi chuyển phòng / gia hạn (`deposits.js`, `contracts.js` — `FR-024`, `FR-040`, `FR-068`, `RP-07`):**
+   - **Tách bạch hoàn toàn `credit_balance` và Tiền cọc gốc (`deposit`) xuyên suốt cả 2 bước Duyệt (`APPROVED_PENDING_PAYOUT`) — Thực chi (`payout` / `payout-returned`) và Biên bản PDF (`GET /:id/settlement/pdf`):**
      - Trong `GET /:id/settlement`, `POST /:id/settlement`, `POST /:id/settlement/approve`, `POST /:id/payout`, `POST /:id/payout-returned`, `PATCH /:id/bank-info` và `GET /:id/settlement/pdf`:
        1. Kiểm tra biến động snapshot (`isSettlementSnapshotStale`) trên cả công nợ hóa đơn, `deposit.amount_held` **và** `available_credit` khả dụng của hợp đồng (`409 SETTLEMENT_SNAPSHOT_STALE` nếu `credit_balance` thay đổi xen giữa lúc lập đề xuất và lúc duyệt/chi).
-       2. **Bước 1 — Đối trừ `credit_balance` (`FR-040`, thực thi nguyên tử trong `fn_apply_deposit_settlement_accounting`):** Vì `credit_balance` là tiền cư dân đã nộp dư từ các hóa đơn trước (không phải tiền cọc), ưu tiên dùng `availableCredit` gạch nợ phần tiền thuê còn thiếu (`rentDebt` — khoản mà tiền cọc không được phép cấn trừ theo `FR-068`, đồng thời khớp 100% với quy tắc phân bổ `v_paid_to_rent := LEAST(v_paid, v_rent_gross)` trên hóa đơn hỗn hợp), tiếp đến phần nợ dịch vụ/điện nước (`serviceDebt`), rồi đến chi phí hư hỏng vượt tiền cọc (`max(0, sumItems - heldBefore)`). Phần `credit_balance` còn dư sau khi hết sạch nghĩa vụ (`credit_refund_amount`) được chuyển sang `status = 'REFUNDED_IN_SETTLEMENT'`, `applied_amount = amount`, `settlement_deposit_id = dep.id`.
+       2. **Bước 1 — Đối trừ `credit_balance` (`FR-040`, thực thi nguyên tử trong `fn_apply_deposit_settlement_accounting`):** Vì `credit_balance` là tiền cư dân đã nộp dư từ các hóa đơn trước (không phải tiền cọc), ưu tiên dùng `availableCredit` gạch nợ phần tiền thuê còn thiếu (`rentDebt` — khoản mà tiền cọc không được phép cấn trừ theo `FR-068`, đồng thời khớp 100% với quy tắc phân bổ `paid_to_rent := LEAST(paid, rent_effective)` trên hóa đơn hỗn hợp), tiếp đến phần nợ dịch vụ/điện nước (`serviceDebt`), rồi đến chi phí hư hỏng vượt tiền cọc (`max(0, sumItems - heldBefore)`). Phần `credit_balance` còn dư sau khi hết sạch nghĩa vụ (`credit_refund_amount`) được chuyển sang `status = 'REFUNDED_IN_SETTLEMENT'`, `applied_amount = amount`, `settlement_deposit_id = dep.id`, `settlement_refund_amount = refundShare`.
        3. **Bước 2 — Tất toán tiền cọc gốc (`FR-068`, `RP-07`):** Sổ giao dịch cọc `deposit_transaction` **chỉ ghi nhận đúng dòng tiền của tiền cọc gốc `heldBefore`**:
           - `deduct` hư hỏng/vệ sinh (`items`, tối đa `heldBefore`) và `UTILITY_DEBT` cho phần nợ dịch vụ còn lại sau Bước 1 (**tuyệt đối không chạm vào nợ `RENT` theo `FR-068`**).
           - Khi `total_payout_amount = deposit_refund_amount + credit_refund_amount === 0`: `POST /:id/settlement/approve` hạch toán ngay trong phiên duyệt (qua `fn_apply_deposit_settlement_accounting`) và chốt trạng thái cuối.
-          - Khi `total_payout_amount > 0`: `POST /:id/settlement/approve` chuyển sang `'APPROVED_PENDING_PAYOUT'` (`accounting_committed_at = null`); `validateRefundBankInfo` và `PATCH /:id/bank-info` kiểm tra theo `total_payout_amount > 0`. Khi `MANAGER` tải chứng từ UNC tại `POST /:id/payout`, hệ thống chạy `commitSettlementAccounting`, **chỉ ghi `deposit_transaction` loại `'refund'` khi `deposit_refund_amount > 0`** (giữ sạch tuyệt đối sổ cọc `RP-07`) và ghi nhận hoàn trả `credit_refund_amount` trên `credit_balance` + `audit_log`. Nếu ngân hàng trả lại giao dịch (`POST /:id/payout-returned`), hệ thống chỉ ghi `'refund_reversal'` cho `deposit_refund_amount > 0` và khôi phục trạng thái chờ chi của các dòng `credit_balance` gắn `settlement_deposit_id = dep.id` để phát hành lại lệnh chi đồng bộ.
+          - Khi `total_payout_amount > 0`: `POST /:id/settlement/approve` chuyển sang `'APPROVED_PENDING_PAYOUT'` (`accounting_committed_at = null`); `validateRefundBankInfo` và `PATCH /:id/bank-info` kiểm tra theo `total_payout_amount > 0`. Khi `MANAGER` tải chứng từ UNC tại `POST /:id/payout`, hệ thống xác thực `bank_info` theo `totalPayoutAmount = depositRefundAmount + creditRefundAmount`, chạy `commitSettlementAccounting` (nếu `!isAlreadyCommitted`) hoặc `fn_recommit_returned_settlement_credits` (nếu phát hành lại từ `'RETURNED'` có `creditRefundAmount > 0`), **chỉ ghi `deposit_transaction` loại `'refund'` khi `depositRefundAmount > 0`** (giữ sạch tuyệt đối sổ cọc `RP-07`) và ghi nhận hoàn trả `creditRefundAmount` trên `credit_balance` + `audit_log`. Nếu ngân hàng trả lại giao dịch (`POST /:id/payout-returned`), hệ thống chấp nhận cả `'DEDUCTED_FULL'` bên cạnh `'REFUNDED'` / `'PARTIALLY_REFUNDED'` miễn `Boolean(settlement.payout_at) && amount_held === 0 && totalPayoutAmt > 0`, chỉ ghi `'refund_reversal'` cho `depositRefundAmt > 0` (`amount_held = depositRefundAmt`), và gọi `fn_restore_returned_settlement_credits` chuyển các dòng `credit_balance` của hồ sơ sang trạng thái khóa `'PENDING_SETTLEMENT_PAYOUT'` chờ phát hành lại lệnh chi đồng bộ.
+          - Cập nhật biểu mẫu in/xuất `GET /api/v1/deposits/:id/settlement/pdf` (`FR-024`) hiển thị minh bạch cả khối đối trừ `credit_balance` (`available_credit`, `credit_applied_to_invoices`, `credit_applied_to_damages`, `credit_refund_amount`), tiền hoàn cọc gốc (`deposit_refund_amount`) và **Tổng số tiền thực chi hoàn lại cho khách thuê (`total_payout_amount`)**.
        4. Lưu vào JSON `deposit.settlement` đầy đủ các trường tách bạch: `available_credit`, `credit_applied_to_invoices`, `credit_applied_to_damages`, `credit_refund_amount`, `deposit_refund_amount`, `total_payout_amount = deposit_refund_amount + credit_refund_amount` (giữ `refund_amount = deposit_refund_amount`, `outstanding_debt = serviceDebt`, `rent_debt = rentDebt`, `shortfall` để tương thích ngược hoàn toàn với M06).
    - **Khi Chuyển phòng (`transfer-room` có `transfer_deposit = true`) hoặc Kích hoạt HĐ Gia hạn (`parent_contract_id` trong `runActivationSideEffects`, bao gồm cả nhánh `OWNER` duyệt giá `approve-price`):**
      - Chốt các khoản `credit_balance` khả dụng còn lại trên hợp đồng cũ (`parent_contract_id`) sang `'TRANSFERRED'` và tạo bản ghi `'AVAILABLE'` (`reason_type = 'TRANSFERRED_IN'`) tương ứng sang hợp đồng mới để tự động bù trừ vào kỳ hóa đơn tiếp theo của cư dân.
