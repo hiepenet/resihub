@@ -8,7 +8,7 @@ import { idempotencyGuard } from '../middleware/idempotency.js';
 import { saveBase64Image, MAX_CONTRACT_SCAN_BYTES } from '../services/imageUpload.js';
 import { isDiscountedPrice, mapPgError } from '../services/contractGuards.js';
 import { refundDeadline } from '../services/deadlines.js';
-import { splitDepositOpening } from '../services/depositSettlement.js';
+import { splitDepositOpening, getTodayVnDateStr } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn, roundVND } from '../services/pricing.js';
@@ -1508,6 +1508,25 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
       finalDeposit = Number(rent_amount) * Number(deposit_months);
     }
 
+    if (reservation_id && UUID_REGEX.test(String(reservation_id))) {
+      const rsvCheck = await client.query(
+        `SELECT id, hold_amount FROM reservation
+         WHERE id = $1 AND apartment_id = $2 AND status = 'HELD'
+         LIMIT 1`,
+        [String(reservation_id), apartment_id]
+      );
+      if (rsvCheck.rows.length > 0) {
+        const matchedRsv = rsvCheck.rows[0];
+        if (BigInt(Math.round(finalDeposit || 0)) < BigInt(matchedRsv.hold_amount ?? 0)) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            code: 'DEPOSIT_BELOW_RESERVATION_HOLD',
+            message: `Tiền cọc hợp đồng (${Number(finalDeposit || 0).toLocaleString('vi-VN')} ₫) không được nhỏ hơn tiền cọc giữ chỗ đã thu (${Number(matchedRsv.hold_amount).toLocaleString('vi-VN')} ₫).`,
+          });
+        }
+      }
+    }
+
     // 1. Tạo bản ghi contract — luôn DRAFT trước (A3, PRD 485: lưu DRAFT → tải bản ký → ACTIVE)
     const contractRes = await client.query(
       `INSERT INTO contract (
@@ -2659,7 +2678,7 @@ router.post('/:id/terminate/reject', authenticateToken, requireRole(['MANAGER'])
  * mở sổ tiền cọc / kết chuyển cọc giữ chỗ hoặc cọc gia hạn, cập nhật reservation -> CONVERTED
  * và đồng bộ trạng thái căn hộ (syncApartmentStatus).
  */
-async function runActivationSideEffects(dbClient, contract, req, sDateStr) {
+async function findMatchingHeldReservation(dbClient, contract, req) {
   let preferredRsvId = req.body?.reservation_id || null;
   if (!preferredRsvId) {
     const createAudit = await adminPool.query(
@@ -2682,22 +2701,28 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr) {
     );
     matchedRsv = rsvById.rows[0] || null;
   } else if (contract.tenant_phone) {
-    const startStr = contract.start_date?.toISOString
-      ? contract.start_date.toISOString().slice(0, 10)
-      : String(contract.start_date).slice(0, 10);
+    const startStr = getTodayVnDateStr(contract.start_date);
     const rsvByPhone = await dbClient.query(
       `SELECT id, hold_amount FROM reservation
        WHERE apartment_id = $1
          AND status = 'HELD'
          AND regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g')
        ORDER BY
-         CASE WHEN COALESCE(hold_from, created_at::date) <= $3::date AND hold_until >= $3::date THEN 0 ELSE 1 END,
+         CASE WHEN COALESCE(hold_from, (created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date) <= $3::date AND hold_until >= $3::date THEN 0 ELSE 1 END,
          created_at DESC
        LIMIT 1`,
       [contract.apartment_id, String(contract.tenant_phone), startStr]
     );
     matchedRsv = rsvByPhone.rows[0] || null;
   }
+  return matchedRsv;
+}
+
+async function runActivationSideEffects(dbClient, contract, req, sDateStr, options = {}) {
+  const matchedRsv =
+    options.matchedRsv !== undefined
+      ? options.matchedRsv
+      : await findMatchingHeldReservation(dbClient, contract, req);
 
   let parentDep = null;
   if (!matchedRsv && contract.parent_contract_id) {
@@ -2891,6 +2916,24 @@ async function completeActivation(
     return { error: { status: 409, code: 'OVERLAP_CONTRACT', message: 'Căn hộ đã có hợp đồng trong khoảng thời gian này.', conflicts: overlapRes.rows } };
   }
 
+  const preMatchedRsv = await findMatchingHeldReservation(
+    commitBeforeAdminSideEffects ? adminPool : client,
+    contract,
+    req
+  );
+  if (
+    preMatchedRsv &&
+    BigInt(Math.round(Number(contract.deposit_amount ?? 0))) < BigInt(preMatchedRsv.hold_amount ?? 0)
+  ) {
+    return {
+      error: {
+        status: 422,
+        code: 'DEPOSIT_BELOW_RESERVATION_HOLD',
+        message: `Tiền cọc hợp đồng (${Number(contract.deposit_amount ?? 0).toLocaleString('vi-VN')} ₫) không được nhỏ hơn tiền cọc giữ chỗ đã thu (${Number(preMatchedRsv.hold_amount).toLocaleString('vi-VN')} ₫).`,
+      },
+    };
+  }
+
   // 3. Giá lệch khung → PENDING_APPROVAL, chờ Chủ sở hữu tòa nhà (OWNER) duyệt
   if (!skipPriceCheck && isDiscountedPrice(contract.rent_amount, apt.base_rent)) {
     const pendingRes = await client.query(
@@ -2925,7 +2968,7 @@ async function completeActivation(
     const adminClient = await adminPool.connect();
     try {
       await adminClient.query('BEGIN');
-      const remainingCollect = await runActivationSideEffects(adminClient, contract, req, sDateStr);
+      const remainingCollect = await runActivationSideEffects(adminClient, contract, req, sDateStr, { matchedRsv: preMatchedRsv });
       await adminClient.query('COMMIT');
       return {
         contract: activeRes.rows[0],
@@ -2943,7 +2986,7 @@ async function completeActivation(
     }
   }
 
-  const remainingCollect = await runActivationSideEffects(client, contract, req, sDateStr);
+  const remainingCollect = await runActivationSideEffects(client, contract, req, sDateStr, { matchedRsv: preMatchedRsv });
 
   await client.query(
     `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -4526,6 +4569,8 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     new_start_date,
     new_end_date,
     new_rent_amount,
+    new_deposit_amount,
+    deposit_amount,
     transfer_deposit = true,
     note,
   } = req.body;
@@ -4645,6 +4690,15 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       ? Number(new_rent_amount)
       : Number(newAptLock.rows[0].base_rent || oldContract.rent_amount);
 
+    const explicitNewDeposit =
+      new_deposit_amount !== undefined && new_deposit_amount !== null
+        ? Number(new_deposit_amount)
+        : deposit_amount !== undefined && deposit_amount !== null
+          ? Number(deposit_amount)
+          : !transfer_deposit && new_rent_amount !== undefined && new_rent_amount !== null
+            ? Number(new_rent_amount)
+            : Number(oldContract.deposit_amount);
+
     const newContractRes = await client.query(
       `INSERT INTO contract (
          apartment_id, building_id, primary_tenant_id,
@@ -4663,7 +4717,7 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
         oldContract.billing_cycle || 'monthly',
         oldContract.billing_day || 1,
         oldContract.payment_due_days || 5,
-        oldContract.deposit_amount,
+        explicitNewDeposit,
         oldContract.id,
         note || `Chuyển phòng từ hợp đồng ${oldContract.id.slice(0, 8).toUpperCase()}`,
         req.user.sub,
@@ -4696,13 +4750,26 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       if (oldDepRes.rows.length > 0) {
         const oldDep = oldDepRes.rows[0];
         const heldAmt = BigInt(oldDep.amount_held || 0);
+        const targetDep = BigInt(Math.round(Number(newContract.deposit_amount ?? 0)));
+        const transferAmt = targetDep > 0n ? (heldAmt > targetDep ? targetDep : heldAmt) : 0n;
+        const surplusAmt = heldAmt - transferAmt;
 
-        await client.query(
-          `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
-          [oldDep.id]
-        );
+        if (surplusAmt > 0n) {
+          const { dueAt: oldDueAt } = refundDeadline(transferDate);
+          await client.query(
+            `UPDATE deposit
+             SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
+             WHERE id = $3`,
+            [surplusAmt.toString(), oldDueAt, oldDep.id]
+          );
+        } else {
+          await client.query(
+            `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
+            [oldDep.id]
+          );
+        }
 
-        if (heldAmt > 0n) {
+        if (transferAmt > 0n) {
           await client.query(
             `INSERT INTO deposit_transaction (
                deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
@@ -4710,34 +4777,36 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
              VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
             [
               oldDep.id,
-              heldAmt.toString(),
+              transferAmt.toString(),
               `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptLock.rows[0].code} (FR-013)`,
               req.user.sub,
             ]
           );
         }
 
-        const newDepRes = await client.query(
-          `INSERT INTO deposit (contract_id, amount_held, status)
-           VALUES ($1, $2, 'HELD')
-           RETURNING *`,
-          [newContract.id, heldAmt.toString()]
-        );
-        transferredDeposit = newDepRes.rows[0];
-
-        if (heldAmt > 0n) {
-          await client.query(
-            `INSERT INTO deposit_transaction (
-               deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
-             )
-             VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-            [
-              transferredDeposit.id,
-              heldAmt.toString(),
-              `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
-              req.user.sub,
-            ]
+        if (targetDep > 0n || transferAmt > 0n) {
+          const newDepRes = await client.query(
+            `INSERT INTO deposit (contract_id, amount_held, status)
+             VALUES ($1, $2, 'HELD')
+             RETURNING *`,
+            [newContract.id, transferAmt.toString()]
           );
+          transferredDeposit = newDepRes.rows[0];
+
+          if (transferAmt > 0n) {
+            await client.query(
+              `INSERT INTO deposit_transaction (
+                 deposit_id, type, amount, description, method, status, approved_by, approved_at, created_by
+               )
+               VALUES ($1, 'transfer', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+              [
+                transferredDeposit.id,
+                transferAmt.toString(),
+                `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
+                req.user.sub,
+              ]
+            );
+          }
         }
       } else if (Number(newContract.deposit_amount || 0) > 0) {
         const newDepRes = await client.query(

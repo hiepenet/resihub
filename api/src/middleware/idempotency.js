@@ -28,7 +28,10 @@ export function idempotencyGuard(options = {}) {
     const rawHeader = req.get('Idempotency-Key');
     if (rawHeader === undefined || rawHeader === null) {
       const mustRequire =
-        options.requireHeader ?? (process.env.REQUIRE_IDEMPOTENCY_KEY === 'true');
+        options.requireHeader ??
+        (process.env.REQUIRE_IDEMPOTENCY_KEY !== undefined
+          ? process.env.REQUIRE_IDEMPOTENCY_KEY === 'true'
+          : process.env.NODE_ENV === 'production');
       if (mustRequire) {
         return res.status(400).json({
           code: 'IDEMPOTENCY_KEY_REQUIRED',

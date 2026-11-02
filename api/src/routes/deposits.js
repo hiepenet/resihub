@@ -2,7 +2,17 @@ import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
-import { validateDeduction, computeRefund, resolvePostSettlementStatus } from '../services/depositSettlement.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
+import {
+  isPositiveSafeIntegerVnd,
+  getTodayVnDateStr,
+  validateDeduction,
+  computeRefund,
+  resolvePostSettlementStatus,
+  validateRefundBankInfo,
+  normalizeOpenInvoiceSnapshot,
+  isSettlementSnapshotStale,
+} from '../services/depositSettlement.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -118,14 +128,8 @@ async function calculateContractOpenDebts(client, contractId) {
 async function checkSettlementPreconditions(client, contractRow) {
   const contractEnded = ['TERMINATED', 'EXPIRED'].includes(contractRow.contract_status);
 
-  const toDateStr = (val) => {
-    if (!val) return null;
-    if (val instanceof Date) return val.toISOString().slice(0, 10);
-    return String(val).slice(0, 10);
-  };
-
-  const startStr = toDateStr(contractRow.start_date);
-  const endRefStr = toDateStr(contractRow.terminated_at) || toDateStr(contractRow.end_date);
+  const startStr = getTodayVnDateStr(contractRow.start_date);
+  const endRefStr = getTodayVnDateStr(contractRow.terminated_at) || getTodayVnDateStr(contractRow.end_date);
   const endPeriod = endRefStr ? endRefStr.slice(0, 7) : null;
   const movedIn = Boolean(startStr && endRefStr && endRefStr >= startStr);
 
@@ -172,6 +176,36 @@ function escapeHtml(val) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+const VALID_COLLECT_METHODS = [
+  'BANK_TRANSFER',
+  'CASH',
+  'CARD',
+  'EWALLET',
+  'E_WALLET',
+  'QR_CODE',
+  'OTHER',
+];
+
+async function insertDepositAttachments(
+  client,
+  { ownerEntity = 'deposit', ownerId, evidenceUrls = [], uploadedBy = null }
+) {
+  if (!ownerId || !Array.isArray(evidenceUrls) || evidenceUrls.length === 0) return;
+  for (const rawUrl of evidenceUrls) {
+    const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+    if (!url || url.startsWith('/api/v1/attachments/')) continue;
+    await client.query(
+      `INSERT INTO attachment (owner_entity, owner_id, storage_path, uploaded_by)
+       SELECT $1::text, $2::uuid, $3::text, $4::uuid
+       WHERE NOT EXISTS (
+         SELECT 1 FROM attachment
+         WHERE owner_entity = $1 AND owner_id = $2 AND storage_path = $3
+       )`,
+      [ownerEntity, ownerId, url, uploadedBy]
+    );
+  }
 }
 
 /**
@@ -325,6 +359,7 @@ router.post(
   '/:id/transactions',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { type, amount, description, method, evidence } = req.body;
@@ -336,25 +371,39 @@ router.post(
       });
     }
 
-    if (type !== 'collect' && type !== 'transfer') {
+    if (type === 'transfer') {
+      return res.status(409).json({
+        code: 'TRANSFER_INTERNAL_ONLY',
+        message: 'Bút toán kết chuyển cọc (transfer) chỉ do hệ thống tự động thực hiện khi kích hoạt hợp đồng / gia hạn / chuyển phòng.',
+      });
+    }
+
+    if (type !== 'collect') {
       return res.status(400).json({
         code: 'INVALID_TRANSACTION_TYPE',
-        message: 'Loại giao dịch không hợp lệ. Chỉ chấp nhận collect hoặc transfer.',
+        message: 'Loại giao dịch không hợp lệ. Chỉ chấp nhận collect.',
       });
     }
 
-    const numAmount = Number(amount);
-    if (!amount || isNaN(numAmount) || numAmount <= 0) {
+    if (!isPositiveSafeIntegerVnd(amount)) {
       return res.status(400).json({
         code: 'INVALID_AMOUNT',
-        message: 'Số tiền giao dịch phải lớn hơn 0.',
+        message: 'Số tiền thu cọc phải là số nguyên dương VND.',
       });
     }
 
-    if (type === 'collect' && !method) {
+    if (!method || !String(method).trim()) {
       return res.status(400).json({
         code: 'METHOD_REQUIRED',
         message: 'Phương thức thanh toán là bắt buộc khi thu tiền cọc (vd: BANK_TRANSFER, CASH).',
+      });
+    }
+
+    const normalizedMethod = String(method).trim();
+    if (!VALID_COLLECT_METHODS.includes(normalizedMethod)) {
+      return res.status(400).json({
+        code: 'INVALID_METHOD',
+        message: `Phương thức thu cọc không hợp lệ. Chỉ chấp nhận: ${VALID_COLLECT_METHODS.join(', ')}.`,
       });
     }
 
@@ -381,37 +430,61 @@ router.post(
 
       await client.query('BEGIN');
 
-      const depositRes = await client.query('SELECT * FROM deposit WHERE id = $1 FOR UPDATE', [id]);
+      const depositRes = await client.query(
+        `SELECT d.*, c.status AS contract_status, c.deposit_amount AS contract_deposit_amount
+         FROM deposit d
+         JOIN contract c ON c.id = d.contract_id
+         WHERE d.id = $1
+         FOR UPDATE OF d`,
+        [id]
+      );
       if (depositRes.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy sổ cọc.' });
       }
 
       const currentDeposit = depositRes.rows[0];
-      if (!['HELD', 'SETTLEMENT_DRAFT'].includes(currentDeposit.status)) {
+      if (
+        currentDeposit.status !== 'HELD' ||
+        !['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].includes(currentDeposit.contract_status)
+      ) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'DEPOSIT_NOT_COLLECTIBLE',
-          message: `Sổ cọc đang ở trạng thái ${currentDeposit.status}, chỉ cho phép ghi nhận thu bổ sung/kết chuyển khi đang HELD hoặc SETTLEMENT_DRAFT.`,
+          message: `Chỉ cho phép thu bổ sung tiền cọc khi sổ cọc đang HELD và hợp đồng đang hiệu lực (hiện tại: cọc ${currentDeposit.status}, hợp đồng ${currentDeposit.contract_status}).`,
         });
       }
 
-      const txnAmount = BigInt(Math.round(numAmount));
-      const newAmount = BigInt(currentDeposit.amount_held) + txnAmount;
+      const txnAmount = BigInt(String(amount).trim());
+      const newAmount = BigInt(currentDeposit.amount_held ?? 0) + txnAmount;
+      const contractCap = BigInt(currentDeposit.contract_deposit_amount ?? 0);
+      if (newAmount > contractCap) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          code: 'DEPOSIT_EXCEEDS_CONTRACT_AMOUNT',
+          message: `Tổng tiền cọc thu vào (${newAmount.toString()} ₫) vượt mức tiền cọc quy định trong hợp đồng (${contractCap.toString()} ₫).`,
+        });
+      }
 
-      const evidenceList = Array.isArray(evidence) ? evidence.filter(Boolean) : [];
+      const evidenceList = Array.isArray(evidence) ? evidence.map((e) => String(e || '').trim()).filter(Boolean) : [];
+      await insertDepositAttachments(client, {
+        ownerEntity: 'deposit',
+        ownerId: id,
+        evidenceUrls: evidenceList,
+        uploadedBy: req.user.sub,
+      });
+
       const txnRes = await client.query(
         `INSERT INTO deposit_transaction (
            deposit_id, type, amount, description, method, evidence, status, approved_by, approved_at, created_by
          )
-         VALUES ($1, $2, $3, $4, $5, $6, 'APPROVED', $7, NOW(), $7)
+         VALUES ($1, 'collect', $2, $3, $4, $5, 'APPROVED', $6, NOW(), $6)
          RETURNING *`,
         [
           id,
-          type,
           txnAmount.toString(),
-          description || (type === 'collect' ? 'Thu bổ sung cọc' : 'Chuyển đổi cọc giữ chỗ'),
-          method || (type === 'transfer' ? 'TRANSFER' : 'OTHER'),
+          description || 'Thu bổ sung cọc',
+          normalizedMethod,
           evidenceList,
           req.user.sub,
         ]
@@ -509,14 +582,23 @@ router.get(
       const debts = await calculateContractOpenDebts(adminPool, row.contract_id);
       const preconditions = await checkSettlementPreconditions(adminPool, row);
 
-      // Khi sổ cọc đã tất toán (PARTIALLY_REFUNDED / REFUNDED), ưu tiên số liệu đã chốt trong settlement
-      const isSettled = ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(row.status);
+      // Khi sổ cọc đã tất toán (PARTIALLY_REFUNDED / REFUNDED / DEDUCTED_FULL), ưu tiên số liệu đã chốt trong settlement
+      const isSettled = ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(row.status);
       const effectiveServiceDebt = isSettled && row.settlement
         ? Number(row.settlement.outstanding_debt || 0)
         : debts.serviceDebt;
       const effectiveRentDebt = isSettled && row.settlement?.rent_debt !== undefined
         ? Number(row.settlement.rent_debt || 0)
         : debts.rentDebt;
+      const snapshotStale =
+        row.status === 'PENDING_APPROVAL'
+          ? isSettlementSnapshotStale(row.settlement, {
+              serviceDebt: debts.serviceDebt,
+              rentDebt: debts.rentDebt,
+              heldAmount: row.amount_held,
+              openInvoices: debts.openInvoices,
+            })
+          : false;
 
       res.json({
         data: {
@@ -535,6 +617,7 @@ router.get(
           calculated_service_debt: effectiveServiceDebt,
           calculated_rent_debt: effectiveRentDebt,
           open_invoices: debts.openInvoices || [],
+          snapshot_stale: snapshotStale,
           preconditions,
         },
       });
@@ -615,7 +698,7 @@ router.get(
         return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
       };
 
-      const heldForCalc = ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(row.status)
+      const heldForCalc = ['PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(row.status)
         ? Number(settlement.deposit_held_before_settlement ?? row.deposit_amount ?? 0)
         : Number(row.amount_held || 0);
       const serviceDebt = Number(settlement.outstanding_debt || 0);
@@ -785,6 +868,7 @@ router.post(
   '/:id/settlement',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { items = [], refund_method = 'BANK_TRANSFER', bank_info = {} } = req.body;
@@ -814,9 +898,11 @@ router.post(
 
       const depRes = await client.query(
         `SELECT d.*, c.status as contract_status, c.building_id, c.apartment_id,
-                c.start_date, c.end_date, c.terminated_at
+                c.primary_tenant_id, c.start_date, c.end_date, c.terminated_at,
+                a.code AS apartment_code
          FROM deposit d
          JOIN contract c ON c.id = d.contract_id
+         JOIN apartment a ON a.id = c.apartment_id
          WHERE d.id = $1 FOR UPDATE OF d`,
         [id]
       );
@@ -873,17 +959,36 @@ router.post(
         }
       }
 
-      const { serviceDebt, rentDebt } = await calculateContractOpenDebts(client, dep.contract_id);
+      const normalizedItems = items.map((item) => ({
+        ...item,
+        amount: Number(String(item.amount).trim()),
+        description: String(item.description).trim(),
+        evidence: Array.isArray(item.evidence)
+          ? item.evidence.map((u) => (typeof u === 'string' ? u.trim() : '')).filter(Boolean)
+          : [],
+      }));
+
+      const { serviceDebt, rentDebt, openInvoices } = await calculateContractOpenDebts(client, dep.contract_id);
 
       const { refund, shortfall } = computeRefund({
         depositAmount: dep.amount_held,
         outstandingDebt: serviceDebt,
-        items,
+        items: normalizedItems,
       });
+
+      const vBank = validateRefundBankInfo({
+        refundAmount: refund,
+        refundMethod: refund_method,
+        bankInfo: bank_info,
+      });
+      if (!vBank.ok) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ code: vBank.code, message: vBank.message });
+      }
 
       const prevSettlement = dep.settlement || {};
       const settlementPayload = {
-        items,
+        items: normalizedItems,
         outstanding_debt: serviceDebt,
         service_debt: serviceDebt,
         rent_debt: rentDebt,
@@ -891,7 +996,8 @@ router.post(
         refund_amount: Number(refund),
         shortfall: Number(shortfall),
         refund_method,
-        bank_info,
+        bank_info: vBank.normalizedBankInfo,
+        open_invoice_snapshot: normalizeOpenInvoiceSnapshot(openInvoices),
         created_by: req.user.sub,
         created_at: new Date().toISOString(),
         dispute_thread: Array.isArray(prevSettlement.dispute_thread) ? prevSettlement.dispute_thread : [],
@@ -902,6 +1008,16 @@ router.post(
         [JSON.stringify(settlementPayload), id]
       );
 
+      const allItemEvidence = normalizedItems.flatMap((it) => it.evidence || []);
+      if (allItemEvidence.length > 0) {
+        await insertDepositAttachments(client, {
+          ownerEntity: 'deposit',
+          ownerId: id,
+          evidenceUrls: allItemEvidence,
+          uploadedBy: req.user.sub,
+        });
+      }
+
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
          VALUES ($1, 'SETTLEMENT_SUBMIT', 'deposit', $2, $3)`,
@@ -909,6 +1025,32 @@ router.post(
       );
 
       await client.query('COMMIT');
+
+      // Thông báo trước chi hoàn cọc tới cư dân đứng tên HĐ (R-12, FR-024)
+      try {
+        const uRes = await adminPool.query(
+          `SELECT u.id AS user_id
+           FROM tenant t
+           JOIN app_user u ON u.person_id = t.person_id
+           WHERE t.id = $1`,
+          [dep.primary_tenant_id]
+        );
+        if (uRes.rows.length > 0) {
+          await adminPool.query(
+            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+             VALUES ($1, $2, 'Bảng kê tất toán tiền cọc đã được lập', $3, 'SETTLEMENT_STATEMENT_READY', $4)`,
+            [
+              req.user.org_id,
+              uRes.rows[0].user_id,
+              `Ban Quản Lý đã lập bảng kê tất toán tiền cọc cho căn ${dep.apartment_code}. Vui lòng kiểm tra chi tiết bảng kê và gửi phản hồi nếu có thắc mắc trước khi chi hoàn cọc.`,
+              JSON.stringify({ deposit_id: id, contract_id: dep.contract_id, settlement: settlementPayload }),
+            ]
+          );
+        }
+      } catch (nErr) {
+        console.warn('[Notification settlement submit warning]:', nErr.message);
+      }
+
       res.status(200).json({
         message: 'Đã gửi hồ sơ tất toán cọc, chờ phê duyệt nội bộ (Quản lý / SYS_ADMIN).',
         data: { settlement: settlementPayload, status: 'PENDING_APPROVAL' },
@@ -932,6 +1074,7 @@ router.post(
   '/:id/settlement/approve',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { client, release } = await getUserClient(req);
@@ -1016,8 +1159,33 @@ router.post(
       const items = Array.isArray(settlement.items) ? settlement.items : [];
       const sumItems = items.reduce((s, it) => s + Math.max(0, Number(it.amount || 0)), 0);
 
-      // Tính lại công nợ thực tế ngay tại thời điểm duyệt để đối trừ chuẩn xác vào hóa đơn đang mở
+      // Khóa FOR UPDATE các hóa đơn mở của HĐ để chặn thanh toán / điều chỉnh song song khi đang phê duyệt
+      await client.query(
+        `SELECT id FROM invoice
+         WHERE contract_id = $1
+           AND status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
+         FOR UPDATE`,
+        [dep.contract_id]
+      );
+
+      // Tính lại công nợ thực tế ngay tại thời điểm duyệt và chặn nếu snapshot đã biến động
       const liveDebts = await calculateContractOpenDebts(client, dep.contract_id);
+      if (
+        isSettlementSnapshotStale(settlement, {
+          serviceDebt: liveDebts.serviceDebt,
+          rentDebt: liveDebts.rentDebt,
+          heldAmount: heldBefore,
+          openInvoices: liveDebts.openInvoices,
+        })
+      ) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SETTLEMENT_SNAPSHOT_STALE',
+          message:
+            'Công nợ hóa đơn hoặc số dư tiền cọc đã biến động kể từ khi trình duyệt. Vui lòng từ chối hồ sơ để Quản lý lập lại bảng kê theo số liệu mới nhất.',
+        });
+      }
+
       const serviceDebt = liveDebts.serviceDebt;
       const rentDebt = liveDebts.rentDebt;
 
@@ -1029,8 +1197,13 @@ router.post(
       const refundAmount = Number(recomputedRefund);
       const shortfallAmount = Number(recomputedShortfall);
 
-      // 1. Ghi nhận khấu trừ hư hỏng / vệ sinh bàn giao
+      // 1. Ghi nhận khấu trừ hư hỏng / vệ sinh bàn giao (tổng deduct trên sổ cọc không được vượt quá heldBefore)
+      let remainingDepositToDeduct = heldBefore;
       for (const item of items) {
+        const itemAmt = Math.max(0, Math.round(Number(item.amount || 0)));
+        const appliedDeduct = Math.min(remainingDepositToDeduct, itemAmt);
+        remainingDepositToDeduct -= appliedDeduct;
+        if (appliedDeduct <= 0) continue;
         await client.query(
           `INSERT INTO deposit_transaction (
              deposit_id, type, amount, category, description, evidence, status, method, approved_by, approved_at, created_by
@@ -1038,7 +1211,7 @@ router.post(
            VALUES ($1, 'deduct', $2, $3, $4, $5, 'APPROVED', $6, $7, NOW(), $8)`,
           [
             id,
-            Math.round(Number(item.amount)),
+            appliedDeduct,
             item.category,
             item.description,
             item.evidence || [],
@@ -1050,8 +1223,7 @@ router.post(
       }
 
       // 2. Đối trừ tự động công nợ dịch vụ / điện / nước từ phần tiền cọc còn lại (KHÔNG đụng vào nợ tiền thuê)
-      const depositAfterItems = Math.max(0, heldBefore - sumItems);
-      const coveredServiceDebt = Math.min(serviceDebt, depositAfterItems);
+      const coveredServiceDebt = Math.min(serviceDebt, remainingDepositToDeduct);
 
       if (coveredServiceDebt > 0) {
         await client.query(
@@ -1247,6 +1419,7 @@ router.post(
   '/:id/settlement/reject',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -1348,6 +1521,7 @@ router.post(
   '/:id/dispute',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER', 'RESIDENT']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -1401,7 +1575,7 @@ router.post(
       }
 
       const dep = depRes.rows[0];
-      if (!['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(dep.status)) {
+      if (!['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(dep.status)) {
         await adminClient.query('ROLLBACK');
         return res.status(409).json({
           code: 'INVALID_STATUS',
@@ -1496,6 +1670,7 @@ router.post(
   '/:id/resolve-dispute',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
     const { resolution, reason } = req.body;

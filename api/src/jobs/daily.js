@@ -37,7 +37,7 @@ export async function runDailyJobs() {
       `UPDATE deposit
        SET refund_due_date = $1, updated_at = NOW()
        WHERE contract_id = $2
-         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED')
+         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
          AND refund_due_date IS NULL`,
       [dueAt, row.id]
     );
@@ -82,7 +82,7 @@ export async function runDailyJobs() {
       `UPDATE deposit
        SET refund_due_date = $1, updated_at = NOW()
        WHERE contract_id = $2
-         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED')
+         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
          AND refund_due_date IS NULL`,
       [dueAt, row.id]
     );
@@ -373,7 +373,7 @@ export async function runDailyJobs() {
      JOIN contract c ON c.id = d.contract_id
      JOIN building b ON b.id = c.building_id
      JOIN apartment a ON a.id = c.apartment_id
-     WHERE d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED')
+     WHERE d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
        AND d.amount_held > 0
        AND c.status IN ('TERMINATED', 'EXPIRED')
        AND COALESCE(c.terminated_at, c.end_date) IS NOT NULL

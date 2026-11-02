@@ -168,7 +168,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
       [personId]
     );
     const depositSettlements = contractHistoryRes.rows
-      .filter((r) => r.deposit_id && (r.deposit_settlement || ['SETTLEMENT_DRAFT', 'PENDING_APPROVAL', 'DISPUTED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(r.deposit_status)))
+      .filter((r) => r.deposit_id && (r.deposit_settlement || ['SETTLEMENT_DRAFT', 'PENDING_APPROVAL', 'DISPUTED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DEDUCTED_FULL'].includes(r.deposit_status)))
       .map((r) => ({
         deposit_id: r.deposit_id,
         contract_id: r.id,

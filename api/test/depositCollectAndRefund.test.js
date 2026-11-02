@@ -712,7 +712,15 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
     body: JSON.stringify({}),
   });
   assert.equal(sfApprove.status, 200);
-  assert.equal(sfApprove.body.data.status, 'REFUNDED');
+  assert.equal(sfApprove.body.data.status, 'DEDUCTED_FULL');
+
+  const sfDeductSum = await adminPool.query(
+    `SELECT COALESCE(SUM(amount), 0)::bigint AS total_deduct
+     FROM deposit_transaction
+     WHERE deposit_id = $1 AND type = 'deduct'`,
+    [dep2.id]
+  );
+  assert.equal(Number(sfDeductSum.rows[0].total_deduct), 5000000);
 
   const sfReceivable = await adminPool.query(
     `SELECT amount, type, status FROM receivable WHERE deposit_id = $1`,
