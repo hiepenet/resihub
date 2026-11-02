@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   DoorOpen,
@@ -36,6 +36,7 @@ import {
   toDateOnlyStr,
 } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+import { createIdempotencyKey } from '../../../utils/idempotency';
 
 function computeSuggestedHoldUntil(startStr, busyIntervals = []) {
   if (!startStr) return '';
@@ -90,6 +91,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
     note: '',
   });
   const [submitting, setSubmitting] = useState(false);
+  const resIdemKeyRef = useRef(createIdempotencyKey());
 
   const loadFloorPlan = useCallback(async () => {
     if (!buildingId) return;
@@ -278,21 +280,29 @@ export function FloorPlanView({ buildingId, embedded = false }) {
   const handleCreateReservation = async (e) => {
     e.preventDefault();
     if (!selectedApt) return;
+    const holdAmt = Number(String(resForm.hold_amount ?? '').trim());
+    if (!Number.isInteger(holdAmt) || holdAmt <= 0) {
+      toast.warning('Tiền đặt cọc giữ chỗ phải là số nguyên dương VND.');
+      return;
+    }
     if (resHoldFromError || resHoldUntilError) {
       toast.warning(resHoldFromError || resHoldUntilError);
       return;
     }
     setSubmitting(true);
     try {
-      await buildingsService.createReservation({
-        apartment_id: selectedApt.id,
-        prospect_name: resForm.prospect_name.trim(),
-        phone: resForm.phone.trim(),
-        hold_amount: Number(resForm.hold_amount || 0),
-        hold_from: resForm.hold_from || undefined,
-        hold_until: resForm.hold_until,
-        note: resForm.note.trim(),
-      });
+      await buildingsService.createReservation(
+        {
+          apartment_id: selectedApt.id,
+          prospect_name: resForm.prospect_name.trim(),
+          phone: resForm.phone.trim(),
+          hold_amount: holdAmt,
+          hold_from: resForm.hold_from || undefined,
+          hold_until: resForm.hold_until,
+          note: resForm.note.trim(),
+        },
+        { idempotencyKey: resIdemKeyRef.current }
+      );
       toast.success('Đã ghi nhận đặt cọc giữ chỗ thành công.');
       setResModalOpen(false);
       setSelectedApt(null);
@@ -654,6 +664,7 @@ export function FloorPlanView({ buildingId, embedded = false }) {
                     onClick={() => {
                       const startStr = earliestResStart || todayStr;
                       const untilStr = computeSuggestedHoldUntil(startStr, resBusyIntervals);
+                      resIdemKeyRef.current = createIdempotencyKey();
                       setResForm({
                         prospect_name: '',
                         phone: '',

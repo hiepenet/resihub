@@ -1,4 +1,5 @@
 import api from './api';
+import { withIdempotency } from '../utils/idempotency';
 
 export const buildingsService = {
   list: () => api.get('/api/v1/buildings').then((r) => r.data),
@@ -31,9 +32,10 @@ export const buildingsService = {
   handoverApartment: (id) => api.patch(`/api/v1/apartments/${id}/handover`).then((r) => r.data),
 
   listReservations: (params) => api.get('/api/v1/reservations', { params }).then((r) => r.data),
-  createReservation: (payload) => api.post('/api/v1/reservations', payload).then((r) => r.data),
-  convertReservation: (id, payload) => api.patch(`/api/v1/reservations/${id}/convert`, payload).then((r) => r.data),
-  forfeitReservation: (id, payload) => api.patch(`/api/v1/reservations/${id}/forfeit`, payload).then((r) => r.data),
-  refundReservation: (id, payload) => api.patch(`/api/v1/reservations/${id}/refund`, payload).then((r) => r.data),
+  createReservation: (payload, options = {}) =>
+    api.post('/api/v1/reservations', payload, withIdempotency(options)).then((r) => r.data),
+  forfeitReservation: (id, payload, options = {}) =>
+    api.patch(`/api/v1/reservations/${id}/forfeit`, payload, withIdempotency(options)).then((r) => r.data),
+  refundReservation: (id, payload, options = {}) =>
+    api.patch(`/api/v1/reservations/${id}/refund`, payload, withIdempotency(options)).then((r) => r.data),
 };
-

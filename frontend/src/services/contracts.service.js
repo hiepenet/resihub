@@ -1,19 +1,7 @@
 import api from './api';
+import { createIdempotencyKey, withIdempotency } from '../utils/idempotency';
 
-export function createIdempotencyKey() {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
-  return `idem-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 12)}`;
-}
-
-function withIdempotency(options) {
-  return {
-    headers: {
-      'Idempotency-Key': options?.idempotencyKey || createIdempotencyKey(),
-    },
-  };
-}
+export { createIdempotencyKey };
 
 export const contractsService = {
   list: (params) => api.get('/api/v1/contracts', { params }).then((r) => r.data),
@@ -62,4 +50,3 @@ export const contractsService = {
 
   getTemplateHtml: (id) => api.get(`/api/v1/contracts/${id}/template`, { responseType: 'text' }).then((r) => r.data),
 };
-

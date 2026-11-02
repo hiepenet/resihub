@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   Wallet,
@@ -47,6 +47,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, formatDateTime } from '../../../utils/format';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
+import { createIdempotencyKey, canCollectAdditionalDeposit } from '../../../utils/idempotency';
 
 // Khớp 100% với DEDUCT_CATEGORIES trong api/src/services/depositSettlement.js
 const DEDUCT_CATEGORY_OPTIONS = [
@@ -174,6 +175,14 @@ export function DepositsPage() {
   const [resolveReason, setResolveReason] = useState('');
   const [resolvingAction, setResolvingAction] = useState('');
 
+  // Rotating Idempotency-Key refs per modal/form session (GAP-04)
+  const collectIdemKeyRef = useRef(createIdempotencyKey());
+  const settlementIdemKeyRef = useRef(createIdempotencyKey());
+  const approveIdemKeyRef = useRef(createIdempotencyKey());
+  const rejectIdemKeyRef = useRef(createIdempotencyKey());
+  const disputeIdemKeyRef = useRef(createIdempotencyKey());
+  const resolveIdemKeyRef = useRef(createIdempotencyKey());
+
   const fetchDeposits = useCallback(async () => {
     setLoading(true);
     try {
@@ -205,7 +214,7 @@ export function DepositsPage() {
     const held = scopedDeposits.filter((d) => ['HELD', 'SETTLEMENT_DRAFT'].includes(d.status)).length;
     const pending = scopedDeposits.filter((d) => d.status === 'PENDING_APPROVAL').length;
     const refunded = scopedDeposits.filter((d) =>
-      ['REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED'].includes(d.status)
+      ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
     ).length;
     const disputed = scopedDeposits.filter((d) => d.status === 'DISPUTED').length;
     const totalHeldAmount = scopedDeposits
@@ -222,7 +231,7 @@ export function DepositsPage() {
       if (activeTab === 'pending' && d.status !== 'PENDING_APPROVAL') return false;
       if (
         activeTab === 'refunded' &&
-        !['REFUNDED', 'PARTIALLY_REFUNDED', 'TRANSFERRED'].includes(d.status)
+        !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(d.status)
       ) {
         return false;
       }
@@ -248,7 +257,11 @@ export function DepositsPage() {
   // Mở Modal Lịch sử giao dịch & Thu bổ sung cọc
   const handleOpenTransactions = useCallback(async (dep, defaultOpenCollect = false) => {
     setSelectedDepositForTxn(dep);
-    setShowCollectForm(defaultOpenCollect);
+    const allowCollect = Boolean(defaultOpenCollect) && canCollectAdditionalDeposit(dep);
+    if (allowCollect) {
+      collectIdemKeyRef.current = createIdempotencyKey();
+    }
+    setShowCollectForm(allowCollect);
     const shortage = Math.max(
       0,
       Math.round(Number(dep?.deposit_amount || 0) - Number(dep?.amount_held || 0))
@@ -277,11 +290,24 @@ export function DepositsPage() {
   const handleSubmitCollect = async (e) => {
     e?.preventDefault();
     if (!selectedDepositForTxn) return;
-    const amt = Math.round(Number(collectForm.amount || 0));
-    if (!amt || amt <= 0) {
-      toast.warning('Số tiền thu bổ sung cọc phải lớn hơn 0.');
+    if (!canCollectAdditionalDeposit(selectedDepositForTxn)) {
+      toast.warning('Sổ cọc hoặc hợp đồng hiện không ở trạng thái cho phép thu bổ sung.');
       return;
     }
+    const rawNum = Number(String(collectForm.amount ?? '').trim());
+    const shortage = Math.max(
+      0,
+      Math.round(Number(selectedDepositForTxn.deposit_amount || 0) - Number(selectedDepositForTxn.amount_held || 0))
+    );
+    if (!Number.isInteger(rawNum) || rawNum <= 0) {
+      toast.warning('Số tiền thu bổ sung cọc phải là số nguyên dương VND.');
+      return;
+    }
+    if (rawNum > shortage) {
+      toast.warning(`Số tiền thu thêm không được vượt quá phần cọc còn thiếu (${formatMoney(shortage)}).`);
+      return;
+    }
+    const amt = rawNum;
     if (!collectForm.method) {
       toast.warning('Vui lòng chọn phương thức thanh toán.');
       return;
@@ -289,13 +315,18 @@ export function DepositsPage() {
 
     setSubmittingCollect(true);
     try {
-      const res = await depositsService.createTransaction(selectedDepositForTxn.id, {
-        type: 'collect',
-        amount: amt,
-        method: collectForm.method,
-        description: collectForm.description.trim() || 'Thu bổ sung cọc',
-        evidence: Array.isArray(collectForm.evidence) ? collectForm.evidence : [],
-      });
+      const res = await depositsService.createTransaction(
+        selectedDepositForTxn.id,
+        {
+          type: 'collect',
+          amount: amt,
+          method: collectForm.method,
+          description: collectForm.description.trim() || 'Thu bổ sung cọc',
+          evidence: Array.isArray(collectForm.evidence) ? collectForm.evidence : [],
+        },
+        { idempotencyKey: collectIdemKeyRef.current }
+      );
+      collectIdemKeyRef.current = createIdempotencyKey();
       toast.success(res?.message || 'Đã ghi nhận giao dịch thu bổ sung cọc.');
       setShowCollectForm(false);
       setCollectForm({
@@ -322,6 +353,7 @@ export function DepositsPage() {
 
   // Mở Modal Tất toán & Hoàn cọc Four-Eyes
   const handleOpenSettlement = useCallback(async (dep) => {
+    settlementIdemKeyRef.current = createIdempotencyKey();
     setSettlementDeposit(dep);
     setSettlementOpen(true);
     setLoadingSettlement(true);
@@ -443,9 +475,9 @@ export function DepositsPage() {
 
     for (let i = 0; i < deductionItems.length; i += 1) {
       const it = deductionItems[i];
-      const numAmt = Math.round(Number(it.amount || 0));
-      if (!numAmt || numAmt <= 0) {
-        toast.warning(`Khoản khấu trừ #${i + 1}: Số tiền phải lớn hơn 0.`);
+      const numAmt = Number(String(it.amount ?? '').trim());
+      if (!Number.isInteger(numAmt) || numAmt <= 0) {
+        toast.warning(`Khoản khấu trừ #${i + 1}: Số tiền phải là số nguyên dương VND.`);
         return;
       }
       if (!String(it.description || '').trim()) {
@@ -460,13 +492,31 @@ export function DepositsPage() {
       }
     }
 
+    if (liveCalc.refundAmount > 0 && refundMethod === 'BANK_TRANSFER') {
+      const bName = String(bankInfo.bank_name || '').trim();
+      const accNo = String(bankInfo.account_number || '').trim();
+      const accHolder = String(bankInfo.account_holder || '').trim();
+      if (!bName || !accNo || !accHolder) {
+        toast.warning(
+          'Vui lòng nhập đầy đủ Ngân hàng, Số tài khoản và Chủ tài khoản nhận hoàn cọc.'
+        );
+        return;
+      }
+      if (!/^[A-Za-z0-9]{4,25}$/.test(accNo)) {
+        toast.warning(
+          'Số tài khoản ngân hàng chỉ được chứa chữ và số (từ 4 đến 25 ký tự, không khoảng trắng hay dấu gạch).'
+        );
+        return;
+      }
+    }
+
     setSubmittingSettlement(true);
     try {
       const payload = {
         outstanding_debt: liveCalc.serviceDebt,
         items: deductionItems.map((it) => ({
           category: it.category,
-          amount: Math.round(Number(it.amount)),
+          amount: Number(String(it.amount).trim()),
           description: it.description.trim(),
           evidence: it.evidence,
         })),
@@ -484,7 +534,9 @@ export function DepositsPage() {
             : {},
       };
 
-      const res = await depositsService.submitSettlement(settlementDeposit.id, payload);
+      const res = await depositsService.submitSettlement(settlementDeposit.id, payload, {
+        idempotencyKey: settlementIdemKeyRef.current,
+      });
       toast.success(
         res?.message || 'Đã trình hồ sơ tất toán cọc chờ cấp thẩm quyền nội bộ (Four-Eyes) phê duyệt.'
       );
@@ -503,7 +555,11 @@ export function DepositsPage() {
     if (!settlementDeposit) return;
     setApprovingSettlement(true);
     try {
-      const res = await depositsService.approveSettlement(settlementDeposit.id, {});
+      const res = await depositsService.approveSettlement(
+        settlementDeposit.id,
+        {},
+        { idempotencyKey: approveIdemKeyRef.current }
+      );
       toast.success(res?.message || 'Đã phê duyệt tất toán và hoàn cọc thành công.');
       setApproveConfirmOpen(false);
       setSettlementOpen(false);
@@ -526,9 +582,11 @@ export function DepositsPage() {
     }
     setRejectingSettlement(true);
     try {
-      const res = await depositsService.rejectSettlement(settlementDeposit.id, {
-        reason: rejectReason.trim(),
-      });
+      const res = await depositsService.rejectSettlement(
+        settlementDeposit.id,
+        { reason: rejectReason.trim() },
+        { idempotencyKey: rejectIdemKeyRef.current }
+      );
       toast.success(res?.message || 'Đã từ chối biên bản tất toán, trả về bản nháp cho BQL chỉnh sửa.');
       setRejectModalOpen(false);
       setSettlementOpen(false);
@@ -543,6 +601,7 @@ export function DepositsPage() {
 
   // MANAGER chuyển sang trạng thái Tranh chấp (DISPUTED)
   const handleOpenDispute = (dep) => {
+    disputeIdemKeyRef.current = createIdempotencyKey();
     setDisputeTarget(dep);
     setDisputeReason('');
     setDisputeModalOpen(true);
@@ -557,9 +616,11 @@ export function DepositsPage() {
     }
     setSubmittingDispute(true);
     try {
-      const res = await depositsService.dispute(disputeTarget.id, {
-        reason: disputeReason.trim(),
-      });
+      const res = await depositsService.dispute(
+        disputeTarget.id,
+        { reason: disputeReason.trim() },
+        { idempotencyKey: disputeIdemKeyRef.current }
+      );
       toast.success(res?.message || 'Đã chuyển hồ sơ sang trạng thái Tranh chấp (DISPUTED).');
       setDisputeModalOpen(false);
       setSettlementOpen(false);
@@ -577,6 +638,7 @@ export function DepositsPage() {
   // Giải quyết khiếu nại cọc (R-07: ADJUST -> SETTLEMENT_DRAFT | CONFIRM -> giữ kết quả)
   const handleOpenResolveDispute = useCallback(
     async (dep) => {
+      resolveIdemKeyRef.current = createIdempotencyKey();
       setResolveTarget(dep);
       setResolveSettlementData(dep?.settlement || null);
       setResolveReason('');
@@ -608,10 +670,15 @@ export function DepositsPage() {
     }
     setResolvingAction(resolution);
     try {
-      const res = await depositsService.resolveDispute(resolveTarget.id, {
-        resolution,
-        reason: resolveReason.trim(),
-      });
+      const res = await depositsService.resolveDispute(
+        resolveTarget.id,
+        {
+          resolution,
+          reason: resolveReason.trim(),
+        },
+        { idempotencyKey: resolveIdemKeyRef.current }
+      );
+      const nextStatus = res?.data?.status;
       toast.success(
         res?.message ||
           (resolution === 'ADJUST'
@@ -622,7 +689,13 @@ export function DepositsPage() {
       setSettlementOpen(false);
       setResolveTarget(null);
       setResolveReason('');
-      setActiveTab(resolution === 'ADJUST' ? 'held' : 'refunded');
+      setActiveTab(
+        nextStatus === 'PENDING_APPROVAL'
+          ? 'pending'
+          : nextStatus === 'SETTLEMENT_DRAFT' || resolution === 'ADJUST'
+            ? 'held'
+            : 'refunded'
+      );
       await fetchDeposits();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể giải quyết khiếu nại sổ cọc.'));
@@ -712,7 +785,9 @@ export function DepositsPage() {
           const heldVal = Number(row.amount_held || 0);
           const reqVal = Number(row.deposit_amount || 0);
           const shortage = Math.max(0, reqVal - heldVal);
-          const isSettledRow = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(row.status);
+          const isSettledRow = ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL'].includes(
+            row.status
+          );
           return (
             <div>
               <p className="font-bold text-slate-900">{formatMoney(row.amount_held)}</p>
@@ -721,7 +796,7 @@ export function DepositsPage() {
                   Cọc HĐ: {formatMoney(row.deposit_amount)}
                 </p>
               ) : null}
-              {['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) && shortage > 0 ? (
+              {canCollectAdditionalDeposit(row) && shortage > 0 ? (
                 <p className="text-[11px] font-sans text-amber-600 font-medium">
                   Còn phải thu: {formatMoney(shortage)}
                 </p>
@@ -785,7 +860,7 @@ export function DepositsPage() {
               Sổ giao dịch
             </Button>
 
-            {canSettleDeposits && ['HELD', 'SETTLEMENT_DRAFT'].includes(row.status) ? (
+            {canSettleDeposits && canCollectAdditionalDeposit(row) ? (
               <Button
                 variant="outline"
                 size="xs"
@@ -831,7 +906,7 @@ export function DepositsPage() {
               </>
             ) : null}
 
-            {['REFUNDED', 'PARTIALLY_REFUNDED', 'DISPUTED'].includes(row.status) ? (
+            {['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'DISPUTED'].includes(row.status) ? (
               <Button
                 variant="soft"
                 size="xs"
@@ -853,9 +928,14 @@ export function DepositsPage() {
               </Button>
             ) : null}
 
-            {['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DISPUTED', 'SETTLEMENT_DRAFT'].includes(
-              row.status
-            ) ? (
+            {[
+              'PENDING_APPROVAL',
+              'PARTIALLY_REFUNDED',
+              'REFUNDED',
+              'DEDUCTED_FULL',
+              'DISPUTED',
+              'SETTLEMENT_DRAFT',
+            ].includes(row.status) ? (
               <Button
                 variant="outline"
                 size="xs"
@@ -918,6 +998,19 @@ export function DepositsPage() {
       currentUserId &&
       String(readonlySettlementData.created_by) === String(currentUserId)
   );
+  const isSnapshotStale =
+    effectiveDepositStatus === 'PENDING_APPROVAL' &&
+    (Boolean(settlementDetail?.snapshot_stale) ||
+      Boolean(
+        readonlySettlementData &&
+          settlementDetail &&
+          (Number(settlementDetail.calculated_service_debt ?? 0) !==
+            Number(readonlySettlementData.outstanding_debt ?? 0) ||
+            Number(settlementDetail.calculated_rent_debt ?? 0) !==
+              Number(readonlySettlementData.rent_debt ?? 0) ||
+            Number(settlementDetail.amount_held ?? 0) !==
+              Number(readonlySettlementData.deposit_held_before_settlement ?? 0))
+      ));
 
   return (
     <div className="space-y-6">
@@ -1031,13 +1124,18 @@ export function DepositsPage() {
               </div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={selectedDepositForTxn.status} domain="deposit" />
-                {canSettleDeposits &&
-                ['HELD', 'SETTLEMENT_DRAFT'].includes(selectedDepositForTxn.status) ? (
+                {canSettleDeposits && canCollectAdditionalDeposit(selectedDepositForTxn) ? (
                   <Button
                     variant={showCollectForm ? 'outline' : 'primary'}
                     size="sm"
                     icon={showCollectForm ? XCircle : Plus}
-                    onClick={() => setShowCollectForm((v) => !v)}
+                    onClick={() =>
+                      setShowCollectForm((v) => {
+                        const next = !v;
+                        if (next) collectIdemKeyRef.current = createIdempotencyKey();
+                        return next;
+                      })
+                    }
                   >
                     {showCollectForm ? 'Ẩn biểu mẫu thu' : 'Thu bổ sung cọc'}
                   </Button>
@@ -1196,9 +1294,14 @@ export function DepositsPage() {
           <div className="flex items-center justify-between w-full flex-wrap gap-2">
             <div className="flex items-center gap-2 flex-wrap">
               {settlementDeposit &&
-              ['PENDING_APPROVAL', 'PARTIALLY_REFUNDED', 'REFUNDED', 'DISPUTED', 'SETTLEMENT_DRAFT'].includes(
-                effectiveDepositStatus
-              ) ? (
+              [
+                'PENDING_APPROVAL',
+                'PARTIALLY_REFUNDED',
+                'REFUNDED',
+                'DEDUCTED_FULL',
+                'DISPUTED',
+                'SETTLEMENT_DRAFT',
+              ].includes(effectiveDepositStatus) ? (
                 <Button
                   variant="outline"
                   icon={Printer}
@@ -1260,6 +1363,7 @@ export function DepositsPage() {
                     variant="danger"
                     icon={XCircle}
                     onClick={() => {
+                      rejectIdemKeyRef.current = createIdempotencyKey();
                       setRejectReason('');
                       setRejectModalOpen(true);
                     }}
@@ -1269,7 +1373,11 @@ export function DepositsPage() {
                   <Button
                     variant="success"
                     icon={ShieldCheck}
-                    onClick={() => setApproveConfirmOpen(true)}
+                    disabled={isSnapshotStale}
+                    onClick={() => {
+                      approveIdemKeyRef.current = createIdempotencyKey();
+                      setApproveConfirmOpen(true);
+                    }}
                   >
                     Phê duyệt hoàn cọc
                   </Button>
@@ -1544,6 +1652,7 @@ export function DepositsPage() {
                   <div className="grid grid-cols-1 gap-2.5 pt-1">
                     <BankSelect
                       label="Ngân hàng thụ hưởng của cư dân (VietQR)"
+                      required={liveCalc.refundAmount > 0}
                       placeholder="-- Chọn ngân hàng thụ hưởng --"
                       value={bankInfo.bank_name}
                       bankMeta={{
@@ -1564,6 +1673,7 @@ export function DepositsPage() {
                     <div className="grid grid-cols-2 gap-2.5">
                       <Input
                         label="Số tài khoản"
+                        required={liveCalc.refundAmount > 0}
                         placeholder="Số TK nhận hoàn cọc"
                         value={bankInfo.account_number}
                         onChange={(e) =>
@@ -1572,6 +1682,7 @@ export function DepositsPage() {
                       />
                       <Input
                         label="Chủ tài khoản"
+                        required={liveCalc.refundAmount > 0}
                         placeholder="Họ tên in hoa"
                         value={bankInfo.account_holder}
                         onChange={(e) =>
@@ -1650,6 +1761,22 @@ export function DepositsPage() {
               </div>
               <StatusBadge status={effectiveDepositStatus} domain="deposit" />
             </div>
+
+            {isSnapshotStale ? (
+              <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 flex items-start gap-2.5 text-xs text-amber-900">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold text-sm">
+                    Dữ liệu công nợ / số dư cọc đã biến động kể từ khi trình duyệt!
+                  </p>
+                  <p className="mt-1">
+                    Hóa đơn mở hoặc tiền cọc bảo lưu hiện tại không còn khớp với bản chụp lúc lập biên bản. Nút{' '}
+                    <strong>Phê duyệt hoàn cọc</strong> đã được khóa an toàn — vui lòng bấm{' '}
+                    <strong>Từ chối biên bản</strong> để Quản lý tòa nhà cập nhật lại bảng kê mới nhất.
+                  </p>
+                </div>
+              </div>
+            ) : null}
 
             {(effectiveDepositStatus === 'DISPUTED' ||
               readonlySettlementData?.dispute_reason ||
@@ -1773,7 +1900,7 @@ export function DepositsPage() {
 
                 {/* Tổng kết tài chính biên bản */}
                 {(() => {
-                  const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(
+                  const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL'].includes(
                     effectiveDepositStatus
                   );
                   const heldBefore = Number(

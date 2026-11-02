@@ -54,7 +54,8 @@ export const DEPOSIT_STATUS = {
   SETTLEMENT_DRAFT: { label: 'Nháp tất toán', variant: 'slate' },
   PENDING_APPROVAL: { label: 'Chờ duyệt hoàn cọc', variant: 'amber' },
   PARTIALLY_REFUNDED: { label: 'Hoàn cọc một phần', variant: 'indigo' },
-  REFUNDED: { label: 'Đã tất toán / Hoàn đủ', variant: 'emerald' },
+  REFUNDED: { label: 'Đã hoàn đủ 100%', variant: 'emerald' },
+  DEDUCTED_FULL: { label: 'Đã khấu trừ hết cọc', variant: 'amber' },
   TRANSFERRED: { label: 'Đã kết chuyển', variant: 'indigo' },
   DISPUTED: { label: 'Đang tranh chấp', variant: 'red' },
 };

@@ -41,6 +41,7 @@ import {
   toDateOnlyStr,
 } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+import { createIdempotencyKey } from '../../../utils/idempotency';
 
 const DIFF_FIELD_LABELS = {
   rent_amount: 'Giá thuê hàng tháng',
@@ -310,7 +311,10 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     }
   };
 
+  const disputeIdemKeyRef = useRef(createIdempotencyKey());
+
   const handleOpenDisputeModal = (depEntry) => {
+    disputeIdemKeyRef.current = createIdempotencyKey();
     setDisputeDepositTarget(depEntry);
     setDisputeReason('');
     setDisputeModalOpen(true);
@@ -325,9 +329,11 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     }
     setSubmittingDispute(true);
     try {
-      const res = await residentService.disputeDeposit(disputeDepositTarget.deposit_id, {
-        reason: disputeReason.trim(),
-      });
+      const res = await residentService.disputeDeposit(
+        disputeDepositTarget.deposit_id,
+        { reason: disputeReason.trim() },
+        { idempotencyKey: disputeIdemKeyRef.current }
+      );
       toast.success(res?.message || 'Đã gửi khiếu nại bảng kê tất toán tiền cọc tới Ban Quản Lý.');
       setDisputeModalOpen(false);
       setDisputeDepositTarget(null);
@@ -380,6 +386,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
         'PENDING_APPROVAL',
         'PARTIALLY_REFUNDED',
         'REFUNDED',
+        'DEDUCTED_FULL',
         'DISPUTED',
       ].includes(entry.deposit_status);
       if (!hasSettlement && !inSettlementStatus) return;
@@ -785,6 +792,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                 'PENDING_APPROVAL',
                 'PARTIALLY_REFUNDED',
                 'REFUNDED',
+                'DEDUCTED_FULL',
               ].includes(sd.deposit_status);
 
               return (
@@ -881,7 +889,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
 
                   {/* Tổng hợp công nợ đối trừ & số tiền hoàn */}
                   {(() => {
-                    const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED'].includes(
+                    const isFinalized = ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL'].includes(
                       sd.deposit_status
                     );
                     const heldBefore = Number(

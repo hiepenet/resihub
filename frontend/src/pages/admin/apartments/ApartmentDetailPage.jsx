@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Edit3,
@@ -27,6 +27,7 @@ import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import { createIdempotencyKey } from '../../../utils/idempotency';
 
 const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
 
@@ -34,7 +35,7 @@ export function ApartmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { canEditRealEstate, isManager } = usePermission();
+  const { canEditRealEstate, isManager, isSysAdmin } = usePermission();
 
   const [apt, setApt] = useState(null);
   const [zones, setZones] = useState([]);
@@ -169,14 +170,43 @@ export function ApartmentDetailPage() {
     }
   };
 
-  const handleReservationAction = async (resId, action) => {
+  const [rsvActionModal, setRsvActionModal] = useState({
+    open: false,
+    reservation: null,
+    action: 'refund',
+    reason: '',
+  });
+  const rsvActionIdemKeyRef = useRef(createIdempotencyKey());
+
+  const handleOpenReservationAction = (reservation, action) => {
+    rsvActionIdemKeyRef.current = createIdempotencyKey();
+    setRsvActionModal({
+      open: true,
+      reservation,
+      action,
+      reason: '',
+    });
+  };
+
+  const handleSubmitReservationAction = async (e) => {
+    e?.preventDefault();
+    const { reservation, action, reason } = rsvActionModal;
+    if (!reservation?.id) return;
+    const trimmedReason = String(reason || '').trim();
+    if (!trimmedReason) {
+      toast.warning('Vui lòng nhập lý do xử lý cọc giữ chỗ.');
+      return;
+    }
     setSaving(true);
     try {
-      if (action === 'refund')
-        await buildingsService.refundReservation(resId, { reason: 'Hoàn cọc giữ chỗ cho khách' });
-      else if (action === 'forfeit')
-        await buildingsService.forfeitReservation(resId, { reason: 'Khách quá hạn không ký HĐ' });
+      const opts = { idempotencyKey: rsvActionIdemKeyRef.current };
+      if (action === 'refund') {
+        await buildingsService.refundReservation(reservation.id, { reason: trimmedReason }, opts);
+      } else if (action === 'forfeit') {
+        await buildingsService.forfeitReservation(reservation.id, { reason: trimmedReason }, opts);
+      }
       toast.success('Đã xử lý hồ sơ giữ chỗ.');
+      setRsvActionModal({ open: false, reservation: null, action: 'refund', reason: '' });
       loadApartment();
     } catch (err) {
       toast.error(extractErrorMessage(err));
@@ -450,12 +480,22 @@ export function ApartmentDetailPage() {
                 render: (r) => (
                   <div className="inline-flex flex-col items-center gap-1.5">
                     <StatusBadge status={r.status} domain="reservation" />
-                    {r.status === 'HELD' && canEditRealEstate ? (
+                    {['HELD', 'EXPIRED'].includes(r.status) &&
+                    Number(r.hold_amount || 0) > 0 &&
+                    (canEditRealEstate || isSysAdmin) ? (
                       <div className="inline-flex items-center justify-center gap-1">
-                        <Button size="xs" variant="outline" onClick={() => handleReservationAction(r.id, 'refund')}>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          onClick={() => handleOpenReservationAction(r, 'refund')}
+                        >
                           Hoàn cọc
                         </Button>
-                        <Button size="xs" variant="danger" onClick={() => handleReservationAction(r.id, 'forfeit')}>
+                        <Button
+                          size="xs"
+                          variant="danger"
+                          onClick={() => handleOpenReservationAction(r, 'forfeit')}
+                        >
                           Tịch thu
                         </Button>
                       </div>
@@ -503,6 +543,59 @@ export function ApartmentDetailPage() {
           />
         </Card>
       ) : null}
+
+      {/* Reservation Refund / Forfeit Reason Modal */}
+      <Modal
+        open={rsvActionModal.open}
+        onClose={() => {
+          if (!saving) setRsvActionModal((p) => ({ ...p, open: false }));
+        }}
+        title={
+          rsvActionModal.action === 'refund'
+            ? 'Xác nhận hoàn cọc giữ chỗ (Four-Eyes)'
+            : 'Xác nhận tịch thu cọc giữ chỗ (Four-Eyes)'
+        }
+        subtitle={
+          rsvActionModal.reservation
+            ? `Khách: ${rsvActionModal.reservation.prospect_name} • Tiền cọc: ${formatMoney(
+                rsvActionModal.reservation.hold_amount
+              )}`
+            : ''
+        }
+        size="sm"
+      >
+        <form onSubmit={handleSubmitReservationAction} className="space-y-4">
+          <Input
+            label="Lý do xử lý (bắt buộc lưu vết kiểm toán)"
+            required
+            multiline
+            rows={3}
+            placeholder={
+              rsvActionModal.action === 'refund'
+                ? 'VD: Hoàn cọc theo thỏa thuận do thay đổi kế hoạch bàn giao...'
+                : 'VD: Khách báo hủy hoặc quá hạn giữ chỗ không ký hợp đồng...'
+            }
+            value={rsvActionModal.reason}
+            onChange={(e) => setRsvActionModal((p) => ({ ...p, reason: e.target.value }))}
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setRsvActionModal((p) => ({ ...p, open: false }))}
+              disabled={saving}
+            >
+              Hủy
+            </Button>
+            <Button
+              type="submit"
+              variant={rsvActionModal.action === 'refund' ? 'primary' : 'danger'}
+              loading={saving}
+            >
+              {rsvActionModal.action === 'refund' ? 'Xác nhận hoàn cọc' : 'Xác nhận tịch thu'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Edit Apartment Modal */}
       <Modal open={editOpen} onClose={() => setEditOpen(false)} title={`Cập nhật căn hộ ${apt.code}`}>
