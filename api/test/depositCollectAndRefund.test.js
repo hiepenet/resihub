@@ -702,7 +702,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
     body: JSON.stringify({ type: 'collect', amount: 5000000, method: 'CASH', description: 'Thu cọc căn A2' }),
   });
 
-  // Chuyển phòng sang apt3 với transfer_deposit = false:
+  // Chuyển phòng sang apt3 với transfer_deposit = false (4-step: DRAFT -> scan -> PENDING_APPROVAL -> OWNER approve):
   // - Sổ cọc cũ (dep2) phải có refund_due_date (+5 ngày) để tất toán độc lập
   // - Sổ cọc mới trên c3 phải được mở tự động (status = HELD, amount_held = 0)
   const transferRes = await apiFetch(`/api/v1/contracts/${c2Id}/transfer-room`, manager.token, {
@@ -719,8 +719,20 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   assert.equal(transferRes.status, 201, `Transfer room failed: ${JSON.stringify(transferRes.body)}`);
   const c3Id = transferRes.body.data.new_contract.id;
   cleanup.contractIds.push(c3Id);
-  assert.ok(transferRes.body.data.transferred_deposit?.id, 'HĐ mới phải được mở sổ cọc HELD (0 ₫) khi transfer_deposit=false');
-  assert.equal(Number(transferRes.body.data.transferred_deposit.amount_held), 0);
+  assert.equal(transferRes.body.data.new_contract.status, 'DRAFT');
+
+  await apiFetch(`/api/v1/contracts/${c3Id}/scan`, manager.token, {
+    method: 'POST',
+    body: JSON.stringify({ image_base64: TINY_PNG_BASE64 }),
+  });
+  const c3Act = await apiFetch(`/api/v1/contracts/${c3Id}/activate`, manager.token, { method: 'POST', body: '{}' });
+  assert.equal(c3Act.status, 409);
+  assert.equal(c3Act.body.code, 'TRANSFER_NEEDS_APPROVAL');
+
+  const c3App = await apiFetch(`/api/v1/contracts/${c3Id}/approve`, owner.token, { method: 'POST', body: '{}' });
+  assert.equal(c3App.status, 200, `Approve transfer failed: ${JSON.stringify(c3App.body)}`);
+  assert.ok(c3App.body.transferred_deposit?.id, 'HĐ mới phải được mở sổ cọc HELD (0 ₫) khi transfer_deposit=false');
+  assert.equal(Number(c3App.body.transferred_deposit.amount_held), 0);
 
   const dep2Check = await adminPool.query('SELECT status, refund_due_date FROM deposit WHERE id = $1', [dep2.id]);
   assert.equal(dep2Check.rows[0].status, 'HELD');

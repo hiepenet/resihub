@@ -506,7 +506,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
       const dep2Lookup = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [hd2Id]);
       const dep2Id = dep2Lookup.rows[0].id;
 
-      // 3. Transfer room HĐ2 -> HĐ3 on apt2 (dep2 TRANSFER_OUT 10tr & status='TRANSFERRED', dep3 TRANSFER_IN 10tr)
+      // 3. Transfer room HĐ2 -> HĐ3 on apt2 (4-step: DRAFT -> scan -> PENDING_APPROVAL -> OWNER approve -> dep2 TRANSFER_OUT 10tr & status='TRANSFERRED', dep3 TRANSFER_IN 10tr)
       const hd3Transfer = await apiFetch(`/api/v1/contracts/${hd2Id}/transfer-room`, mgr1.token, {
         method: 'POST',
         body: JSON.stringify({
@@ -521,6 +521,21 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
       assert.equal(hd3Transfer.status, 201, JSON.stringify(hd3Transfer.body));
       const hd3Id = hd3Transfer.body.data.new_contract?.id || hd3Transfer.body.data.id;
       cleanup.contractIds.push(hd3Id);
+
+      await apiFetch(`/api/v1/contracts/${hd3Id}/scan`, mgr1.token, {
+        method: 'POST',
+        body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+      });
+      const hd3Act = await apiFetch(`/api/v1/contracts/${hd3Id}/activate`, mgr1.token, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      assert.equal(hd3Act.status, 409, JSON.stringify(hd3Act.body));
+      const hd3App = await apiFetch(`/api/v1/contracts/${hd3Id}/approve`, ownerAuth.token, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      assert.equal(hd3App.status, 200, JSON.stringify(hd3App.body));
 
       // 4. Create 1 deposit in APPROVED_PENDING_PAYOUT (apt3)
       const hd4Res = await apiFetch('/api/v1/contracts', mgr1.token, {

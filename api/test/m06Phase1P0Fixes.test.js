@@ -431,7 +431,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
       else process.env.REQUIRE_IDEMPOTENCY_KEY = prevReqIdem;
     }
 
-    // Room transfer (transfer_deposit: true) from 9M held to aptB with deposit_amount = 6M -> new gets 6M, old keeps 3M HELD + refund_due_date
+    // Room transfer (transfer_deposit: true) from 9M held to aptB with deposit_amount = 6M -> 4-step (DRAFT -> scan -> PENDING_APPROVAL -> OWNER approve) -> new gets 6M, old keeps 3M HELD + refund_due_date
     const transferRes = await apiFetch(`/api/v1/contracts/${cValidId}/transfer-room`, manager.token, {
       method: 'POST',
       body: JSON.stringify({
@@ -447,6 +447,24 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     assert.equal(transferRes.status, 201, `Transfer failed: ${JSON.stringify(transferRes.body)}`);
     const newCId = transferRes.body.data.new_contract.id;
     cleanup.contractIds.push(newCId);
+    assert.equal(transferRes.body.data.new_contract.status, 'DRAFT');
+
+    await apiFetch(`/api/v1/contracts/${newCId}/scan`, manager.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+    const actTr = await apiFetch(`/api/v1/contracts/${newCId}/activate`, manager.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(actTr.status, 409);
+    assert.equal(actTr.body.code, 'TRANSFER_NEEDS_APPROVAL');
+
+    const appTr = await apiFetch(`/api/v1/contracts/${newCId}/approve`, owner.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(appTr.status, 200, JSON.stringify(appTr.body));
 
     const oldDepAfter = await adminPool.query('SELECT amount_held, status, refund_due_date FROM deposit WHERE id = $1', [depId]);
     assert.equal(Number(oldDepAfter.rows[0].amount_held), 3000000, 'Old deposit must retain 3M surplus');

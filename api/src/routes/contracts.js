@@ -450,13 +450,19 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
         const sysRes = await adminPool.query(
           `SELECT DISTINCT u.id
            FROM app_user u
+           JOIN person p ON p.id = u.person_id
            JOIN user_role ur ON ur.user_id = u.id
            JOIN role r ON r.id = ur.role_id
-           WHERE u.org_id = $1 AND u.status = 'ACTIVE' AND r.code = 'SYS_ADMIN'`,
-          [meta.org_id]
+           WHERE p.org_id = $1 AND u.status = 'ACTIVE'
+             AND (
+               r.code = 'SYS_ADMIN'
+               OR (r.code = 'MANAGER' AND ur.building_id = $2 AND u.id <> COALESCE($3::uuid, '00000000-0000-0000-0000-000000000000'::uuid))
+             )`,
+          [meta.org_id, meta.building_id, meta.created_by || null]
         );
         approverIds = sysRes.rows.map((r) => String(r.id));
       }
+      const isTransferOnly = extra.approvalCode === 'TRANSFER_NEEDS_APPROVAL';
       for (const ownerUserId of approverIds) {
         await adminPool.query(
           `INSERT INTO notification (org_id, user_id, title, content, type, payload)
@@ -464,8 +470,12 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
           [
             meta.org_id,
             ownerUserId,
-            `Chờ phê duyệt giá hợp đồng ưu đãi — Căn ${meta.apartment_code}`,
-            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) có giá thuê thấp hơn 90% giá niêm yết và đang chờ phê duyệt để kích hoạt.`,
+            isTransferOnly
+              ? `Chờ phê duyệt đổi phòng & kết chuyển cọc — Căn ${meta.apartment_code}`
+              : `Chờ phê duyệt giá hợp đồng ưu đãi — Căn ${meta.apartment_code}`,
+            isTransferOnly
+              ? `Hợp đồng đổi phòng sang căn ${meta.apartment_code} (${meta.building_name}) đã có bản scan ký giấy và đang chờ phê duyệt để đóng hợp đồng cũ & kết chuyển cọc.`
+              : `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) có giá thuê thấp hơn 90% giá niêm yết và đang chờ phê duyệt để kích hoạt.`,
             JSON.stringify({ contract_id: meta.id, link: `/admin/contracts/${meta.id}` }),
           ]
         );
@@ -480,8 +490,10 @@ async function notifyContractStakeholders(contract, eventType, extra = {}) {
           [
             meta.org_id,
             mgrId,
-            `Từ chối duyệt giá hợp đồng — Căn ${meta.apartment_code}`,
-            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) đã được trả về bản nháp (DRAFT) để điều chỉnh. Lý do: ${extra.reason || 'Không đạt khung giá'}`,
+            contract.is_room_transfer
+              ? `Từ chối duyệt hợp đồng đổi phòng — Căn ${meta.apartment_code}`
+              : `Từ chối duyệt giá hợp đồng — Căn ${meta.apartment_code}`,
+            `Hợp đồng căn ${meta.apartment_code} (${meta.building_name}) đã được trả về bản nháp (DRAFT) để điều chỉnh. Lý do: ${extra.reason || 'Không đạt điều kiện phê duyệt'}`,
             JSON.stringify({ contract_id: meta.id, link: `/admin/contracts/${meta.id}` }),
           ]
         );
@@ -2062,7 +2074,7 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
   const {
     start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
     deposit_amount, deposit_months, apartment_id, primary_tenant_id, note,
-    services, service_prices,
+    services, service_prices, transfer_deposit,
   } = req.body;
 
   const billingValidation = validateBillingParams(
@@ -2108,6 +2120,49 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
     if (e <= s) {
       await client.query('ROLLBACK');
       return res.status(422).json({ code: 'INVALID_DATE_RANGE', message: 'Ngày kết thúc hợp đồng phải sau ngày bắt đầu hợp đồng.' });
+    }
+
+    if (cur.is_room_transfer && cur.parent_contract_id) {
+      const parentCheck = await adminPool.query(
+        'SELECT id, apartment_id, building_id, start_date, status FROM contract WHERE id = $1 LIMIT 1',
+        [cur.parent_contract_id]
+      );
+      const parentContract = parentCheck.rows[0] || null;
+      if (parentContract) {
+        if (String(nextApartment) === String(parentContract.apartment_id)) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            code: 'SAME_APARTMENT',
+            message: 'Căn hộ mới phải khác căn hộ đang ở hiện tại của hợp đồng gốc.',
+          });
+        }
+        const nextStartOnly = toVnDateOnlyStr(nextStart);
+        const parentStartOnly = toVnDateOnlyStr(parentContract.start_date);
+        if (nextStartOnly < parentStartOnly) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            code: 'INVALID_TRANSFER_DATE',
+            message: 'Ngày chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng hiện tại.',
+          });
+        }
+      }
+      if (apartment_id !== undefined) {
+        const targetMeta = await adminPool.query(
+          'SELECT a.id, a.building_id, b.org_id FROM apartment a JOIN building b ON b.id = a.building_id WHERE a.id = $1 LIMIT 1',
+          [nextApartment]
+        );
+        if (targetMeta.rows.length === 0 || targetMeta.rows[0].org_id !== req.user.org_id) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+        }
+        if (targetMeta.rows[0].building_id !== cur.building_id) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            code: 'CROSS_BUILDING_TRANSFER_NOT_ALLOWED',
+            message: 'Chỉ hỗ trợ chuyển phòng và kết chuyển cọc giữa các căn hộ trong cùng một tòa nhà (FR-013, FR-070).',
+          });
+        }
+      }
     }
 
     // Đổi dates hoặc căn → chạy lại guard căn + chồng lấn
@@ -2199,6 +2254,11 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
       nextDeposit = Number(rent_amount ?? cur.rent_amount) * Number(deposit_months);
     }
 
+    const nextTransferDeposit =
+      cur.is_room_transfer && transfer_deposit !== undefined
+        ? Boolean(transfer_deposit)
+        : Boolean(cur.transfer_deposit);
+
     const updated = await client.query(
       `UPDATE contract
        SET start_date = $1, end_date = $2,
@@ -2210,15 +2270,16 @@ router.patch('/:id', authenticateToken, requireRole(['MANAGER']), async (req, re
            apartment_id = $8,
            primary_tenant_id = COALESCE($9, primary_tenant_id),
            note = COALESCE($10, note),
+           transfer_deposit = $11,
            updated_at = NOW()
-       WHERE id = $11 RETURNING *`,
+       WHERE id = $12 RETURNING *`,
       [
         nextStart, nextEnd,
         rent_amount ?? null,
         billingValidation.billingCycle,
         billingValidation.billingDay,
         billingValidation.paymentDueDays,
-        nextDeposit, nextApartment, primary_tenant_id ?? null, note ?? null, id,
+        nextDeposit, nextApartment, primary_tenant_id ?? null, note ?? null, nextTransferDeposit, id,
       ]
     );
 
@@ -2723,118 +2784,290 @@ async function findMatchingHeldReservation(dbClient, contract, req) {
 }
 
 async function runActivationSideEffects(dbClient, contract, req, sDateStr, options = {}) {
-  const matchedRsv =
-    options.matchedRsv !== undefined
-      ? options.matchedRsv
-      : await findMatchingHeldReservation(dbClient, contract, req);
-
-  let parentDep = null;
-  if (!matchedRsv && contract.parent_contract_id) {
-    const pDepRes = await dbClient.query(
-      `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' AND amount_held > 0 FOR UPDATE`,
-      [contract.parent_contract_id]
-    );
-    parentDep = pDepRes.rows[0] || null;
-  }
-
-  const opensDeposit = Number(contract.deposit_amount) > 0 || Boolean(matchedRsv) || Boolean(parentDep);
   let remainingCollect = 0n;
+  let surplusDepositAmount = 0;
+  let oldDepositId = null;
+  let transferredDeposit = null;
 
-  if (opensDeposit) {
-    const existing = await dbClient.query(`SELECT id FROM deposit WHERE contract_id = $1`, [contract.id]);
+  if (contract.is_room_transfer) {
+    if (!contract.parent_contract_id) {
+      const err = new Error('Hồ sơ chuyển phòng thiếu liên kết hợp đồng gốc.');
+      err.httpStatus = 409;
+      err.code = 'PARENT_CONTRACT_NOT_ACTIVE';
+      throw err;
+    }
+    const oldRes = await dbClient.query(`SELECT * FROM contract WHERE id = $1 FOR UPDATE`, [
+      contract.parent_contract_id,
+    ]);
+    if (oldRes.rows.length === 0 || oldRes.rows[0].status !== 'ACTIVE') {
+      const err = new Error('Hợp đồng gốc không còn ở trạng thái hiệu lực (ACTIVE), không thể thực thi chuyển phòng.');
+      err.httpStatus = 409;
+      err.code = 'PARENT_CONTRACT_NOT_ACTIVE';
+      throw err;
+    }
+    const oldContract = oldRes.rows[0];
+
+    const newAptRes = await dbClient.query(`SELECT code FROM apartment WHERE id = $1`, [contract.apartment_id]);
+    const newAptCode = newAptRes.rows[0]?.code || '';
+
+    // 1. Đóng hợp đồng cũ & chuyển căn cũ sang MAINTENANCE chờ nghiệm thu (FR-013, FR-017)
+    await dbClient.query(
+      `UPDATE contract
+       SET status = 'TERMINATED',
+           terminated_at = $1,
+           note = COALESCE(NULLIF(btrim(note), '') || ' ', '') || $2,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [sDateStr, `[Chuyển sang căn ${newAptCode}]`, oldContract.id]
+    );
+    await dbClient.query(
+      `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
+      [oldContract.apartment_id]
+    );
+
+    // 2. Xử lý kết chuyển sổ cọc hoặc tách sổ cọc độc lập (FR-013, FR-020, FR-025, FR-068)
+    const refundDays = await getOrgDepositRefundDays(adminPool, req?.user?.org_id);
+    const approverUserId = req.user.sub;
+    const creatorUserId = contract.created_by || req.user.sub;
+    const targetDep = BigInt(Math.round(Number(contract.deposit_amount ?? 0)));
+
+    const existing = await dbClient.query(`SELECT * FROM deposit WHERE contract_id = $1`, [contract.id]);
     if (existing.rows.length === 0) {
-      if (parentDep) {
-        const parentHeld = BigInt(parentDep.amount_held);
-        const targetDep = BigInt(contract.deposit_amount ?? 0);
-        const transferAmt = targetDep > 0n ? (parentHeld > targetDep ? targetDep : parentHeld) : 0n;
-        const surplusAmt = parentHeld - transferAmt;
-        remainingCollect = targetDep > transferAmt ? targetDep - transferAmt : 0n;
+      if (contract.transfer_deposit) {
+        const oldDepRes = await dbClient.query(
+          `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' FOR UPDATE`,
+          [oldContract.id]
+        );
+        if (oldDepRes.rows.length > 0) {
+          const oldDep = oldDepRes.rows[0];
+          oldDepositId = oldDep.id;
+          const heldAmt = BigInt(oldDep.amount_held || 0);
+          const transferAmt = targetDep > 0n ? (heldAmt > targetDep ? targetDep : heldAmt) : 0n;
+          const surplusAmt = heldAmt - transferAmt;
+          remainingCollect = targetDep > transferAmt ? targetDep - transferAmt : 0n;
 
-        if (transferAmt > 0n) {
           if (surplusAmt > 0n) {
-            const refundDays = await getOrgDepositRefundDays(adminPool, req?.user?.org_id);
-            const { dueAt: parentDueAt } = refundDeadline(sDateStr, refundDays);
+            surplusDepositAmount = Number(surplusAmt);
+            const { dueAt: oldDueAt } = refundDeadline(sDateStr, refundDays);
             await dbClient.query(
               `UPDATE deposit
                SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
                WHERE id = $3`,
-              [surplusAmt.toString(), parentDueAt, parentDep.id]
+              [surplusAmt.toString(), oldDueAt, oldDep.id]
             );
           } else {
             await dbClient.query(
               `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
-              [parentDep.id]
+              [oldDep.id]
             );
           }
 
-          await dbClient.query(
-            `INSERT INTO deposit_transaction (
-               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
-             )
-             VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-            [
-              parentDep.id,
-              transferAmt.toString(),
-              `Chuyển kết dư tiền cọc sang hợp đồng gia hạn ${contract.id.slice(0, 8).toUpperCase()}`,
-              req.user.sub,
-            ]
-          );
+          if (transferAmt > 0n) {
+            await dbClient.query(
+              `INSERT INTO deposit_transaction (
+                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
+               )
+               VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $5)`,
+              [
+                oldDep.id,
+                transferAmt.toString(),
+                `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptCode} (FR-013)`,
+                approverUserId,
+                creatorUserId,
+              ]
+            );
+          }
 
-          const depRes = await dbClient.query(
-            `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-             VALUES ($1, NULL, $2, 'HELD')
-             RETURNING id`,
-            [contract.id, transferAmt.toString()]
-          );
-          await dbClient.query(
-            `INSERT INTO deposit_transaction (
-               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
-             )
-             VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-            [
-              depRes.rows[0].id,
-              transferAmt.toString(),
-              `Nhận kết chuyển tiền cọc từ hợp đồng kỳ trước ${contract.parent_contract_id.slice(0, 8).toUpperCase()}`,
-              req.user.sub,
-            ]
-          );
-        } else if (targetDep > 0n) {
-          await dbClient.query(
-            `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-             VALUES ($1, NULL, '0', 'HELD')`,
-            [contract.id]
-          );
+          if (targetDep > 0n || transferAmt > 0n) {
+            const newDepRes = await dbClient.query(
+              `INSERT INTO deposit (contract_id, amount_held, status)
+               VALUES ($1, $2, 'HELD')
+               RETURNING *`,
+              [contract.id, transferAmt.toString()]
+            );
+            transferredDeposit = newDepRes.rows[0];
+
+            if (transferAmt > 0n) {
+              await dbClient.query(
+                `INSERT INTO deposit_transaction (
+                   deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
+                 )
+                 VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $5)`,
+                [
+                  transferredDeposit.id,
+                  transferAmt.toString(),
+                  `Chuyển tiền cọc sang căn hộ mới ${newAptCode} (FR-013)`,
+                  approverUserId,
+                  creatorUserId,
+                ]
+              );
+            }
+          }
+        } else {
+          remainingCollect = targetDep;
+          if (targetDep > 0n) {
+            const newDepRes = await dbClient.query(
+              `INSERT INTO deposit (contract_id, amount_held, status)
+               VALUES ($1, '0', 'HELD')
+               RETURNING *`,
+              [contract.id]
+            );
+            transferredDeposit = newDepRes.rows[0];
+          }
         }
       } else {
-        const holdAmount = matchedRsv ? matchedRsv.hold_amount : null;
-        const split = splitDepositOpening({
-          depositAmount: contract.deposit_amount,
-          holdAmount,
-        });
-        remainingCollect = split.remainingCollect;
-
-        const depRes = await dbClient.query(
-          `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
-           VALUES ($1, $2, $3, 'HELD')
+        const { dueAt: oldDueAt } = refundDeadline(sDateStr, refundDays);
+        const oldUpd = await dbClient.query(
+          `UPDATE deposit
+           SET refund_due_date = COALESCE(refund_due_date, $1), updated_at = NOW()
+           WHERE contract_id = $2 AND status = 'HELD'
            RETURNING id`,
-          [contract.id, matchedRsv?.id ?? null, split.openHeld.toString()]
+          [oldDueAt, oldContract.id]
         );
-
-        const newDepositId = depRes.rows[0].id;
-
-        if (split.openHeld > 0n && matchedRsv) {
-          await dbClient.query(
-            `INSERT INTO deposit_transaction (
-               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
-             )
-             VALUES ($1, 'transfer', 'TRANSFER_IN', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
-            [newDepositId, split.openHeld.toString(), req.user.sub]
+        oldDepositId = oldUpd.rows[0]?.id || null;
+        remainingCollect = targetDep;
+        if (targetDep > 0n) {
+          const newDepRes = await dbClient.query(
+            `INSERT INTO deposit (contract_id, amount_held, status)
+             VALUES ($1, '0', 'HELD')
+             RETURNING *`,
+            [contract.id]
           );
+          transferredDeposit = newDepRes.rows[0];
         }
       }
     }
-    if (matchedRsv) {
-      await dbClient.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [matchedRsv.id]);
+
+    await dbClient.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'TRANSFER_ROOM', 'contract', $2, $3, $4)`,
+      [
+        approverUserId,
+        contract.id,
+        JSON.stringify({ old_contract_id: oldContract.id, old_apartment_id: oldContract.apartment_id }),
+        JSON.stringify({
+          new_contract_id: contract.id,
+          approved_by: approverUserId,
+          transfer_deposit: Boolean(contract.transfer_deposit),
+          transferred_deposit_id: transferredDeposit?.id || null,
+          surplus_deposit_amount: surplusDepositAmount,
+          old_deposit_id: oldDepositId,
+        }),
+      ]
+    );
+  } else {
+    const matchedRsv =
+      options.matchedRsv !== undefined
+        ? options.matchedRsv
+        : await findMatchingHeldReservation(dbClient, contract, req);
+
+    let parentDep = null;
+    if (!matchedRsv && contract.parent_contract_id) {
+      const pDepRes = await dbClient.query(
+        `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' AND amount_held > 0 FOR UPDATE`,
+        [contract.parent_contract_id]
+      );
+      parentDep = pDepRes.rows[0] || null;
+    }
+
+    const opensDeposit = Number(contract.deposit_amount) > 0 || Boolean(matchedRsv) || Boolean(parentDep);
+
+    if (opensDeposit) {
+      const existing = await dbClient.query(`SELECT id FROM deposit WHERE contract_id = $1`, [contract.id]);
+      if (existing.rows.length === 0) {
+        if (parentDep) {
+          const parentHeld = BigInt(parentDep.amount_held);
+          const targetDep = BigInt(contract.deposit_amount ?? 0);
+          const transferAmt = targetDep > 0n ? (parentHeld > targetDep ? targetDep : parentHeld) : 0n;
+          const surplusAmt = parentHeld - transferAmt;
+          remainingCollect = targetDep > transferAmt ? targetDep - transferAmt : 0n;
+
+          if (transferAmt > 0n) {
+            if (surplusAmt > 0n) {
+              const refundDays = await getOrgDepositRefundDays(adminPool, req?.user?.org_id);
+              const { dueAt: parentDueAt } = refundDeadline(sDateStr, refundDays);
+              await dbClient.query(
+                `UPDATE deposit
+                 SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
+                 WHERE id = $3`,
+                [surplusAmt.toString(), parentDueAt, parentDep.id]
+              );
+            } else {
+              await dbClient.query(
+                `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
+                [parentDep.id]
+              );
+            }
+
+            await dbClient.query(
+              `INSERT INTO deposit_transaction (
+                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
+               )
+               VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+              [
+                parentDep.id,
+                transferAmt.toString(),
+                `Chuyển kết dư tiền cọc sang hợp đồng gia hạn ${contract.id.slice(0, 8).toUpperCase()}`,
+                req.user.sub,
+              ]
+            );
+
+            const depRes = await dbClient.query(
+              `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+               VALUES ($1, NULL, $2, 'HELD')
+               RETURNING id`,
+              [contract.id, transferAmt.toString()]
+            );
+            await dbClient.query(
+              `INSERT INTO deposit_transaction (
+                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
+               )
+               VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
+              [
+                depRes.rows[0].id,
+                transferAmt.toString(),
+                `Nhận kết chuyển tiền cọc từ hợp đồng kỳ trước ${contract.parent_contract_id.slice(0, 8).toUpperCase()}`,
+                req.user.sub,
+              ]
+            );
+          } else if (targetDep > 0n) {
+            await dbClient.query(
+              `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+               VALUES ($1, NULL, '0', 'HELD')`,
+              [contract.id]
+            );
+          }
+        } else {
+          const holdAmount = matchedRsv ? matchedRsv.hold_amount : null;
+          const split = splitDepositOpening({
+            depositAmount: contract.deposit_amount,
+            holdAmount,
+          });
+          remainingCollect = split.remainingCollect;
+
+          const depRes = await dbClient.query(
+            `INSERT INTO deposit (contract_id, source_reservation_id, amount_held, status)
+             VALUES ($1, $2, $3, 'HELD')
+             RETURNING id`,
+            [contract.id, matchedRsv?.id ?? null, split.openHeld.toString()]
+          );
+
+          const newDepositId = depRes.rows[0].id;
+
+          if (split.openHeld > 0n && matchedRsv) {
+            await dbClient.query(
+              `INSERT INTO deposit_transaction (
+                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
+               )
+               VALUES ($1, 'transfer', 'TRANSFER_IN', $2, 'Chuyển cọc giữ chỗ thành cọc hợp đồng', 'TRANSFER', 'APPROVED', $3, NOW(), $3)`,
+              [newDepositId, split.openHeld.toString(), req.user.sub]
+            );
+          }
+        }
+      }
+      if (matchedRsv) {
+        await dbClient.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [matchedRsv.id]);
+      }
     }
   }
 
@@ -2878,7 +3111,12 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
     );
   }
 
-  return remainingCollect;
+  return {
+    remainingCollect,
+    surplusDepositAmount,
+    oldDepositId,
+    transferredDeposit,
+  };
 }
 
 async function completeActivation(
@@ -2898,6 +3136,50 @@ async function completeActivation(
   const apt = aptRes.rows[0];
   const sDateStr = toVnDateOnlyStr(contract.start_date);
   const isFutureContract = sDateStr > apt.today;
+
+  if (contract.is_room_transfer) {
+    if (!contract.parent_contract_id) {
+      return {
+        error: {
+          status: 409,
+          code: 'PARENT_CONTRACT_NOT_ACTIVE',
+          message: 'Hồ sơ chuyển phòng thiếu liên kết hợp đồng gốc.',
+        },
+      };
+    }
+    const parentCheck = await adminPool.query(
+      `SELECT id, status, apartment_id, building_id, start_date FROM contract WHERE id = $1 LIMIT 1`,
+      [contract.parent_contract_id]
+    );
+    if (parentCheck.rows.length === 0 || parentCheck.rows[0].status !== 'ACTIVE') {
+      return {
+        error: {
+          status: 409,
+          code: 'PARENT_CONTRACT_NOT_ACTIVE',
+          message: 'Hợp đồng gốc không còn ở trạng thái hiệu lực (ACTIVE), không thể kích hoạt hợp đồng chuyển phòng.',
+        },
+      };
+    }
+    const parentStartStr = toVnDateOnlyStr(parentCheck.rows[0].start_date);
+    if (sDateStr < parentStartStr) {
+      return {
+        error: {
+          status: 422,
+          code: 'INVALID_TRANSFER_DATE',
+          message: 'Ngày bắt đầu hợp đồng chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng gốc.',
+        },
+      };
+    }
+    if (parentCheck.rows[0].building_id !== apt.building_id) {
+      return {
+        error: {
+          status: 422,
+          code: 'CROSS_BUILDING_TRANSFER_NOT_ALLOWED',
+          message: 'Chỉ hỗ trợ chuyển phòng giữa các căn hộ trong cùng một tòa nhà.',
+        },
+      };
+    }
+  }
 
   if (apt.status === 'INACTIVE') {
     return { error: { status: 409, code: 'INVALID_APARTMENT_STATUS', message: 'Căn hộ đang ngừng khai thác (INACTIVE), không thể kích hoạt hợp đồng.' } };
@@ -2919,11 +3201,13 @@ async function completeActivation(
     return { error: { status: 409, code: 'OVERLAP_CONTRACT', message: 'Căn hộ đã có hợp đồng trong khoảng thời gian này.', conflicts: overlapRes.rows } };
   }
 
-  const preMatchedRsv = await findMatchingHeldReservation(
-    commitBeforeAdminSideEffects ? adminPool : client,
-    contract,
-    req
-  );
+  const preMatchedRsv = contract.is_room_transfer
+    ? null
+    : await findMatchingHeldReservation(
+        commitBeforeAdminSideEffects ? adminPool : client,
+        contract,
+        req
+      );
   if (
     preMatchedRsv &&
     BigInt(Math.round(Number(contract.deposit_amount ?? 0))) < BigInt(preMatchedRsv.hold_amount ?? 0)
@@ -2937,24 +3221,44 @@ async function completeActivation(
     };
   }
 
-  // 3. Giá lệch khung → PENDING_APPROVAL, chờ Chủ sở hữu tòa nhà (OWNER) duyệt
-  if (!skipPriceCheck && isDiscountedPrice(contract.rent_amount, apt.base_rent)) {
+  // 3. Giá lệch khung hoặc Hợp đồng đổi phòng (FR-013, FR-025) → PENDING_APPROVAL chờ người có thẩm quyền duyệt
+  const discounted = isDiscountedPrice(contract.rent_amount, apt.base_rent);
+  if (!skipPriceCheck && (discounted || contract.is_room_transfer)) {
     const pendingRes = await client.query(
       `UPDATE contract SET status = 'PENDING_APPROVAL', updated_at = NOW() WHERE id = $1 RETURNING *`,
       [contract.id]
     );
+    const approvalReasons = [];
+    if (contract.is_room_transfer) {
+      approvalReasons.push('ROOM_TRANSFER');
+      if (contract.transfer_deposit) approvalReasons.push('DEPOSIT_TRANSFER');
+    }
+    if (discounted) approvalReasons.push('DISCOUNTED_PRICE');
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'SUBMIT_APPROVAL', 'contract', $2, $3, $4)`,
-      [req.user.sub, contract.id, JSON.stringify(contract), JSON.stringify(pendingRes.rows[0])]
+      [
+        req.user.sub,
+        contract.id,
+        JSON.stringify(contract),
+        JSON.stringify({ ...pendingRes.rows[0], approval_reasons: approvalReasons }),
+      ]
     );
-    return { needsApproval: pendingRes.rows[0] };
+    return {
+      needsApproval: pendingRes.rows[0],
+      approvalCode: discounted ? 'PRICE_NEEDS_APPROVAL' : 'TRANSFER_NEEDS_APPROVAL',
+    };
   }
 
-  // 4. ACTIVE + chuyển cọc giữ chỗ / kết chuyển cọc gia hạn thành cọc hợp đồng (FR-067, R-03, R-19)
+  // 4. ACTIVE + chuyển cọc giữ chỗ / kết chuyển cọc gia hạn / đổi phòng thành cọc hợp đồng (FR-013, FR-025, FR-067)
   const activeRes = await client.query(
-    `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 RETURNING *`,
-    [contract.id]
+    `UPDATE contract
+     SET status = 'ACTIVE',
+         approved_by = CASE WHEN $2::uuid IS NOT NULL THEN $2::uuid ELSE approved_by END,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [contract.id, skipPriceCheck ? req.user.sub : null]
   );
   if (activeRes.rows.length === 0) {
     return { error: { status: 403, code: 'ACCESS_DENIED', message: 'Không có quyền cập nhật trạng thái hợp đồng.' } };
@@ -2971,25 +3275,38 @@ async function completeActivation(
     const adminClient = await adminPool.connect();
     try {
       await adminClient.query('BEGIN');
-      const remainingCollect = await runActivationSideEffects(adminClient, contract, req, sDateStr, { matchedRsv: preMatchedRsv });
+      const sideOut = await runActivationSideEffects(adminClient, activeRes.rows[0], req, sDateStr, { matchedRsv: preMatchedRsv });
       await adminClient.query('COMMIT');
       return {
         contract: activeRes.rows[0],
-        remaining_collect: Number(remainingCollect),
+        remaining_collect: Number(sideOut.remainingCollect),
+        surplus_deposit_amount: sideOut.surplusDepositAmount || 0,
+        old_deposit_id: sideOut.oldDepositId || null,
+        transferred_deposit: sideOut.transferredDeposit || null,
         clientCommitted: true,
       };
     } catch (sideErr) {
       await adminClient.query('ROLLBACK').catch(() => {});
       await adminPool
-        .query(`UPDATE contract SET status = 'PENDING_APPROVAL', updated_at = NOW() WHERE id = $1`, [contract.id])
+        .query(`UPDATE contract SET status = 'PENDING_APPROVAL', approved_by = NULL, updated_at = NOW() WHERE id = $1`, [contract.id])
         .catch(() => {});
+      if (sideErr?.httpStatus) {
+        return {
+          error: {
+            status: sideErr.httpStatus,
+            code: sideErr.code || 'CONFLICT',
+            message: sideErr.message,
+          },
+          clientCommitted: true,
+        };
+      }
       throw sideErr;
     } finally {
       adminClient.release();
     }
   }
 
-  const remainingCollect = await runActivationSideEffects(client, contract, req, sDateStr, { matchedRsv: preMatchedRsv });
+  const sideOut = await runActivationSideEffects(client, activeRes.rows[0], req, sDateStr, { matchedRsv: preMatchedRsv });
 
   await client.query(
     `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -2997,7 +3314,14 @@ async function completeActivation(
     [req.user.sub, contract.id, JSON.stringify(contract), JSON.stringify(activeRes.rows[0])]
   );
 
-  return { contract: activeRes.rows[0], remaining_collect: Number(remainingCollect), clientCommitted: false };
+  return {
+    contract: activeRes.rows[0],
+    remaining_collect: Number(sideOut.remainingCollect),
+    surplus_deposit_amount: sideOut.surplusDepositAmount || 0,
+    old_deposit_id: sideOut.oldDepositId || null,
+    transferred_deposit: sideOut.transferredDeposit || null,
+    clientCommitted: false,
+  };
 }
 
 // Guard điều kiện chung trước khi gọi completeActivation
@@ -3066,10 +3390,15 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), idempo
     const result = await completeActivation(client, contract, res, req);
     if (result.needsApproval) {
       await client.query('COMMIT');
-      await notifyContractStakeholders(result.needsApproval, 'PENDING_APPROVAL');
+      await notifyContractStakeholders(result.needsApproval, 'PENDING_APPROVAL', {
+        approvalCode: result.approvalCode,
+      });
+      const isTransferOnly = result.approvalCode === 'TRANSFER_NEEDS_APPROVAL';
       return res.status(409).json({
-        code: 'PRICE_NEEDS_APPROVAL',
-        message: 'Giá thuê thấp hơn 10% so với giá niêm yết, hợp đồng chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt (PENDING_APPROVAL).',
+        code: result.approvalCode || 'PRICE_NEEDS_APPROVAL',
+        message: isTransferOnly
+          ? 'Hợp đồng chuyển phòng đã đủ bản scan ký giấy và chuyển sang chờ phê duyệt (PENDING_APPROVAL) để đóng hợp đồng cũ & kết chuyển cọc (FR-013, FR-025).'
+          : 'Giá thuê thấp hơn 10% so với giá niêm yết, hợp đồng chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt (PENDING_APPROVAL).',
         data: result.needsApproval,
       });
     }
@@ -3105,7 +3434,7 @@ router.post('/:id/activate', authenticateToken, requireRole(['MANAGER']), idempo
   }
 });
 
-router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), idempotencyGuard(), async (req, res) => {
+router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
@@ -3120,14 +3449,14 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
       await logAccessDenied(req, 'contract', id, 'Actor is not the active OWNER of this contract building');
       return res.status(403).json({
         code: 'FORBIDDEN_NOT_BUILDING_OWNER',
-        message: 'Chỉ Chủ sở hữu (OWNER) của tòa nhà này mới có quyền phê duyệt / từ chối hợp đồng lệch khung giá.',
+        message: 'Chỉ Chủ sở hữu (OWNER) của tòa nhà này mới có quyền phê duyệt / từ chối hợp đồng này.',
       });
     }
-  } else if (!userRoles.includes('SYS_ADMIN')) {
-    await logAccessDenied(req, 'contract', id, 'Building has no active OWNER and actor is not SYS_ADMIN');
+  } else if (!userRoles.includes('SYS_ADMIN') && !userRoles.includes('MANAGER')) {
+    await logAccessDenied(req, 'contract', id, 'Building has no active OWNER and actor is neither SYS_ADMIN nor MANAGER');
     return res.status(403).json({
       code: 'FORBIDDEN_NOT_BUILDING_OWNER',
-      message: 'Tòa nhà chưa gắn Chủ sở hữu hoạt động; chỉ Quản trị hệ thống (SYS_ADMIN) được duyệt dự phòng.',
+      message: 'Tòa nhà chưa gắn Chủ sở hữu hoạt động; chỉ Quản trị hệ thống (SYS_ADMIN) hoặc Quản lý thứ hai (Four-eyes) được duyệt dự phòng.',
     });
   }
 
@@ -3149,6 +3478,22 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
         code: 'INVALID_STATUS',
         message: `Hợp đồng đang ở trạng thái ${contract.status}, chỉ hợp đồng chờ phê duyệt (PENDING_APPROVAL) mới được duyệt.`,
       });
+    }
+
+    if (ownerUserIds.length === 0 && !userRoles.includes('SYS_ADMIN')) {
+      const aptRentRes = await adminPool.query('SELECT base_rent FROM apartment WHERE id = $1 LIMIT 1', [
+        contract.apartment_id,
+      ]);
+      const baseRent = aptRentRes.rows[0]?.base_rent;
+      if (!contract.is_room_transfer || isDiscountedPrice(contract.rent_amount, baseRent)) {
+        await client.query('ROLLBACK');
+        txOpen = false;
+        await logAccessDenied(req, 'contract', id, 'MANAGER cannot approve discounted contract even on unowned building');
+        return res.status(403).json({
+          code: 'FORBIDDEN_NOT_BUILDING_OWNER',
+          message: 'Hợp đồng giảm giá trên 10% trên tòa nhà chưa có Chủ sở hữu bắt buộc do Quản trị hệ thống (SYS_ADMIN) phê duyệt.',
+        });
+      }
     }
 
     // Kiểm tra lại đầy đủ điều kiện kích hoạt trước khi duyệt (R-12)
@@ -3210,7 +3555,7 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
         txOpen = false;
         return res.status(403).json({
           code: 'SELF_APPROVAL',
-          message: 'Nguyên tắc Four-eyes: Người lập / trình duyệt hợp đồng lệch khung giá không được tự phê duyệt.',
+          message: 'Nguyên tắc Four-eyes: Người lập / trình duyệt hợp đồng không được tự phê duyệt.',
         });
       }
     }
@@ -3248,13 +3593,21 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
     await notifyContractStakeholders(result.contract, 'ACTIVATED', {
       scheduleLen: scheduleBundle.invoice_schedule.length,
     });
+    const surplusAmt = Number(result.surplus_deposit_amount || 0);
+    const surplusNotice =
+      surplusAmt > 0
+        ? ` Lưu ý: Sổ cọc căn cũ còn dư ${surplusAmt.toLocaleString('vi-VN')} ₫ cần lập tất toán hoàn trả cho cư dân đúng hạn.`
+        : '';
     const approveMsg = result.remaining_collect > 0
-      ? `Đã phê duyệt và kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.`
-      : 'Đã phê duyệt và kích hoạt hợp đồng thành công.';
+      ? `Đã phê duyệt và kích hoạt hợp đồng thành công. Sổ cọc đã mở theo tiền thực giữ. Cần thu bổ sung ${result.remaining_collect.toLocaleString('vi-VN')} ₫ qua Sổ cọc.${surplusNotice}`
+      : `Đã phê duyệt và kích hoạt hợp đồng thành công.${surplusNotice}`;
     res.json({
       message: approveMsg,
       data: result.contract,
       remaining_collect: result.remaining_collect,
+      surplus_deposit_amount: surplusAmt,
+      old_deposit_id: result.old_deposit_id || null,
+      transferred_deposit: result.transferred_deposit || null,
       service_subscriptions: scheduleBundle.service_subscriptions,
       invoice_schedule: scheduleBundle.invoice_schedule,
     });
@@ -3270,9 +3623,9 @@ router.post('/:id/approve', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN'
 });
 
 /**
- * POST /api/v1/contracts/:id/reject — Từ chối phê duyệt hợp đồng lệch khung giá, trả về DRAFT để chỉnh sửa (R-12)
+ * POST /api/v1/contracts/:id/reject — Từ chối phê duyệt hợp đồng lệch khung giá / đổi phòng, trả về DRAFT để chỉnh sửa (R-12)
  */
-router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']), async (req, res) => {
+router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']), async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
 
@@ -3289,14 +3642,14 @@ router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']
       await logAccessDenied(req, 'contract', id, 'Actor is not the active OWNER of this contract building');
       return res.status(403).json({
         code: 'FORBIDDEN_NOT_BUILDING_OWNER',
-        message: 'Chỉ Chủ sở hữu (OWNER) của tòa nhà này mới có quyền phê duyệt / từ chối hợp đồng lệch khung giá.',
+        message: 'Chỉ Chủ sở hữu (OWNER) của tòa nhà này mới có quyền phê duyệt / từ chối hợp đồng này.',
       });
     }
-  } else if (!userRoles.includes('SYS_ADMIN')) {
-    await logAccessDenied(req, 'contract', id, 'Building has no active OWNER and actor is not SYS_ADMIN');
+  } else if (!userRoles.includes('SYS_ADMIN') && !userRoles.includes('MANAGER')) {
+    await logAccessDenied(req, 'contract', id, 'Building has no active OWNER and actor is neither SYS_ADMIN nor MANAGER');
     return res.status(403).json({
       code: 'FORBIDDEN_NOT_BUILDING_OWNER',
-      message: 'Tòa nhà chưa gắn Chủ sở hữu hoạt động; chỉ Quản trị hệ thống (SYS_ADMIN) được từ chối dự phòng.',
+      message: 'Tòa nhà chưa gắn Chủ sở hữu hoạt động; chỉ Quản trị hệ thống (SYS_ADMIN) hoặc Quản lý thứ hai (Four-eyes) được từ chối dự phòng.',
     });
   }
 
@@ -3319,6 +3672,21 @@ router.post('/:id/reject', authenticateToken, requireRole(['OWNER', 'SYS_ADMIN']
         code: 'INVALID_STATUS',
         message: `Hợp đồng đang ở trạng thái ${cur.status}. Chỉ hợp đồng PENDING_APPROVAL mới được từ chối phê duyệt để trả về DRAFT.`,
       });
+    }
+
+    if (ownerUserIds.length === 0 && !userRoles.includes('SYS_ADMIN')) {
+      const aptRentRes = await adminPool.query('SELECT base_rent FROM apartment WHERE id = $1 LIMIT 1', [
+        cur.apartment_id,
+      ]);
+      const baseRent = aptRentRes.rows[0]?.base_rent;
+      if (!cur.is_room_transfer || isDiscountedPrice(cur.rent_amount, baseRent)) {
+        await client.query('ROLLBACK');
+        await logAccessDenied(req, 'contract', id, 'MANAGER cannot reject discounted contract on unowned building');
+        return res.status(403).json({
+          code: 'FORBIDDEN_NOT_BUILDING_OWNER',
+          message: 'Hợp đồng giảm giá trên 10% trên tòa nhà chưa có Chủ sở hữu bắt buộc do Quản trị hệ thống (SYS_ADMIN) xử lý.',
+        });
+      }
     }
 
     const submitAudit = await adminPool.query(
@@ -4559,11 +4927,12 @@ router.post('/:id/renew', authenticateToken, requireRole(['MANAGER']), idempoten
 });
 
 /**
- * POST /api/v1/contracts/:id/transfer-room (FR-013)
- * Chuyển phòng atomic trong một transaction:
- * - Đóng hợp đồng cũ (TERMINATED) & chuyển căn cũ sang MAINTENANCE
- * - Mở hợp đồng mới ACTIVE trên căn mới (gán parent_contract_id = id) & chuyển căn mới sang OCCUPIED
- * - Tùy chọn chuyển sổ cọc sang hợp đồng mới (transfer_deposit = true)
+ * POST /api/v1/contracts/:id/transfer-room (FR-013, FR-014, FR-017, FR-020, FR-025, FR-070, AC-009.2)
+ * Tạo hợp đồng nháp (DRAFT) chuyển phòng giữ nguyên hợp đồng cũ ACTIVE:
+ *   1. Tạo HĐ mới DRAFT (is_room_transfer = true, transfer_deposit = boolean, parent_contract_id = id)
+ *   2. MANAGER tải bản scan hợp đồng ký giấy (POST /:newId/scan)
+ *   3. MANAGER trình kích hoạt (POST /:newId/activate -> PENDING_APPROVAL)
+ *   4. OWNER (hoặc người duyệt dự phòng) phê duyệt thực thi nguyên tử đóng HĐ cũ + mở HĐ mới + kết chuyển cọc
  */
 router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
@@ -4608,6 +4977,13 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
+    if (targetApt.building_id !== access.meta.building_id) {
+      return res.status(422).json({
+        code: 'CROSS_BUILDING_TRANSFER_NOT_ALLOWED',
+        message: 'Chỉ hỗ trợ chuyển phòng và kết chuyển cọc giữa các căn hộ trong cùng một tòa nhà (FR-013, FR-070).',
+      });
+    }
+
     await client.query('BEGIN');
 
     const oldRes = await client.query('SELECT * FROM contract WHERE id = $1 FOR UPDATE', [id]);
@@ -4633,6 +5009,31 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
+    if (targetApt.building_id !== oldContract.building_id) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'CROSS_BUILDING_TRANSFER_NOT_ALLOWED',
+        message: 'Chỉ hỗ trợ chuyển phòng và kết chuyển cọc giữa các căn hộ trong cùng một tòa nhà (FR-013, FR-070).',
+      });
+    }
+
+    const openTransferRes = await client.query(
+      `SELECT id, status FROM contract
+       WHERE parent_contract_id = $1
+         AND is_room_transfer = TRUE
+         AND status IN ('DRAFT', 'PENDING_APPROVAL')
+       LIMIT 1`,
+      [oldContract.id]
+    );
+    if (openTransferRes.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'PENDING_TRANSFER_EXISTS',
+        message: 'Hợp đồng này đang có hồ sơ chuyển phòng chờ ký hoặc chờ phê duyệt.',
+        data: openTransferRes.rows[0],
+      });
+    }
+
     const newAptLock = await client.query('SELECT * FROM apartment WHERE id = $1 FOR UPDATE', [new_apartment_id]);
     if (newAptLock.rows.length === 0 || newAptLock.rows[0].status !== 'AVAILABLE') {
       await client.query('ROLLBACK');
@@ -4642,9 +5043,18 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
-    const transferDate = new_start_date || getTodayVnDateStr();
+    const transferDate = String(new_start_date || getTodayVnDateStr()).slice(0, 10);
+    const oldStartStr = toVnDateOnlyStr(oldContract.start_date);
     const oldEndStr = toVnDateOnlyStr(oldContract.end_date);
-    const finalEndDate = new_end_date || oldEndStr;
+    const finalEndDate = String(new_end_date || oldEndStr).slice(0, 10);
+
+    if (transferDate < oldStartStr) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_TRANSFER_DATE',
+        message: 'Ngày chuyển phòng không được sớm hơn ngày bắt đầu hợp đồng hiện tại.',
+      });
+    }
 
     if (finalEndDate <= transferDate) {
       await client.query('ROLLBACK');
@@ -4658,8 +5068,8 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
     const overlapRes = await client.query(
       `SELECT id FROM contract
        WHERE apartment_id = $1
-         AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING')
-         AND (start_date < $3 AND end_date > $2)`,
+         AND status IN ('DRAFT', 'PENDING_APPROVAL', 'ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+         AND (start_date < $3 AND COALESCE(terminated_at, end_date) > $2)`,
       [new_apartment_id, transferDate, finalEndDate]
     );
     if (overlapRes.rows.length > 0) {
@@ -4682,49 +5092,32 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
       });
     }
 
-    if (isDiscountedPrice(finalRent, newAptLock.rows[0].base_rent)) {
-      await client.query('ROLLBACK');
-      return res.status(422).json({
-        code: 'DISCOUNTED_PRICE_REQUIRES_APPROVAL',
-        message:
-          'Giá thuê căn hộ mới giảm quá 10% so với giá niêm yết cần Chủ nhà phê duyệt (FR-013). Vui lòng tạo hợp đồng mới trình duyệt thay vì chuyển phòng trực tiếp.',
-      });
-    }
-
-    // 1. Đóng hợp đồng cũ & đặt căn cũ sang MAINTENANCE
-    await client.query(
-      `UPDATE contract
-       SET status = 'TERMINATED',
-           terminated_at = $1,
-           note = COALESCE(note || ' ', '') || $2,
-           updated_at = NOW()
-       WHERE id = $3`,
-      [transferDate, `[Chuyển sang căn ${newAptLock.rows[0].code}]`, oldContract.id]
-    );
-
-    await client.query(
-      `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
-      [oldContract.apartment_id]
-    );
-
-    // 2. Tạo hợp đồng mới ACTIVE trên căn mới, liên kết parent_contract_id
-
+    const shouldTransferDeposit = Boolean(transfer_deposit);
     const explicitNewDeposit =
       new_deposit_amount !== undefined && new_deposit_amount !== null
         ? Number(new_deposit_amount)
         : deposit_amount !== undefined && deposit_amount !== null
           ? Number(deposit_amount)
-          : !transfer_deposit && new_rent_amount !== undefined && new_rent_amount !== null
+          : !shouldTransferDeposit && new_rent_amount !== undefined && new_rent_amount !== null
             ? Number(new_rent_amount)
             : Number(oldContract.deposit_amount);
 
+    if (!Number.isFinite(explicitNewDeposit) || explicitNewDeposit < 0) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        code: 'INVALID_DEPOSIT_AMOUNT',
+        message: 'Tiền đặt cọc hợp đồng mới không hợp lệ.',
+      });
+    }
+
+    // Tạo hợp đồng mới ở trạng thái DRAFT, giữ nguyên hợp đồng cũ ACTIVE cho tới khi được phê duyệt
     const newContractRes = await client.query(
       `INSERT INTO contract (
          apartment_id, building_id, primary_tenant_id,
          start_date, end_date, rent_amount, billing_cycle, billing_day, payment_due_days,
-         deposit_amount, status, parent_contract_id, note, created_by
+         deposit_amount, status, parent_contract_id, is_room_transfer, transfer_deposit, note, created_by
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ACTIVE', $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'DRAFT', $11, TRUE, $12, $13, $14)
        RETURNING *`,
       [
         new_apartment_id,
@@ -4738,158 +5131,51 @@ router.post('/:id/transfer-room', authenticateToken, requireRole(['MANAGER']), i
         oldContract.payment_due_days || 5,
         explicitNewDeposit,
         oldContract.id,
+        shouldTransferDeposit,
         note || `Chuyển phòng từ hợp đồng ${oldContract.id.slice(0, 8).toUpperCase()}`,
         req.user.sub,
       ]
     );
     const newContract = newContractRes.rows[0];
 
-    await client.query(
-      `UPDATE apartment
-       SET status = CASE WHEN $2::date <= CURRENT_DATE THEN 'OCCUPIED' ELSE 'RESERVED' END,
-           updated_at = NOW()
-       WHERE id = $1`,
-      [new_apartment_id, transferDate]
-    );
-
-    // Sao chép người ở cùng
+    // Sao chép người ở cùng sang hợp đồng nháp mới
     await client.query(
       `INSERT INTO contract_occupant (contract_id, tenant_id, relationship)
        SELECT $1, tenant_id, relationship FROM contract_occupant WHERE contract_id = $2`,
       [newContract.id, oldContract.id]
     );
 
-    // 3. Chuyển sổ cọc (nếu chọn transfer_deposit) hoặc tách tất toán cọc cũ + mở sổ cọc mới
-    const refundDays = await getOrgDepositRefundDays(adminPool, req.user.org_id);
-    let transferredDeposit = null;
-    let surplusDepositAmount = 0;
-    let oldDepositId = null;
-    if (transfer_deposit) {
-      const oldDepRes = await client.query(
-        `SELECT * FROM deposit WHERE contract_id = $1 AND status = 'HELD' FOR UPDATE`,
-        [oldContract.id]
-      );
-      if (oldDepRes.rows.length > 0) {
-        const oldDep = oldDepRes.rows[0];
-        oldDepositId = oldDep.id;
-        const heldAmt = BigInt(oldDep.amount_held || 0);
-        const targetDep = BigInt(Math.round(Number(newContract.deposit_amount ?? 0)));
-        const transferAmt = targetDep > 0n ? (heldAmt > targetDep ? targetDep : heldAmt) : 0n;
-        const surplusAmt = heldAmt - transferAmt;
-
-        if (surplusAmt > 0n) {
-          surplusDepositAmount = Number(surplusAmt);
-          const { dueAt: oldDueAt } = refundDeadline(transferDate, refundDays);
-          await client.query(
-            `UPDATE deposit
-             SET amount_held = $1, refund_due_date = COALESCE(refund_due_date, $2), updated_at = NOW()
-             WHERE id = $3`,
-            [surplusAmt.toString(), oldDueAt, oldDep.id]
-          );
-        } else {
-          await client.query(
-            `UPDATE deposit SET amount_held = 0, status = 'TRANSFERRED', updated_at = NOW() WHERE id = $1`,
-            [oldDep.id]
-          );
-        }
-
-        if (transferAmt > 0n) {
-          await client.query(
-            `INSERT INTO deposit_transaction (
-               deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
-             )
-             VALUES ($1, 'transfer', 'TRANSFER_OUT', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-            [
-              oldDep.id,
-              transferAmt.toString(),
-              `Chuyển kết dư tiền cọc sang hợp đồng căn mới ${newAptLock.rows[0].code} (FR-013)`,
-              req.user.sub,
-            ]
-          );
-        }
-
-        if (targetDep > 0n || transferAmt > 0n) {
-          const newDepRes = await client.query(
-            `INSERT INTO deposit (contract_id, amount_held, status)
-             VALUES ($1, $2, 'HELD')
-             RETURNING *`,
-            [newContract.id, transferAmt.toString()]
-          );
-          transferredDeposit = newDepRes.rows[0];
-
-          if (transferAmt > 0n) {
-            await client.query(
-              `INSERT INTO deposit_transaction (
-                 deposit_id, type, category, amount, description, method, status, approved_by, approved_at, created_by
-               )
-               VALUES ($1, 'transfer', 'TRANSFER_IN', $2, $3, 'TRANSFER', 'APPROVED', $4, NOW(), $4)`,
-              [
-                transferredDeposit.id,
-                transferAmt.toString(),
-                `Chuyển tiền cọc sang căn hộ mới ${newAptLock.rows[0].code} (FR-013)`,
-                req.user.sub,
-              ]
-            );
-          }
-        }
-      } else if (Number(newContract.deposit_amount || 0) > 0) {
-        const newDepRes = await client.query(
-          `INSERT INTO deposit (contract_id, amount_held, status)
-           VALUES ($1, 0, 'HELD')
-           RETURNING *`,
-          [newContract.id]
-        );
-        transferredDeposit = newDepRes.rows[0];
-      }
-    } else {
-      const { dueAt: oldDueAt } = refundDeadline(transferDate, refundDays);
-      await client.query(
-        `UPDATE deposit
-         SET refund_due_date = COALESCE(refund_due_date, $1), updated_at = NOW()
-         WHERE contract_id = $2 AND status = 'HELD'`,
-        [oldDueAt, oldContract.id]
-      );
-      if (Number(newContract.deposit_amount || 0) > 0) {
-        const newDepRes = await client.query(
-          `INSERT INTO deposit (contract_id, amount_held, status)
-           VALUES ($1, 0, 'HELD')
-           RETURNING *`,
-          [newContract.id]
-        );
-        transferredDeposit = newDepRes.rows[0];
-      }
-    }
-
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES ($1, 'TRANSFER_ROOM', 'contract', $2, $3, $4)`,
+       VALUES ($1, 'TRANSFER_ROOM_DRAFT', 'contract', $2, $3, $4)`,
       [
         req.user.sub,
         newContract.id,
         JSON.stringify({ old_contract_id: oldContract.id, old_apartment_id: oldContract.apartment_id }),
-        JSON.stringify({ new_contract: newContract, transfer_deposit, transferred_deposit_id: transferredDeposit?.id || null }),
+        JSON.stringify({ new_contract: newContract, transfer_deposit: shouldTransferDeposit }),
       ]
     );
 
     await client.query('COMMIT');
-    const surplusNotice =
-      surplusDepositAmount > 0
-        ? ` Lưu ý: Sổ cọc căn cũ còn dư ${surplusDepositAmount.toLocaleString('vi-VN')} ₫ cần lập tất toán hoàn trả cho cư dân đúng hạn.`
-        : '';
     res.status(201).json({
-      message: `Chuyển phòng sang căn ${newAptLock.rows[0].code} thành công!${surplusNotice}`,
+      message: `Đã tạo hợp đồng nháp chuyển phòng sang căn ${newAptLock.rows[0].code}. Vui lòng tải bản scan hợp đồng đã ký và bấm kích hoạt để trình phê duyệt.`,
       data: {
         old_contract_id: oldContract.id,
         new_contract: newContract,
-        transferred_deposit: transferredDeposit,
-        surplus_deposit_amount: surplusDepositAmount,
-        old_deposit_id: oldDepositId,
+        requires_scan: true,
+        requires_approval: true,
       },
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err?.code === '23505') {
+      return res.status(409).json({
+        code: 'PENDING_TRANSFER_EXISTS',
+        message: 'Hợp đồng này đang có hồ sơ chuyển phòng chờ ký hoặc chờ phê duyệt.',
+      });
+    }
     console.error('[Transfer Room Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi thực hiện chuyển phòng.' });
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tạo hợp đồng chuyển phòng.' });
   } finally {
     await release();
   }

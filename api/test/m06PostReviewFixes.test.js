@@ -495,9 +495,9 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
   });
 
   // =========================================================================
-  // 2. Item 3.3 (FR-025 & FR-013): Room transfer blocks >10% rent discount bypass & returns surplus deposit info
+  // 2. Item 3.3 (FR-025 & FR-013): Room transfer routes >10% rent discount through DRAFT -> scan -> PENDING_APPROVAL -> OWNER approve & surfaces surplus_deposit_amount
   // =========================================================================
-  await t.test('3.3: transfer-room blocks >10% rent discount (422) and surfaces surplus_deposit_amount when new deposit < held', async () => {
+  await t.test('3.3: transfer-room routes >10% rent discount through PENDING_APPROVAL and surfaces surplus_deposit_amount on OWNER approve', async () => {
     const aptFrom = await createApt('TF1', 12000000);
     const aptTo = await createApt('TF2', 10000000);
     const { contractId: oldContractId, depositId: oldDepositId } = await createActiveContractWithDeposit({
@@ -507,7 +507,7 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
       phoneTag: '2',
     });
 
-    // Attempt >10% discount on target room (8,500,000 < 90% of 10,000,000) -> 422 DISCOUNTED_PRICE_REQUIRES_APPROVAL
+    // Discounted transfer (8,500,000 < 90% of 10,000,000) with lower deposit (8,000,000 vs 12,000,000 held -> surplus 4,000,000) creates DRAFT
     const discountedTransfer = await apiFetch(`/api/v1/contracts/${oldContractId}/transfer-room`, mgrAuth.token, {
       method: 'POST',
       body: JSON.stringify({
@@ -515,36 +515,40 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
         new_start_date: todayStr,
         new_end_date: isoDaysFromToday(150),
         new_rent_amount: 8500000,
-        transfer_deposit: true,
-      }),
-    });
-    if (discountedTransfer.body?.data?.new_contract?.id) {
-      cleanup.contractIds.push(discountedTransfer.body.data.new_contract.id);
-    }
-    assert.equal(discountedTransfer.status, 422, JSON.stringify(discountedTransfer.body));
-    assert.equal(discountedTransfer.body.code, 'DISCOUNTED_PRICE_REQUIRES_APPROVAL');
-
-    // Old contract must still be ACTIVE
-    const oldCheck = await adminPool.query(`SELECT status FROM contract WHERE id = $1`, [oldContractId]);
-    assert.equal(oldCheck.rows[0].status, 'ACTIVE');
-
-    // Valid transfer with lower deposit on target room (8,000,000 vs 12,000,000 held -> surplus 4,000,000)
-    const validTransfer = await apiFetch(`/api/v1/contracts/${oldContractId}/transfer-room`, mgrAuth.token, {
-      method: 'POST',
-      body: JSON.stringify({
-        new_apartment_id: aptTo.id,
-        new_start_date: todayStr,
-        new_end_date: isoDaysFromToday(150),
-        new_rent_amount: 9500000,
         new_deposit_amount: 8000000,
         transfer_deposit: true,
       }),
     });
-    assert.equal(validTransfer.status, 201, JSON.stringify(validTransfer.body));
-    cleanup.contractIds.push(validTransfer.body.data.new_contract.id);
-    assert.equal(validTransfer.body.data.surplus_deposit_amount, 4000000);
-    assert.equal(validTransfer.body.data.old_deposit_id, oldDepositId);
-    assert.match(validTransfer.body.message, /4\.000\.000/);
+    assert.equal(discountedTransfer.status, 201, JSON.stringify(discountedTransfer.body));
+    const trContractId = discountedTransfer.body.data.new_contract.id;
+    cleanup.contractIds.push(trContractId);
+    assert.equal(discountedTransfer.body.data.new_contract.status, 'DRAFT');
+
+    // Old contract MUST remain ACTIVE while in DRAFT
+    const oldCheck = await adminPool.query(`SELECT status FROM contract WHERE id = $1`, [oldContractId]);
+    assert.equal(oldCheck.rows[0].status, 'ACTIVE');
+
+    // Upload signed scan & submit activate -> 409 PRICE_NEEDS_APPROVAL (PENDING_APPROVAL)
+    await apiFetch(`/api/v1/contracts/${trContractId}/scan`, mgrAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({ image_base64: TINY_PNG_B64 }),
+    });
+    const actTr = await apiFetch(`/api/v1/contracts/${trContractId}/activate`, mgrAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(actTr.status, 409, JSON.stringify(actTr.body));
+    assert.equal(actTr.body.code, 'PRICE_NEEDS_APPROVAL');
+
+    // OWNER approves -> 200 ACTIVE + surplus 4,000,000
+    const appTr = await apiFetch(`/api/v1/contracts/${trContractId}/approve`, ownerAuth.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(appTr.status, 200, JSON.stringify(appTr.body));
+    assert.equal(appTr.body.surplus_deposit_amount, 4000000);
+    assert.equal(appTr.body.old_deposit_id, oldDepositId);
+    assert.match(appTr.body.message, /4\.000\.000/);
   });
 
   // =========================================================================
