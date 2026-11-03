@@ -207,7 +207,7 @@ router.get(
         `SELECT COUNT(*)::int AS pending_count
          FROM service_request sr
          WHERE sr.org_id = $1
-           AND sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS')
+           AND sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED')
            ${srScope} ${srFilter}`,
         srParams
       );
@@ -915,7 +915,25 @@ router.get(
         `SELECT sr.category,
                 COUNT(*)::int AS total_requests,
                 COUNT(*) FILTER (WHERE sr.status IN ('RESOLVED', 'CLOSED'))::int AS resolved_count,
-                COUNT(*) FILTER (WHERE sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS'))::int AS open_count,
+                COUNT(*) FILTER (WHERE sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'))::int AS open_count,
+                COUNT(*) FILTER (
+                  WHERE sr.sla_breached_at IS NOT NULL
+                     OR (sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED') AND sr.sla_due_at IS NOT NULL AND sr.sla_due_at < NOW())
+                     OR (sr.resolved_at IS NOT NULL AND sr.sla_due_at IS NOT NULL AND sr.resolved_at > sr.sla_due_at)
+                )::int AS sla_breached_count,
+                CASE
+                  WHEN COUNT(*) FILTER (WHERE sr.status IN ('RESOLVED', 'CLOSED')) > 0 THEN
+                    ROUND(
+                      (
+                        COUNT(*) FILTER (
+                          WHERE sr.status IN ('RESOLVED', 'CLOSED')
+                            AND (sr.sla_due_at IS NULL OR sr.resolved_at <= sr.sla_due_at)
+                        )::numeric * 100.0
+                      ) / COUNT(*) FILTER (WHERE sr.status IN ('RESOLVED', 'CLOSED')),
+                      1
+                    )
+                  ELSE 100.0
+                END AS on_time_rate_pct,
                 ROUND(AVG(EXTRACT(EPOCH FROM (sr.resolved_at - sr.created_at)) / 3600.0)::numeric, 1) AS avg_resolve_hours,
                 ROUND(AVG(sr.rating)::numeric, 2) AS avg_rating
          FROM service_request sr
@@ -1020,12 +1038,14 @@ router.get(
           r.total_debt,
         ]);
 
-        const slaHeaders = ['Danh mục', 'Tổng yêu cầu', 'Đã xử lý', 'Đang xử lý', 'Thời gian TB (giờ)', 'Đánh giá'];
+        const slaHeaders = ['Danh mục', 'Tổng yêu cầu', 'Đã xử lý', 'Đang xử lý', 'Quá hạn SLA', 'Đúng hạn (%)', 'Thời gian TB (giờ)', 'Đánh giá'];
         const slaRows = slaRes.rows.map((r) => [
           r.category,
           r.total_requests,
           r.resolved_count,
           r.open_count,
+          r.sla_breached_count ?? 0,
+          r.on_time_rate_pct ?? 100,
           r.avg_resolve_hours,
           r.avg_rating,
         ]);

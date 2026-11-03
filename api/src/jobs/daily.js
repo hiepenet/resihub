@@ -1176,6 +1176,114 @@ export async function runOverdueDepositSettlementAlerts(options = {}) {
   } catch (monthlyErr) {
     console.error('[DailyJob] monthly owner deposit report error:', monthlyErr.message);
   }
+
+  // 10. Cảnh báo leo thang yêu cầu sửa chữa quá hạn SLA gửi MANAGER + OWNER (M11 FR-044, PRD 10.2)
+  try {
+    await escalateOverdueServiceRequests(adminPool, {
+      nowTs: new Date(),
+      buildingId,
+    });
+  } catch (slaErr) {
+    console.error('[DailyJob] SLA escalation error:', slaErr.message);
+  }
+}
+
+export async function escalateOverdueServiceRequests(
+  dbPool = adminPool,
+  { nowTs = new Date(), buildingId = null } = {}
+) {
+  const effectiveNow = nowTs instanceof Date && !Number.isNaN(nowTs.getTime()) ? nowTs : new Date(nowTs);
+  let escalatedCount = 0;
+  let notificationsSent = 0;
+
+  const client = await dbPool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const overdueRes = await client.query(
+      `UPDATE service_request sr
+       SET sla_breached_at = $1::timestamptz,
+           updated_at = NOW()
+       FROM apartment a, building b
+       WHERE sr.apartment_id = a.id
+         AND sr.building_id = b.id
+         AND sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED')
+         AND sr.sla_due_at IS NOT NULL
+         AND sr.sla_due_at < $1::timestamptz
+         AND sr.sla_breached_at IS NULL
+         AND ($2::uuid IS NULL OR sr.building_id = $2::uuid)
+       RETURNING sr.id, sr.org_id, sr.building_id, sr.apartment_id, sr.assigned_to,
+                 sr.tracking_code, sr.title, sr.priority, sr.status, sr.sla_due_at,
+                 a.code AS apartment_code, b.code AS building_code, b.name AS building_name`,
+      [effectiveNow.toISOString(), buildingId]
+    );
+
+    escalatedCount = overdueRes.rows.length;
+
+    for (const sr of overdueRes.rows) {
+      const recipientsRes = await client.query(
+        `SELECT DISTINCT user_id FROM (
+           SELECT ur.user_id
+           FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           JOIN app_user au ON au.id = ur.user_id
+           WHERE au.status = 'ACTIVE'
+             AND r.code = 'MANAGER'
+             AND ur.building_id = $1
+           UNION
+           SELECT au_own.id AS user_id
+           FROM building b
+           JOIN owner o ON o.id = b.owner_id
+           JOIN app_user au_own ON au_own.person_id = o.person_id
+           WHERE b.id = $1
+             AND au_own.status = 'ACTIVE'
+           UNION
+           SELECT au_ass.id AS user_id
+           FROM app_user au_ass
+           WHERE $2::uuid IS NOT NULL
+             AND au_ass.id = $2::uuid
+             AND au_ass.status = 'ACTIVE'
+         ) rec`,
+        [sr.building_id, sr.assigned_to || null]
+      );
+
+      const title = `[QUÁ HẠN SLA] Yêu cầu #${sr.tracking_code} — Phòng ${sr.apartment_code} (${sr.building_code})`;
+      const content = `Yêu cầu "${sr.title}" tại căn hộ ${sr.apartment_code} (${sr.building_name}) đã vượt cam kết SLA xử lý. Vui lòng kiểm tra và đôn đốc xử lý ngay.`;
+      const payload = {
+        service_request_id: sr.id,
+        tracking_code: sr.tracking_code,
+        building_id: sr.building_id,
+        apartment_id: sr.apartment_id,
+        priority: sr.priority,
+        sla_due_at: sr.sla_due_at,
+        link: '/admin/service-requests',
+      };
+
+      for (const rec of recipientsRes.rows) {
+        const ins = await client.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           SELECT $1::uuid, $2::uuid, $3::text, $4::text, 'SERVICE_REQUEST_SLA_BREACH', $5::jsonb
+           WHERE NOT EXISTS (
+             SELECT 1 FROM notification n
+             WHERE n.user_id = $2::uuid
+               AND n.type = 'SERVICE_REQUEST_SLA_BREACH'
+               AND (n.payload->>'service_request_id') = $6::text
+           )`,
+          [sr.org_id, rec.user_id, title, content, JSON.stringify(payload), String(sr.id)]
+        );
+        notificationsSent += ins.rowCount || 0;
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { escalatedCount, notificationsSent };
 }
 
 export async function sendMonthlyOwnerDepositReports(

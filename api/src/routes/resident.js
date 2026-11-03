@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { roundVND } from '../services/pricing.js';
@@ -14,19 +15,83 @@ import {
   resolveServiceUnitPrice,
   computeSubscriptionPeriodCharge,
 } from '../services/serviceBilling.js';
+import {
+  SERVICE_REQUEST_OPEN_STATUSES,
+  PREFERRED_SLOT_CODES,
+  buildServiceRequestTrackingPrefix,
+  computeServiceRequestSlaDeadlines,
+  isWithinDuplicateWindow,
+  validateServiceRequestTransition,
+} from '../services/serviceRequestRules.js';
 
 const router = express.Router();
 
 const SR_CATEGORIES = ['ELECTRICAL', 'PLUMBING', 'HVAC', 'FURNITURE', 'APPLIANCE', 'CLEANING', 'SECURITY', 'OTHER'];
 const SR_PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
 
-async function generateTrackingCode(queryFn) {
-  const datePart = todayVietnamYmd().replace(/-/g, '');
-  const rand = Math.floor(1000 + Math.random() * 9000);
-  const candidate = `SR-${datePart}-${rand}`;
-  const dup = await queryFn('SELECT 1 FROM service_request WHERE tracking_code = $1', [candidate]);
-  if (dup.rows.length === 0) return candidate;
-  return `SR-${datePart}-${Math.floor(10000 + Math.random() * 90000)}`;
+const RESIDENT_SR_SAFE_COLUMNS = `
+  sr.id, sr.org_id, sr.building_id, sr.apartment_id, sr.tenant_id, sr.created_by, sr.assigned_to,
+  sr.tracking_code, sr.category, sr.title, sr.description, sr.location_detail, sr.preferred_slot,
+  sr.priority, sr.status, sr.images,
+  sr.sla_response_due_at, sr.sla_due_at, sr.first_responded_at, sr.sla_breached_at,
+  sr.hold_reason, sr.next_appointment_at,
+  sr.resolution_note, sr.resolution_images, sr.resolved_at,
+  sr.reopened_at, sr.reopen_reason, sr.reopen_count, sr.cancelled_reason,
+  sr.rating, sr.rating_note, sr.created_at, sr.updated_at,
+  (sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED')
+   AND sr.sla_due_at IS NOT NULL AND sr.sla_due_at < NOW()) AS is_sla_overdue
+`;
+
+function sanitizeResidentServiceRequest(row) {
+  if (!row || typeof row !== 'object') return row;
+  const { internal_note: _omittedInternalNote, ...safeRow } = row;
+  return safeRow;
+}
+
+function buildTrackingCodeCandidate(attempt = 0) {
+  const prefix = buildServiceRequestTrackingPrefix(new Date());
+  if (attempt < 3) {
+    return `${prefix}${Math.floor(1000 + Math.random() * 9000)}`;
+  }
+  return `${prefix}${Math.floor(10000 + Math.random() * 90000)}`;
+}
+
+async function loadResidentOrgSlaConfig(queryFn, orgId) {
+  if (!orgId) return {};
+  const res = await queryFn(
+    `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'sla_config' LIMIT 1`,
+    [orgId]
+  );
+  return res.rows[0]?.value || {};
+}
+
+async function findResidentAccessibleServiceRequest(queryFn, srId, reqUser) {
+  const res = await queryFn(
+    `SELECT sr.*, a.code AS apartment_code, b.name AS building_name
+     FROM service_request sr
+     JOIN apartment a ON a.id = sr.apartment_id
+     JOIN building b ON b.id = sr.building_id
+     WHERE sr.id = $1
+       AND (
+         sr.created_by = $2
+         OR sr.apartment_id IN (
+           SELECT c.apartment_id
+           FROM contract c
+           WHERE c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+             AND (
+               EXISTS (SELECT 1 FROM tenant t WHERE t.id = c.primary_tenant_id AND t.person_id = $3)
+               OR EXISTS (
+                 SELECT 1 FROM contract_occupant co
+                 JOIN tenant tocc ON tocc.id = co.tenant_id
+                 WHERE co.contract_id = c.id AND tocc.person_id = $3
+               )
+             )
+         )
+       )
+     LIMIT 1`,
+    [srId, reqUser.sub, reqUser.person_id]
+  );
+  return res.rows[0] || null;
 }
 
 /**
@@ -758,9 +823,10 @@ router.post('/rental-application', authenticateToken, async (req, res) => {
 
 /**
  * GET /api/v1/resident/service-requests (M11, P5)
- * Danh sách yêu cầu sửa chữa / báo hỏng đã gửi của cư dân
+ * Danh sách yêu cầu sửa chữa / báo hỏng đã gửi của cư dân (hỗ trợ cả primary_tenant_id và contract_occupant, ẩn tuyệt đối internal_note)
  */
-router.get('/service-requests', authenticateToken, async (req, res) => {
+router.get('/service-requests', authenticateToken, requireRole(['RESIDENT']), async (req, res) => {
+  const { client, release } = await getUserClient(req);
   try {
     const userId = req.user.sub;
     const personId = req.user.person_id;
@@ -774,17 +840,24 @@ router.get('/service-requests', authenticateToken, async (req, res) => {
         AND sr.apartment_id IN (
           SELECT c2.apartment_id
           FROM contract c2
-          JOIN tenant t2 ON t2.id = c2.primary_tenant_id
-          WHERE c2.id = $3 AND t2.person_id = $2
+          WHERE c2.id = $3
+            AND (
+              EXISTS (SELECT 1 FROM tenant t2 WHERE t2.id = c2.primary_tenant_id AND t2.person_id = $2)
+              OR EXISTS (
+                SELECT 1 FROM contract_occupant co2
+                JOIN tenant tocc2 ON tocc2.id = co2.tenant_id
+                WHERE co2.contract_id = c2.id AND tocc2.person_id = $2
+              )
+            )
         )
       `;
     }
 
-    const result = await pool.query(
-      `SELECT sr.*,
-              a.code as apartment_code,
-              b.name as building_name,
-              p_assigned.full_name as assigned_to_name
+    const result = await client.query(
+      `SELECT ${RESIDENT_SR_SAFE_COLUMNS},
+              a.code AS apartment_code,
+              b.name AS building_name,
+              p_assigned.full_name AS assigned_to_name
        FROM service_request sr
        JOIN apartment a ON a.id = sr.apartment_id
        JOIN building b ON b.id = sr.building_id
@@ -793,9 +866,17 @@ router.get('/service-requests', authenticateToken, async (req, res) => {
        WHERE (
          sr.created_by = $1
          OR sr.apartment_id IN (
-           SELECT c.apartment_id FROM contract c
-           JOIN tenant t ON t.id = c.primary_tenant_id
-           WHERE t.person_id = $2 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+           SELECT c.apartment_id
+           FROM contract c
+           WHERE c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+             AND (
+               EXISTS (SELECT 1 FROM tenant t WHERE t.id = c.primary_tenant_id AND t.person_id = $2)
+               OR EXISTS (
+                 SELECT 1 FROM contract_occupant co
+                 JOIN tenant tocc ON tocc.id = co.tenant_id
+                 WHERE co.contract_id = c.id AND tocc.person_id = $2
+               )
+             )
          )
        )
        ${contractScopeSql}
@@ -803,29 +884,34 @@ router.get('/service-requests', authenticateToken, async (req, res) => {
       params
     );
 
-    res.json({ data: result.rows });
+    res.json({ data: result.rows.map(sanitizeResidentServiceRequest) });
   } catch (err) {
     console.error('[Resident Get Service Requests Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách yêu cầu báo hỏng.' });
+  } finally {
+    await release();
   }
 });
 
 /**
  * POST /api/v1/resident/service-requests (FR-042, AC-004.1, AC-004.2)
- * Cư dân gửi yêu cầu sửa chữa / báo hỏng vào bảng service_request (tối đa 3 ảnh, trả mã tra cứu)
+ * Cư dân / người ở cùng gửi yêu cầu sửa chữa / báo hỏng (kiểm tra trùng 24h, tính SLA Việt Nam, tối đa 3 ảnh)
  */
-router.post('/service-requests', authenticateToken, async (req, res) => {
+router.post('/service-requests', authenticateToken, requireRole(['RESIDENT']), idempotencyGuard(), async (req, res) => {
   const {
     title,
     category = 'OTHER',
     description,
+    location_detail,
+    preferred_slot,
     priority,
     urgency,
     apartment_id,
     contract_id,
     images = [],
+    ignore_duplicate_warning = false,
     confirm_duplicate = false,
-  } = req.body;
+  } = req.body || {};
 
   if (!description?.trim()) {
     return res.status(400).json({ code: 'INVALID_INPUT', message: 'Vui lòng nhập mô tả chi tiết sự cố.' });
@@ -838,6 +924,20 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
   const rawPrio = String(priority || urgency || 'NORMAL').toUpperCase();
   const normPriority = SR_PRIORITIES.includes(rawPrio) ? rawPrio : 'NORMAL';
 
+  let normPreferredSlot = 'ANYTIME';
+  if (preferred_slot !== undefined && preferred_slot !== null && String(preferred_slot).trim() !== '') {
+    const slotUpper = String(preferred_slot).trim().toUpperCase();
+    if (!PREFERRED_SLOT_CODES.includes(slotUpper)) {
+      return res.status(400).json({
+        code: 'INVALID_PREFERRED_SLOT',
+        message: 'Khung giờ mong muốn không hợp lệ.',
+      });
+    }
+    normPreferredSlot = slotUpper;
+  }
+
+  const normLocationDetail = location_detail?.trim() ? location_detail.trim() : null;
+
   if (Array.isArray(images) && images.length > 3) {
     return res.status(400).json({
       code: 'TOO_MANY_IMAGES',
@@ -846,15 +946,33 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
   }
 
   const { client, release } = await getUserClient(req);
+  let txStarted = false;
   try {
-    // Xác định căn hộ đang thuê của cư dân (hỗ trợ contract_id hoặc apartment_id khi cư dân thuê nhiều căn)
     let targetAptQuery = `
-      SELECT c.id as contract_id, c.apartment_id, c.building_id, b.org_id, a.code as apartment_code
+      SELECT c.id AS contract_id, c.apartment_id, c.building_id, b.org_id,
+             a.code AS apartment_code, b.name AS building_name,
+             COALESCE(
+               (SELECT t_me.id FROM tenant t_me WHERE t_me.id = c.primary_tenant_id AND t_me.person_id = $1 LIMIT 1),
+               (
+                 SELECT tocc.id
+                 FROM contract_occupant co
+                 JOIN tenant tocc ON tocc.id = co.tenant_id
+                 WHERE co.contract_id = c.id AND tocc.person_id = $1
+                 LIMIT 1
+               )
+             ) AS caller_tenant_id
       FROM contract c
-      JOIN tenant t ON t.id = c.primary_tenant_id
       JOIN apartment a ON a.id = c.apartment_id
       JOIN building b ON b.id = c.building_id
-      WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+      WHERE c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+        AND (
+          EXISTS (SELECT 1 FROM tenant t WHERE t.id = c.primary_tenant_id AND t.person_id = $1)
+          OR EXISTS (
+            SELECT 1 FROM contract_occupant co
+            JOIN tenant tocc ON tocc.id = co.tenant_id
+            WHERE co.contract_id = c.id AND tocc.person_id = $1
+          )
+        )
     `;
     const aptParams = [req.user.person_id];
     if (contract_id) {
@@ -875,45 +993,100 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
       });
     }
 
-    const { apartment_id: aptId, building_id: bldgId, org_id: orgId } = aptRes.rows[0];
+    const {
+      apartment_id: aptId,
+      building_id: bldgId,
+      org_id: orgId,
+      apartment_code: aptCode,
+      caller_tenant_id: callerTenantId,
+    } = aptRes.rows[0];
 
-    // AC-004.2: Cảnh báo yêu cầu trùng danh mục đang mở trên cùng căn hộ trong 7 ngày qua
-    if (!confirm_duplicate) {
+    // AC-004.2: Cảnh báo yêu cầu trùng danh mục đang mở trên cùng căn hộ trong 24 giờ qua
+    const bypassDup = Boolean(ignore_duplicate_warning) || Boolean(confirm_duplicate);
+    if (!bypassDup) {
       const dupCheck = await client.query(
         `SELECT id, tracking_code, title, status, created_at
          FROM service_request
          WHERE apartment_id = $1
            AND category = $2
-           AND status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS')
-           AND created_at >= NOW() - INTERVAL '7 days'
+           AND status = ANY($3::text[])
          ORDER BY created_at DESC
          LIMIT 1`,
-        [aptId, normCategory]
+        [aptId, normCategory, SERVICE_REQUEST_OPEN_STATUSES]
       );
-      if (dupCheck.rows.length > 0) {
+      if (
+        dupCheck.rows.length > 0 &&
+        isWithinDuplicateWindow({
+          existingCreatedAt: dupCheck.rows[0].created_at,
+          existingStatus: dupCheck.rows[0].status,
+          now: new Date(),
+          windowHours: 24,
+        })
+      ) {
         return res.status(409).json({
           code: 'DUPLICATE_SERVICE_REQUEST',
-          message: `Căn hộ đang có yêu cầu cùng hạng mục chờ xử lý (${dupCheck.rows[0].tracking_code}). Bạn vẫn muốn gửi thêm yêu cầu mới?`,
+          message: `Căn hộ đang có yêu cầu cùng hạng mục vừa gửi trong 24 giờ qua (${dupCheck.rows[0].tracking_code}). Bạn vẫn muốn gửi thêm yêu cầu mới?`,
           existing_request: dupCheck.rows[0],
         });
       }
     }
 
-    await client.query('BEGIN');
+    const slaConfig = await loadResidentOrgSlaConfig((s, p) => client.query(s, p), orgId);
+    const createdAt = new Date();
+    const { slaResponseDueAt, slaDueAt } = computeServiceRequestSlaDeadlines({
+      createdAt,
+      priority: normPriority,
+      slaConfig,
+    });
 
-    const trackingCode = await generateTrackingCode((s, p) => client.query(s, p));
+    await client.query('BEGIN');
+    txStarted = true;
+
     const finalTitle = title?.trim() || `Báo hỏng ${normCategory} - ${description.trim().slice(0, 48)}`;
 
-    const insRes = await client.query(
-      `INSERT INTO service_request (
-         org_id, building_id, apartment_id, created_by,
-         title, category, description, priority, status, tracking_code, images
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'NEW', $9, '{}')
-       RETURNING *`,
-      [orgId, bldgId, aptId, req.user.sub, finalTitle, normCategory, description.trim(), normPriority, trackingCode]
-    );
-    const createdReq = insRes.rows[0];
+    let createdReq = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const candidateCode = buildTrackingCodeCandidate(attempt);
+      await client.query('SAVEPOINT sp_res_sr_tracking');
+      try {
+        const insRes = await client.query(
+          `INSERT INTO service_request (
+             org_id, building_id, apartment_id, tenant_id, created_by,
+             title, category, description, location_detail, preferred_slot,
+             priority, status, tracking_code, images,
+             sla_response_due_at, sla_due_at, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'NEW', $12, '{}', $13, $14, $15, $15)
+           RETURNING *`,
+          [
+            orgId,
+            bldgId,
+            aptId,
+            callerTenantId || null,
+            req.user.sub,
+            finalTitle,
+            normCategory,
+            description.trim(),
+            normLocationDetail,
+            normPreferredSlot,
+            normPriority,
+            candidateCode,
+            slaResponseDueAt,
+            slaDueAt,
+            createdAt,
+          ]
+        );
+        await client.query('RELEASE SAVEPOINT sp_res_sr_tracking');
+        createdReq = insRes.rows[0];
+        break;
+      } catch (insErr) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_res_sr_tracking');
+        if (insErr.code === '23505' && attempt < 4) {
+          continue;
+        }
+        throw insErr;
+      }
+    }
 
     // Lưu ảnh đính kèm (tối đa 3 ảnh base64 hoặc URL)
     const savedImageUrls = [];
@@ -931,6 +1104,7 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
           });
           if (saved.error) {
             await client.query('ROLLBACK');
+            txStarted = false;
             return res.status(400).json(saved.error);
           }
           savedImageUrls.push(`/api/v1/attachments/${saved.attachment.id}/view`);
@@ -949,20 +1123,46 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
       finalRow = updImg.rows[0];
     }
 
+    const notifType = normPriority === 'URGENT' ? 'SERVICE_REQUEST_URGENT' : 'SERVICE_REQUEST_CREATED';
+    const notifTitle =
+      normPriority === 'URGENT'
+        ? `[KHẨN CẤP] Báo hỏng căn ${aptCode} (${finalRow.tracking_code})`
+        : `Yêu cầu sửa chữa mới căn ${aptCode} (${finalRow.tracking_code})`;
+    const notifContent = `${finalTitle}${normLocationDetail ? ` — Vị trí: ${normLocationDetail}` : ''}.`;
+
+    await client.query(
+      `SELECT fn_notify_service_request_managers($1, $2, $3, $4, $5::jsonb)`,
+      [
+        finalRow.id,
+        notifType,
+        notifTitle,
+        notifContent,
+        JSON.stringify({
+          priority: normPriority,
+          category: normCategory,
+          apartment_code: aptCode,
+        }),
+      ]
+    );
+
+    const safeData = sanitizeResidentServiceRequest(finalRow);
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-       VALUES ($1, 'CREATE', 'service_request', $2, $3)`,
-      [req.user.sub, finalRow.id, JSON.stringify(finalRow)]
+       VALUES ($1, 'CREATE_SERVICE_REQUEST', 'service_request', $2, $3)`,
+      [req.user.sub, finalRow.id, JSON.stringify(safeData)]
     );
 
     await client.query('COMMIT');
+    txStarted = false;
 
     res.status(201).json({
       message: `Đã tiếp nhận yêu cầu báo hỏng. Mã tra cứu của bạn là ${finalRow.tracking_code}.`,
-      data: finalRow,
+      data: safeData,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
     console.error('[Create Resident Service Request Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi ghi nhận yêu cầu hỗ trợ.' });
   } finally {
@@ -971,27 +1171,179 @@ router.post('/service-requests', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/resident/service-requests/:id/rating (P5)
- * Cư dân đánh giá chất lượng xử lý (1-5 sao) sau khi sự cố đã được giải quyết
+ * POST /api/v1/resident/service-requests/:id/cancel (M11)
+ * Cư dân tự hủy yêu cầu khi còn ở trạng thái NEW
  */
-router.post('/service-requests/:id/rating', authenticateToken, async (req, res) => {
+router.post('/service-requests/:id/cancel', authenticateToken, requireRole(['RESIDENT']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
-  const { rating, rating_note } = req.body;
+  const { cancel_reason } = req.body || {};
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    const sr = await findResidentAccessibleServiceRequest((s, p) => client.query(s, p), id, req.user);
+    if (!sr) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu báo hỏng của bạn.' });
+    }
+
+    const check = validateServiceRequestTransition({
+      fromStatus: sr.status,
+      toStatus: 'CANCELLED',
+      actorRole: 'RESIDENT',
+    });
+    if (!check.valid) {
+      return res.status(409).json({ code: check.code, message: check.message });
+    }
+
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const updatedRes = await client.query(
+      `UPDATE service_request
+       SET status = 'CANCELLED',
+           cancelled_reason = $1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [cancel_reason?.trim() || null, id]
+    );
+    const safeBefore = sanitizeResidentServiceRequest(sr);
+    const safeAfter = sanitizeResidentServiceRequest(updatedRes.rows[0]);
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'CANCEL_SERVICE_REQUEST', 'service_request', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(safeBefore), JSON.stringify(safeAfter)]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    res.json({
+      message: 'Đã hủy yêu cầu sửa chữa.',
+      data: safeAfter,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    console.error('[Cancel Resident Service Request Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi hủy yêu cầu báo hỏng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/resident/service-requests/:id/reopen (FR-047)
+ * Cư dân mở lại phiếu RESOLVED trong thời hạn reopen_window_days
+ */
+router.post('/service-requests/:id/reopen', authenticateToken, requireRole(['RESIDENT']), idempotencyGuard(), async (req, res) => {
+  const { id } = req.params;
+  const { reopen_reason } = req.body || {};
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    const sr = await findResidentAccessibleServiceRequest((s, p) => client.query(s, p), id, req.user);
+    if (!sr) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu báo hỏng của bạn.' });
+    }
+
+    const slaConfig = await loadResidentOrgSlaConfig((s, p) => client.query(s, p), sr.org_id);
+    const reopenWindowDays =
+      Number(slaConfig?.reopen_window_days) > 0 ? Number(slaConfig.reopen_window_days) : 3;
+
+    const check = validateServiceRequestTransition({
+      fromStatus: sr.status,
+      toStatus: 'REOPENED',
+      actorRole: 'RESIDENT',
+      reopenReason: reopen_reason,
+      resolvedAt: sr.resolved_at,
+      reopenWindowDays,
+      now: new Date(),
+    });
+    if (!check.valid) {
+      const httpStatus = check.code === 'REOPEN_REASON_REQUIRED' ? 400 : 409;
+      return res.status(httpStatus).json({ code: check.code, message: check.message });
+    }
+
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const trimmedReason = String(reopen_reason).trim();
+    const updatedRes = await client.query(
+      `UPDATE service_request
+       SET status = 'REOPENED',
+           reopened_at = NOW(),
+           reopen_reason = $1,
+           reopen_count = COALESCE(reopen_count, 0) + 1,
+           updated_at = NOW()
+       WHERE id = $2
+       RETURNING *`,
+      [trimmedReason, id]
+    );
+    const safeBefore = sanitizeResidentServiceRequest(sr);
+    const safeAfter = sanitizeResidentServiceRequest(updatedRes.rows[0]);
+
+    await client.query(
+      `SELECT fn_notify_service_request_managers($1, $2, $3, $4, $5::jsonb)`,
+      [
+        id,
+        'SERVICE_REQUEST_REOPENED',
+        `[Mở lại] Căn ${sr.apartment_code} yêu cầu xử lý lại (${sr.tracking_code})`,
+        `Lý do mở lại: ${trimmedReason}`,
+        JSON.stringify({
+          reopen_count: safeAfter.reopen_count,
+          apartment_code: sr.apartment_code,
+        }),
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'REOPEN_SERVICE_REQUEST', 'service_request', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(safeBefore), JSON.stringify(safeAfter)]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    res.json({
+      message: 'Đã gửi yêu cầu xử lý lại cho Ban quản lý.',
+      data: safeAfter,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    console.error('[Reopen Resident Service Request Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi mở lại yêu cầu báo hỏng.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * POST /api/v1/resident/service-requests/:id/rating (P5, FR-047)
+ * Cư dân đánh giá chất lượng xử lý (1-5 sao) và nghiệm thu đóng phiếu (RESOLVED -> CLOSED)
+ */
+router.post('/service-requests/:id/rating', authenticateToken, requireRole(['RESIDENT']), idempotencyGuard(), async (req, res) => {
+  const { id } = req.params;
+  const { rating, rating_note } = req.body || {};
   const numRating = Number(rating);
 
   if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
     return res.status(400).json({ code: 'INVALID_RATING', message: 'Điểm đánh giá phải từ 1 đến 5 sao.' });
   }
 
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
   try {
-    const srRes = await pool.query(
-      `SELECT * FROM service_request WHERE id = $1 AND created_by = $2`,
-      [id, req.user.sub]
-    );
-    if (srRes.rows.length === 0) {
+    const sr = await findResidentAccessibleServiceRequest((s, p) => client.query(s, p), id, req.user);
+    if (!sr) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu báo hỏng của bạn.' });
     }
-    const sr = srRes.rows[0];
     if (!['RESOLVED', 'CLOSED'].includes(sr.status)) {
       return res.status(409).json({
         code: 'NOT_RESOLVED',
@@ -999,18 +1351,57 @@ router.post('/service-requests/:id/rating', authenticateToken, async (req, res) 
       });
     }
 
-    const updated = await pool.query(
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const updatedRes = await client.query(
       `UPDATE service_request
-       SET rating = $1, rating_note = $2, status = 'CLOSED', updated_at = NOW()
+       SET rating = $1,
+           rating_note = $2,
+           status = 'CLOSED',
+           updated_at = NOW()
        WHERE id = $3
        RETURNING *`,
       [numRating, rating_note?.trim() || null, id]
     );
+    const safeBefore = sanitizeResidentServiceRequest(sr);
+    const safeAfter = sanitizeResidentServiceRequest(updatedRes.rows[0]);
 
-    res.json({ message: 'Cảm ơn bạn đã gửi đánh giá chất lượng dịch vụ!', data: updated.rows[0] });
+    await client.query(
+      `SELECT fn_notify_service_request_managers($1, $2, $3, $4, $5::jsonb)`,
+      [
+        id,
+        'SERVICE_REQUEST_RATED',
+        `Cư dân căn ${sr.apartment_code} đánh giá ${numRating}/5 sao (${sr.tracking_code})`,
+        rating_note?.trim() ? `Nhận xét: ${rating_note.trim()}` : `Đã nghiệm thu đóng phiếu ${sr.tracking_code}.`,
+        JSON.stringify({
+          rating: numRating,
+          apartment_code: sr.apartment_code,
+        }),
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'RATE_SERVICE_REQUEST', 'service_request', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(safeBefore), JSON.stringify(safeAfter)]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    res.json({
+      message: 'Cảm ơn bạn đã gửi đánh giá chất lượng dịch vụ!',
+      data: safeAfter,
+    });
   } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
     console.error('[Rate Service Request Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lưu đánh giá.' });
+  } finally {
+    await release();
   }
 });
 
@@ -1048,7 +1439,40 @@ router.get('/invoices', authenticateToken, async (req, res) => {
 
     if (invoiceIds.length > 0) {
       const linesRes = await pool.query(
-        `SELECT * FROM invoice_line WHERE invoice_id = ANY($1::uuid[]) ORDER BY created_at ASC`,
+        `SELECT il.*,
+                COALESCE(mr_join.image_url, NULLIF(il.formula_meta->>'image_url', '')) AS meter_image_url,
+                COALESCE(mr_join.meter_code, NULLIF(il.formula_meta->>'meter_code', '')) AS meter_code
+         FROM invoice_line il
+         JOIN invoice inv ON inv.id = il.invoice_id
+         LEFT JOIN LATERAL (
+           SELECT mr.image_url, m.meter_code
+           FROM meter_reading mr
+           JOIN meter m ON m.id = mr.meter_id
+           WHERE il.item_type IN ('ELECTRICITY', 'WATER')
+             AND mr.status = 'CONFIRMED'
+             AND (
+               (
+                 (il.formula_meta->>'reading_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                 AND mr.id = (il.formula_meta->>'reading_id')::uuid
+               )
+               OR (
+                 mr.apartment_id = inv.apartment_id
+                 AND mr.period = inv.period
+                 AND m.meter_type = il.item_type
+               )
+             )
+           ORDER BY (
+             CASE
+               WHEN (il.formula_meta->>'reading_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    AND mr.id = (il.formula_meta->>'reading_id')::uuid
+                 THEN 0
+               ELSE 1
+             END
+           ) ASC, mr.recorded_at DESC
+           LIMIT 1
+         ) mr_join ON TRUE
+         WHERE il.invoice_id = ANY($1::uuid[])
+         ORDER BY il.created_at ASC`,
         [invoiceIds]
       );
       for (const l of linesRes.rows) {
