@@ -1,10 +1,11 @@
-// Job hằng ngày (B5, R-01, R-02, R-05, R-11, R-15, R-22):
+// Job hằng ngày (B5, R-01, R-02, R-05, R-11, R-15, R-22, FR-064, FR-066, PRD 14.5):
 // 1. Hết hạn hợp đồng -> EXPIRED + chuyển căn sang MAINTENANCE chờ bàn giao (trừ khi có HĐ gia hạn con nối tiếp ngay) + gán hạn hoàn cọc +5 ngày
 // 2. Đồng bộ trạng thái căn hộ (HĐ tới ngày bắt đầu, giữ chỗ quá hạn, RESERVED mồ côi)
-// 3. Tự động sinh hóa đơn hàng tháng theo billing_day (FR-066)
-// 4. Tự động chuyển hóa đơn quá hạn sang OVERDUE & cộng phạt chậm thanh toán 100.000 ₫/ngày từ ngày quá hạn thứ 6 (không trần tối đa)
+// 3. Tự động sinh hóa đơn nháp hàng tháng theo billing_day (FR-066) + cảnh báo BQL khi thiếu chỉ số đồng hồ CONFIRMED (AC-015.1)
+// 4. Tự động chuyển hóa đơn quá hạn sang OVERDUE & cộng phạt chậm thanh toán có khóa dòng FOR UPDATE (FR-064)
 // 5. Cảnh báo sắp hết hạn HĐ: 60 ngày chỉ gửi MANAGER; 30 & 15 ngày gửi MANAGER + RESIDENT (FR-018)
 // 6. Cảnh báo hạn hoàn cọc cho cả HĐ TERMINATED và EXPIRED trên mọi trạng thái chưa tất toán xong (FR-068)
+// 7. Đảm bảo pg_try_advisory_lock(73918205), retry tối đa 3 lần, ghi nhận cron_job_run & cảnh báo SYS_ADMIN khi lỗi (PRD 14.5)
 import { adminPool } from '../db/client.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.js';
@@ -17,17 +18,78 @@ import {
 } from '../services/invoiceLifecycle.js';
 import {
   todayVietnamYmd,
-  currentVietnamPeriod,
+  resolveBillingDaysForDate,
+  computeNextVietnamDailyRunMs,
+  computeLateFeeAccrual,
 } from '../services/serviceBilling.js';
 
-export async function runDailyJobs() {
+export const DAILY_JOB_ADVISORY_LOCK_KEY = 73918205;
+
+function sleepMs(ms) {
+  const wait = Math.max(0, Number(ms) || 0);
+  if (wait <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, wait));
+}
+
+async function notifySysAdminsCronFailure({
+  effectiveDateYmd,
+  attempts,
+  errorMessage,
+  buildingId = null,
+}) {
+  let targetOrgId = null;
+  if (buildingId) {
+    const bRes = await adminPool.query(
+      `SELECT org_id FROM building WHERE id = $1 LIMIT 1`,
+      [buildingId]
+    );
+    targetOrgId = bRes.rows[0]?.org_id || null;
+  }
+
+  const sysUsersRes = await adminPool.query(
+    `SELECT DISTINCT ur.user_id, COALESCE(p.org_id, r.org_id) AS org_id
+     FROM user_role ur
+     JOIN role r ON r.id = ur.role_id
+     JOIN app_user au ON au.id = ur.user_id
+     LEFT JOIN person p ON p.id = au.person_id
+     WHERE au.status = 'ACTIVE'
+       AND r.code = 'SYS_ADMIN'
+       AND ($1::uuid IS NULL OR COALESCE(p.org_id, r.org_id) = $1::uuid)`,
+    [targetOrgId]
+  );
+
+  const title = `[CẢNH BÁO HỆ THỐNG] Cron job hằng ngày thất bại (${effectiveDateYmd})`;
+  const content = `Tiến trình đồng bộ hóa đơn & công nợ hằng ngày (${effectiveDateYmd}) đã thất bại sau ${attempts} lần thử: ${errorMessage}`;
+  const payload = {
+    job_name: 'DAILY_BILLING_SYNC',
+    run_date: effectiveDateYmd,
+    attempts,
+    error_message: String(errorMessage || '').slice(0, 500),
+    building_id: buildingId || null,
+    link: '/admin/settings',
+  };
+
+  for (const row of sysUsersRes.rows) {
+    if (!row.org_id || !row.user_id) continue;
+    await adminPool.query(
+      `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+       VALUES ($1::uuid, $2::uuid, $3::text, $4::text, 'CRON_JOB_FAILED', $5::jsonb)`,
+      [row.org_id, row.user_id, title, content, JSON.stringify(payload)]
+    );
+  }
+}
+
+async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
   const expiredAptIds = new Set();
   const otherAffectedAptIds = new Set();
   const orgRefundDaysCache = new Map();
 
-  async function resolveBuildingRefundDays(buildingId) {
-    if (!buildingId) return 5;
-    const bRes = await adminPool.query(`SELECT org_id FROM building WHERE id = $1 LIMIT 1`, [buildingId]);
+  async function resolveBuildingRefundDays(targetBuildingId) {
+    if (!targetBuildingId) return 5;
+    const bRes = await adminPool.query(
+      `SELECT org_id FROM building WHERE id = $1 LIMIT 1`,
+      [targetBuildingId]
+    );
     const orgId = bRes.rows[0]?.org_id;
     if (!orgId) return 5;
     if (!orgRefundDaysCache.has(orgId)) {
@@ -41,7 +103,9 @@ export async function runDailyJobs() {
     `SELECT id, building_id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date
      FROM contract
      WHERE status = 'TERMINATION_PENDING'
-       AND COALESCE(terminated_at, end_date) <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`
+       AND COALESCE(terminated_at, end_date) <= $1::date
+       AND ($2::uuid IS NULL OR building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
   );
   let finalizedCount = 0;
   for (const cand of candidateTerminated.rows) {
@@ -104,10 +168,10 @@ export async function runDailyJobs() {
            WHERE parent_contract_id = $1
              AND apartment_id = $2
              AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-             AND start_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-             AND COALESCE(terminated_at, end_date) > (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+             AND start_date <= $3::date
+             AND COALESCE(terminated_at, end_date) > $3::date
            LIMIT 1`,
-          [row.id, row.apartment_id]
+          [row.id, row.apartment_id, effectiveDateYmd]
         );
         if (childContinue.rows.length > 0) {
           otherAffectedAptIds.add(row.apartment_id);
@@ -121,12 +185,14 @@ export async function runDailyJobs() {
     console.log(`[DailyJob] scheduled contract terminations finalized: ${finalizedCount}`);
   }
 
-  // 1b. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= CURRENT_DATE là đã kết thúc) (R-02)
+  // 1b. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= effectiveDateYmd là đã kết thúc) (R-02)
   const candidateExpired = await adminPool.query(
     `SELECT id, building_id, apartment_id, end_date
      FROM contract
      WHERE status IN ('ACTIVE', 'RENEWAL_PENDING')
-       AND end_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`
+       AND end_date <= $1::date
+       AND ($2::uuid IS NULL OR building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
   );
   let expiredCount = 0;
   for (const cand of candidateExpired.rows) {
@@ -200,10 +266,10 @@ export async function runDailyJobs() {
          WHERE parent_contract_id = $1
            AND apartment_id = $2
            AND status IN ('ACTIVE', 'RENEWAL_PENDING')
-           AND start_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-           AND COALESCE(terminated_at, end_date) > (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+           AND start_date <= $3::date
+           AND COALESCE(terminated_at, end_date) > $3::date
          LIMIT 1`,
-        [row.id, row.apartment_id]
+        [row.id, row.apartment_id, effectiveDateYmd]
       );
       if (childContinue.rows.length > 0) {
         otherAffectedAptIds.add(row.apartment_id);
@@ -214,15 +280,17 @@ export async function runDailyJobs() {
   }
   console.log(`[DailyJob] contract expired: ${expiredCount}`);
 
-  // 2. Các căn hộ đang RESERVED/AVAILABLE nhưng HĐ ACTIVE đã tới ngày bắt đầu (start_date <= CURRENT_DATE)
+  // 2. Các căn hộ đang RESERVED/AVAILABLE nhưng HĐ ACTIVE đã tới ngày bắt đầu (start_date <= effectiveDateYmd)
   const dueStartApts = await adminPool.query(
     `SELECT DISTINCT a.id AS apartment_id
      FROM apartment a
      JOIN contract c ON c.apartment_id = a.id
      WHERE a.status IN ('RESERVED', 'AVAILABLE')
        AND c.status IN ('ACTIVE', 'RENEWAL_PENDING')
-       AND c.start_date <= CURRENT_DATE
-       AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE`
+       AND c.start_date <= $1::date
+       AND COALESCE(c.terminated_at, c.end_date) > $1::date
+       AND ($2::uuid IS NULL OR a.building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
   );
   dueStartApts.rows.forEach((r) => {
     if (!expiredAptIds.has(r.apartment_id)) otherAffectedAptIds.add(r.apartment_id);
@@ -236,8 +304,10 @@ export async function runDailyJobs() {
          updated_at = NOW()
      WHERE status = 'PENDING_CONFIRM'
        AND hold_until IS NOT NULL
-       AND hold_until < CURRENT_DATE
-     RETURNING id`
+       AND hold_until < $1::date
+       AND ($2::uuid IS NULL OR apartment_id IN (SELECT id FROM apartment WHERE building_id = $2::uuid))
+     RETURNING id`,
+    [effectiveDateYmd, buildingId]
   );
   if (rsvPendingRejected.rowCount > 0) {
     console.log(`[DailyJob] unconfirmed public reservations rejected: ${rsvPendingRejected.rowCount}`);
@@ -246,8 +316,12 @@ export async function runDailyJobs() {
   // 3b. Giữ chỗ đã xác nhận tiền (HELD) quá hạn -> chuyển sang EXPIRED
   const rsvExpired = await adminPool.query(
     `UPDATE reservation SET status = 'EXPIRED', updated_at = NOW()
-     WHERE status = 'HELD' AND hold_until IS NOT NULL AND hold_until < CURRENT_DATE
-     RETURNING apartment_id`
+     WHERE status = 'HELD'
+       AND hold_until IS NOT NULL
+       AND hold_until < $1::date
+       AND ($2::uuid IS NULL OR apartment_id IN (SELECT id FROM apartment WHERE building_id = $2::uuid))
+     RETURNING apartment_id`,
+    [effectiveDateYmd, buildingId]
   );
   rsvExpired.rows.forEach((r) => {
     if (!expiredAptIds.has(r.apartment_id)) otherAffectedAptIds.add(r.apartment_id);
@@ -259,8 +333,20 @@ export async function runDailyJobs() {
     `SELECT a.id AS apartment_id
      FROM apartment a
      WHERE a.status = 'RESERVED'
-       AND NOT EXISTS (SELECT 1 FROM reservation r WHERE r.apartment_id = a.id AND r.status IN ('HELD', 'CANCEL_PENDING_APPROVAL') AND (r.hold_until IS NULL OR r.hold_until >= CURRENT_DATE))
-       AND NOT EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING') AND COALESCE(c.terminated_at, c.end_date) > CURRENT_DATE)`
+       AND ($2::uuid IS NULL OR a.building_id = $2::uuid)
+       AND NOT EXISTS (
+         SELECT 1 FROM reservation r
+         WHERE r.apartment_id = a.id
+           AND r.status IN ('HELD', 'CANCEL_PENDING_APPROVAL')
+           AND (r.hold_until IS NULL OR r.hold_until >= $1::date)
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM contract c
+         WHERE c.apartment_id = a.id
+           AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+           AND COALESCE(c.terminated_at, c.end_date) > $1::date
+       )`,
+    [effectiveDateYmd, buildingId]
   );
   orphanReserved.rows.forEach((r) => {
     if (!expiredAptIds.has(r.apartment_id)) otherAffectedAptIds.add(r.apartment_id);
@@ -278,46 +364,101 @@ export async function runDailyJobs() {
   }
   console.log(`[DailyJob] synced apartment statuses: expired->maintenance=${expiredAptIds.size}, other=${otherAffectedAptIds.size}`);
 
-  // 5. FR-066 & R-05: Tự động sinh hóa đơn định kỳ theo billing_day (xử lý ngày 29/30/31 vào cuối tháng ngắn)
+  // 5. FR-066, R-05 & AC-015.1: Tự động sinh hóa đơn nháp định kỳ theo billing_day (xử lý ngày 29/30/31 vào cuối tháng ngắn)
+  let autoCreatedInvoices = 0;
+  let skippedMeterContracts = 0;
   try {
-    const dbNowRes = await adminPool.query(
-      `SELECT CURRENT_DATE::text AS today_str,
-              EXTRACT(DAY FROM CURRENT_DATE)::int AS day_of_month,
-              EXTRACT(DAY FROM (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month - 1 day'))::int AS days_in_month`
-    );
-    const { today_str: todayStr, day_of_month: dayOfMonth, days_in_month: daysInCurrentMonth } = dbNowRes.rows[0];
-    const currentPeriod = todayStr.slice(0, 7);
-    const matchDays = [dayOfMonth];
-    if (dayOfMonth === daysInCurrentMonth && daysInCurrentMonth < 31) {
-      for (let d = daysInCurrentMonth + 1; d <= 31; d++) matchDays.push(d);
-    }
+    const matchDays = resolveBillingDaysForDate(effectiveDateYmd);
+    const currentPeriod = effectiveDateYmd.slice(0, 7);
 
-    const orgsRes = await adminPool.query('SELECT id FROM organization');
-    let autoCreatedTotal = 0;
+    const orgsRes = buildingId
+      ? await adminPool.query(`SELECT DISTINCT org_id AS id FROM building WHERE id = $1`, [buildingId])
+      : await adminPool.query(`SELECT id FROM organization`);
+
     for (const orgRow of orgsRes.rows) {
       const txClient = await adminPool.connect();
+      let skippedList = [];
       try {
         await txClient.query('BEGIN');
-        const { createdInvoices } = await generateInvoicesCore(txClient, {
+        const genRes = await generateInvoicesCore(txClient, {
           orgId: orgRow.id,
+          buildingId: buildingId || null,
           targetPeriod: currentPeriod,
           matchBillingDays: matchDays,
           onlyOngoingContracts: false,
           excludeSettledDeposits: true,
           autoIssue: false,
           actorId: null,
+          issueDateYmd: effectiveDateYmd,
         });
         await txClient.query('COMMIT');
-        autoCreatedTotal += createdInvoices.length;
+        autoCreatedInvoices += (genRes.createdInvoices || []).length;
+        skippedList = genRes.skipped_contracts || [];
       } catch (genErr) {
         await txClient.query('ROLLBACK').catch(() => {});
         console.error('[DailyJob] auto-billing org error:', genErr.message);
       } finally {
         txClient.release();
       }
+
+      // AC-015.1: Gửi thông báo cho BQL phụ trách tòa nhà khi hợp đồng bị bỏ qua do thiếu chỉ số đồng hồ CONFIRMED
+      for (const skipItem of skippedList) {
+        if (skipItem.reason_code !== 'MISSING_CONFIRMED_METER_READING') continue;
+        skippedMeterContracts += 1;
+
+        const mgrsRes = await adminPool.query(
+          `SELECT DISTINCT ur.user_id
+           FROM user_role ur
+           JOIN role r ON r.id = ur.role_id
+           JOIN app_user au ON au.id = ur.user_id
+           WHERE ur.building_id = $1
+             AND r.code = 'MANAGER'
+             AND au.status = 'ACTIVE'`,
+          [skipItem.building_id]
+        );
+
+        const missingTypesLabel = Array.isArray(skipItem.missing_meter_types)
+          ? skipItem.missing_meter_types.join(', ')
+          : '';
+        const notifTitle = `[CHƯA CHỐT CHỈ SỐ] Tạm hoãn tạo hóa đơn căn ${skipItem.apartment_code} kỳ ${currentPeriod}`;
+        const notifContent = `Hợp đồng căn ${skipItem.apartment_code} đến ngày tạo hóa đơn (${effectiveDateYmd}) nhưng chưa có chỉ số đồng hồ đã xác nhận (${missingTypesLabel || 'Điện/Nước'}) cho kỳ ${currentPeriod}. Vui lòng chốt chỉ số để tạo hóa đơn.`;
+        const notifPayload = {
+          contract_id: skipItem.contract_id,
+          apartment_id: skipItem.apartment_id,
+          apartment_code: skipItem.apartment_code,
+          building_id: skipItem.building_id,
+          period: currentPeriod,
+          missing_meter_types: skipItem.missing_meter_types || [],
+          link: '/admin/meters',
+        };
+
+        for (const mgr of mgrsRes.rows) {
+          await adminPool.query(
+            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+             SELECT $1::uuid, $2::uuid, $3::text, $4::text, 'MISSING_METER_READING', $5::jsonb
+             WHERE NOT EXISTS (
+               SELECT 1 FROM notification n
+               WHERE n.user_id = $2::uuid
+                 AND n.type = 'MISSING_METER_READING'
+                 AND n.payload->>'contract_id' = $6::text
+                 AND n.payload->>'period' = $7::text
+             )`,
+            [
+              orgRow.id,
+              mgr.user_id,
+              notifTitle,
+              notifContent,
+              JSON.stringify(notifPayload),
+              String(skipItem.contract_id),
+              currentPeriod,
+            ]
+          );
+        }
+      }
     }
-    if (autoCreatedTotal > 0) {
-      console.log(`[DailyJob] auto-generated invoices for billing_day=${matchDays.join(',')}: ${autoCreatedTotal}`);
+
+    if (autoCreatedInvoices > 0) {
+      console.log(`[DailyJob] auto-generated invoices for billing_day=${matchDays.join(',')}: ${autoCreatedInvoices}`);
     }
   } catch (autoBillErr) {
     console.error('[DailyJob] auto-billing step failed:', autoBillErr.message);
@@ -329,121 +470,232 @@ export async function runDailyJobs() {
      SET status = 'OVERDUE', updated_at = NOW()
      WHERE status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
        AND paid_amount < total_amount
-       AND due_date < (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-     RETURNING id, org_id, total_amount, paid_amount`
+       AND due_date < $1::date
+       AND ($2::uuid IS NULL OR building_id = $2::uuid)
+     RETURNING id, org_id, total_amount, paid_amount`,
+    [effectiveDateYmd, buildingId]
   );
   for (const row of overdueInvoices.rows) {
     await adminPool.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES (NULL, 'MARK_INVOICE_OVERDUE', 'invoice', $1, NULL, $2)`,
-      [row.id, JSON.stringify({ status: 'OVERDUE', id: row.id })]
+      [row.id, JSON.stringify({ status: 'OVERDUE', id: row.id, as_of_date: effectiveDateYmd })]
     );
   }
-  if (overdueInvoices.rowCount > 0) {
-    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueInvoices.rowCount}`);
+  const overdueMarked = overdueInvoices.rowCount || 0;
+  if (overdueMarked > 0) {
+    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueMarked}`);
   }
 
-  // 7. R-11 & FR-064: Tự động cộng phí phạt chậm thanh toán append-only 100.000 ₫/ngày từ ngày quá hạn thứ 6
-  // deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee) để bảo toàn 100% dòng miễn giảm LATE_FEE
-  const LATE_FEE_PER_DAY = 100000;
-  const GRACE_DAYS = 5;
-  const lateInvoices = await adminPool.query(
-    `SELECT i.id,
-            i.due_date,
-            i.subtotal_amount,
-            i.adjustment_amount,
-            i.total_amount,
-            i.paid_amount,
-            ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date)::int AS overdue_days,
-            COALESCE(lf.gross_late_fee, 0)::bigint AS gross_accrued_late_fee
+  // Tải cấu hình billing_config theo từng org cho cả bước 7 (phí phạt chậm) và bước 8 (nhắc nợ)
+  const billingConfigsRes = await adminPool.query(
+    `SELECT org_id, value FROM system_setting WHERE key = 'billing_config'`
+  );
+  const orgBillingConfigMap = new Map();
+  for (const r of billingConfigsRes.rows) {
+    const val = r.value || {};
+    orgBillingConfigMap.set(r.org_id, {
+      graceDays:
+        val.late_fee_grace_days !== undefined && val.late_fee_grace_days !== null
+          ? Math.max(0, Math.trunc(Number(val.late_fee_grace_days)))
+          : 5,
+      feePerDay:
+        val.late_fee_per_day !== undefined && val.late_fee_per_day !== null
+          ? Math.max(0, roundVND(Number(val.late_fee_per_day)))
+          : 100000,
+      lateFeeCap:
+        val.late_fee_cap !== undefined && val.late_fee_cap !== null && Number(val.late_fee_cap) > 0
+          ? roundVND(Number(val.late_fee_cap))
+          : null,
+      reminderDays: Array.isArray(val.reminder_days) ? val.reminder_days.map(Number) : [3, 7, 15],
+    });
+  }
+
+  // 7. R-11 & FR-064: Tự động cộng phí phạt chậm thanh toán append-only có khóa dòng FOR UPDATE
+  // Bảo toàn dòng miễn giảm LATE_FEE, tôn trọng late_fee_cap và dừng cộng khi nợ gốc (principal) đã thanh toán đủ
+  let lateFeeUpdated = 0;
+  const lateCandidates = await adminPool.query(
+    `SELECT i.id, i.org_id
      FROM invoice i
-     LEFT JOIN (
-       SELECT invoice_id, SUM(amount)::bigint AS gross_late_fee
-       FROM invoice_line
-       WHERE item_type = 'LATE_FEE' AND amount > 0
-       GROUP BY invoice_id
-     ) lf ON lf.invoice_id = i.id
      WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
        AND i.paid_amount < i.total_amount
-       AND ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date) > $1`,
-    [GRACE_DAYS]
+       AND i.due_date < $1::date
+       AND ($2::uuid IS NULL OR i.building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
   );
 
-  for (const inv of lateInvoices.rows) {
-    const penaltyDays = Number(inv.overdue_days) - GRACE_DAYS;
-    if (penaltyDays <= 0) continue;
-    const expectedFee = roundVND(penaltyDays * LATE_FEE_PER_DAY);
-    const grossAccruedFee = Number(inv.gross_accrued_late_fee || 0);
-    const deltaFee = Math.max(0, expectedFee - grossAccruedFee);
+  for (const cand of lateCandidates.rows) {
+    const cfg = orgBillingConfigMap.get(cand.org_id) || {
+      graceDays: 5,
+      feePerDay: 100000,
+      lateFeeCap: null,
+    };
 
-    if (deltaFee > 0) {
-      const txClient = await adminPool.connect();
-      try {
-        await txClient.query('BEGIN');
-        const deltaDays = Math.round(deltaFee / LATE_FEE_PER_DAY);
-        await txClient.query(
-          `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
-           VALUES ($1, 'LATE_FEE', $2, $3, 'ngày', $4, $5)`,
-          [
-            inv.id,
-            `Phạt chậm thanh toán (${penaltyDays} ngày sau ${GRACE_DAYS} ngày ân hạn × 100.000 ₫/ngày)`,
-            deltaDays,
-            LATE_FEE_PER_DAY,
-            deltaFee,
-          ]
-        );
-        await txClient.query(
-          `UPDATE invoice
-           SET subtotal_amount = subtotal_amount + $1,
-               total_amount = total_amount + $1,
-               status = CASE WHEN status = 'ISSUED' THEN 'OVERDUE' ELSE status END,
-               updated_at = NOW()
-           WHERE id = $2`,
-          [deltaFee, inv.id]
-        );
-        await txClient.query(
-          `UPDATE receivable
-           SET amount = amount + $1,
-               updated_at = NOW()
-           WHERE invoice_id = $2
-             AND status IN ('OPEN', 'PARTIALLY_PAID')`,
-          [deltaFee, inv.id]
-        );
-        await txClient.query(
-          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-           VALUES (NULL, 'ACCRUE_LATE_FEE', 'invoice', $1, NULL, $2)`,
-          [
-            inv.id,
-            JSON.stringify({
-              delta_fee: deltaFee,
-              expected_fee: expectedFee,
-              gross_accrued_fee: grossAccruedFee,
-              penalty_days: penaltyDays,
-            }),
-          ]
-        );
-        await txClient.query('COMMIT');
-      } catch (lfErr) {
-        await txClient.query('ROLLBACK').catch(() => {});
-        console.error('[DailyJob] late fee error:', lfErr.message);
-      } finally {
-        txClient.release();
+    const txClient = await adminPool.connect();
+    try {
+      await txClient.query('BEGIN');
+      const lockedRes = await txClient.query(
+        `SELECT * FROM invoice WHERE id = $1 FOR UPDATE`,
+        [cand.id]
+      );
+      const lockedInv = lockedRes.rows[0];
+      if (
+        !lockedInv ||
+        !['OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED'].includes(lockedInv.status) ||
+        Number(lockedInv.paid_amount || 0) >= Number(lockedInv.total_amount || 0)
+      ) {
+        await txClient.query('ROLLBACK');
+        continue;
       }
+
+      const lineAggRes = await txClient.query(
+        `SELECT
+           COUNT(*) FILTER (
+             WHERE il.item_type <> 'LATE_FEE'
+               AND NOT (
+                 il.item_type = 'ADJUSTMENT'
+                 AND (
+                   ia.adjustment_target = 'LATE_FEE'
+                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+                 )
+               )
+           )::int AS non_lf_line_count,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type <> 'LATE_FEE'
+               AND NOT (
+                 il.item_type = 'ADJUSTMENT'
+                 AND (
+                   ia.adjustment_target = 'LATE_FEE'
+                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+                 )
+               )
+           ), 0)::bigint AS principal_from_lines,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type = 'LATE_FEE' AND il.amount > 0
+           ), 0)::bigint AS gross_accrued_late_fee,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type = 'ADJUSTMENT'
+               AND il.credit_id IS NULL
+               AND (
+                 ia.adjustment_target = 'LATE_FEE'
+                 OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+               )
+           ), 0)::bigint AS late_fee_adjustment
+         FROM invoice_line il
+         LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id
+         WHERE il.invoice_id = $1`,
+        [lockedInv.id]
+      );
+      const agg = lineAggRes.rows[0] || {};
+      const grossAccruedFee = Number(agg.gross_accrued_late_fee || 0);
+      let principalAmount;
+      if (Number(agg.non_lf_line_count || 0) > 0) {
+        principalAmount = Math.max(0, Number(agg.principal_from_lines || 0));
+      } else {
+        const nonLateFeeAdj =
+          Number(lockedInv.adjustment_amount || 0) - Number(agg.late_fee_adjustment || 0);
+        principalAmount = Math.max(
+          0,
+          Number(lockedInv.subtotal_amount || 0) -
+            grossAccruedFee +
+            nonLateFeeAdj -
+            Number(lockedInv.credit_offset_amount || 0)
+        );
+      }
+
+      const accrual = computeLateFeeAccrual({
+        dueDateYmd: lockedInv.due_date,
+        asOfDateYmd: effectiveDateYmd,
+        totalAmount: Number(lockedInv.total_amount || 0),
+        paidAmount: Number(lockedInv.paid_amount || 0),
+        creditOffsetAmount: 0,
+        principalAmount,
+        grossAccruedLateFee: grossAccruedFee,
+        graceDays: cfg.graceDays,
+        lateFeePerDay: cfg.feePerDay,
+        maxLateFeeCap: cfg.lateFeeCap,
+      });
+
+      if (accrual.deltaFee <= 0) {
+        await txClient.query('ROLLBACK');
+        continue;
+      }
+
+      const deltaDays =
+        cfg.feePerDay > 0
+          ? Math.max(1, Math.round(accrual.deltaFee / cfg.feePerDay))
+          : 1;
+      const formulaMeta = {
+        overdue_days: accrual.overdueDays,
+        grace_days: cfg.graceDays,
+        billable_days: accrual.chargeableDays,
+        fee_per_day: cfg.feePerDay,
+        late_fee_cap: cfg.lateFeeCap,
+        expected_gross_fee: accrual.expectedTotalLateFee,
+        gross_accrued_before: grossAccruedFee,
+        delta_fee: accrual.deltaFee,
+        principal_amount: principalAmount,
+        as_of_date: effectiveDateYmd,
+      };
+
+      await txClient.query(
+        `INSERT INTO invoice_line (
+           invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta
+         )
+         VALUES ($1, 'LATE_FEE', $2, $3, 'ngày', $4, $5, $6::jsonb)`,
+        [
+          lockedInv.id,
+          `Phạt chậm thanh toán (${accrual.chargeableDays} ngày sau ${cfg.graceDays} ngày ân hạn × ${cfg.feePerDay.toLocaleString('vi-VN')} ₫/ngày)`,
+          deltaDays,
+          cfg.feePerDay,
+          accrual.deltaFee,
+          JSON.stringify(formulaMeta),
+        ]
+      );
+      await txClient.query(
+        `UPDATE invoice
+         SET subtotal_amount = subtotal_amount + $1,
+             total_amount = total_amount + $1,
+             status = CASE WHEN status = 'ISSUED' THEN 'OVERDUE' ELSE status END,
+             updated_at = NOW()
+         WHERE id = $2`,
+        [accrual.deltaFee, lockedInv.id]
+      );
+      await txClient.query(
+        `UPDATE receivable
+         SET amount = amount + $1,
+             updated_at = NOW()
+         WHERE invoice_id = $2
+           AND status IN ('OPEN', 'PARTIALLY_PAID')`,
+        [accrual.deltaFee, lockedInv.id]
+      );
+      await txClient.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES (NULL, 'ACCRUE_LATE_FEE', 'invoice', $1, NULL, $2::jsonb)`,
+        [
+          lockedInv.id,
+          JSON.stringify({
+            delta_fee: accrual.deltaFee,
+            expected_fee: accrual.expectedTotalLateFee,
+            gross_accrued_fee: grossAccruedFee,
+            penalty_days: accrual.chargeableDays,
+            as_of_date: effectiveDateYmd,
+          }),
+        ]
+      );
+
+      await txClient.query('COMMIT');
+      lateFeeUpdated += 1;
+    } catch (lfErr) {
+      await txClient.query('ROLLBACK').catch(() => {});
+      console.error('[DailyJob] late fee error:', lfErr.message);
+    } finally {
+      txClient.release();
     }
   }
 
   // 8. FR-039 & PRD Mục 10.1 & 12.4: Nhắc nợ tự động đa mốc (-3, 0, +3, +7, +15 ngày)
   try {
-    const billingConfigsRes = await adminPool.query(
-      `SELECT org_id, value FROM system_setting WHERE key = 'billing_config'`
-    );
-    const orgReminderDaysMap = new Map();
-    for (const r of billingConfigsRes.rows) {
-      const val = r.value || {};
-      const days = Array.isArray(val.reminder_days) ? val.reminder_days.map(Number) : [3, 7, 15];
-      orgReminderDaysMap.set(r.org_id, days);
-    }
-
     const unpaidInvoicesRes = await adminPool.query(
       `SELECT i.id,
               i.org_id,
@@ -453,7 +705,7 @@ export async function runDailyJobs() {
               i.total_amount,
               i.paid_amount,
               i.due_date,
-              ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date)::int AS days_diff,
+              ($1::date - i.due_date)::int AS days_diff,
               c.building_id,
               b.name AS building_name,
               a.code AS apartment_code,
@@ -467,13 +719,15 @@ export async function runDailyJobs() {
        JOIN app_user au ON au.person_id = p.id
        WHERE i.status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED')
          AND i.paid_amount < i.total_amount
-         AND au.status = 'ACTIVE'`
+         AND au.status = 'ACTIVE'
+         AND ($2::uuid IS NULL OR c.building_id = $2::uuid)`,
+      [effectiveDateYmd, buildingId]
     );
 
     let remindersSent = 0;
     for (const inv of unpaidInvoicesRes.rows) {
       const daysDiff = Number(inv.days_diff);
-      const reminderDays = orgReminderDaysMap.get(inv.org_id) || [3, 7, 15];
+      const reminderDays = orgBillingConfigMap.get(inv.org_id)?.reminderDays || [3, 7, 15];
 
       let stageKey = null;
       let title = null;
@@ -554,16 +808,18 @@ export async function runDailyJobs() {
     console.error('[DailyJob] debt reminder step error:', reminderErr.message);
   }
 
-  // 8. FR-018 & R-22: Cảnh báo hợp đồng sắp hết hạn (60 ngày chỉ MANAGER; 30 & 15 ngày cả MANAGER + RESIDENT)
+  // 8b. FR-018 & R-22: Cảnh báo hợp đồng sắp hết hạn (60 ngày chỉ MANAGER; 30 & 15 ngày cả MANAGER + RESIDENT)
   const expiringContracts = await adminPool.query(
     `SELECT c.id, c.building_id, c.primary_tenant_id, c.end_date,
-            (c.end_date - CURRENT_DATE)::int AS days_left,
+            (c.end_date - $1::date)::int AS days_left,
             b.org_id, b.name AS building_name, a.code AS apartment_code
      FROM contract c
      JOIN building b ON b.id = c.building_id
      JOIN apartment a ON a.id = c.apartment_id
      WHERE c.status IN ('ACTIVE', 'RENEWAL_PENDING')
-       AND (c.end_date - CURRENT_DATE) IN (60, 30, 15)`
+       AND (c.end_date - $1::date) IN (60, 30, 15)
+       AND ($2::uuid IS NULL OR c.building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
   );
 
   for (const c of expiringContracts.rows) {
@@ -600,33 +856,175 @@ export async function runDailyJobs() {
     for (const item of deliveries) {
       await adminPool.query(
         `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-         SELECT $1, $2, $3, $4, 'CONTRACT_EXPIRY', $5
+         SELECT $1, $2, $3, $4, 'CONTRACT_EXPIRY', $5::jsonb
          WHERE NOT EXISTS (
            SELECT 1 FROM notification n
            WHERE n.user_id = $2
              AND n.type = 'CONTRACT_EXPIRY'
              AND (n.payload->>'contract_id')::uuid = $6::uuid
              AND (n.payload->>'days_left')::int = $7::int
-             AND n.created_at::date = CURRENT_DATE
+             AND (
+               n.payload->>'as_of_date' = $8::text
+               OR (n.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = $8::date
+             )
          )`,
         [
           c.org_id,
           item.userId,
           `Hợp đồng căn ${c.apartment_code} sắp hết hạn`,
           `Hợp đồng thuê căn ${c.apartment_code} (${c.building_name}) còn ${daysLeft} ngày là hết hạn (ngày kết thúc: ${endDateStr}). Vui lòng liên hệ để gia hạn hoặc chuẩn bị bàn giao.`,
-          JSON.stringify({ contract_id: c.id, days_left: daysLeft, link: item.link }),
+          JSON.stringify({
+            contract_id: c.id,
+            days_left: daysLeft,
+            as_of_date: effectiveDateYmd,
+            link: item.link,
+          }),
           c.id,
           daysLeft,
+          effectiveDateYmd,
         ]
       );
     }
   }
 
   // 9. FR-068 & R-15: Cảnh báo hạn hoàn cọc cho cả TERMINATED và EXPIRED, và mọi trạng thái chưa tất toán xong
-  await runOverdueDepositSettlementAlerts();
+  await runOverdueDepositSettlementAlerts({ asOfDate: effectiveDateYmd, buildingId });
+
+  return {
+    autoCreatedInvoices,
+    skippedMeterContracts,
+    overdueMarked,
+    lateFeeUpdated,
+  };
 }
 
-export async function runOverdueDepositSettlementAlerts() {
+export async function runDailyJobs(options = {}) {
+  const {
+    asOfDate = null,
+    buildingId = null,
+    maxRetries = 3,
+    retryDelaysMs = [1000, 2000, 4000],
+    stepHookForTest = null,
+  } = options || {};
+
+  const effectiveDateYmd = asOfDate ? String(asOfDate).slice(0, 10) : todayVietnamYmd();
+  const effectiveMaxRetries = Math.max(1, Math.trunc(Number(maxRetries) || 3));
+
+  const lockClient = await adminPool.connect();
+  let lockAcquired = false;
+
+  try {
+    const lockRes = await lockClient.query(
+      `SELECT pg_try_advisory_lock($1) AS locked`,
+      [DAILY_JOB_ADVISORY_LOCK_KEY]
+    );
+    lockAcquired = Boolean(lockRes.rows[0]?.locked);
+    if (!lockAcquired) {
+      return {
+        skipped: true,
+        reason: 'LOCK_HELD',
+        runDate: effectiveDateYmd,
+      };
+    }
+
+    const startedAtMs = Date.now();
+    const runRowRes = await adminPool.query(
+      `INSERT INTO cron_job_run (job_name, run_date, status, attempt_count, started_at)
+       VALUES ('DAILY_BILLING_SYNC', $1::date, 'RUNNING', 1, NOW())
+       RETURNING id`,
+      [effectiveDateYmd]
+    );
+    const cronRunId = runRowRes.rows[0]?.id || null;
+
+    for (let attempt = 1; attempt <= effectiveMaxRetries; attempt += 1) {
+      try {
+        if (cronRunId) {
+          await adminPool.query(
+            `UPDATE cron_job_run SET attempt_count = $1, status = 'RUNNING' WHERE id = $2`,
+            [attempt, cronRunId]
+          );
+        }
+
+        if (typeof stepHookForTest === 'function') {
+          await stepHookForTest(attempt);
+        }
+
+        const summary = await executeDailySteps({ effectiveDateYmd, buildingId });
+        const durationMs = Math.max(0, Date.now() - startedAtMs);
+
+        if (cronRunId) {
+          await adminPool.query(
+            `UPDATE cron_job_run
+             SET status = 'SUCCEEDED',
+                 attempt_count = $1,
+                 finished_at = NOW(),
+                 duration_ms = $2,
+                 summary = $3::jsonb,
+                 error_message = NULL
+             WHERE id = $4`,
+            [attempt, durationMs, JSON.stringify(summary), cronRunId]
+          );
+        }
+
+        return {
+          skipped: false,
+          runDate: effectiveDateYmd,
+          attempts: attempt,
+          ...summary,
+        };
+      } catch (err) {
+        if (attempt < effectiveMaxRetries) {
+          const delayMs =
+            Array.isArray(retryDelaysMs) && retryDelaysMs.length > 0
+              ? Number(retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)] || 0)
+              : 0;
+          await sleepMs(delayMs);
+          continue;
+        }
+
+        const durationMs = Math.max(0, Date.now() - startedAtMs);
+        const errMsg = String(err?.message || err || 'Unknown cron failure');
+        if (cronRunId) {
+          await adminPool
+            .query(
+              `UPDATE cron_job_run
+               SET status = 'FAILED',
+                   attempt_count = $1,
+                   finished_at = NOW(),
+                   duration_ms = $2,
+                   error_message = $3
+               WHERE id = $4`,
+              [attempt, durationMs, errMsg.slice(0, 2000), cronRunId]
+            )
+            .catch(() => {});
+        }
+
+        await notifySysAdminsCronFailure({
+          effectiveDateYmd,
+          attempts: attempt,
+          errorMessage: errMsg,
+          buildingId,
+        }).catch((alertErr) => {
+          console.error('[DailyJob] failed to alert SYS_ADMIN:', alertErr.message);
+        });
+
+        throw err;
+      }
+    }
+  } finally {
+    if (lockAcquired) {
+      await lockClient
+        .query(`SELECT pg_advisory_unlock($1)`, [DAILY_JOB_ADVISORY_LOCK_KEY])
+        .catch(() => {});
+    }
+    lockClient.release();
+  }
+}
+
+export async function runOverdueDepositSettlementAlerts(options = {}) {
+  const { asOfDate = null, buildingId = null } = options || {};
+  const todayStr = asOfDate ? String(asOfDate).slice(0, 10) : getTodayVnDateStr();
+
   const depositAlerts = await adminPool.query(
     `SELECT d.id AS deposit_id,
             d.contract_id,
@@ -639,7 +1037,7 @@ export async function runOverdueDepositSettlementAlerts() {
             b.org_id,
             a.code AS apartment_code,
             b.name AS building_name,
-            (CURRENT_DATE - COALESCE(c.terminated_at, c.end_date))::int AS days_since_end,
+            ($1::date - COALESCE(c.terminated_at, c.end_date))::int AS days_since_end,
             GREATEST(
               1,
               LEAST(
@@ -662,10 +1060,11 @@ export async function runOverdueDepositSettlementAlerts() {
      WHERE d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
        AND d.amount_held > 0
        AND c.status IN ('TERMINATED', 'EXPIRED')
-       AND COALESCE(c.terminated_at, c.end_date) IS NOT NULL`
+       AND COALESCE(c.terminated_at, c.end_date) IS NOT NULL
+       AND ($2::uuid IS NULL OR c.building_id = $2::uuid)`,
+    [todayStr, buildingId]
   );
 
-  const todayStr = getTodayVnDateStr();
   for (const dep of depositAlerts.rows) {
     const days = Number(dep.days_since_end);
     const slaDays = Number(dep.sla_refund_days) || 5;
@@ -742,7 +1141,10 @@ export async function runOverdueDepositSettlementAlerts() {
            WHERE n.user_id = $2::uuid
              AND n.type = $5::text
              AND (n.payload->>'deposit_id')::uuid = $7::uuid
-             AND n.created_at::date = CURRENT_DATE
+             AND (
+               n.payload->>'as_of_date' = $8::text
+               OR (n.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date = $8::date
+             )
          )`,
         [
           dep.org_id,
@@ -750,21 +1152,36 @@ export async function runOverdueDepositSettlementAlerts() {
           title,
           content,
           isOverdue ? 'DEPOSIT_OVERDUE_5D' : 'DEPOSIT_WARNING_3D',
-          JSON.stringify({ deposit_id: dep.deposit_id, contract_id: dep.contract_id, days_since: days, link: '/admin/deposits' }),
+          JSON.stringify({
+            deposit_id: dep.deposit_id,
+            contract_id: dep.contract_id,
+            days_since: days,
+            as_of_date: todayStr,
+            link: '/admin/deposits',
+          }),
           dep.deposit_id,
+          todayStr,
         ]
       );
     }
   }
   // 9. Báo cáo tổng hợp Sổ cọc định kỳ đầu tháng gửi OWNER đang ACTIVE (1 lần/tháng/tòa — GAP-05, PRD 15.3)
   try {
-    await sendMonthlyOwnerDepositReports(adminPool);
+    await sendMonthlyOwnerDepositReports(
+      adminPool,
+      new Date(`${todayStr}T00:05:00+07:00`),
+      buildingId
+    );
   } catch (monthlyErr) {
     console.error('[DailyJob] monthly owner deposit report error:', monthlyErr.message);
   }
 }
 
-export async function sendMonthlyOwnerDepositReports(dbPool = adminPool, refDate = new Date()) {
+export async function sendMonthlyOwnerDepositReports(
+  dbPool = adminPool,
+  refDate = new Date(),
+  buildingId = null
+) {
   const vnParts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Ho_Chi_Minh',
     year: 'numeric',
@@ -795,7 +1212,9 @@ export async function sendMonthlyOwnerDepositReports(dbPool = adminPool, refDate
      JOIN user_role ur ON ur.user_id = au.id
      JOIN role r ON r.id = ur.role_id
      WHERE au.status = 'ACTIVE'
-       AND r.code = 'OWNER'`
+       AND r.code = 'OWNER'
+       AND ($1::uuid IS NULL OR b.id = $1::uuid)`,
+    [buildingId]
   );
 
   let sentCount = 0;
@@ -881,9 +1300,61 @@ export async function sendMonthlyOwnerDepositReports(dbPool = adminPool, refDate
   return sentCount;
 }
 
-export function startDailyJobs() {
-  runDailyJobs().catch((err) => console.error('[DailyJob] boot run failed:', err));
-  setInterval(() => {
-    runDailyJobs().catch((err) => console.error('[DailyJob] scheduled run failed:', err));
-  }, 24 * 60 * 60 * 1000);
+export function startDailyJobs(options = {}) {
+  const {
+    targetHour = 0,
+    targetMinute = 5,
+    runCatchUpOnBoot = true,
+  } = options || {};
+
+  let stopped = false;
+  let timer = null;
+
+  if (runCatchUpOnBoot) {
+    const todayVn = todayVietnamYmd();
+    adminPool
+      .query(
+        `SELECT 1 FROM cron_job_run
+         WHERE job_name = 'DAILY_BILLING_SYNC'
+           AND run_date = $1::date
+           AND status = 'SUCCEEDED'
+         LIMIT 1`,
+        [todayVn]
+      )
+      .then((res) => {
+        if (!stopped && res.rows.length === 0) {
+          return runDailyJobs();
+        }
+        return null;
+      })
+      .catch((err) => console.error('[DailyJob] boot catch-up failed:', err));
+  }
+
+  function scheduleNext() {
+    if (stopped) return;
+    const delayMs = computeNextVietnamDailyRunMs(new Date(), targetHour, targetMinute);
+    timer = setTimeout(async () => {
+      if (stopped) return;
+      try {
+        await runDailyJobs();
+      } catch (err) {
+        console.error('[DailyJob] scheduled run failed:', err);
+      } finally {
+        scheduleNext();
+      }
+    }, delayMs);
+    timer.unref?.();
+  }
+
+  scheduleNext();
+
+  return {
+    stop() {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
 }
