@@ -9,10 +9,15 @@ import {
 import { roundVND } from '../services/pricing.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
 import {
+  todayVietnamYmd,
+  currentVietnamPeriod,
   toDateOnlyYmd,
+  addDaysYmd,
+  getMonthBoundsYmd,
   resolveContractLastActiveDay,
   computeContractRentPeriodCharge,
   computeSubscriptionPeriodCharge,
+  resolveUtilityUnitPrice,
 } from '../services/serviceBilling.js';
 import {
   recalculateDraftInvoiceTotalsInTx,
@@ -46,7 +51,7 @@ export async function issueDraftInvoiceInTx(
 
   const totalAmount = Number(inv.total_amount || 0);
   const targetStatus = totalAmount === 0 ? 'PAID' : 'ISSUED';
-  const effectiveDueDate = dueDate || inv.due_date || new Date().toISOString().slice(0, 10);
+  const effectiveDueDate = dueDate || inv.due_date || todayVietnamYmd();
 
   const upRes = await client.query(
     `UPDATE invoice
@@ -128,9 +133,34 @@ export async function generateInvoicesCore(
     onlyOngoingContracts = false,
     excludeSettledDeposits = false,
     autoIssue = false,
+    issueDateYmd = null,
+    dueDate = null,
     actorId = null,
+    allowMissingMeterReadings = false,
   }
 ) {
+  const { monthEnd } = getMonthBoundsYmd(targetPeriod);
+  const effectiveIssueDateYmd = issueDateYmd || todayVietnamYmd();
+
+  const [catalogRes, settingRes] = await Promise.all([
+    client.query(
+      `SELECT id, building_id, code, category, unit_price, is_active
+       FROM service_catalog
+       WHERE org_id = $1 AND is_active = TRUE`,
+      [orgId]
+    ),
+    client.query(
+      `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
+      [orgId]
+    ),
+  ]);
+  const catalogItems = catalogRes.rows;
+  const billingConfig = settingRes.rows[0]?.value || {};
+  const defaultDueOffsetDays = Number.isFinite(Number(billingConfig.due_date_offset_days))
+    ? Math.max(0, Math.round(Number(billingConfig.due_date_offset_days)))
+    : Number.isFinite(Number(billingConfig.payment_due_days))
+    ? Math.max(0, Math.round(Number(billingConfig.payment_due_days)))
+    : 5;
   // Đếm số HĐ tương lai chưa tới kỳ để phản hồi minh bạch trên UI (Điểm 4)
   const futureParams = [orgId, targetPeriod];
   let futureFilterSql = '';
@@ -275,6 +305,54 @@ export async function generateInvoicesCore(
       roomTransferChildStartDate,
       isRoomTransfer: Boolean(roomTransferChildStartDate),
     });
+    const effectivePeriodEndYmd =
+      resolvedActive.lastActiveDayYmd && resolvedActive.lastActiveDayYmd < monthEnd
+        ? resolvedActive.lastActiveDayYmd
+        : monthEnd;
+
+    // AC-015.1: Cổng kiểm tra đồng hồ điện/nước đang hoạt động phải có chỉ số CONFIRMED trong kỳ
+    if (!allowMissingMeterReadings) {
+      const missingMetersRes = await client.query(
+        `SELECT m.meter_type
+         FROM meter m
+         WHERE m.apartment_id = $1
+           AND m.status = 'ACTIVE'
+           AND (m.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= $2::date
+           AND NOT EXISTS (
+             SELECT 1 FROM meter_reading mr
+             WHERE mr.meter_id = m.id
+               AND mr.period = $3
+               AND mr.status = 'CONFIRMED'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM invoice i2
+             JOIN invoice_line il2 ON il2.invoice_id = i2.id
+             WHERE i2.apartment_id = $1
+               AND i2.period = $3
+               AND i2.status NOT IN ('VOID', 'CANCELLED')
+               AND i2.contract_id <> $4
+               AND il2.item_type = m.meter_type
+           )
+         ORDER BY m.meter_type ASC`,
+        [c.apartment_id, effectivePeriodEndYmd, targetPeriod, c.id]
+      );
+      if (missingMetersRes.rows.length > 0) {
+        const missingMeterTypes = missingMetersRes.rows.map((r) => r.meter_type);
+        skippedContracts.push({
+          contract_id: c.id,
+          contract_code: c.code || c.id,
+          apartment_id: c.apartment_id,
+          apartment_code: c.apartment_code,
+          building_id: c.building_id,
+          building_code: c.building_code,
+          reason_code: 'MISSING_CONFIRMED_METER_READING',
+          missing_meter_types: missingMeterTypes,
+          reason: `Thiếu chỉ số đồng hồ đã xác nhận kỳ ${targetPeriod} (${missingMeterTypes.join(', ')}).`,
+        });
+        continue;
+      }
+    }
 
     const rentCharge = computeContractRentPeriodCharge({
       contract: c,
@@ -298,27 +376,24 @@ export async function generateInvoicesCore(
 
     // FR-065 & R-10: Bảng giá dịch vụ/điện/nước ghi đè theo hợp đồng
     const cspRes = await client.query(
-      `SELECT service_code, unit_price
+      `SELECT service_code, unit_price, effective_from
        FROM contract_service_price
        WHERE contract_id = $1
-         AND effective_from <= (($2 || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
+         AND effective_from <= $2::date
        ORDER BY effective_from DESC`,
-      [c.id, targetPeriod]
+      [c.id, effectivePeriodEndYmd]
     );
-    const cspMap = new Map();
-    for (const row of cspRes.rows) {
-      const key = String(row.service_code || '').toUpperCase();
-      if (key && !cspMap.has(key)) {
-        cspMap.set(key, Number(row.unit_price));
-      }
-    }
 
-    // Điện / Nước từ meter_reading kỳ này
+    // Điện / Nước từ meter_reading đã xác nhận (CONFIRMED) kỳ này
     const mrRes = await client.query(
-      `SELECT mr.consumption, mr.previous_reading, mr.current_reading, m.meter_type, m.unit, m.unit_price
+      `SELECT mr.id, mr.meter_id, mr.consumption, mr.previous_reading, mr.current_reading,
+              m.meter_type, m.unit, m.unit_price
        FROM meter_reading mr
        JOIN meter m ON m.id = mr.meter_id
-       WHERE mr.apartment_id = $1 AND mr.period = $2`,
+       WHERE mr.apartment_id = $1
+         AND mr.period = $2
+         AND mr.status = 'CONFIRMED'
+         AND m.status = 'ACTIVE'`,
       [c.apartment_id, targetPeriod]
     );
     for (const mr of mrRes.rows) {
@@ -337,23 +412,36 @@ export async function generateInvoicesCore(
       );
       if (alreadyBilledRes.rows.length > 0) continue;
 
-      const cons = Number(mr.consumption || 0);
-      const hasContractPrice = cspMap.has(itemType);
-      const price = hasContractPrice ? cspMap.get(itemType) : Number(mr.unit_price || 0);
+      const prevReadNum = Number(mr.previous_reading || 0);
+      const currReadNum = Number(mr.current_reading || 0);
+      const cons = Number(mr.consumption ?? currReadNum - prevReadNum);
+      const { unitPrice: price, priceSource } = resolveUtilityUnitPrice({
+        meterType: itemType,
+        meterUnitPrice: mr.unit_price,
+        contractBuildingId: c.building_id,
+        periodEndYmd: effectivePeriodEndYmd,
+        contractServicePrices: cspRes.rows,
+        catalogItems,
+      });
       const lineAmt = roundVND(cons * price);
       if (lineAmt > 0) {
         lines.push({
           item_type: itemType,
-          description: `${itemType === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${mr.previous_reading} → ${mr.current_reading} ${mr.unit})${hasContractPrice ? ' (Giá HĐ)' : ''}`,
+          description: `${itemType === 'ELECTRICITY' ? 'Tiền điện' : 'Tiền nước'} (${prevReadNum} → ${currReadNum} ${mr.unit})${priceSource === 'CONTRACT_OVERRIDE' ? ' (Giá HĐ)' : ''}`,
           quantity: cons,
           unit: mr.unit,
           unit_price: price,
           amount: lineAmt,
           formula_meta: {
+            meter_id: mr.meter_id,
+            reading_id: mr.id,
             meter_type: itemType,
+            previous_reading: prevReadNum,
+            current_reading: currReadNum,
             consumption: cons,
             unit_price: price,
             amount: lineAmt,
+            price_source: priceSource,
           },
         });
       }
@@ -373,8 +461,10 @@ export async function generateInvoicesCore(
       const subCharge = computeSubscriptionPeriodCharge({
         subscription: sub,
         periodYm: targetPeriod,
+        boundEndYmd: effectivePeriodEndYmd,
         contractBuildingId: c.building_id,
         contractServicePrices: cspRes.rows,
+        catalogItems,
       });
       if (subCharge.amount > 0) {
         lines.push({
@@ -398,6 +488,7 @@ export async function generateInvoicesCore(
         contract_id: c.id,
         contract_code: c.code || c.id,
         apartment_code: c.apartment_code,
+        reason_code: 'ZERO_BILLABLE_AMOUNT',
         reason: 'Không có khoản phí nào phát sinh trong kỳ.',
       });
       continue;
@@ -456,14 +547,14 @@ export async function generateInvoicesCore(
     }
 
     // Create new DRAFT invoice
-    const dueDays = Number(c.payment_due_days || 5);
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + dueDays);
-    const dueDateStr = dueDate.toISOString().slice(0, 10);
+    const dueDays =
+      c.payment_due_days !== undefined && c.payment_due_days !== null
+        ? Math.max(0, Math.round(Number(c.payment_due_days)))
+        : defaultDueOffsetDays;
+    const dueDateStr = dueDate || addDaysYmd(effectiveIssueDateYmd, dueDays);
 
     const randSuffix = Math.floor(1000 + Math.random() * 9000);
     const invCode = `INV-${targetPeriod.replace('-', '')}-${c.building_code}-${c.apartment_code}-${randSuffix}`;
-    const initStatus = autoIssue ? 'ISSUED' : 'DRAFT';
 
     let inv;
     await client.query('SAVEPOINT sp_gen_inv');
@@ -473,9 +564,9 @@ export async function generateInvoicesCore(
            org_id, building_id, apartment_id, contract_id, tenant_id,
            invoice_code, period, issue_date, due_date,
            subtotal_amount, adjustment_amount, total_amount, paid_amount,
-           status, created_by, issued_by, issued_at
+           status, created_by
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, 0, $9, 0, $10, $11, $12, $13)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10, 0, $10, 0, 'DRAFT', $11)
          RETURNING *`,
         [
           orgId,
@@ -485,12 +576,10 @@ export async function generateInvoicesCore(
           c.primary_tenant_id,
           invCode,
           targetPeriod,
+          effectiveIssueDateYmd,
           dueDateStr,
           grossSubtotal,
-          initStatus,
           actorId,
-          autoIssue ? actorId : null,
-          autoIssue ? new Date().toISOString() : null,
         ]
       );
       inv = invIns.rows[0];
@@ -731,9 +820,9 @@ router.post(
   requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
-    const { building_id, contract_id, period, auto_issue = false } = req.body;
+    const { building_id, contract_id, period, auto_issue = false, allow_missing_meter_readings = false } = req.body;
     const orgId = req.user.org_id;
-    const targetPeriod = period && PERIOD_RE.test(period) ? period : new Date().toISOString().slice(0, 7);
+    const targetPeriod = period && PERIOD_RE.test(period) ? period : currentVietnamPeriod();
 
     try {
       if (building_id) {
@@ -754,6 +843,7 @@ router.post(
           contractId: contract_id || null,
           applyScope: (p) => scopedBuildingFilter(req, 'c.building_id', p),
           autoIssue: Boolean(auto_issue),
+          allowMissingMeterReadings: Boolean(allow_missing_meter_readings),
           actorId: req.user.sub,
         });
 

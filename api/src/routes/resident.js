@@ -12,6 +12,7 @@ import {
   addDaysYmd,
   toDateOnlyYmd,
   resolveServiceUnitPrice,
+  computeSubscriptionPeriodCharge,
 } from '../services/serviceBilling.js';
 
 const router = express.Router();
@@ -19,18 +20,8 @@ const router = express.Router();
 const SR_CATEGORIES = ['ELECTRICAL', 'PLUMBING', 'HVAC', 'FURNITURE', 'APPLIANCE', 'CLEANING', 'SECURITY', 'OTHER'];
 const SR_PRIORITIES = ['LOW', 'NORMAL', 'HIGH', 'URGENT'];
 
-function computeProrata(unitPrice, quantity, targetDateStr, mode = 'subscribe') {
-  const dt = targetDateStr ? new Date(targetDateStr) : new Date();
-  const year = dt.getFullYear();
-  const month = dt.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const day = dt.getDate();
-  const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  return roundVND((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
-}
-
 async function generateTrackingCode(queryFn) {
-  const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const datePart = todayVietnamYmd().replace(/-/g, '');
   const rand = Math.floor(1000 + Math.random() * 9000);
   const candidate = `SR-${datePart}-${rand}`;
   const dup = await queryFn('SELECT 1 FROM service_request WHERE tracking_code = $1', [candidate]);
@@ -1400,7 +1391,24 @@ router.post('/services', authenticateToken, idempotencyGuard(), async (req, res)
       catalogItems: catRes.rows,
     });
     const unitPrice = priceRes.unitPrice;
-    const prorata = computeProrata(unitPrice, qty, effStart, 'subscribe');
+    const effStartYmd = toDateOnlyYmd(effStart) || todayVietnamYmd();
+    const prorata = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: svc.code,
+        service_category: svc.category,
+        service_name: svc.name,
+        billing_type: svc.billing_type,
+        quantity: qty,
+        unit_price: unitPrice,
+        is_price_locked: false,
+        start_date: effStartYmd,
+        status: 'ACTIVE',
+      },
+      periodYm: effStartYmd.slice(0, 7),
+      contractBuildingId: c.building_id,
+      contractServicePrices: cspRes.rows,
+      catalogItems: catRes.rows,
+    }).amount;
 
     const ins = await client.query(
       `INSERT INTO service_subscription (

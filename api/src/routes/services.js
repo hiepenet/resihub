@@ -13,6 +13,7 @@ import { roundVND } from '../services/pricing.js';
 import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
 import {
   resolveServiceUnitPrice,
+  computeSubscriptionPeriodCharge,
   normalizeSubscriptionStatusInput,
   todayVietnamYmd,
   addDaysYmd,
@@ -26,16 +27,6 @@ const router = express.Router();
 
 const VALID_CATEGORIES = ['ELECTRICITY', 'WATER', 'INTERNET', 'PARKING', 'CLEANING', 'MANAGEMENT', 'UTILITY', 'OTHER'];
 const VALID_BILLING_TYPES = ['FIXED', 'METERED', 'QUANTITY'];
-
-function computeProrata(unitPrice, quantity, targetDateStr, mode = 'subscribe') {
-  const dt = targetDateStr ? new Date(targetDateStr) : new Date();
-  const year = dt.getFullYear();
-  const month = dt.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const day = dt.getDate();
-  const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  return roundVND((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth);
-}
 
 /**
  * GET /api/v1/service-catalog (hoặc /api/v1/services/catalog)
@@ -420,7 +411,24 @@ serviceSubscriptionsRouter.post(
         ? Math.round(Number(unit_price))
         : priceResult.unitPrice;
 
-      const prorata = computeProrata(finalUnitPrice, meta.quantity, effDate, 'subscribe');
+      const effStartYmd = toDateOnlyYmd(effDate) || todayVietnamYmd();
+      const prorata = computeSubscriptionPeriodCharge({
+        subscription: {
+          service_code: svc.code,
+          service_category: svc.category,
+          service_name: svc.name,
+          billing_type: svc.billing_type,
+          quantity: meta.quantity,
+          unit_price: finalUnitPrice,
+          is_price_locked: isPriceLocked,
+          start_date: effStartYmd,
+          status: 'ACTIVE',
+        },
+        periodYm: effStartYmd.slice(0, 7),
+        contractBuildingId: targetBuildingId,
+        contractServicePrices,
+        catalogItems: catRes.rows,
+      }).amount;
 
       const ins = await client.query(
         `INSERT INTO service_subscription (
@@ -570,7 +578,25 @@ serviceSubscriptionsRouter.patch(
             nextProrata = 0;
           } else {
             nextEnd = targetEnd;
-            nextProrata = computeProrata(sub.unit_price, nextQty, nextEnd, 'cancel');
+            const [termCspRes, termCatRes] = await Promise.all([
+              sub.contract_id
+                ? client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
+                : Promise.resolve({ rows: [] }),
+              client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [orgId]),
+            ]);
+            nextProrata = computeSubscriptionPeriodCharge({
+              subscription: {
+                ...sub,
+                quantity: nextQty,
+                end_date: nextEnd,
+                status: 'TERMINATED',
+                is_price_locked: sub.is_price_locked,
+              },
+              periodYm: nextEnd.slice(0, 7),
+              contractBuildingId: sub.building_id,
+              contractServicePrices: termCspRes.rows,
+              catalogItems: termCatRes.rows,
+            }).amount;
           }
         } else {
           nextStatus = normalizedStatusInput;

@@ -128,7 +128,7 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
     ? `AND status NOT IN ('CANCELLED', 'VOID', 'DRAFT')`
     : `AND status NOT IN ('CANCELLED', 'VOID')`;
 
-  const [subsRes, pricesRes, invRes, creditRes, adjRes] = await Promise.all([
+  const [subsRes, pricesRes, invRes, creditRes, adjRes, catalogRes] = await Promise.all([
     adminPool.query(
       `SELECT ss.*,
               sc.code AS service_code,
@@ -170,6 +170,13 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
          AND ia.status = 'PENDING_APPROVAL'`,
       [contract.id]
     ),
+    adminPool.query(
+      `SELECT id, building_id, code, category, unit_price, is_active
+       FROM service_catalog
+       WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
+         AND is_active = TRUE`,
+      [contract.building_id]
+    ),
   ]);
 
   const availableCreditBalance = creditRes.rows
@@ -182,6 +189,7 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
     servicePrices: pricesRes.rows,
     existingInvoices: invRes.rows,
     roomTransferChildStartDate,
+    catalogItems: catalogRes.rows,
   });
 
   return {
