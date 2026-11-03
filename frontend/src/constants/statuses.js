@@ -140,9 +140,25 @@ export const SERVICE_REQUEST_STATUS = {
   NEW: { label: 'Mới tiếp nhận', variant: 'sky' },
   ASSIGNED: { label: 'Đã phân công', variant: 'indigo' },
   IN_PROGRESS: { label: 'Đang xử lý', variant: 'amber' },
+  ON_HOLD: { label: 'Tạm hoãn / Hẹn lại', variant: 'purple' },
   RESOLVED: { label: 'Đã xử lý xong', variant: 'emerald' },
+  REOPENED: { label: 'Mở lại xử lý', variant: 'red' },
   CLOSED: { label: 'Đã đóng', variant: 'slate' },
   CANCELLED: { label: 'Đã hủy', variant: 'red' },
+};
+
+export const ANNOUNCEMENT_STATUS = {
+  DRAFT: { label: 'Bản nháp', variant: 'slate' },
+  SCHEDULED: { label: 'Hẹn giờ gửi', variant: 'amber' },
+  SENT: { label: 'Đã phát hành', variant: 'emerald' },
+  CANCELLED: { label: 'Đã hủy', variant: 'red' },
+};
+
+export const PREFERRED_SLOT_LABELS = {
+  MORNING_08_12: 'Sáng (08:00 – 12:00)',
+  AFTERNOON_13_17: 'Chiều (13:00 – 17:00)',
+  EVENING_18_21: 'Tối (18:00 – 21:00)',
+  ANYTIME: 'Linh hoạt cả ngày',
 };
 
 export const SERVICE_REQUEST_PRIORITY = {
@@ -210,6 +226,7 @@ export const ALL_STATUS_MAPS = {
   receivable: RECEIVABLE_STATUS,
   reservation: RESERVATION_STATUS,
   service_request: SERVICE_REQUEST_STATUS,
+  announcement: ANNOUNCEMENT_STATUS,
   priority: SERVICE_REQUEST_PRIORITY,
   subscription: SUBSCRIPTION_STATUS,
   tenant: TENANT_STATUS,

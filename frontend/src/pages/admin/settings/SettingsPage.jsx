@@ -1,13 +1,26 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Save, ShieldCheck, AlertTriangle, BookmarkCheck } from 'lucide-react';
+import {
+  Save,
+  ShieldCheck,
+  AlertTriangle,
+  BookmarkCheck,
+  Play,
+  RefreshCw,
+  Clock,
+} from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
+import { Select } from '../../../components/ui/Select';
+import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
+import { Table, THead, TBody, TH, TD } from '../../../components/ui/Table';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { usersService } from '../../../services/users.service';
+import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
+import { formatDate, formatDateTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 import { DEFAULT_RESERVATION_CANCEL_POLICY } from '../../../utils/depositUiHelpers';
 
@@ -30,6 +43,7 @@ const DEFAULT_SLA_CONFIG = {
   urgent_resolve_hours: 4,
   normal_resolve_hours: 24,
   deposit_refund_days: 5,
+  reopen_window_days: 3,
 };
 
 const DEFAULT_CONTACT_CONFIG = {
@@ -57,6 +71,72 @@ export function SettingsPage() {
   const [reservationCancelPolicy, setReservationCancelPolicy] = useState(
     DEFAULT_RESERVATION_CANCEL_POLICY
   );
+
+  // Giám sát & Kích hoạt Tiến trình Tự động Hằng ngày (Cron 00:05 — FR-066 / PRD 14.5)
+  const [cronRuns, setCronRuns] = useState([]);
+  const [cronLoading, setCronLoading] = useState(false);
+  const [triggeringCron, setTriggeringCron] = useState(false);
+  const [allowCustomDate, setAllowCustomDate] = useState(false);
+  const [cronAsOfDate, setCronAsOfDate] = useState('');
+  const [cronBuildingId, setCronBuildingId] = useState('');
+  const [buildings, setBuildings] = useState([]);
+
+  const fetchCronRuns = useCallback(async () => {
+    if (!isSysAdmin) return;
+    setCronLoading(true);
+    try {
+      const [cronRes, bldgRes] = await Promise.allSettled([
+        usersService.listCronRuns({ limit: 10 }),
+        buildingsService.list(),
+      ]);
+      if (cronRes.status === 'fulfilled') {
+        const payload = cronRes.value || {};
+        setCronRuns(Array.isArray(payload.data) ? payload.data : []);
+        setAllowCustomDate(Boolean(payload.allow_custom_date));
+        if (payload.today_vn) {
+          setCronAsOfDate((prev) => prev || payload.today_vn);
+        }
+      }
+      if (bldgRes.status === 'fulfilled') {
+        const list = Array.isArray(bldgRes.value?.data)
+          ? bldgRes.value.data
+          : Array.isArray(bldgRes.value)
+          ? bldgRes.value
+          : [];
+        setBuildings(list);
+      }
+    } catch {
+      // silent fallback
+    } finally {
+      setCronLoading(false);
+    }
+  }, [isSysAdmin]);
+
+  useEffect(() => {
+    fetchCronRuns();
+  }, [fetchCronRuns]);
+
+  const handleTriggerCron = async () => {
+    if (!isSysAdmin) return;
+    setTriggeringCron(true);
+    try {
+      const payload = {};
+      if (allowCustomDate && cronAsOfDate) {
+        payload.as_of_date = cronAsOfDate;
+      }
+      if (cronBuildingId) {
+        payload.building_id = cronBuildingId;
+      }
+      const res = await usersService.triggerCronRun(payload);
+      toast.success(res?.message || 'Đã thực thi tiến trình tự động hằng ngày thành công.');
+      await fetchCronRuns();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể kích hoạt tiến trình tự động hằng ngày.'));
+      await fetchCronRuns();
+    } finally {
+      setTriggeringCron(false);
+    }
+  };
 
   const fetchSettings = useCallback(async () => {
     setLoading(true);
@@ -196,6 +276,7 @@ export function SettingsPage() {
           urgent_resolve_hours: Math.max(1, Number(slaConfig.urgent_resolve_hours) || 4),
           normal_resolve_hours: Math.max(1, Number(slaConfig.normal_resolve_hours) || 24),
           deposit_refund_days: Math.max(1, Number(slaConfig.deposit_refund_days) || 5),
+          reopen_window_days: Math.max(1, Number(slaConfig.reopen_window_days) || 3),
         },
         contact_config: {
           working_hours: contactConfig.working_hours.trim(),
@@ -576,6 +657,16 @@ export function SettingsPage() {
                   setSlaConfig((s) => ({ ...s, deposit_refund_days: e.target.value }))
                 }
               />
+              <Input
+                label="Số ngày cho phép cư dân mở lại yêu cầu sau khi hoàn tất (ngày)"
+                type="number"
+                min="1"
+                disabled={!isSysAdmin}
+                value={slaConfig.reopen_window_days ?? 3}
+                onChange={(e) =>
+                  setSlaConfig((s) => ({ ...s, reopen_window_days: e.target.value }))
+                }
+              />
             </Card>
 
             <Card className="space-y-4">
@@ -636,6 +727,144 @@ export function SettingsPage() {
           ) : null}
         </form>
       )}
+
+      {/* Giám sát & Kích hoạt Tiến trình Tự động Hằng ngày (FR-066 / FR-064 / PRD 14.5) */}
+      {isSysAdmin ? (
+        <Card className="space-y-4">
+          <CardHeader
+            title="Tiến trình Tự động Hằng ngày (Cron 00:05 — FR-066 / FR-064)"
+            subtitle="Tự động sinh hóa đơn nháp theo billing_day, chuyển quá hạn (OVERDUE) & cộng phạt chậm thanh toán với khóa pg_try_advisory_lock(73918205)"
+            action={
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                icon={RefreshCw}
+                loading={cronLoading}
+                onClick={fetchCronRuns}
+              >
+                Làm mới nhật ký
+              </Button>
+            }
+          />
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end p-4 rounded-xl bg-slate-50 border border-slate-200">
+            <Select
+              label="Phạm vi tòa nhà đối soát"
+              value={cronBuildingId}
+              onChange={(e) => setCronBuildingId(e.target.value)}
+              options={[
+                { value: '', label: 'Tất cả tòa nhà trong hệ thống' },
+                ...buildings.map((b) => ({
+                  value: b.id,
+                  label: `${b.code} — ${b.name}`,
+                })),
+              ]}
+            />
+            <Input
+              label={
+                allowCustomDate
+                  ? 'Ngày đối soát (as_of_date — Môi trường Dev/QA)'
+                  : 'Ngày đối soát hiện tại (Múi giờ Việt Nam)'
+              }
+              type="date"
+              disabled={!allowCustomDate}
+              value={cronAsOfDate}
+              onChange={(e) => setCronAsOfDate(e.target.value)}
+            />
+            <div className="flex sm:justify-end">
+              <Button
+                type="button"
+                variant="primary"
+                icon={Play}
+                loading={triggeringCron}
+                onClick={handleTriggerCron}
+                className="w-full sm:w-auto"
+              >
+                Chạy đồng bộ ngay
+              </Button>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            {cronRuns.length === 0 ? (
+              <p className="p-6 text-xs text-slate-400 text-center">
+                {cronLoading
+                  ? 'Đang tải lịch sử thực thi cron_job_run...'
+                  : 'Chưa có bản ghi thực thi tiến trình tự động nào.'}
+              </p>
+            ) : (
+              <Table>
+                <THead>
+                  <tr>
+                    <TH>Ngày đối soát</TH>
+                    <TH className="text-center">Trạng thái</TH>
+                    <TH className="text-center">Lần thử / Thời lượng</TH>
+                    <TH>Kết quả tổng hợp</TH>
+                    <TH className="text-right">Thời điểm chạy</TH>
+                  </tr>
+                </THead>
+                <TBody>
+                  {cronRuns.map((run) => {
+                    const st = String(run.status || '').toUpperCase();
+                    const sum = run.summary && typeof run.summary === 'object' ? run.summary : {};
+                    return (
+                      <tr key={run.id}>
+                        <TD className="font-mono font-semibold text-slate-900 whitespace-nowrap">
+                          {formatDate(run.run_date)}
+                        </TD>
+                        <TD className="text-center whitespace-nowrap">
+                          {st === 'SUCCEEDED' ? (
+                            <Badge variant="emerald" dot>
+                              Thành công
+                            </Badge>
+                          ) : st === 'FAILED' ? (
+                            <Badge variant="red" dot>
+                              Thất bại
+                            </Badge>
+                          ) : (
+                            <Badge variant="sky" dot>
+                              Đang chạy
+                            </Badge>
+                          )}
+                        </TD>
+                        <TD className="text-center text-xs text-slate-600 font-mono whitespace-nowrap">
+                          Lần {run.attempt_count || 1} • {run.duration_ms ?? 0} ms
+                        </TD>
+                        <TD className="text-xs text-slate-700">
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            <span>
+                              HĐ nháp mới:{' '}
+                              <strong>{Number(sum.autoCreatedInvoices || 0)}</strong>
+                            </span>
+                            <span>
+                              Chặn thiếu chỉ số:{' '}
+                              <strong>{Number(sum.skippedMeterContracts || 0)}</strong>
+                            </span>
+                            <span>
+                              Chuyển quá hạn: <strong>{Number(sum.overdueMarked || 0)}</strong>
+                            </span>
+                            <span>
+                              Cộng phạt chậm: <strong>{Number(sum.lateFeeUpdated || 0)}</strong>
+                            </span>
+                          </div>
+                          {run.error_message ? (
+                            <p className="text-rose-600 mt-1 break-words">{run.error_message}</p>
+                          ) : null}
+                        </TD>
+                        <TD className="text-right text-xs text-slate-500 whitespace-nowrap">
+                          <Clock className="w-3 h-3 inline mr-1" />
+                          {formatDateTime(run.started_at)}
+                        </TD>
+                      </tr>
+                    );
+                  })}
+                </TBody>
+              </Table>
+            )}
+          </div>
+        </Card>
+      ) : null}
     </div>
   );
 }

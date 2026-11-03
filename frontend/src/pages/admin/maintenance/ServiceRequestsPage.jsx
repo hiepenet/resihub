@@ -16,6 +16,11 @@ import {
   Archive,
   XCircle,
   Eye,
+  Copy,
+  Check,
+  ExternalLink,
+  History,
+  Lock,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -39,10 +44,18 @@ import {
   SERVICE_REQUEST_STATUS,
   SERVICE_REQUEST_PRIORITY,
   SERVICE_REQUEST_CATEGORY,
+  PREFERRED_SLOT_LABELS,
 } from '../../../constants/statuses';
 import { ROLE_LABELS } from '../../../constants/roles';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import {
+  buildRoomMaintenanceZaloText,
+  computeSlaBadgeMeta,
+  copyTextToClipboard,
+} from '../../../utils/zaloFormat';
+
+const OPEN_STATUSES = ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'];
 
 const KANBAN_COLUMNS = [
   {
@@ -51,6 +64,13 @@ const KANBAN_COLUMNS = [
     accent: 'border-t-sky-500',
     badgeVariant: 'sky',
     bgHeader: 'bg-sky-50/70',
+  },
+  {
+    status: 'REOPENED',
+    title: 'Mở lại xử lý',
+    accent: 'border-t-rose-500',
+    badgeVariant: 'red',
+    bgHeader: 'bg-rose-50/70',
   },
   {
     status: 'ASSIGNED',
@@ -65,6 +85,13 @@ const KANBAN_COLUMNS = [
     accent: 'border-t-amber-500',
     badgeVariant: 'amber',
     bgHeader: 'bg-amber-50/70',
+  },
+  {
+    status: 'ON_HOLD',
+    title: 'Tạm hoãn / Hẹn lại',
+    accent: 'border-t-purple-500',
+    badgeVariant: 'purple',
+    bgHeader: 'bg-purple-50/70',
   },
   {
     status: 'RESOLVED',
@@ -104,6 +131,32 @@ const STATUS_OPTIONS = Object.entries(SERVICE_REQUEST_STATUS).map(([value, info]
   label: info.label,
 }));
 
+const PREFERRED_SLOT_OPTIONS = [
+  { value: 'ANYTIME', label: PREFERRED_SLOT_LABELS.ANYTIME },
+  { value: 'MORNING_08_12', label: PREFERRED_SLOT_LABELS.MORNING_08_12 },
+  { value: 'AFTERNOON_13_17', label: PREFERRED_SLOT_LABELS.AFTERNOON_13_17 },
+  { value: 'EVENING_18_21', label: PREFERRED_SLOT_LABELS.EVENING_18_21 },
+];
+
+const AUDIT_ACTION_LABELS = {
+  CREATE_SERVICE_REQUEST: 'Tạo yêu cầu báo hỏng',
+  UPDATE_SERVICE_REQUEST: 'Cập nhật xử lý kỹ thuật',
+  REOPEN_SERVICE_REQUEST: 'Cư dân yêu cầu xử lý lại',
+  CANCEL_SERVICE_REQUEST: 'Hủy yêu cầu sửa chữa',
+  RATE_SERVICE_REQUEST: 'Cư dân nghiệm thu & đánh giá sao',
+  SLA_ESCALATION_SERVICE_REQUEST: 'Hệ thống cảnh báo quá hạn SLA',
+};
+
+function toLocalDateTimeInputValue(isoValue) {
+  if (!isoValue) return '';
+  const dt = new Date(isoValue);
+  if (Number.isNaN(dt.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(
+    dt.getHours()
+  )}:${pad(dt.getMinutes())}`;
+}
+
 function StarRatingDisplay({ rating, size = 'sm' }) {
   const num = Number(rating || 0);
   if (!num) return null;
@@ -133,15 +186,19 @@ export function ServiceRequestsPage() {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [overdueOnly, setOverdueOnly] = useState(false);
 
   // Modal tạo yêu cầu hộ cư dân
   const [createOpen, setCreateOpen] = useState(false);
   const [apartments, setApartments] = useState([]);
   const [creating, setCreating] = useState(false);
+  const [mgrDuplicatePrompt, setMgrDuplicatePrompt] = useState(null);
   const [createForm, setCreateForm] = useState({
     apartment_id: '',
     category: 'ELECTRICAL',
     priority: 'NORMAL',
+    location_detail: '',
+    preferred_slot: 'ANYTIME',
     title: '',
     description: '',
     images: [],
@@ -152,10 +209,15 @@ export function ServiceRequestsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState(null);
   const [updating, setUpdating] = useState(false);
+  const [copiedRoomZalo, setCopiedRoomZalo] = useState(false);
   const [editState, setEditState] = useState({
     status: '',
     assigned_to: '',
     priority: 'NORMAL',
+    resolution_note: '',
+    resolution_images: [],
+    hold_reason: '',
+    next_appointment_at: '',
     internal_note: '',
   });
   const [previewImg, setPreviewImg] = useState(null);
@@ -168,6 +230,7 @@ export function ServiceRequestsPage() {
         category: categoryFilter || undefined,
         priority: priorityFilter || undefined,
         status: statusFilter || undefined,
+        overdue_sla: overdueOnly ? 'true' : undefined,
         search: search.trim() || undefined,
       });
       setRequests(res.data || []);
@@ -176,7 +239,7 @@ export function ServiceRequestsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, categoryFilter, priorityFilter, statusFilter, search, toast]);
+  }, [selectedBuildingId, categoryFilter, priorityFilter, statusFilter, overdueOnly, search, toast]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -187,22 +250,34 @@ export function ServiceRequestsPage() {
 
   const stats = useMemo(() => {
     const total = requests.length;
-    const newCount = requests.filter((r) => r.status === 'NEW').length;
+    const newCount = requests.filter((r) => ['NEW', 'REOPENED'].includes(r.status)).length;
     const processingCount = requests.filter((r) =>
-      ['ASSIGNED', 'IN_PROGRESS'].includes(r.status)
+      ['ASSIGNED', 'IN_PROGRESS', 'ON_HOLD'].includes(r.status)
     ).length;
     const doneCount = requests.filter((r) => ['RESOLVED', 'CLOSED'].includes(r.status)).length;
+    const overdueCount = requests.filter((r) => {
+      if (r.is_sla_overdue) return true;
+      return (
+        computeSlaBadgeMeta({
+          status: r.status,
+          slaDueAt: r.sla_due_at,
+          slaBreachedAt: r.sla_breached_at,
+        }).state === 'OVERDUE'
+      );
+    }).length;
     const urgentCount = requests.filter(
-      (r) => r.priority === 'URGENT' && !['RESOLVED', 'CLOSED', 'CANCELLED'].includes(r.status)
+      (r) => r.priority === 'URGENT' && OPEN_STATUSES.includes(r.status)
     ).length;
-    return { total, newCount, processingCount, doneCount, urgentCount };
+    return { total, newCount, processingCount, doneCount, overdueCount, urgentCount };
   }, [requests]);
 
   const groupedKanban = useMemo(() => {
     const map = {
       NEW: [],
+      REOPENED: [],
       ASSIGNED: [],
       IN_PROGRESS: [],
+      ON_HOLD: [],
       RESOLVED: [],
       CLOSED: [],
       CANCELLED: [],
@@ -215,15 +290,31 @@ export function ServiceRequestsPage() {
     return map;
   }, [requests]);
 
+  const syncEditStateFromDetail = (d) => {
+    setEditState({
+      status: d.status || 'NEW',
+      assigned_to: d.assigned_to || '',
+      priority: d.priority || 'NORMAL',
+      resolution_note: d.resolution_note || '',
+      resolution_images: Array.isArray(d.resolution_images) ? d.resolution_images : [],
+      hold_reason: d.hold_reason || '',
+      next_appointment_at: toLocalDateTimeInputValue(d.next_appointment_at),
+      internal_note: d.internal_note || '',
+    });
+  };
+
   const openCreateModal = async () => {
     setCreateForm({
       apartment_id: '',
       category: 'ELECTRICAL',
       priority: 'NORMAL',
+      location_detail: '',
+      preferred_slot: 'ANYTIME',
       title: '',
       description: '',
       images: [],
     });
+    setMgrDuplicatePrompt(null);
     setCreateOpen(true);
     try {
       const res = await buildingsService.listApartments({
@@ -232,6 +323,31 @@ export function ServiceRequestsPage() {
       setApartments(res.data || []);
     } catch {
       setApartments([]);
+    }
+  };
+
+  const submitCreatePayload = async (payload) => {
+    setCreating(true);
+    try {
+      const res = await serviceRequestsService.create(payload);
+      toast.success(res.message || 'Đã tạo yêu cầu bảo trì mới.');
+      setMgrDuplicatePrompt(null);
+      setCreateOpen(false);
+      fetchRequests();
+    } catch (err) {
+      const status = err?.response?.status;
+      const errData = err?.response?.data;
+      if (status === 409 && errData?.code === 'DUPLICATE_SERVICE_REQUEST') {
+        setMgrDuplicatePrompt({
+          message: errData?.message || 'Căn hộ đang có yêu cầu cùng hạng mục trong 24 giờ qua.',
+          existingRequest: errData?.existing_request || null,
+          pendingPayload: payload,
+        });
+      } else {
+        toast.error(extractErrorMessage(err, 'Lỗi khi tạo yêu cầu bảo trì.'));
+      }
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -246,39 +362,27 @@ export function ServiceRequestsPage() {
       return;
     }
 
-    setCreating(true);
-    try {
-      const res = await serviceRequestsService.create({
-        apartment_id: createForm.apartment_id,
-        category: createForm.category,
-        priority: createForm.priority,
-        title: createForm.title.trim(),
-        description: createForm.description.trim(),
-        images: createForm.images,
-      });
-      toast.success(res.message || 'Đã tạo yêu cầu bảo trì mới.');
-      setCreateOpen(false);
-      fetchRequests();
-    } catch (err) {
-      toast.error(extractErrorMessage(err, 'Lỗi khi tạo yêu cầu bảo trì.'));
-    } finally {
-      setCreating(false);
-    }
+    await submitCreatePayload({
+      apartment_id: createForm.apartment_id,
+      category: createForm.category,
+      priority: createForm.priority,
+      location_detail: createForm.location_detail.trim() || undefined,
+      preferred_slot: createForm.preferred_slot || 'ANYTIME',
+      title: createForm.title.trim(),
+      description: createForm.description.trim(),
+      images: createForm.images,
+    });
   };
 
   const openDetailDrawer = async (id) => {
     setDrawerOpen(true);
     setDetailLoading(true);
+    setCopiedRoomZalo(false);
     try {
       const res = await serviceRequestsService.getById(id);
       const d = res.data;
       setDetail(d);
-      setEditState({
-        status: d.status || 'NEW',
-        assigned_to: d.assigned_to || '',
-        priority: d.priority || 'NORMAL',
-        internal_note: d.internal_note || '',
-      });
+      syncEditStateFromDetail(d);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải chi tiết yêu cầu.'));
       setDrawerOpen(false);
@@ -290,28 +394,51 @@ export function ServiceRequestsPage() {
   const handleUpdateRequest = async (overrideStatus) => {
     if (!detail) return;
     const nextStatus = overrideStatus || editState.status;
+
+    if (nextStatus === 'ON_HOLD' && (!editState.hold_reason || editState.hold_reason.trim().length < 3)) {
+      setEditState((s) => ({ ...s, status: 'ON_HOLD' }));
+      toast.warning('Vui lòng nhập lý do tạm hoãn / hẹn lại (tối thiểu 3 ký tự) trước khi lưu.');
+      return;
+    }
+
     setUpdating(true);
     try {
+      const nextApptIso = editState.next_appointment_at
+        ? new Date(editState.next_appointment_at).toISOString()
+        : null;
+
       const res = await serviceRequestsService.updateStatus(detail.id, {
         status: nextStatus,
         assigned_to: editState.assigned_to || null,
         priority: editState.priority,
+        resolution_note: editState.resolution_note,
+        resolution_images: editState.resolution_images,
+        hold_reason: editState.hold_reason,
+        next_appointment_at: nextApptIso,
         internal_note: editState.internal_note,
       });
       toast.success(res.message || 'Cập nhật yêu cầu thành công.');
       const refreshed = await serviceRequestsService.getById(detail.id);
       setDetail(refreshed.data);
-      setEditState({
-        status: refreshed.data.status,
-        assigned_to: refreshed.data.assigned_to || '',
-        priority: refreshed.data.priority,
-        internal_note: refreshed.data.internal_note || '',
-      });
+      syncEditStateFromDetail(refreshed.data);
       fetchRequests();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể cập nhật yêu cầu bảo trì.'));
     } finally {
       setUpdating(false);
+    }
+  };
+
+  const handleCopyRoomZalo = async () => {
+    if (!detail) return;
+    const text = buildRoomMaintenanceZaloText(detail);
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedRoomZalo(true);
+      setTimeout(() => setCopiedRoomZalo(false), 2500);
+      toast.success('Đã sao chép tin nhắn cập nhật Zalo phòng vào bộ nhớ tạm!');
+    } else {
+      toast.error('Không thể truy cập bộ nhớ tạm để sao chép.');
     }
   };
 
@@ -358,16 +485,29 @@ export function ServiceRequestsPage() {
             <p className="font-medium text-slate-900 break-words">{row.title}</p>
             <p className="text-xs text-slate-500 mt-0.5">
               {SERVICE_REQUEST_CATEGORY[row.category] || row.category}
+              {row.location_detail ? ` • ${row.location_detail}` : ''}
             </p>
           </div>
         ),
       },
       {
         key: 'priority',
-        label: 'Ưu tiên',
+        label: 'Ưu tiên & SLA',
         align: 'center',
         sortable: true,
-        render: (row) => <StatusBadge status={row.priority} domain="priority" />,
+        render: (row) => {
+          const sla = computeSlaBadgeMeta({
+            status: row.status,
+            slaDueAt: row.sla_due_at,
+            slaBreachedAt: row.sla_breached_at,
+          });
+          return (
+            <div className="flex flex-col items-center gap-1">
+              <StatusBadge status={row.priority} domain="priority" />
+              <Badge variant={sla.variant}>{sla.label}</Badge>
+            </div>
+          );
+        },
       },
       {
         key: 'assigned_to_name',
@@ -426,11 +566,19 @@ export function ServiceRequestsPage() {
     []
   );
 
+  const detailSlaMeta = detail
+    ? computeSlaBadgeMeta({
+        status: detail.status,
+        slaDueAt: detail.sla_due_at,
+        slaBreachedAt: detail.sla_breached_at,
+      })
+    : null;
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Yêu cầu & Báo hỏng Kỹ thuật"
-        subtitle="Tiếp nhận, điều phối nhân sự bảo trì và theo dõi chất lượng xử lý SLA theo thời gian thực."
+        subtitle="Tiếp nhận, điều phối nhân sự bảo trì, kiểm soát cam kết SLA và đồng bộ tin nhắn nhóm Zalo phòng."
         actions={
           <>
             <div className="inline-flex items-center bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm">
@@ -478,21 +626,29 @@ export function ServiceRequestsPage() {
         <StatsCard
           title="Tổng yêu cầu"
           value={stats.total}
-          subtext={stats.urgentCount > 0 ? `${stats.urgentCount} sự cố KHẨN CẤP đang mở` : 'Tất cả sự cố ghi nhận'}
+          subtext={
+            stats.urgentCount > 0
+              ? `${stats.urgentCount} sự cố KHẨN CẤP đang mở`
+              : 'Tất cả sự cố ghi nhận'
+          }
           icon={Wrench}
           color="sky"
         />
         <StatsCard
-          title="Mới tiếp nhận"
+          title="Mới / Mở lại"
           value={stats.newCount}
-          subtext="Chờ phân công kỹ thuật viên"
+          subtext={
+            stats.overdueCount > 0
+              ? `${stats.overdueCount} phiếu đang quá hạn SLA!`
+              : 'Chờ tiếp nhận & phân công'
+          }
           icon={AlertTriangle}
-          color="amber"
+          color={stats.overdueCount > 0 ? 'red' : 'amber'}
         />
         <StatsCard
-          title="Đang xử lý"
+          title="Đang xử lý / Hẹn lại"
           value={stats.processingCount}
-          subtext="Đã giao nhân sự / Đang sửa chữa"
+          subtext="Đã phân công / Đang sửa / Tạm hoãn"
           icon={Clock}
           color="indigo"
         />
@@ -506,7 +662,7 @@ export function ServiceRequestsPage() {
       </div>
 
       {/* Bộ lọc */}
-      <Card className="p-4">
+      <Card className="p-4 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div className="lg:col-span-2">
             <SearchBar
@@ -534,13 +690,43 @@ export function ServiceRequestsPage() {
             options={STATUS_OPTIONS}
           />
         </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={overdueOnly}
+              onChange={(e) => setOverdueOnly(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+            />
+            <span className={overdueOnly ? 'text-rose-700 font-semibold' : ''}>
+              Chỉ hiển thị phiếu đang Quá hạn SLA
+            </span>
+          </label>
+
+          {(categoryFilter || priorityFilter || statusFilter || overdueOnly || search) ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSearch('');
+                setCategoryFilter('');
+                setPriorityFilter('');
+                setStatusFilter('');
+                setOverdueOnly(false);
+              }}
+              className="text-xs text-primary-600 hover:text-primary-700 font-medium"
+            >
+              Xóa bộ lọc
+            </button>
+          ) : null}
+        </div>
       </Card>
 
       {/* Nội dung chính: Kanban hoặc Bảng */}
       {viewMode === 'kanban' ? (
         loading ? (
           <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4">
-            {KANBAN_COLUMNS.map((col) => (
+            {KANBAN_COLUMNS.slice(0, 5).map((col) => (
               <div
                 key={col.status}
                 className="bg-slate-100/70 rounded-xl border border-slate-200 p-3 h-96 animate-pulse"
@@ -571,61 +757,85 @@ export function ServiceRequestsPage() {
                         Không có yêu cầu
                       </div>
                     ) : (
-                      items.map((sr) => (
-                        <div
-                          key={sr.id}
-                          onClick={() => openDetailDrawer(sr.id)}
-                          className="bg-white rounded-xl border border-slate-200/90 p-3.5 shadow-sm hover:shadow-md hover:border-primary-300 transition-all cursor-pointer space-y-2.5"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="font-mono text-[11px] font-semibold text-primary-700 bg-primary-50 px-2 py-0.5 rounded border border-primary-100 break-all">
-                              {sr.tracking_code}
-                            </span>
-                            <StatusBadge status={sr.priority} domain="priority" dot={false} />
-                          </div>
+                      items.map((sr) => {
+                        const slaMeta = computeSlaBadgeMeta({
+                          status: sr.status,
+                          slaDueAt: sr.sla_due_at,
+                          slaBreachedAt: sr.sla_breached_at,
+                        });
+                        return (
+                          <div
+                            key={sr.id}
+                            onClick={() => openDetailDrawer(sr.id)}
+                            className={`bg-white rounded-xl border p-3.5 shadow-sm hover:shadow-md hover:border-primary-300 transition-all cursor-pointer space-y-2.5 ${
+                              slaMeta.state === 'OVERDUE'
+                                ? 'border-rose-300 ring-1 ring-rose-100'
+                                : 'border-slate-200/90'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-1.5">
+                              <span className="font-mono text-[11px] font-semibold text-primary-700 bg-primary-50 px-2 py-0.5 rounded border border-primary-100 break-all">
+                                {sr.tracking_code}
+                              </span>
+                              <StatusBadge status={sr.priority} domain="priority" dot={false} />
+                            </div>
 
-                          <div>
-                            <h4 className="text-sm font-semibold text-slate-900 line-clamp-2 leading-snug break-words" title={sr.title}>
-                              {sr.title}
-                            </h4>
-                            <p className="text-xs text-slate-500 mt-1">
-                              {SERVICE_REQUEST_CATEGORY[sr.category] || sr.category}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center justify-between gap-2 text-xs text-slate-600 pt-1 border-t border-slate-100">
-                            <div className="min-w-0">
-                              <p className="font-semibold text-slate-800">
-                                Căn {sr.apartment_code}{' '}
-                                <span className="text-slate-400 font-normal">({sr.building_code})</span>
+                            <div>
+                              <h4
+                                className="text-sm font-semibold text-slate-900 line-clamp-2 leading-snug break-words"
+                                title={sr.title}
+                              >
+                                {sr.title}
+                              </h4>
+                              <p className="text-xs text-slate-500 mt-1">
+                                {SERVICE_REQUEST_CATEGORY[sr.category] || sr.category}
+                                {sr.location_detail ? ` • ${sr.location_detail}` : ''}
                               </p>
-                              {sr.requester_name ? (
-                                <p className="text-[11px] text-slate-500 break-words">
-                                  {sr.requester_name}
-                                </p>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <Badge variant={slaMeta.variant}>{slaMeta.label}</Badge>
+                              {Number(sr.reopen_count) > 0 ? (
+                                <Badge variant="red">Mở lại x{sr.reopen_count}</Badge>
                               ) : null}
                             </div>
-                            <span className="text-[11px] text-slate-400 shrink-0">
-                              {formatRelativeTime(sr.created_at)}
-                            </span>
-                          </div>
 
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            {sr.assigned_to_name ? (
-                              <span className="inline-flex items-center gap-1 text-[11px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full font-medium break-words">
-                                <UserCheck className="w-3 h-3 shrink-0" />
-                                {sr.assigned_to_name}
+                            <div className="flex items-center justify-between gap-2 text-xs text-slate-600 pt-1 border-t border-slate-100">
+                              <div className="min-w-0">
+                                <p className="font-semibold text-slate-800">
+                                  Căn {sr.apartment_code}{' '}
+                                  <span className="text-slate-400 font-normal">
+                                    ({sr.building_code})
+                                  </span>
+                                </p>
+                                {sr.requester_name ? (
+                                  <p className="text-[11px] text-slate-500 break-words">
+                                    {sr.requester_name}
+                                  </p>
+                                ) : null}
+                              </div>
+                              <span className="text-[11px] text-slate-400 shrink-0">
+                                {formatRelativeTime(sr.created_at)}
                               </span>
-                            ) : (
-                              <span className="text-[11px] text-slate-400 italic">
-                                Chưa giao nhân sự
-                              </span>
-                            )}
+                            </div>
 
-                            {sr.rating ? <StarRatingDisplay rating={sr.rating} /> : null}
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              {sr.assigned_to_name ? (
+                                <span className="inline-flex items-center gap-1 text-[11px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full font-medium break-words">
+                                  <UserCheck className="w-3 h-3 shrink-0" />
+                                  {sr.assigned_to_name}
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-slate-400 italic">
+                                  Chưa giao nhân sự
+                                </span>
+                              )}
+
+                              {sr.rating ? <StarRatingDisplay rating={sr.rating} /> : null}
+                            </div>
                           </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -694,6 +904,21 @@ export function ServiceRequestsPage() {
             />
           </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Vị trí cụ thể trong phòng"
+              placeholder="VD: Nhà vệ sinh phụ, Ban công, Bếp..."
+              value={createForm.location_detail}
+              onChange={(e) => setCreateForm((s) => ({ ...s, location_detail: e.target.value }))}
+            />
+            <Select
+              label="Khung giờ cư dân thuận tiện"
+              value={createForm.preferred_slot}
+              onChange={(e) => setCreateForm((s) => ({ ...s, preferred_slot: e.target.value }))}
+              options={PREFERRED_SLOT_OPTIONS}
+            />
+          </div>
+
           <Input
             label="Tiêu đề sự cố"
             required
@@ -707,7 +932,7 @@ export function ServiceRequestsPage() {
             required
             multiline
             rows={4}
-            placeholder="Ghi rõ vị trí hỏng, biểu hiện sự cố, khung giờ cư dân có nhà để kỹ thuật viên kiểm tra..."
+            placeholder="Ghi rõ biểu hiện sự cố, ghi chú liên hệ để kỹ thuật viên kiểm tra..."
             value={createForm.description}
             onChange={(e) => setCreateForm((s) => ({ ...s, description: e.target.value }))}
           />
@@ -719,6 +944,46 @@ export function ServiceRequestsPage() {
             value={createForm.images}
             onChange={(imgs) => setCreateForm((s) => ({ ...s, images: imgs }))}
           />
+
+          {mgrDuplicatePrompt ? (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2 text-xs text-amber-900">
+              <p className="font-semibold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                {mgrDuplicatePrompt.message}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {mgrDuplicatePrompt.existingRequest?.id ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="secondary"
+                    onClick={() => {
+                      const existingId = mgrDuplicatePrompt.existingRequest.id;
+                      setMgrDuplicatePrompt(null);
+                      setCreateOpen(false);
+                      openDetailDrawer(existingId);
+                    }}
+                  >
+                    Mở phiếu #{mgrDuplicatePrompt.existingRequest.tracking_code}
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="warning"
+                  loading={creating}
+                  onClick={() =>
+                    submitCreatePayload({
+                      ...mgrDuplicatePrompt.pendingPayload,
+                      ignore_duplicate_warning: true,
+                    })
+                  }
+                >
+                  Vẫn tạo phiếu mới
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </form>
       </Modal>
 
@@ -765,16 +1030,65 @@ export function ServiceRequestsPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge status={detail.status} domain="service_request" />
                 <StatusBadge status={detail.priority} domain="priority" />
+                {detailSlaMeta ? (
+                  <Badge variant={detailSlaMeta.variant}>{detailSlaMeta.label}</Badge>
+                ) : null}
                 <Badge variant="slate">
                   {SERVICE_REQUEST_CATEGORY[detail.category] || detail.category}
                 </Badge>
+                {Number(detail.reopen_count) > 0 ? (
+                  <Badge variant="red">Đã mở lại {detail.reopen_count} lần</Badge>
+                ) : null}
               </div>
-              <h4 className="text-base font-semibold text-slate-900 leading-snug">
+              <h4 className="text-base font-semibold text-slate-900 leading-snug break-words">
                 {detail.title}
               </h4>
             </div>
 
-            {/* Thông tin chung */}
+            {/* Hộp tiện ích Đồng bộ Nhóm Zalo Phòng (FR-069) */}
+            <div className="p-3.5 rounded-xl bg-sky-50/70 border border-sky-200/90 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <p className="text-xs font-bold text-sky-900">
+                    Cập nhật tiến độ qua Nhóm Zalo Phòng
+                  </p>
+                  <p className="text-[11px] text-sky-700">
+                    Tin nhắn tự động loại bỏ ghi chú nội bộ BQL để gửi an toàn cho cư dân.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="secondary"
+                    icon={copiedRoomZalo ? Check : Copy}
+                    onClick={handleCopyRoomZalo}
+                  >
+                    {copiedRoomZalo ? 'Đã sao chép!' : 'Copy tin nhắn Zalo phòng'}
+                  </Button>
+
+                  {detail.apartment_zalo_group?.invite_link ? (
+                    <a
+                      href={detail.apartment_zalo_group.invite_link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Mở nhóm Zalo phòng</span>
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+              {detail.apartment_zalo_group?.name ? (
+                <p className="text-[11px] text-slate-600">
+                  Nhóm liên kết: <strong>{detail.apartment_zalo_group.name}</strong>
+                </p>
+              ) : null}
+            </div>
+
+            {/* Thông tin chung & SLA */}
             <div className="bg-slate-50 rounded-xl border border-slate-200/80 p-4 grid grid-cols-2 gap-3 text-xs">
               <div>
                 <p className="text-slate-400">Mã tra cứu</p>
@@ -785,8 +1099,24 @@ export function ServiceRequestsPage() {
               <div>
                 <p className="text-slate-400">Vị trí căn hộ</p>
                 <p className="font-semibold text-slate-800 mt-0.5 flex items-center gap-1">
-                  <Building2 className="w-3.5 h-3.5 text-primary-500" />
-                  Căn {detail.apartment_code} ({detail.building_code})
+                  <Building2 className="w-3.5 h-3.5 text-primary-500 shrink-0" />
+                  <span>
+                    Căn {detail.apartment_code} ({detail.building_code})
+                  </span>
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-400">Vị trí trong phòng</p>
+                <p className="font-medium text-slate-800 mt-0.5 break-words">
+                  {detail.location_detail || 'Không ghi cụ thể'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-400">Khung giờ cư dân hẹn</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {detail.preferred_slot
+                    ? PREFERRED_SLOT_LABELS[detail.preferred_slot] || detail.preferred_slot
+                    : 'Linh hoạt'}
                 </p>
               </div>
               <div>
@@ -806,6 +1136,22 @@ export function ServiceRequestsPage() {
                   {formatDateTime(detail.created_at)}
                 </p>
               </div>
+              {detail.sla_due_at ? (
+                <div>
+                  <p className="text-slate-400">Hạn hoàn thành SLA</p>
+                  <p className="font-semibold text-slate-800 mt-0.5">
+                    {formatDateTime(detail.sla_due_at)}
+                  </p>
+                </div>
+              ) : null}
+              {detail.first_responded_at ? (
+                <div>
+                  <p className="text-slate-400">Phản hồi đầu tiên</p>
+                  <p className="font-medium text-slate-800 mt-0.5">
+                    {formatDateTime(detail.first_responded_at)}
+                  </p>
+                </div>
+              ) : null}
               {detail.resolved_at ? (
                 <div className="col-span-2 pt-2 border-t border-slate-200/70 flex items-center justify-between">
                   <span className="text-slate-500">
@@ -821,17 +1167,27 @@ export function ServiceRequestsPage() {
               ) : null}
             </div>
 
-            {/* Mô tả sự cố */}
-            <div className="space-y-1.5">
+            {/* Mô tả sự cố & Lý do mở lại / hủy */}
+            <div className="space-y-2">
               <h5 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                 Mô tả chi tiết từ cư dân
               </h5>
-              <div className="p-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-700 whitespace-pre-line leading-relaxed">
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-700 whitespace-pre-line leading-relaxed break-words">
                 {detail.description}
               </div>
+              {detail.reopen_reason ? (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 break-words">
+                  <strong>Lý do cư dân mở lại yêu cầu:</strong> {detail.reopen_reason}
+                </div>
+              ) : null}
+              {detail.cancelled_reason ? (
+                <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-700 break-words">
+                  <strong>Lý do hủy phiếu:</strong> {detail.cancelled_reason}
+                </div>
+              ) : null}
             </div>
 
-            {/* Ảnh đính kèm */}
+            {/* Ảnh hiện trạng ban đầu */}
             {Array.isArray(detail.images) && detail.images.length > 0 ? (
               <div className="space-y-2">
                 <h5 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -877,13 +1233,13 @@ export function ServiceRequestsPage() {
                 </div>
               ) : (
                 <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70 text-xs text-slate-500">
-                  Chưa có đánh giá từ cư dân (cư dân sẽ đánh giá 1–5 sao sau khi yêu cầu chuyển sang
-                  trạng thái <strong>Đã xử lý xong</strong>).
+                  Chưa có đánh giá từ cư dân (cư dân sẽ nghiệm thu 1–5 sao hoặc yêu cầu xử lý lại sau khi yêu cầu chuyển sang{' '}
+                  <strong>Đã xử lý xong</strong>).
                 </div>
               )}
             </div>
 
-            {/* Khu vực chuyển trạng thái nhanh & Điều phối */}
+            {/* Khu vực chuyển trạng thái nhanh & Điều phối (MANAGER only) */}
             {canHandleMaintenance ? (
               <div className="space-y-4 pt-4 border-t border-slate-200">
                 <h5 className="text-xs font-semibold uppercase tracking-wide text-slate-700">
@@ -892,7 +1248,7 @@ export function ServiceRequestsPage() {
 
                 {/* Nút chuyển nhanh trạng thái */}
                 <div className="flex flex-wrap gap-2">
-                  {detail.status === 'NEW' ? (
+                  {['NEW', 'REOPENED'].includes(detail.status) ? (
                     <Button
                       size="xs"
                       variant="soft"
@@ -903,7 +1259,7 @@ export function ServiceRequestsPage() {
                       Tiếp nhận / Phân công
                     </Button>
                   ) : null}
-                  {['NEW', 'ASSIGNED'].includes(detail.status) ? (
+                  {['NEW', 'ASSIGNED', 'ON_HOLD', 'REOPENED'].includes(detail.status) ? (
                     <Button
                       size="xs"
                       variant="warning"
@@ -911,10 +1267,21 @@ export function ServiceRequestsPage() {
                       loading={updating}
                       onClick={() => handleUpdateRequest('IN_PROGRESS')}
                     >
-                      Bắt đầu xử lý
+                      {detail.status === 'ON_HOLD' ? 'Tiếp tục xử lý' : 'Bắt đầu xử lý'}
                     </Button>
                   ) : null}
-                  {['ASSIGNED', 'IN_PROGRESS'].includes(detail.status) ? (
+                  {['ASSIGNED', 'IN_PROGRESS', 'REOPENED'].includes(detail.status) ? (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      icon={Clock}
+                      disabled={updating}
+                      onClick={() => setEditState((s) => ({ ...s, status: 'ON_HOLD' }))}
+                    >
+                      Tạm hoãn / Hẹn lại
+                    </Button>
+                  ) : null}
+                  {['ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'].includes(detail.status) ? (
                     <Button
                       size="xs"
                       variant="success"
@@ -936,7 +1303,7 @@ export function ServiceRequestsPage() {
                       Nghiệm thu & Đóng yêu cầu
                     </Button>
                   ) : null}
-                  {!['CLOSED', 'CANCELLED'].includes(detail.status) ? (
+                  {OPEN_STATUSES.includes(detail.status) ? (
                     <Button
                       size="xs"
                       variant="danger"
@@ -977,24 +1344,178 @@ export function ServiceRequestsPage() {
                   }))}
                 />
 
-                <Input
-                  label="Ghi chú nội bộ Ban quản lý / Biên bản xử lý"
-                  multiline
-                  rows={3}
-                  placeholder="Ghi nhận nguyên nhân sự cố, vật tư thay thế hoặc hướng xử lý..."
-                  value={editState.internal_note}
-                  onChange={(e) =>
-                    setEditState((s) => ({ ...s, internal_note: e.target.value }))
-                  }
-                />
+                {/* Khối Tạm hoãn / Hẹn lại (ON_HOLD) */}
+                {(editState.status === 'ON_HOLD' || detail.hold_reason || detail.next_appointment_at) ? (
+                  <div className="p-3.5 rounded-xl bg-purple-50/70 border border-purple-200 space-y-3">
+                    <p className="text-xs font-bold text-purple-900">
+                      Thông tin Tạm hoãn / Hẹn lịch kỹ thuật (hiển thị cho cư dân)
+                    </p>
+                    <Input
+                      label="Lý do tạm hoãn / chờ vật tư"
+                      required={editState.status === 'ON_HOLD'}
+                      placeholder="VD: Chờ nhập van điện từ chính hãng, cư dân hẹn chiều thứ 7..."
+                      value={editState.hold_reason}
+                      onChange={(e) =>
+                        setEditState((s) => ({ ...s, hold_reason: e.target.value }))
+                      }
+                    />
+                    <Input
+                      type="datetime-local"
+                      label="Lịch hẹn xử lý tiếp theo (tùy chọn)"
+                      value={editState.next_appointment_at}
+                      onChange={(e) =>
+                        setEditState((s) => ({ ...s, next_appointment_at: e.target.value }))
+                      }
+                    />
+                  </div>
+                ) : null}
+
+                {/* Khối Kết quả xử lý gửi Cư dân (PUBLIC) */}
+                <div className="p-3.5 rounded-xl bg-emerald-50/50 border border-emerald-200 space-y-3">
+                  <p className="text-xs font-bold text-emerald-900">
+                    Kết quả xử lý gửi cư dân (hiển thị công khai trên Cổng cư dân & tin nhắn Zalo)
+                  </p>
+                  <Input
+                    label="Biên bản / Kết quả nghiệm thu gửi cư dân"
+                    multiline
+                    rows={3}
+                    placeholder="VD: Đã vệ sinh dàn lạnh, bổ sung gas và kiểm tra nhiệt độ ổn định..."
+                    value={editState.resolution_note}
+                    onChange={(e) =>
+                      setEditState((s) => ({ ...s, resolution_note: e.target.value }))
+                    }
+                  />
+                  <FileUpload
+                    label="Ảnh nghiệm thu sau sửa chữa (tối đa 3 ảnh)"
+                    multiple
+                    maxFiles={3}
+                    value={editState.resolution_images}
+                    onChange={(imgs) =>
+                      setEditState((s) => ({ ...s, resolution_images: imgs }))
+                    }
+                  />
+                </div>
+
+                {/* Khối Ghi chú nội bộ BQL (CONFIDENTIAL - Review Focus #1) */}
+                <div className="p-3.5 rounded-xl bg-amber-50/50 border border-amber-200 space-y-2">
+                  <p className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                    <span>Ghi chú nội bộ BQL (Bảo mật — Cư dân KHÔNG xem được)</span>
+                  </p>
+                  <Input
+                    multiline
+                    rows={3}
+                    placeholder="Ghi chú nội bộ chi phí vật tư kho, nhà thầu phụ, lưu ý vận hành..."
+                    value={editState.internal_note}
+                    onChange={(e) =>
+                      setEditState((s) => ({ ...s, internal_note: e.target.value }))
+                    }
+                  />
+                </div>
               </div>
-            ) : detail.internal_note ? (
-              <div className="space-y-1.5">
-                <h5 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Ghi chú nội bộ kỹ thuật
+            ) : (
+              /* Chế độ chỉ đọc cho OWNER / SYS_ADMIN */
+              <div className="space-y-4 pt-3 border-t border-slate-200">
+                {(detail.hold_reason || detail.next_appointment_at) ? (
+                  <div className="p-3.5 rounded-xl bg-purple-50/70 border border-purple-200 text-xs text-purple-900 space-y-1">
+                    {detail.hold_reason ? (
+                      <p>
+                        <strong>Lý do tạm hoãn:</strong> {detail.hold_reason}
+                      </p>
+                    ) : null}
+                    {detail.next_appointment_at ? (
+                      <p>
+                        <strong>Lịch hẹn tiếp theo:</strong>{' '}
+                        {formatDateTime(detail.next_appointment_at)}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {detail.resolution_note ||
+                (Array.isArray(detail.resolution_images) && detail.resolution_images.length > 0) ? (
+                  <div className="space-y-2">
+                    <h5 className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                      Kết quả xử lý gửi cư dân
+                    </h5>
+                    {detail.resolution_note ? (
+                      <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 text-sm text-emerald-900 whitespace-pre-line">
+                        {detail.resolution_note}
+                      </div>
+                    ) : null}
+                    {Array.isArray(detail.resolution_images) &&
+                    detail.resolution_images.length > 0 ? (
+                      <div className="grid grid-cols-3 gap-2.5">
+                        {detail.resolution_images.map((imgUrl, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => setPreviewImg(imgUrl)}
+                            className="aspect-square rounded-xl border border-emerald-200 overflow-hidden bg-emerald-50"
+                          >
+                            <AuthImage
+                              src={imgUrl}
+                              alt={`Ảnh nghiệm thu ${idx + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {detail.internal_note ? (
+                  <div className="space-y-1.5">
+                    <h5 className="text-xs font-semibold uppercase tracking-wide text-amber-800 flex items-center gap-1">
+                      <Lock className="w-3.5 h-3.5" />
+                      Ghi chú nội bộ BQL
+                    </h5>
+                    <div className="p-3.5 rounded-xl bg-amber-50/50 border border-amber-200 text-sm text-slate-700 whitespace-pre-line">
+                      {detail.internal_note}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {/* Lịch sử xử lý (Audit Timeline) */}
+            {Array.isArray(detail.audit_timeline) && detail.audit_timeline.length > 0 ? (
+              <div className="space-y-2.5 pt-4 border-t border-slate-200">
+                <h5 className="text-xs font-semibold uppercase tracking-wide text-slate-600 flex items-center gap-1.5">
+                  <History className="w-3.5 h-3.5" />
+                  <span>Lịch sử xử lý ({detail.audit_timeline.length})</span>
                 </h5>
-                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm text-slate-700">
-                  {detail.internal_note}
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {detail.audit_timeline.map((log) => {
+                    const prevSt = log.before?.status;
+                    const nextSt = log.after?.status;
+                    return (
+                      <div
+                        key={log.id}
+                        className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 text-xs space-y-1"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-800">
+                            {AUDIT_ACTION_LABELS[log.action] || log.action}
+                          </span>
+                          <span className="text-[11px] text-slate-400">
+                            {formatDateTime(log.created_at || log.at)}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                          <span>
+                            Thực hiện bởi: <strong>{log.actor_name || 'Hệ thống tự động'}</strong>
+                          </span>
+                          {nextSt ? (
+                            <span className="font-mono text-slate-700">
+                              {prevSt && prevSt !== nextSt ? `${prevSt} → ${nextSt}` : nextSt}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}

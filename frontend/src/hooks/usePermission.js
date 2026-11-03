@@ -47,8 +47,8 @@ export function usePermission() {
     canApproveInvoiceAdjustments: isOwner || isManager || isSysAdmin,
     canApproveCreditRefunds: isOwner || isManager || isSysAdmin,
     canViewFinancialAuditLogs: isSysAdmin || isOwner || isManager,
-    canHandleMaintenance: isSysAdmin || isManager,
-    canSendNotifications: isSysAdmin || isManager,
+    canHandleMaintenance: isManager,
+    canSendNotifications: isManager,
     canManageUsers: isSysAdmin,
     canViewAuditLogs: isSysAdmin || isOwner,
   };

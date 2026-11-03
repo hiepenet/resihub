@@ -11,6 +11,9 @@ import {
   ArrowRight,
   Sparkles,
   Home,
+  ShieldAlert,
+  Droplets,
+  BookOpen,
 } from 'lucide-react';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -73,13 +76,61 @@ function getNotificationMeta(type = '') {
       actionLabel: 'Xem hợp đồng',
     };
   }
-  if (upper.includes('SERVICE_REQUEST') || upper.includes('MAINTENANCE')) {
+  if (upper === 'UTILITY_INTERRUPTION') {
+    return {
+      icon: Droplets,
+      color: 'bg-sky-50 text-sky-600 border-sky-100',
+      label: 'Thông báo Điện / Nước',
+      targetTab: null,
+      actionLabel: null,
+    };
+  }
+  if (upper === 'MAINTENANCE_NOTICE') {
     return {
       icon: Wrench,
       color: 'bg-amber-50 text-amber-600 border-amber-100',
-      label: 'Kỹ thuật & Bảo trì',
+      label: 'Lịch bảo trì tòa nhà',
+      targetTab: null,
+      actionLabel: null,
+    };
+  }
+  if (upper === 'HOUSE_RULES') {
+    return {
+      icon: BookOpen,
+      color: 'bg-indigo-50 text-indigo-600 border-indigo-100',
+      label: 'Nhắc nhở Nội quy',
+      targetTab: null,
+      actionLabel: null,
+    };
+  }
+  if (upper === 'SECURITY_ALERT') {
+    return {
+      icon: ShieldAlert,
+      color: 'bg-rose-50 text-rose-600 border-rose-100',
+      label: 'Cảnh báo An ninh & PCCC',
+      targetTab: null,
+      actionLabel: null,
+    };
+  }
+  if (upper.startsWith('SERVICE_REQUEST_') || upper.includes('SERVICE_REQUEST') || upper === 'MAINTENANCE_UPDATE') {
+    return {
+      icon: Wrench,
+      color:
+        upper === 'SERVICE_REQUEST_URGENT' || upper === 'SERVICE_REQUEST_SLA_BREACH'
+          ? 'bg-rose-50 text-rose-600 border-rose-100'
+          : 'bg-amber-50 text-amber-600 border-amber-100',
+      label: 'Kỹ thuật & Báo hỏng',
       targetTab: 'maintenance',
       actionLabel: 'Xem báo hỏng',
+    };
+  }
+  if (upper === 'ANNOUNCEMENT') {
+    return {
+      icon: Megaphone,
+      color: 'bg-purple-50 text-purple-600 border-purple-100',
+      label: 'Thông báo Ban Quản Lý',
+      targetTab: null,
+      actionLabel: null,
     };
   }
   if (upper.includes('SERVICE_UPDATE') || upper.includes('SUBSCRIPTION') || upper === 'SERVICE_TERMINATED') {

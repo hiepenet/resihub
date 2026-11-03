@@ -12,8 +12,20 @@ export const residentService = {
 
   listServiceRequests: (contractId) =>
     api.get('/api/v1/resident/service-requests', withContractParam(contractId)).then((r) => r.data),
-  createServiceRequest: (payload) => api.post('/api/v1/resident/service-requests', payload).then((r) => r.data),
-  rateServiceRequest: (id, payload) => api.post(`/api/v1/resident/service-requests/${id}/rating`, payload).then((r) => r.data),
+  createServiceRequest: (payload, options = {}) =>
+    api.post('/api/v1/resident/service-requests', payload, withIdempotency(options)).then((r) => r.data),
+  cancelServiceRequest: (id, payload = {}, options = {}) =>
+    api
+      .post(`/api/v1/resident/service-requests/${id}/cancel`, payload, withIdempotency(options))
+      .then((r) => r.data),
+  reopenServiceRequest: (id, payload, options = {}) =>
+    api
+      .post(`/api/v1/resident/service-requests/${id}/reopen`, payload, withIdempotency(options))
+      .then((r) => r.data),
+  rateServiceRequest: (id, payload, options = {}) =>
+    api
+      .post(`/api/v1/resident/service-requests/${id}/rating`, payload, withIdempotency(options))
+      .then((r) => r.data),
 
   listInvoices: (contractId) =>
     api.get('/api/v1/resident/invoices', withContractParam(contractId)).then((r) => r.data),

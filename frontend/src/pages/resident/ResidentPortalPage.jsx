@@ -43,7 +43,7 @@ export function ResidentPortalPage() {
 
   const computeOpenRequests = useCallback((rows = []) => {
     const count = rows.filter((r) =>
-      ['NEW', 'ASSIGNED', 'IN_PROGRESS'].includes(r.status)
+      ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'].includes(r.status)
     ).length;
     setOpenRequestsCount(count);
   }, []);
