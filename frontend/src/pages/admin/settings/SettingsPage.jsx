@@ -14,6 +14,11 @@ import { DEFAULT_RESERVATION_CANCEL_POLICY } from '../../../utils/depositUiHelpe
 const DEFAULT_BILLING_CONFIG = {
   billing_day: 1,
   payment_due_days: 5,
+  due_date_offset_days: 5,
+  late_fee_grace_days: 5,
+  late_fee_per_day: 100000,
+  late_fee_cap: '',
+  meter_anomaly_threshold_pct: 30,
   reminder_days_text: '3, 7, 15',
   late_fee_percent: 0,
   electricity_default_price: 3800,
@@ -60,9 +65,20 @@ export function SettingsPage() {
       const data = res?.data || {};
       if (data.billing_config) {
         const bc = data.billing_config;
+        const resolvedDueDays = bc.due_date_offset_days ?? bc.payment_due_days ?? 5;
         setBillingConfig({
           billing_day: bc.billing_day ?? 1,
-          payment_due_days: bc.payment_due_days ?? 5,
+          payment_due_days: resolvedDueDays,
+          due_date_offset_days: resolvedDueDays,
+          late_fee_grace_days: bc.late_fee_grace_days ?? 5,
+          late_fee_per_day: bc.late_fee_per_day ?? 100000,
+          late_fee_cap:
+            bc.late_fee_cap !== null &&
+            bc.late_fee_cap !== undefined &&
+            Number(bc.late_fee_cap) > 0
+              ? bc.late_fee_cap
+              : '',
+          meter_anomaly_threshold_pct: bc.meter_anomaly_threshold_pct ?? 30,
           reminder_days_text: Array.isArray(bc.reminder_days)
             ? bc.reminder_days.join(', ')
             : '3, 7, 15',
@@ -118,12 +134,55 @@ export function SettingsPage() {
       .map((x) => Number(x.trim()))
       .filter((n) => !Number.isNaN(n) && n > 0);
 
+    const dueOffsetDays = Math.min(
+      60,
+      Math.max(
+        1,
+        Math.round(
+          Number(billingConfig.due_date_offset_days ?? billingConfig.payment_due_days) || 5
+        )
+      )
+    );
+    const rawLateFeeCap = Number(billingConfig.late_fee_cap);
+    const normalizedLateFeeCap =
+      billingConfig.late_fee_cap !== '' &&
+      billingConfig.late_fee_cap !== null &&
+      billingConfig.late_fee_cap !== undefined &&
+      Number.isFinite(rawLateFeeCap) &&
+      rawLateFeeCap > 0
+        ? Math.round(rawLateFeeCap)
+        : null;
+    const rawGraceDays = Number(billingConfig.late_fee_grace_days);
+    const normalizedGraceDays =
+      billingConfig.late_fee_grace_days !== '' &&
+      billingConfig.late_fee_grace_days !== null &&
+      billingConfig.late_fee_grace_days !== undefined &&
+      Number.isFinite(rawGraceDays)
+        ? Math.min(60, Math.max(0, Math.round(rawGraceDays)))
+        : 5;
+    const rawFeePerDay = Number(billingConfig.late_fee_per_day);
+    const normalizedFeePerDay =
+      billingConfig.late_fee_per_day !== '' &&
+      billingConfig.late_fee_per_day !== null &&
+      billingConfig.late_fee_per_day !== undefined &&
+      Number.isFinite(rawFeePerDay)
+        ? Math.max(0, Math.round(rawFeePerDay))
+        : 100000;
+
     setSaving(true);
     try {
       const res = await usersService.updateSettings({
         billing_config: {
-          billing_day: Math.min(28, Math.max(1, Number(billingConfig.billing_day) || 1)),
-          payment_due_days: Math.max(1, Number(billingConfig.payment_due_days) || 5),
+          billing_day: Math.min(31, Math.max(1, Math.round(Number(billingConfig.billing_day) || 1))),
+          payment_due_days: dueOffsetDays,
+          due_date_offset_days: dueOffsetDays,
+          late_fee_grace_days: normalizedGraceDays,
+          late_fee_per_day: normalizedFeePerDay,
+          late_fee_cap: normalizedLateFeeCap,
+          meter_anomaly_threshold_pct: Math.min(
+            500,
+            Math.max(1, Number(billingConfig.meter_anomaly_threshold_pct) || 30)
+          ),
           reminder_days: reminderDays.length > 0 ? reminderDays : [3, 7, 15],
           late_fee_percent: Math.max(0, Number(billingConfig.late_fee_percent) || 0),
           electricity_default_price: Math.max(
@@ -343,40 +402,107 @@ export function SettingsPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <Card className="space-y-4">
               <CardHeader
-                title="Chu kỳ Hóa đơn & Giá mặc định"
+                title="Chu kỳ Hóa đơn, Phạt chậm & Giá mặc định"
                 subtitle="Khóa cấu hình: billing_config"
               />
-              <Input
-                label="Ngày chốt chỉ số & lập hóa đơn hàng tháng"
-                type="number"
-                min="1"
-                max="28"
-                disabled={!isSysAdmin}
-                value={billingConfig.billing_day}
-                onChange={(e) =>
-                  setBillingConfig((s) => ({ ...s, billing_day: e.target.value }))
-                }
-              />
-              <Input
-                label="Thời hạn thanh toán (số ngày sau phát hành)"
-                type="number"
-                min="1"
-                max="30"
-                disabled={!isSysAdmin}
-                value={billingConfig.payment_due_days}
-                onChange={(e) =>
-                  setBillingConfig((s) => ({ ...s, payment_due_days: e.target.value }))
-                }
-              />
-              <Input
-                label="Các mốc ngày nhắc nợ tự động (cách nhau dấu phẩy)"
-                placeholder="3, 7, 15"
-                disabled={!isSysAdmin}
-                value={billingConfig.reminder_days_text}
-                onChange={(e) =>
-                  setBillingConfig((s) => ({ ...s, reminder_days_text: e.target.value }))
-                }
-              />
+              <div className="space-y-1">
+                <Input
+                  label="Ngày chốt chỉ số & lập hóa đơn mặc định (1–31)"
+                  type="number"
+                  min="1"
+                  max="31"
+                  disabled={!isSysAdmin}
+                  value={billingConfig.billing_day}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({ ...s, billing_day: e.target.value }))
+                  }
+                />
+                <p className="text-[11px] text-slate-500">
+                  Hợp đồng có ngày lập hóa đơn 29/30/31 sẽ tự động chốt vào ngày cuối cùng của tháng ngắn (VD: 28/02 hoặc 29/02 năm nhuận — FR-066).
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="Hạn thanh toán sau phát hành (ngày)"
+                  type="number"
+                  min="1"
+                  max="60"
+                  disabled={!isSysAdmin}
+                  value={billingConfig.due_date_offset_days}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({
+                      ...s,
+                      due_date_offset_days: e.target.value,
+                      payment_due_days: e.target.value,
+                    }))
+                  }
+                />
+                <Input
+                  label="Số ngày ân hạn phạt chậm"
+                  type="number"
+                  min="0"
+                  max="60"
+                  disabled={!isSysAdmin}
+                  value={billingConfig.late_fee_grace_days}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({
+                      ...s,
+                      late_fee_grace_days: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <MoneyInput
+                  label="Phạt chậm mỗi ngày (₫/ngày)"
+                  disabled={!isSysAdmin}
+                  placeholder="VD: 100.000"
+                  value={billingConfig.late_fee_per_day}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({
+                      ...s,
+                      late_fee_per_day: e.target.value,
+                    }))
+                  }
+                />
+                <MoneyInput
+                  label="Trần phí phạt tối đa (₫)"
+                  disabled={!isSysAdmin}
+                  placeholder="Trống = không trần"
+                  value={billingConfig.late_fee_cap}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({
+                      ...s,
+                      late_fee_cap: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="Ngưỡng cảnh báo chỉ số (%)"
+                  type="number"
+                  min="1"
+                  max="500"
+                  disabled={!isSysAdmin}
+                  value={billingConfig.meter_anomaly_threshold_pct}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({
+                      ...s,
+                      meter_anomaly_threshold_pct: e.target.value,
+                    }))
+                  }
+                />
+                <Input
+                  label="Mốc ngày nhắc nợ (dấu phẩy)"
+                  placeholder="3, 7, 15"
+                  disabled={!isSysAdmin}
+                  value={billingConfig.reminder_days_text}
+                  onChange={(e) =>
+                    setBillingConfig((s) => ({ ...s, reminder_days_text: e.target.value }))
+                  }
+                />
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <MoneyInput
                   label="Giá điện mặc định (₫/kWh)"

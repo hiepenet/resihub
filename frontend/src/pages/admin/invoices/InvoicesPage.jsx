@@ -28,6 +28,7 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { INVOICE_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDate, getCurrentPeriod, exportToCsv } from '../../../utils/format';
+import { summarizeSkippedContracts } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const STATUS_OPTIONS = Object.entries(INVOICE_STATUS).map(([value, info]) => ({
@@ -61,7 +62,7 @@ export function InvoicesPage() {
   const [buildings, setBuildings] = useState([]);
   const [batchPeriod, setBatchPeriod] = useState(getCurrentPeriod());
   const [batchBuildingId, setBatchBuildingId] = useState('');
-  const [autoIssue, setAutoIssue] = useState(true);
+  const [autoIssue, setAutoIssue] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [issuingId, setIssuingId] = useState(null);
 
@@ -120,7 +121,7 @@ export function InvoicesPage() {
   const openBatchModal = async () => {
     setBatchPeriod(period || getCurrentPeriod());
     setBatchBuildingId(selectedBuildingId || '');
-    setAutoIssue(true);
+    setAutoIssue(false);
     setBatchOpen(true);
     try {
       const res = await buildingsService.list();
@@ -143,7 +144,14 @@ export function InvoicesPage() {
         period: batchPeriod,
         auto_issue: autoIssue,
       });
-      toast.success(res.message || 'Đã xử lý sinh hóa đơn hàng loạt.');
+      const skipSummary = summarizeSkippedContracts(res.skipped_contracts);
+      if (skipSummary.totalSkipped > 0) {
+        toast.warning(
+          `${res.message || 'Đã xử lý sinh hóa đơn hàng loạt.'} (${skipSummary.message})`
+        );
+      } else {
+        toast.success(res.message || 'Đã xử lý sinh hóa đơn hàng loạt.');
+      }
       setBatchOpen(false);
       setBatchResult(res);
       setPeriod(batchPeriod);
@@ -567,6 +575,14 @@ export function InvoicesPage() {
 
             {Array.isArray(batchResult.skipped_contracts) && batchResult.skipped_contracts.length > 0 ? (
               <div className="space-y-2">
+                {(() => {
+                  const skipSummary = summarizeSkippedContracts(batchResult.skipped_contracts);
+                  return skipSummary.message ? (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                      <strong>Tổng hợp bỏ qua:</strong> {skipSummary.message}
+                    </div>
+                  ) : null;
+                })()}
                 <p className="text-xs font-semibold text-slate-800">
                   Chi tiết hợp đồng không sinh hóa đơn kỳ này (Bảo toàn dữ liệu):
                 </p>

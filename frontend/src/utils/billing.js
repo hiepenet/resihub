@@ -63,10 +63,7 @@ function toDateStr(val) {
   if (!val) return '';
   if (typeof val === 'string') return val.slice(0, 10);
   if (val instanceof Date && !Number.isNaN(val.getTime())) {
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const d = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return todayVietnamYmd(val);
   }
   return String(val).slice(0, 10);
 }
@@ -306,4 +303,136 @@ export function resolveSettlementPayoutSummary(settlement = {}) {
     requiresUncPayout: totalPayout > 0,
   };
 }
+
+/**
+ * Đánh giá sản lượng và cảnh báo biến động bất thường > thresholdPct% (mặc định 30%)
+ * so với trung bình tối đa 3 kỳ CONFIRMED liền trước (M08 / FR-030 / FR-031).
+ */
+export function evaluateClientMeterAnomaly({
+  prevReading,
+  currentReading,
+  baselineAvg = null,
+  thresholdPct = 30,
+} = {}) {
+  const prev = Number(prevReading ?? 0);
+  const hasInput =
+    currentReading !== undefined &&
+    currentReading !== null &&
+    String(currentReading).trim() !== '';
+  const base =
+    baselineAvg !== null && baselineAvg !== undefined && Number(baselineAvg) > 0
+      ? Number(baselineAvg)
+      : null;
+
+  if (!hasInput) {
+    return {
+      hasInput: false,
+      isInvalid: false,
+      consumption: null,
+      baselineAvg: base,
+      diffPct: null,
+      isAbnormal: false,
+    };
+  }
+
+  const curr = Number(currentReading);
+  if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr < prev) {
+    return {
+      hasInput: true,
+      isInvalid: true,
+      consumption: null,
+      baselineAvg: base,
+      diffPct: null,
+      isAbnormal: false,
+    };
+  }
+
+  const consumption = Number((curr - prev).toFixed(2));
+  if (base === null) {
+    return {
+      hasInput: true,
+      isInvalid: false,
+      consumption,
+      baselineAvg: null,
+      diffPct: null,
+      isAbnormal: false,
+    };
+  }
+
+  const threshold =
+    Number.isFinite(Number(thresholdPct)) && Number(thresholdPct) > 0
+      ? Number(thresholdPct)
+      : 30;
+  const ratio = (consumption - base) / base;
+  const diffPct = Math.round(ratio * 100);
+  const isAbnormal = Math.abs(ratio) * 100 > threshold + 1e-9;
+
+  return {
+    hasInput: true,
+    isInvalid: false,
+    consumption,
+    baselineAvg: base,
+    diffPct,
+    isAbnormal,
+  };
+}
+
+/**
+ * Tổng hợp danh sách hợp đồng bị bỏ qua khi sinh hóa đơn hàng loạt (AC-015.1):
+ * - Phân tách nhóm thiếu chỉ số đồng hồ CONFIRMED (MISSING_CONFIRMED_METER_READING)
+ *   và nhóm không phát sinh khoản thu (ZERO_BILLABLE_AMOUNT).
+ */
+export function summarizeSkippedContracts(skippedContracts = []) {
+  const list = Array.isArray(skippedContracts) ? skippedContracts : [];
+  const missingMeterApartments = [];
+  const zeroBillableApartments = [];
+  let missingMeterCount = 0;
+  let zeroBillableCount = 0;
+  let otherCount = 0;
+
+  for (const item of list) {
+    if (!item) continue;
+    const aptLabel = item.apartment_code || item.contract_code || item.contract_id || '—';
+    if (item.reason_code === 'MISSING_CONFIRMED_METER_READING') {
+      missingMeterCount += 1;
+      if (!missingMeterApartments.includes(aptLabel)) {
+        missingMeterApartments.push(aptLabel);
+      }
+    } else if (item.reason_code === 'ZERO_BILLABLE_AMOUNT') {
+      zeroBillableCount += 1;
+      if (!zeroBillableApartments.includes(aptLabel)) {
+        zeroBillableApartments.push(aptLabel);
+      }
+    } else {
+      otherCount += 1;
+    }
+  }
+
+  const totalSkipped = list.length;
+  const parts = [];
+  if (missingMeterCount > 0) {
+    parts.push(
+      `Thiếu chỉ số đồng hồ đã xác nhận (${missingMeterCount} căn: ${missingMeterApartments.join(', ')})`
+    );
+  }
+  if (zeroBillableCount > 0) {
+    parts.push(
+      `Không phát sinh khoản thu (${zeroBillableCount} căn: ${zeroBillableApartments.join(', ')})`
+    );
+  }
+  if (otherCount > 0) {
+    parts.push(`Đã có hóa đơn / khác (${otherCount} hợp đồng)`);
+  }
+
+  return {
+    totalSkipped,
+    missingMeterCount,
+    missingMeterApartments,
+    zeroBillableCount,
+    zeroBillableApartments,
+    otherCount,
+    message: parts.join(' • '),
+  };
+}
+
 

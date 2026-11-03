@@ -12,7 +12,10 @@ import {
   createIdempotencyKey,
   withIdempotency,
   resolveSettlementPayoutSummary,
+  evaluateClientMeterAnomaly,
+  summarizeSkippedContracts,
 } from '../../frontend/src/utils/billing.js';
+import { getCurrentPeriod } from '../../frontend/src/utils/format.js';
 
 import {
   SUBSCRIPTION_STATUS,
@@ -386,4 +389,93 @@ test('6. resolveSettlementPayoutSummary separates deposit vs credit refunds and 
     requiresUncPayout: false,
   });
 });
+
+test('7. getCurrentPeriod resolves YYYY-MM in Asia/Ho_Chi_Minh across UTC midnight boundary (Review Focus #1)', () => {
+  // 2026-10-31T17:05:00Z is 2026-11-01 00:05:00 in Vietnam (+07:00) -> '2026-11'
+  assert.equal(getCurrentPeriod(new Date('2026-10-31T17:05:00.000Z')), '2026-11');
+  // 2026-10-31T16:59:59Z is 2026-10-31 23:59:59 in Vietnam (+07:00) -> '2026-10'
+  assert.equal(getCurrentPeriod(new Date('2026-10-31T16:59:59.000Z')), '2026-10');
+});
+
+test('8. evaluateClientMeterAnomaly handles 3-period baselineAvg, strict >30% threshold, invalid decrease & cold start', () => {
+  // Exact +30% is NOT abnormal (strict > 30%)
+  const exact30 = evaluateClientMeterAnomaly({
+    prevReading: 100,
+    currentReading: 230,
+    baselineAvg: 100,
+    thresholdPct: 30,
+  });
+  assert.equal(exact30.isInvalid, false);
+  assert.equal(exact30.consumption, 130);
+  assert.equal(exact30.diffPct, 30);
+  assert.equal(exact30.isAbnormal, false);
+
+  // +31% IS abnormal
+  const over30 = evaluateClientMeterAnomaly({
+    prevReading: 100,
+    currentReading: 231,
+    baselineAvg: 100,
+    thresholdPct: 30,
+  });
+  assert.equal(over30.consumption, 131);
+  assert.equal(over30.diffPct, 31);
+  assert.equal(over30.isAbnormal, true);
+
+  // Negative consumption (current < prev) -> invalid
+  const invalid = evaluateClientMeterAnomaly({
+    prevReading: 100,
+    currentReading: 95,
+    baselineAvg: 100,
+  });
+  assert.equal(invalid.isInvalid, true);
+  assert.equal(invalid.consumption, null);
+  assert.equal(invalid.isAbnormal, false);
+
+  // Cold start (baselineAvg = null) -> never flagged abnormal
+  const coldStart = evaluateClientMeterAnomaly({
+    prevReading: 100,
+    currentReading: 500,
+    baselineAvg: null,
+  });
+  assert.equal(coldStart.isInvalid, false);
+  assert.equal(coldStart.consumption, 400);
+  assert.equal(coldStart.diffPct, null);
+  assert.equal(coldStart.isAbnormal, false);
+});
+
+test('9. summarizeSkippedContracts separates MISSING_CONFIRMED_METER_READING vs ZERO_BILLABLE_AMOUNT', () => {
+  const empty = summarizeSkippedContracts([]);
+  assert.equal(empty.totalSkipped, 0);
+  assert.equal(empty.missingMeterCount, 0);
+  assert.equal(empty.zeroBillableCount, 0);
+  assert.equal(empty.message, '');
+
+  const summary = summarizeSkippedContracts([
+    {
+      contract_id: 'c-1',
+      apartment_code: 'A-101',
+      reason_code: 'MISSING_CONFIRMED_METER_READING',
+      missing_meter_types: ['ELECTRICITY'],
+    },
+    {
+      contract_id: 'c-2',
+      apartment_code: 'A-102',
+      reason_code: 'MISSING_CONFIRMED_METER_READING',
+      missing_meter_types: ['WATER'],
+    },
+    {
+      contract_id: 'c-3',
+      apartment_code: 'B-205',
+      reason_code: 'ZERO_BILLABLE_AMOUNT',
+    },
+  ]);
+  assert.equal(summary.totalSkipped, 3);
+  assert.equal(summary.missingMeterCount, 2);
+  assert.deepEqual(summary.missingMeterApartments, ['A-101', 'A-102']);
+  assert.equal(summary.zeroBillableCount, 1);
+  assert.deepEqual(summary.zeroBillableApartments, ['B-205']);
+  assert.match(summary.message, /A-101, A-102/);
+  assert.match(summary.message, /B-205/);
+});
+
 

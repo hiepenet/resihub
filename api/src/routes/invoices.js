@@ -649,7 +649,9 @@ export async function generateInvoicesCore(
   return {
     created_count: createdInvoices.length,
     updated_draft_count: updatedDraftCount,
+    updatedDraftCount,
     skipped_contracts: skippedContracts,
+    skippedContracts,
     warnings: [],
     data: createdInvoices,
     createdInvoices,

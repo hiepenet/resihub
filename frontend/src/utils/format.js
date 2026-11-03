@@ -1,4 +1,4 @@
-import { toDateOnlyStr } from './dateRange';
+import { toDateOnlyStr } from './dateRange.js';
 
 export function formatMoney(amount, showSymbol = true) {
   const num = Number(amount || 0);
@@ -58,8 +58,17 @@ export function toInputDate(dateVal) {
   return toDateOnlyStr(dateVal);
 }
 
-export function getCurrentPeriod() {
-  return new Date().toISOString().slice(0, 7);
+export function getCurrentPeriod(now = new Date()) {
+  const dt = now instanceof Date && !Number.isNaN(now.getTime()) ? now : new Date(now);
+  const safeDt = Number.isNaN(dt.getTime()) ? new Date() : dt;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+    .format(safeDt)
+    .slice(0, 7);
 }
 
 export function maskIdNumber(idNumber) {

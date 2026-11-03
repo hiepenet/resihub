@@ -30,6 +30,7 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDateTime, getCurrentPeriod } from '../../../utils/format';
+import { evaluateClientMeterAnomaly } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
 function getPreviousBaseline(row) {
@@ -42,55 +43,90 @@ function getPreviousBaseline(row) {
   return Number(row.initial_reading || 0);
 }
 
+function resolveRowBaselineAvg(row) {
+  if (row.baseline_avg_consumption !== null && row.baseline_avg_consumption !== undefined) {
+    return Number(row.baseline_avg_consumption);
+  }
+  if (row.last_known_consumption !== null && row.last_known_consumption !== undefined) {
+    return Number(row.last_known_consumption);
+  }
+  return null;
+}
+
 function evaluateRowMetrics(row, draftValue) {
   const prevReading = getPreviousBaseline(row);
-  const hasDraft = draftValue !== undefined && draftValue !== '' && draftValue !== null;
-  const currentNum = hasDraft ? Number(draftValue) : null;
-  const isInvalid = hasDraft && (Number.isNaN(currentNum) || currentNum < prevReading);
-  const consumption =
-    hasDraft && !isInvalid ? Number((currentNum - prevReading).toFixed(2)) : null;
+  const baselineAvg = resolveRowBaselineAvg(row);
+  const anomaly = evaluateClientMeterAnomaly({
+    prevReading,
+    currentReading: draftValue,
+    baselineAvg,
+    thresholdPct: 30,
+  });
 
-  const prevCons =
-    row.last_known_consumption !== null && row.last_known_consumption !== undefined
-      ? Number(row.last_known_consumption)
-      : null;
-
-  let diffPct = null;
-  let isAbnormal = false;
-
-  if (consumption !== null && prevCons !== null && prevCons > 0) {
-    const ratio = (consumption - prevCons) / prevCons;
-    diffPct = Math.round(ratio * 100);
-    if (Math.abs(ratio) > 0.3) {
-      isAbnormal = true;
-    }
-  } else if (Boolean(row.period_is_abnormal) && String(draftValue) === String(row.period_current_reading ?? '')) {
+  const hasDraft = anomaly.hasInput;
+  const currentNum = hasDraft && !anomaly.isInvalid ? Number(draftValue) : null;
+  let isAbnormal = anomaly.isAbnormal;
+  if (
+    !isAbnormal &&
+    Boolean(row.period_is_abnormal) &&
+    String(draftValue) === String(row.period_current_reading ?? '')
+  ) {
     isAbnormal = true;
   }
 
   const isDirty =
     hasDraft && String(Number(draftValue)) !== String(Number(row.period_current_reading ?? -1));
+  const readingStatus = row.period_reading_status || (row.period_reading_id ? 'CONFIRMED' : null);
 
   return {
     prevReading,
     hasDraft,
     currentNum,
-    isInvalid,
-    consumption,
-    prevCons,
-    diffPct,
+    isInvalid: anomaly.isInvalid,
+    consumption: anomaly.consumption,
+    baselineAvg: anomaly.baselineAvg,
+    diffPct: anomaly.diffPct,
     isAbnormal,
     isDirty,
+    readingStatus,
   };
+}
+
+function renderReadingStatusBadge(status) {
+  if (status === 'CONFIRMED') {
+    return (
+      <Badge variant="emerald" dot>
+        Đã chốt (CONFIRMED)
+      </Badge>
+    );
+  }
+  if (status === 'FLAGGED') {
+    return (
+      <Badge variant="red" dot>
+        Tạm giữ &gt;30% (FLAGGED)
+      </Badge>
+    );
+  }
+  if (status === 'DRAFT') {
+    return (
+      <Badge variant="sky" dot>
+        Bản nháp (DRAFT)
+      </Badge>
+    );
+  }
+  return <span className="text-xs text-slate-400 whitespace-nowrap">Chưa ghi</span>;
 }
 
 export function MeterReadingsPage() {
   const toast = useToast();
-  const { canManageMeters } = usePermission();
+  const { isManager } = usePermission();
+  // PRD 6.2: Chỉ MANAGER mới được khởi tạo, ghi nhận và xác nhận chốt chỉ số đồng hồ (SYS_ADMIN / OWNER chỉ đọc)
+  const canWriteMeters = isManager;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
   const [period, setPeriod] = useState(getCurrentPeriod());
   const [meterType, setMeterType] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
   const [abnormalOnly, setAbnormalOnly] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -99,6 +135,8 @@ export function MeterReadingsPage() {
   const [notes, setNotes] = useState({});
   const [loading, setLoading] = useState(true);
   const [savingBatch, setSavingBatch] = useState(false);
+  const [confirmingBatch, setConfirmingBatch] = useState(false);
+  const [confirmingRowId, setConfirmingRowId] = useState(null);
 
   // Modal ghi chi tiết 1 đồng hồ + ảnh công tơ + lịch sử
   const [detailModalOpen, setDetailModalOpen] = useState(false);
@@ -130,6 +168,7 @@ export function MeterReadingsPage() {
       const res = await metersService.list({
         building_id: selectedBuildingId || undefined,
         meter_type: meterType || undefined,
+        status: statusFilter || undefined,
         period,
         search: search.trim() || undefined,
       });
@@ -152,7 +191,7 @@ export function MeterReadingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, meterType, period, search, toast]);
+  }, [selectedBuildingId, meterType, statusFilter, period, search, toast]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -162,13 +201,18 @@ export function MeterReadingsPage() {
   }, [fetchMeters]);
 
   const enrichedRows = useMemo(() => {
-    const mapped = meters.map((m) => ({
+    let mapped = meters.map((m) => ({
       ...m,
       metrics: evaluateRowMetrics(m, drafts[m.id]),
     }));
-    if (!abnormalOnly) return mapped;
-    return mapped.filter((r) => r.metrics.isAbnormal || Boolean(r.period_is_abnormal));
-  }, [meters, drafts, abnormalOnly]);
+    if (statusFilter) {
+      mapped = mapped.filter((r) => r.metrics.readingStatus === statusFilter);
+    }
+    if (abnormalOnly) {
+      mapped = mapped.filter((r) => r.metrics.isAbnormal || Boolean(r.period_is_abnormal));
+    }
+    return mapped;
+  }, [meters, drafts, statusFilter, abnormalOnly]);
 
   const dirtyValidRows = useMemo(() => {
     return meters.filter((m) => {
@@ -177,22 +221,39 @@ export function MeterReadingsPage() {
     });
   }, [meters, drafts]);
 
+  const unconfirmedRows = useMemo(() => {
+    return meters.filter(
+      (m) =>
+        Boolean(m.period_reading_id) &&
+        ['DRAFT', 'FLAGGED'].includes(m.period_reading_status || '')
+    );
+  }, [meters]);
+
   const hasInvalidDrafts = useMemo(() => {
     return meters.some((m) => evaluateRowMetrics(m, drafts[m.id]).isInvalid);
   }, [meters, drafts]);
 
   const stats = useMemo(() => {
     const total = meters.length;
-    const recorded = meters.filter(
-      (m) => m.period_current_reading !== null && m.period_current_reading !== undefined
+    const confirmed = meters.filter(
+      (m) =>
+        Boolean(m.period_reading_id) &&
+        (m.period_reading_status || 'CONFIRMED') === 'CONFIRMED'
     ).length;
+    const pendingConfirm = meters.filter(
+      (m) =>
+        Boolean(m.period_reading_id) &&
+        ['DRAFT', 'FLAGGED'].includes(m.period_reading_status || '')
+    ).length;
+    const unrecorded = Math.max(0, total - confirmed - pendingConfirm);
     const abnormalCount = meters.filter(
       (m) => evaluateRowMetrics(m, drafts[m.id]).isAbnormal || Boolean(m.period_is_abnormal)
     ).length;
-    return { total, recorded, unrecorded: Math.max(0, total - recorded), abnormalCount };
+    return { total, confirmed, pendingConfirm, unrecorded, abnormalCount };
   }, [meters, drafts]);
 
-  const handleSaveBatch = async () => {
+  const handleSaveBatch = async (targetStatus = 'CONFIRMED') => {
+    if (!canWriteMeters) return;
     if (hasInvalidDrafts) {
       toast.error('Có dòng nhập chỉ số mới nhỏ hơn chỉ số cũ. Vui lòng kiểm tra các ô màu đỏ.');
       return;
@@ -206,9 +267,11 @@ export function MeterReadingsPage() {
     try {
       const payload = {
         period,
+        status: targetStatus,
         readings: dirtyValidRows.map((m) => ({
           meter_id: m.id,
           period,
+          status: targetStatus,
           current_reading: Number(drafts[m.id]),
           abnormal_note: notes[m.id]?.trim() || undefined,
         })),
@@ -224,6 +287,53 @@ export function MeterReadingsPage() {
       toast.error(extractErrorMessage(err, 'Không thể lưu chỉ số hàng loạt.'));
     } finally {
       setSavingBatch(false);
+    }
+  };
+
+  const handleConfirmBatch = async () => {
+    if (!canWriteMeters || unconfirmedRows.length === 0) return;
+    setConfirmingBatch(true);
+    try {
+      const res = await metersService.confirmBatch({
+        period,
+        building_id: selectedBuildingId || undefined,
+        reading_ids: unconfirmedRows.map((r) => r.period_reading_id),
+      });
+      if ((res.skipped_abnormal_without_note || []).length > 0) {
+        toast.warning(
+          `${res.message || 'Đã xác nhận hàng loạt.'} (Còn ${res.skipped_abnormal_without_note.length} đồng hồ bất thường cần nhập ghi chú giải trình).`
+        );
+      } else {
+        toast.success(res.message || `Đã xác nhận chốt ${res.confirmed_count || 0} chỉ số.`);
+      }
+      fetchMeters();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xác nhận chốt chỉ số hàng loạt.'));
+    } finally {
+      setConfirmingBatch(false);
+    }
+  };
+
+  const handleConfirmSingleRow = async (row) => {
+    if (!canWriteMeters || !row.period_reading_id) return;
+    const noteText = (notes[row.id] ?? row.period_abnormal_note ?? '').trim();
+    if ((row.period_is_abnormal || row.metrics?.isAbnormal) && !noteText) {
+      toast.warning(
+        `Công tơ ${row.meter_code} có biến động >30%. Vui lòng nhập ghi chú giải trình trước khi xác nhận chốt.`
+      );
+      return;
+    }
+    setConfirmingRowId(row.period_reading_id);
+    try {
+      const res = await metersService.confirmReading(row.period_reading_id, {
+        abnormal_note: noteText || undefined,
+      });
+      toast.success(res.message || `Đã xác nhận chốt chỉ số công tơ ${row.meter_code}.`);
+      fetchMeters();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xác nhận chốt chỉ số.'));
+    } finally {
+      setConfirmingRowId(null);
     }
   };
 
@@ -251,9 +361,9 @@ export function MeterReadingsPage() {
     }
   };
 
-  const handleSaveSingle = async (e) => {
-    e.preventDefault();
-    if (!selectedMeter) return;
+  const handleSaveSingle = async (e, targetStatus = 'CONFIRMED') => {
+    e?.preventDefault();
+    if (!canWriteMeters || !selectedMeter) return;
     const prev = getPreviousBaseline(selectedMeter);
     const val = Number(singleForm.current_reading);
 
@@ -262,10 +372,22 @@ export function MeterReadingsPage() {
       return;
     }
 
+    const preview = evaluateClientMeterAnomaly({
+      prevReading: prev,
+      currentReading: val,
+      baselineAvg: resolveRowBaselineAvg(selectedMeter),
+      thresholdPct: 30,
+    });
+    if (targetStatus === 'CONFIRMED' && preview.isAbnormal && !singleForm.abnormal_note.trim()) {
+      toast.warning('Sản lượng biến động >30% so với trung bình 3 kỳ trước. Vui lòng nhập ghi chú giải trình để chốt.');
+      return;
+    }
+
     setSavingSingle(true);
     try {
       const payload = {
         period,
+        status: targetStatus,
         current_reading: val,
         abnormal_note: singleForm.abnormal_note.trim() || undefined,
       };
@@ -290,7 +412,29 @@ export function MeterReadingsPage() {
     }
   };
 
+  const handleConfirmFromModal = async () => {
+    if (!canWriteMeters || !selectedMeter?.period_reading_id) return;
+    if (selectedMeter.period_is_abnormal && !singleForm.abnormal_note.trim()) {
+      toast.warning('Vui lòng nhập ghi chú giải trình bất thường trước khi xác nhận chốt.');
+      return;
+    }
+    setSavingSingle(true);
+    try {
+      const res = await metersService.confirmReading(selectedMeter.period_reading_id, {
+        abnormal_note: singleForm.abnormal_note.trim() || undefined,
+      });
+      toast.success(res.message || 'Đã xác nhận chốt chỉ số đồng hồ.');
+      setDetailModalOpen(false);
+      fetchMeters();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xác nhận chốt chỉ số.'));
+    } finally {
+      setSavingSingle(false);
+    }
+  };
+
   const openCreateModal = async () => {
+    if (!canWriteMeters) return;
     setCreateForm({
       apartment_id: '',
       meter_type: 'ELECTRICITY',
@@ -311,6 +455,7 @@ export function MeterReadingsPage() {
 
   const handleCreateMeter = async (e) => {
     e.preventDefault();
+    if (!canWriteMeters) return;
     if (!createForm.apartment_id) {
       toast.warning('Vui lòng chọn căn hộ cần lắp đặt đồng hồ.');
       return;
@@ -337,26 +482,45 @@ export function MeterReadingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Ghi Chỉ số Điện / Nước"
-        subtitle="Chốt chỉ số công tơ nhanh theo kỳ, tự động tính sản lượng và cảnh báo biến động bất thường >30%."
+        title="Ghi & Xác nhận Chỉ số Điện / Nước"
+        subtitle="Ghi nháp, đối soát biến động >30% trên trung bình 3 kỳ gần nhất và xác nhận chốt chỉ số trước khi sinh hóa đơn."
         actions={
           <>
             <Button variant="outline" icon={RefreshCw} onClick={fetchMeters}>
               Làm mới
             </Button>
-            {canManageMeters ? (
+            {canWriteMeters ? (
               <>
                 <Button variant="outline" icon={Plus} onClick={openCreateModal}>
                   Khởi tạo đồng hồ
                 </Button>
+                {unconfirmedRows.length > 0 ? (
+                  <Button
+                    variant="soft"
+                    icon={CheckCircle2}
+                    loading={confirmingBatch}
+                    onClick={handleConfirmBatch}
+                  >
+                    Xác nhận chốt ({unconfirmedRows.length})
+                  </Button>
+                ) : null}
                 <Button
-                  variant="primary"
+                  variant="outline"
                   icon={Save}
                   loading={savingBatch}
                   disabled={dirtyValidRows.length === 0 && !hasInvalidDrafts}
-                  onClick={handleSaveBatch}
+                  onClick={() => handleSaveBatch('DRAFT')}
                 >
-                  Lưu hàng loạt {dirtyValidRows.length > 0 ? `(${dirtyValidRows.length})` : ''}
+                  Lưu nháp {dirtyValidRows.length > 0 ? `(${dirtyValidRows.length})` : ''}
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={CheckCircle2}
+                  loading={savingBatch}
+                  disabled={dirtyValidRows.length === 0 && !hasInvalidDrafts}
+                  onClick={() => handleSaveBatch('CONFIRMED')}
+                >
+                  Lưu &amp; Chốt chỉ số {dirtyValidRows.length > 0 ? `(${dirtyValidRows.length})` : ''}
                 </Button>
               </>
             ) : null}
@@ -374,23 +538,23 @@ export function MeterReadingsPage() {
           color="sky"
         />
         <StatsCard
-          title="Đã chốt kỳ này"
-          value={`${stats.recorded} / ${stats.total}`}
-          subtext={`Còn ${stats.unrecorded} đồng hồ chưa chốt`}
+          title="Đã chốt (CONFIRMED)"
+          value={`${stats.confirmed} / ${stats.total}`}
+          subtext={`Nháp / Tạm giữ: ${stats.pendingConfirm} đồng hồ`}
           icon={CheckCircle2}
           color="emerald"
         />
         <StatsCard
-          title="Chưa chốt chỉ số"
+          title="Chưa ghi chỉ số"
           value={stats.unrecorded}
-          subtext="Cần nhập trước khi sinh hóa đơn"
+          subtext="Cần chốt CONFIRMED trước khi sinh hóa đơn"
           icon={Zap}
           color="indigo"
         />
         <StatsCard
           title="Cảnh báo bất thường (>30%)"
           value={stats.abnormalCount}
-          subtext="Biến động sản lượng cần kiểm tra"
+          subtext="So với TB tối đa 3 kỳ CONFIRMED gần nhất"
           icon={AlertTriangle}
           color={stats.abnormalCount > 0 ? 'rose' : 'amber'}
           onClick={() => setAbnormalOnly((v) => !v)}
@@ -399,7 +563,7 @@ export function MeterReadingsPage() {
 
       {/* Bộ lọc */}
       <Card className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-center">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-center">
           <div>
             <input
               type="month"
@@ -416,6 +580,17 @@ export function MeterReadingsPage() {
               { value: '', label: 'Tất cả loại đồng hồ' },
               { value: 'ELECTRICITY', label: '⚡ Đồng hồ Điện (kWh)' },
               { value: 'WATER', label: '💧 Đồng hồ Nước (m³)' },
+            ]}
+          />
+
+          <Select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            options={[
+              { value: '', label: 'Tất cả trạng thái chốt' },
+              { value: 'CONFIRMED', label: 'Đã chốt (CONFIRMED)' },
+              { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
+              { value: 'FLAGGED', label: 'Tạm giữ >30% (FLAGGED)' },
             ]}
           />
 
@@ -455,7 +630,7 @@ export function MeterReadingsPage() {
                 : 'Hãy khởi tạo đồng hồ điện/nước cho căn hộ để bắt đầu ghi nhận chỉ số hàng kỳ.'
             }
             action={
-              canManageMeters && !abnormalOnly ? (
+              canWriteMeters && !abnormalOnly ? (
                 <Button variant="primary" size="sm" icon={Plus} onClick={openCreateModal}>
                   Khởi tạo đồng hồ mới
                 </Button>
@@ -467,8 +642,8 @@ export function MeterReadingsPage() {
             <THead>
               <tr>
                 <TH>Căn hộ / Công tơ</TH>
-                <TH>Loại & Đơn giá</TH>
-                <TH className="text-right">Chỉ số cũ</TH>
+                <TH>Loại &amp; Đơn giá</TH>
+                <TH className="text-right">Chỉ số cũ &amp; TB 3 kỳ</TH>
                 <TH className="min-w-[150px] text-center">Chỉ số mới ({period})</TH>
                 <TH className="text-right">Sản lượng</TH>
                 <TH className="text-right">Tạm tính</TH>
@@ -482,7 +657,7 @@ export function MeterReadingsPage() {
                 const isElec = row.meter_type === 'ELECTRICITY';
                 const rowHighlight = metrics.isInvalid
                   ? 'bg-rose-50/70'
-                  : metrics.isAbnormal
+                  : metrics.isAbnormal || metrics.readingStatus === 'FLAGGED'
                   ? 'bg-amber-50/70'
                   : metrics.isDirty
                   ? 'bg-sky-50/40'
@@ -493,6 +668,12 @@ export function MeterReadingsPage() {
                     ? Math.round(metrics.consumption * Number(row.unit_price || 0))
                     : null;
 
+                const canQuickConfirm =
+                  canWriteMeters &&
+                  Boolean(row.period_reading_id) &&
+                  ['DRAFT', 'FLAGGED'].includes(metrics.readingStatus || '') &&
+                  !metrics.isDirty;
+
                 return (
                   <tr key={row.id} className={`transition-colors ${rowHighlight}`}>
                     <TD>
@@ -502,7 +683,9 @@ export function MeterReadingsPage() {
                           ({row.building_code})
                         </span>
                       </p>
-                      <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">{row.meter_code}</span>
+                      <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                        {row.meter_code}
+                      </span>
                     </TD>
 
                     <TD>
@@ -524,10 +707,9 @@ export function MeterReadingsPage() {
 
                     <TD className="text-right font-mono tabular-nums font-medium text-slate-700 whitespace-nowrap">
                       <div>{metrics.prevReading}</div>
-                      {row.last_known_consumption !== null &&
-                      row.last_known_consumption !== undefined ? (
+                      {metrics.baselineAvg !== null ? (
                         <div className="text-[11px] text-slate-400">
-                          Kỳ trước: {Number(row.last_known_consumption)} {row.unit}
+                          TB 3 kỳ: {metrics.baselineAvg} {row.unit}
                         </div>
                       ) : null}
                     </TD>
@@ -537,7 +719,7 @@ export function MeterReadingsPage() {
                         type="number"
                         step="0.01"
                         min={metrics.prevReading}
-                        disabled={!canManageMeters}
+                        disabled={!canWriteMeters}
                         value={drafts[row.id] ?? ''}
                         onChange={(e) =>
                           setDrafts((prev) => ({ ...prev, [row.id]: e.target.value }))
@@ -577,7 +759,7 @@ export function MeterReadingsPage() {
                               }`}
                             >
                               {metrics.diffPct > 0 ? `+${metrics.diffPct}%` : `${metrics.diffPct}%`}{' '}
-                              vs kỳ trước
+                              vs TB 3 kỳ
                             </p>
                           ) : null}
                         </div>
@@ -591,49 +773,61 @@ export function MeterReadingsPage() {
                     </TD>
 
                     <TD className="text-center">
-                      {metrics.isAbnormal ? (
-                        <div className="space-y-1 max-w-[220px] mx-auto">
-                          <Badge
-                            variant={
-                              metrics.diffPct !== null && Math.abs(metrics.diffPct) >= 60
-                                ? 'red'
-                                : 'amber'
-                            }
-                          >
-                            <AlertTriangle className="w-3 h-3" /> Biến động &gt;30%
-                          </Badge>
-                          {canManageMeters ? (
+                      <div className="space-y-1 max-w-[220px] mx-auto">
+                        <div>{renderReadingStatusBadge(metrics.readingStatus)}</div>
+                        {metrics.isAbnormal ? (
+                          <div>
+                            <Badge
+                              variant={
+                                metrics.diffPct !== null && Math.abs(metrics.diffPct) >= 60
+                                  ? 'red'
+                                  : 'amber'
+                              }
+                            >
+                              <AlertTriangle className="w-3 h-3" /> Biến động &gt;30%
+                            </Badge>
+                          </div>
+                        ) : null}
+                        {metrics.isAbnormal || metrics.readingStatus === 'FLAGGED' ? (
+                          canWriteMeters ? (
                             <input
                               type="text"
                               value={notes[row.id] ?? ''}
                               onChange={(e) =>
                                 setNotes((prev) => ({ ...prev, [row.id]: e.target.value }))
                               }
-                              placeholder="Ghi chú lý do biến động..."
+                              placeholder="Ghi chú giải trình bất thường..."
                               className="w-full h-7 px-2 text-xs rounded border border-amber-300 bg-white text-slate-700 focus:outline-none focus:border-amber-500"
                             />
                           ) : row.period_abnormal_note ? (
                             <p className="text-xs text-amber-800">{row.period_abnormal_note}</p>
-                          ) : null}
-                        </div>
-                      ) : row.period_reading_id ? (
-                        <Badge variant="emerald" dot>
-                          Đã chốt
-                        </Badge>
-                      ) : (
-                        <span className="text-xs text-slate-400 whitespace-nowrap">Chưa ghi</span>
-                      )}
+                          ) : null
+                        ) : null}
+                      </div>
                     </TD>
 
                     <TD className="w-px whitespace-nowrap text-center">
-                      <Button
-                        size="xs"
-                        variant={row.period_image_url ? 'soft' : 'outline'}
-                        icon={Camera}
-                        onClick={() => openSingleModal(row)}
-                      >
-                        {row.period_image_url ? 'Có ảnh' : 'Chi tiết'}
-                      </Button>
+                      <div className="inline-flex items-center gap-1.5">
+                        {canQuickConfirm ? (
+                          <Button
+                            size="xs"
+                            variant="soft"
+                            icon={CheckCircle2}
+                            loading={confirmingRowId === row.period_reading_id}
+                            onClick={() => handleConfirmSingleRow(row)}
+                          >
+                            Xác nhận chốt
+                          </Button>
+                        ) : null}
+                        <Button
+                          size="xs"
+                          variant={row.period_image_url ? 'soft' : 'outline'}
+                          icon={Camera}
+                          onClick={() => openSingleModal(row)}
+                        >
+                          {row.period_image_url ? 'Có ảnh' : 'Chi tiết'}
+                        </Button>
+                      </div>
                     </TD>
                   </tr>
                 );
@@ -659,7 +853,7 @@ export function MeterReadingsPage() {
         }
         size="lg"
         footer={
-          canManageMeters ? (
+          canWriteMeters ? (
             <>
               <Button
                 variant="outline"
@@ -668,8 +862,32 @@ export function MeterReadingsPage() {
               >
                 Đóng
               </Button>
-              <Button variant="primary" onClick={handleSaveSingle} loading={savingSingle}>
-                Lưu chỉ số & Ảnh công tơ
+              {selectedMeter?.period_reading_id &&
+              ['DRAFT', 'FLAGGED'].includes(selectedMeter.period_reading_status || '') ? (
+                <Button
+                  variant="soft"
+                  icon={CheckCircle2}
+                  onClick={handleConfirmFromModal}
+                  loading={savingSingle}
+                >
+                  Xác nhận chốt
+                </Button>
+              ) : null}
+              <Button
+                variant="outline"
+                icon={Save}
+                onClick={(e) => handleSaveSingle(e, 'DRAFT')}
+                loading={savingSingle}
+              >
+                Lưu nháp
+              </Button>
+              <Button
+                variant="primary"
+                icon={CheckCircle2}
+                onClick={(e) => handleSaveSingle(e, 'CONFIRMED')}
+                loading={savingSingle}
+              >
+                Lưu &amp; Chốt chỉ số
               </Button>
             </>
           ) : (
@@ -681,8 +899,8 @@ export function MeterReadingsPage() {
       >
         {selectedMeter ? (
           <div className="space-y-6">
-            {canManageMeters ? (
-              <form onSubmit={handleSaveSingle} className="space-y-4">
+            {canWriteMeters ? (
+              <form onSubmit={(e) => handleSaveSingle(e, 'CONFIRMED')} className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <Input
                     label={`Chỉ số cũ (${selectedMeter.unit})`}
@@ -748,6 +966,7 @@ export function MeterReadingsPage() {
                         <TH className="text-right">Chỉ số cũ</TH>
                         <TH className="text-right">Chỉ số mới</TH>
                         <TH className="text-right">Tiêu thụ &amp; Ghi chú</TH>
+                        <TH className="text-center">Trạng thái</TH>
                         <TH className="text-center">Ảnh</TH>
                         <TH className="text-center">Người ghi / Thời gian</TH>
                       </tr>
@@ -755,8 +974,12 @@ export function MeterReadingsPage() {
                     <TBody>
                       {historyList.map((h) => (
                         <tr key={h.id}>
-                          <TD className="text-center font-mono font-semibold whitespace-nowrap">{h.period}</TD>
-                          <TD className="text-right font-mono tabular-nums whitespace-nowrap">{Number(h.previous_reading)}</TD>
+                          <TD className="text-center font-mono font-semibold whitespace-nowrap">
+                            {h.period}
+                          </TD>
+                          <TD className="text-right font-mono tabular-nums whitespace-nowrap">
+                            {Number(h.previous_reading)}
+                          </TD>
                           <TD className="text-right font-mono tabular-nums font-semibold whitespace-nowrap">
                             {Number(h.current_reading)}
                           </TD>
@@ -778,9 +1001,16 @@ export function MeterReadingsPage() {
                             ) : null}
                           </TD>
                           <TD className="text-center">
+                            {renderReadingStatusBadge(h.status || 'CONFIRMED')}
+                          </TD>
+                          <TD className="text-center">
                             {h.image_url ? (
                               <div className="w-10 h-10 mx-auto rounded-lg border border-slate-200 overflow-hidden bg-slate-100">
-                                <AuthImage src={h.image_url} alt={`Kỳ ${h.period}`} className="w-full h-full object-cover" />
+                                <AuthImage
+                                  src={h.image_url}
+                                  alt={`Kỳ ${h.period}`}
+                                  className="w-full h-full object-cover"
+                                />
                               </div>
                             ) : (
                               <span className="text-xs text-slate-400">—</span>

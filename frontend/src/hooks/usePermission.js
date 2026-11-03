@@ -39,7 +39,7 @@ export function usePermission() {
     canSettleDeposits: isManager,
     canExecuteDepositPayout: isManager,
     canApproveDepositRefund: isOwner || isManager || isSysAdmin,
-    canManageMeters: isSysAdmin || isManager,
+    canManageMeters: isManager,
     canManageServiceCatalog: isManager,
     canManageServices: isManager,
     canManageInvoices: isManager,
