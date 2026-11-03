@@ -495,6 +495,32 @@ test('Task 4: Service Catalog Multi-Building Guard & FORCE RLS-Safe Resident Rou
       `POST /payments/report on DRAFT invoice must be rejected with 404 or 409 (got ${resPayDraft.status})`
     );
 
+    // 2b. Resident requests mid-term cancellation with specific end_date (CANCELLATION_PENDING)
+    const resCancelMid = await apiJson(`/api/v1/resident/services/${subDraft.id}/cancel`, resident.token, {
+      method: 'PATCH',
+      headers: { 'Idempotency-Key': `idem-res-cancel-mid-${suffix}` },
+      body: JSON.stringify({ end_date: '2026-08-20', note: 'Resident mid-term cancel request' }),
+    });
+    assert.equal(resCancelMid.status, 200, `Resident cancel must return 200: ${JSON.stringify(resCancelMid.body)}`);
+    assert.equal(resCancelMid.body.data.status, 'CANCELLATION_PENDING');
+    assert.equal(resCancelMid.body.data.end_date, '2026-08-20');
+
+    // Manager approves mid-term cancellation with { status: 'TERMINATED' } omitting end_date
+    // sub.end_date must be preserved as 2026-08-20 rather than overwritten with todayVnYmd
+    const mgrTermDraft = await apiJson(`/api/v1/service-subscriptions/${subDraft.id}`, managerVopA.token, {
+      method: 'PATCH',
+      headers: { 'Idempotency-Key': `idem-mgr-term-draft-${suffix}` },
+      body: JSON.stringify({ status: 'TERMINATED' }), // no end_date passed!
+    });
+    assert.equal(mgrTermDraft.status, 200, `Manager terminate draft sub must return 200: ${JSON.stringify(mgrTermDraft.body)}`);
+    assert.equal(mgrTermDraft.body.data.status, 'TERMINATED');
+    assert.equal(
+      mgrTermDraft.body.data.end_date,
+      '2026-08-20',
+      'sub.end_date requested by resident must be preserved when Manager approves TERMINATED without passing end_date'
+    );
+    assert.equal(mgrTermDraft.body.invoice_sync?.scenario, 'DRAFT_UPDATED');
+
     // Scenario 3 & Review Focus #1 Pin:
     // Create an ISSUED invoice for period 2026-06
     const issuedInvRes = await adminPool.query(`

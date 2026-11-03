@@ -1467,6 +1467,8 @@ router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), asyn
           }).note
         : null;
 
+    await client.query('BEGIN');
+
     const subRes = await client.query(
       `SELECT ss.*
        FROM service_subscription ss
@@ -1477,15 +1479,18 @@ router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), asyn
       [id, req.user.person_id]
     );
     if (subRes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đăng ký dịch vụ.' });
     }
     const sub = subRes.rows[0];
 
     // Block mutating already TERMINATED or REJECTED
     if (sub.status === 'TERMINATED' || sub.status === 'REJECTED') {
+      await client.query('ROLLBACK');
       return res.status(409).json({ code: 'INVALID_STATUS', message: 'Không thể hủy dịch vụ đã kết thúc hoặc bị từ chối.' });
     }
     if (sub.status === 'CANCELLATION_PENDING') {
+      await client.query('ROLLBACK');
       return res.status(409).json({ code: 'INVALID_STATUS', message: 'Yêu cầu hủy dịch vụ đang chờ Ban Quản Lý xử lý.' });
     }
 
@@ -1530,11 +1535,16 @@ router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), asyn
       [req.user.sub, id, JSON.stringify(sub), JSON.stringify(updatedRow)]
     );
 
+    await client.query('COMMIT');
+
     res.json({
       message: nextStatus === 'TERMINATED' ? 'Đã hủy yêu cầu đăng ký dịch vụ.' : 'Đã gửi yêu cầu hủy dịch vụ tới Ban Quản Lý.',
       data: updatedRow,
     });
   } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
     if (err.httpStatus) {
       return res.status(err.httpStatus).json({ code: err.code, message: err.message });
     }
@@ -1554,6 +1564,8 @@ router.patch('/services/:id/withdraw-cancel', authenticateToken, idempotencyGuar
 
   const { client, release } = await getUserClient(req);
   try {
+    await client.query('BEGIN');
+
     const subRes = await client.query(
       `SELECT ss.*
        FROM service_subscription ss
@@ -1564,11 +1576,13 @@ router.patch('/services/:id/withdraw-cancel', authenticateToken, idempotencyGuar
       [id, req.user.person_id]
     );
     if (subRes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đăng ký dịch vụ.' });
     }
     const sub = subRes.rows[0];
 
     if (sub.status !== 'CANCELLATION_PENDING') {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         code: 'INVALID_STATUS',
         message: 'Chỉ có thể rút yêu cầu hủy khi đang ở trạng thái chờ hủy.',
@@ -1590,11 +1604,16 @@ router.patch('/services/:id/withdraw-cancel', authenticateToken, idempotencyGuar
       [req.user.sub, id, JSON.stringify(sub), JSON.stringify(updatedRow)]
     );
 
+    await client.query('COMMIT');
+
     res.json({
       message: 'Đã rút yêu cầu hủy dịch vụ thành công.',
       data: updatedRow,
     });
   } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
     if (err.httpStatus) {
       return res.status(err.httpStatus).json({ code: err.code, message: err.message });
     }

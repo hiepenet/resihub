@@ -497,6 +497,8 @@ serviceSubscriptionsRouter.patch(
         return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà này.' });
       }
 
+      await client.query('BEGIN');
+
       const curRes = await client.query(
         `SELECT ss.*, sc.name AS service_name, sc.code AS service_code, sc.category AS service_category, sc.billing_type
          FROM service_subscription ss
@@ -506,12 +508,14 @@ serviceSubscriptionsRouter.patch(
         [id, orgId]
       );
       if (curRes.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đăng ký dịch vụ.' });
       }
       const sub = curRes.rows[0];
 
       // Block mutating already TERMINATED or REJECTED subscriptions (409 INVALID_STATUS)
       if (sub.status === 'TERMINATED' || sub.status === 'REJECTED') {
+        await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'INVALID_STATUS',
           message: 'Không thể chỉnh sửa đăng ký dịch vụ đã kết thúc hoặc bị từ chối.',
@@ -558,13 +562,14 @@ serviceSubscriptionsRouter.patch(
           const subStartYmd = toDateOnlyYmd(sub.start_date);
           const reqEndYmd = end_date ? toDateOnlyYmd(end_date) : null;
           const todayVnYmd = todayVietnamYmd();
+          const targetEnd = reqEndYmd || toDateOnlyYmd(sub.end_date) || todayVnYmd;
 
-          if (Boolean(zero_usage) === true || (reqEndYmd && reqEndYmd < subStartYmd) || (!reqEndYmd && todayVnYmd < subStartYmd)) {
+          if (Boolean(zero_usage) === true || (targetEnd && targetEnd < subStartYmd)) {
             // 0 VND pre-start cancellation or zero_usage
             nextEnd = addDaysYmd(subStartYmd, -1);
             nextProrata = 0;
           } else {
-            nextEnd = reqEndYmd || todayVnYmd;
+            nextEnd = targetEnd;
             nextProrata = computeProrata(sub.unit_price, nextQty, nextEnd, 'cancel');
           }
         } else {
@@ -625,12 +630,17 @@ serviceSubscriptionsRouter.patch(
         }
       }
 
+      await client.query('COMMIT');
+
       res.json({
         message: 'Cập nhật đăng ký dịch vụ thành công.',
         data: updatedSub,
         invoice_sync: invoiceSyncResult,
       });
     } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {}
       if (err.httpStatus) {
         return res.status(err.httpStatus).json({ code: err.code, message: err.message });
       }
