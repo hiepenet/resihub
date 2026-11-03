@@ -14,6 +14,10 @@ import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { checkFourEyesOrWarn, roundVND } from '../services/pricing.js';
 import { buildExpectedInvoiceSchedule } from '../services/invoiceSchedule.js';
 import {
+  closeContractBillingAndSubscriptionsInTx,
+  transferContractCreditsInTx,
+} from '../services/invoiceLifecycle.js';
+import {
   escapeTemplateHtml,
   buildContractTemplateServiceRows,
 } from '../services/contractTemplate.js';
@@ -94,11 +98,37 @@ function formatContractDateOnly(val) {
   return String(val).slice(0, 10);
 }
 
-async function loadContractSubscriptionsAndSchedule(contract) {
+async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
   if (!contract?.id) {
-    return { service_subscriptions: [], invoice_schedule: [] };
+    return {
+      service_subscriptions: [],
+      invoice_schedule: [],
+      available_credit_balance: 0,
+      credit_balances: [],
+      pending_invoice_adjustments_count: 0,
+    };
   }
-  const [subsRes, pricesRes, invRes] = await Promise.all([
+
+  const childRes = await adminPool.query(
+    `SELECT ch.start_date
+     FROM contract ch
+     WHERE ch.parent_contract_id = $1
+       AND ch.is_room_transfer = TRUE
+       AND ch.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')
+     ORDER BY ch.created_at DESC
+     LIMIT 1`,
+    [contract.id]
+  );
+  const roomTransferChildStartDate = childRes.rows.length > 0
+    ? formatContractDateOnly(childRes.rows[0].start_date)
+    : null;
+
+  const isResident = !!options.isResident;
+  const invoiceFilterSql = isResident
+    ? `AND status NOT IN ('CANCELLED', 'VOID', 'DRAFT')`
+    : `AND status <> 'CANCELLED'`;
+
+  const [subsRes, pricesRes, invRes, creditRes, adjRes] = await Promise.all([
     adminPool.query(
       `SELECT ss.*,
               sc.code AS service_code,
@@ -122,22 +152,44 @@ async function loadContractSubscriptionsAndSchedule(contract) {
     adminPool.query(
       `SELECT id, invoice_code, period, status, total_amount
        FROM invoice
-       WHERE contract_id = $1 AND status <> 'CANCELLED'
+       WHERE contract_id = $1 ${invoiceFilterSql}
        ORDER BY period ASC`,
       [contract.id]
     ),
+    adminPool.query(
+      `SELECT * FROM credit_balance
+       WHERE contract_id = $1
+       ORDER BY created_at DESC`,
+      [contract.id]
+    ),
+    adminPool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM invoice_adjustment ia
+       JOIN invoice inv ON inv.id = ia.invoice_id
+       WHERE inv.contract_id = $1
+         AND ia.status = 'PENDING_APPROVAL'`,
+      [contract.id]
+    ),
   ]);
+
+  const availableCreditBalance = creditRes.rows
+    .filter((cr) => ['AVAILABLE', 'PARTIALLY_APPLIED'].includes(cr.status))
+    .reduce((sum, cr) => sum + Math.max(0, Number(cr.amount || 0) - Number(cr.applied_amount || 0)), 0);
 
   const invoice_schedule = buildExpectedInvoiceSchedule({
     contract,
     subscriptions: subsRes.rows,
     servicePrices: pricesRes.rows,
     existingInvoices: invRes.rows,
+    roomTransferChildStartDate,
   });
 
   return {
     service_subscriptions: subsRes.rows,
     invoice_schedule,
+    available_credit_balance: availableCreditBalance,
+    credit_balances: creditRes.rows,
+    pending_invoice_adjustments_count: adjRes.rows[0]?.count || 0,
   };
 }
 
@@ -925,6 +977,13 @@ router.post('/requests/:id/approve', authenticateToken, requireRole(['MANAGER'])
           [dueAt, requestItem.contract_id]
         );
 
+        await closeContractBillingAndSubscriptionsInTx(client, {
+          contract: updatedContract,
+          explicitEndYmd: effDate,
+          actorId: req.user.sub,
+          reason: `Chấm dứt theo đề nghị cư dân (${id})`,
+        });
+
         await client.query(
           `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
            VALUES ($1, 'TERMINATE', 'contract', $2, $3, $4)`,
@@ -1246,9 +1305,11 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
         [id]
       );
 
+      const isResident = getUserRoleCodes(req).includes('RESIDENT') &&
+        !getUserRoleCodes(req).some(r => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(r));
       const [ownerUserIds, scheduleBundle] = await Promise.all([
         getBuildingActiveOwnerUserIds(result.rows[0].building_id),
-        loadContractSubscriptionsAndSchedule(result.rows[0]),
+        loadContractSubscriptionsAndSchedule(result.rows[0], { isResident }),
       ]);
 
       res.json({
@@ -1259,6 +1320,9 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
           attachments: attRes.rows,
           service_subscriptions: scheduleBundle.service_subscriptions,
           invoice_schedule: scheduleBundle.invoice_schedule,
+          available_credit_balance: scheduleBundle.available_credit_balance,
+          credit_balances: scheduleBundle.credit_balances,
+          pending_invoice_adjustments_count: scheduleBundle.pending_invoice_adjustments_count,
         },
       });
     } finally {
@@ -2555,6 +2619,13 @@ router.post('/:id/terminate', authenticateToken, requireRole(['MANAGER']), idemp
       );
     }
 
+    await closeContractBillingAndSubscriptionsInTx(client, {
+      contract: updatedRes.rows[0],
+      explicitEndYmd: termDate,
+      actorId: req.user.sub,
+      reason: cleanReason,
+    });
+
     await client.query('COMMIT');
     res.json({
       message: movedIn
@@ -2674,6 +2745,13 @@ router.post('/:id/terminate/approve', authenticateToken, requireRole(['MANAGER']
         ]
       );
     }
+
+    await closeContractBillingAndSubscriptionsInTx(client, {
+      contract: updatedRes.rows[0],
+      explicitEndYmd: termAt,
+      actorId: req.user.sub,
+      reason: 'Phê duyệt chấm dứt hợp đồng',
+    });
 
     await client.query('COMMIT');
     res.json({
@@ -2866,6 +2944,30 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
       `UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`,
       [oldContract.apartment_id]
     );
+
+    // 6A Sync: đồng bộ hóa đơn & đóng subscription cho hợp đồng cũ
+    await closeContractBillingAndSubscriptionsInTx(dbClient, {
+      contract: {
+        ...oldContract,
+        status: 'TERMINATED',
+        terminated_at: effectiveTerminatedAt,
+      },
+      explicitEndYmd: sDateStr,
+      roomTransferChildStartDate: sDateStr,
+      isRoomTransfer: true,
+      adjustmentCreatorId: contract.created_by || req?.user?.sub,
+      actorId: req?.user?.sub,
+      reason: `Chuyển sang căn ${newAptCode}`,
+    });
+
+    // Kết chuyển credit_balance từ hợp đồng cũ sang hợp đồng mới
+    await transferContractCreditsInTx(dbClient, {
+      fromContractId: oldContract.id,
+      toContractId: contract.id,
+      toBuildingId: contract.building_id,
+      actorId: req?.user?.sub,
+      reason: `Kết chuyển số dư tín dụng khi chuyển sang phòng ${newAptCode}`,
+    });
 
     // 2. Xử lý kết chuyển sổ cọc hoặc tách sổ cọc độc lập (FR-013, FR-020, FR-025, FR-068)
     const refundDays = await getOrgDepositRefundDays(adminPool, req?.user?.org_id);
@@ -3109,6 +3211,26 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
       }
       if (matchedRsv) {
         await dbClient.query(`UPDATE reservation SET status = 'CONVERTED', updated_at = NOW() WHERE id = $1`, [matchedRsv.id]);
+      }
+    }
+  }
+
+  // Kết chuyển credit_balance cho hợp đồng gia hạn (nếu hợp đồng cũ ĐÃ kết thúc)
+  if (!contract.is_room_transfer && contract.parent_contract_id) {
+    const parentContractRes = await dbClient.query(
+      `SELECT id, status, building_id FROM contract WHERE id = $1`,
+      [contract.parent_contract_id]
+    );
+    if (parentContractRes.rows.length > 0) {
+      const pContract = parentContractRes.rows[0];
+      if (['TERMINATED', 'EXPIRED'].includes(pContract.status)) {
+        await transferContractCreditsInTx(dbClient, {
+          fromContractId: pContract.id,
+          toContractId: contract.id,
+          toBuildingId: contract.building_id,
+          actorId: req?.user?.sub,
+          reason: 'Kết chuyển số dư tín dụng từ hợp đồng cũ đã kết thúc',
+        });
       }
     }
   }
@@ -3844,10 +3966,15 @@ router.post('/:id/cancel', authenticateToken, requireRole(['MANAGER']), async (r
     );
     await client.query(
       `UPDATE service_subscription
-       SET status = 'CANCELLED', updated_at = NOW()
+       SET status = 'TERMINATED', updated_at = NOW()
        WHERE contract_id = $1 AND status = 'PENDING_APPROVAL'`,
       [id]
     );
+    await closeContractBillingAndSubscriptionsInTx(client, {
+      contract: updated.rows[0],
+      actorId: req.user.sub,
+      reason: reason ? `Hủy hợp đồng nháp: ${reason}` : 'Hủy hợp đồng nháp',
+    });
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
        VALUES ($1, 'CANCEL', 'contract', $2, $3, $4)`,

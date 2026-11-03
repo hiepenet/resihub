@@ -11,6 +11,14 @@ import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.j
 import { generateInvoicesCore } from '../routes/invoices.js';
 import { roundVND } from '../services/pricing.js';
 import { getTodayVnDateStr } from '../services/depositSettlement.js';
+import {
+  closeContractBillingAndSubscriptionsInTx,
+  transferContractCreditsInTx,
+} from '../services/invoiceLifecycle.js';
+import {
+  todayVietnamYmd,
+  currentVietnamPeriod,
+} from '../services/serviceBilling.js';
 
 export async function runDailyJobs() {
   const expiredAptIds = new Set();
@@ -36,7 +44,7 @@ export async function runDailyJobs() {
          updated_at = NOW()
      WHERE status = 'TERMINATION_PENDING'
        AND COALESCE(terminated_at, end_date) <= CURRENT_DATE
-     RETURNING id, building_id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date`
+     RETURNING *, COALESCE(terminated_at, end_date) AS eff_end_date`
   );
   for (const row of scheduledTerminated.rows) {
     const termStr = getTodayVnDateStr(row.eff_end_date);
@@ -51,6 +59,18 @@ export async function runDailyJobs() {
          AND refund_due_date IS NULL`,
       [dueAt, row.id]
     );
+
+    // 6A Sync: đồng bộ hóa đơn & đóng subscription cho hợp đồng kết thúc lịch trả phòng
+    try {
+      await closeContractBillingAndSubscriptionsInTx(adminPool, {
+        contract: row,
+        explicitEndYmd: termStr,
+        actorId: null,
+        reason: 'Kết thúc hợp đồng theo lịch trả phòng (TERMINATION_PENDING)',
+      });
+    } catch (closeErr) {
+      console.error('[DailyJob] Step 1a closeContract error:', closeErr.message);
+    }
 
     if (row.apartment_id) {
       const movedIn = Boolean(sDateStr && termStr >= sDateStr);
@@ -83,7 +103,7 @@ export async function runDailyJobs() {
   const expired = await adminPool.query(
     `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
      WHERE status IN ('ACTIVE', 'RENEWAL_PENDING') AND end_date <= CURRENT_DATE
-     RETURNING id, building_id, apartment_id, end_date`
+     RETURNING *`
   );
   for (const row of expired.rows) {
     const endDateStr = getTodayVnDateStr(row.end_date);
@@ -97,6 +117,41 @@ export async function runDailyJobs() {
          AND refund_due_date IS NULL`,
       [dueAt, row.id]
     );
+
+    // 6A Sync: đồng bộ hóa đơn & đóng subscription khi hợp đồng hết hạn tự nhiên
+    try {
+      await closeContractBillingAndSubscriptionsInTx(adminPool, {
+        contract: row,
+        explicitEndYmd: endDateStr,
+        isNaturalExpiry: true,
+        actorId: null,
+        reason: 'Hết hạn hợp đồng tự nhiên',
+      });
+    } catch (closeErr) {
+      console.error('[DailyJob] Step 1b closeContract error:', closeErr.message);
+    }
+
+    // Kết chuyển credit_balance sang hợp đồng gia hạn con (nếu có)
+    try {
+      const childRenewRes = await adminPool.query(
+        `SELECT id, building_id FROM contract
+         WHERE parent_contract_id = $1
+           AND status IN ('ACTIVE', 'RENEWAL_PENDING')
+         ORDER BY created_at DESC LIMIT 1`,
+        [row.id]
+      );
+      if (childRenewRes.rows.length > 0) {
+        await transferContractCreditsInTx(adminPool, {
+          fromContractId: row.id,
+          toContractId: childRenewRes.rows[0].id,
+          toBuildingId: childRenewRes.rows[0].building_id,
+          actorId: null,
+          reason: 'Kết chuyển số dư tín dụng khi hợp đồng cũ hết hạn',
+        });
+      }
+    } catch (xferErr) {
+      console.error('[DailyJob] Step 1b transferCredits error:', xferErr.message);
+    }
 
     if (row.apartment_id) {
       // Nếu có HĐ gia hạn con nối tiếp bắt đầu hôm nay (cùng khách ở tiếp), không ép sang MAINTENANCE
@@ -207,7 +262,8 @@ export async function runDailyJobs() {
           orgId: orgRow.id,
           targetPeriod: currentPeriod,
           matchBillingDays: matchDays,
-          onlyOngoingContracts: true,
+          onlyOngoingContracts: false,
+          excludeSettledDeposits: true,
           autoIssue: false,
           actorId: null,
         });
@@ -227,18 +283,28 @@ export async function runDailyJobs() {
     console.error('[DailyJob] auto-billing step failed:', autoBillErr.message);
   }
 
-  // 6. R-05: Tự động chuyển hóa đơn quá hạn sang OVERDUE
-  const overdueUpdate = await adminPool.query(
+  // 6. R-05: Tự động chuyển hóa đơn quá hạn sang OVERDUE (hỗ trợ cả ADJUSTED khi paid_amount < total_amount)
+  const overdueInvoices = await adminPool.query(
     `UPDATE invoice
      SET status = 'OVERDUE', updated_at = NOW()
-     WHERE status IN ('ISSUED', 'PARTIALLY_PAID')
-       AND due_date < CURRENT_DATE`
+     WHERE status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
+       AND paid_amount < total_amount
+       AND due_date < (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+     RETURNING id, org_id, total_amount, paid_amount`
   );
-  if (overdueUpdate.rowCount > 0) {
-    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueUpdate.rowCount}`);
+  for (const row of overdueInvoices.rows) {
+    await adminPool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES (NULL, 'MARK_INVOICE_OVERDUE', 'invoice', $1, NULL, $2)`,
+      [row.id, JSON.stringify({ status: 'OVERDUE', id: row.id })]
+    );
+  }
+  if (overdueInvoices.rowCount > 0) {
+    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueInvoices.rowCount}`);
   }
 
-  // 7. R-11: Tự động cộng phí phạt chậm thanh toán 100.000 ₫/ngày từ ngày quá hạn thứ 6 (sau 5 ngày ân hạn, không giới hạn trần)
+  // 7. R-11 & FR-064: Tự động cộng phí phạt chậm thanh toán append-only 100.000 ₫/ngày từ ngày quá hạn thứ 6
+  // deltaFee = GREATEST(0, expectedFee - gross_accrued_late_fee) để bảo toàn 100% dòng miễn giảm LATE_FEE
   const LATE_FEE_PER_DAY = 100000;
   const GRACE_DAYS = 5;
   const lateInvoices = await adminPool.query(
@@ -247,17 +313,19 @@ export async function runDailyJobs() {
             i.subtotal_amount,
             i.adjustment_amount,
             i.total_amount,
-            (CURRENT_DATE - i.due_date)::int AS overdue_days,
-            COALESCE(lf.total_late_fee, 0)::bigint AS existing_late_fee
+            i.paid_amount,
+            ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date)::int AS overdue_days,
+            COALESCE(lf.gross_late_fee, 0)::bigint AS gross_accrued_late_fee
      FROM invoice i
      LEFT JOIN (
-       SELECT invoice_id, SUM(amount)::bigint AS total_late_fee
+       SELECT invoice_id, SUM(amount)::bigint AS gross_late_fee
        FROM invoice_line
-       WHERE item_type = 'LATE_FEE'
+       WHERE item_type = 'LATE_FEE' AND amount > 0
        GROUP BY invoice_id
      ) lf ON lf.invoice_id = i.id
-     WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID')
-       AND (CURRENT_DATE - i.due_date) > $1`,
+     WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
+       AND i.paid_amount < i.total_amount
+       AND ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date) > $1`,
     [GRACE_DAYS]
   );
 
@@ -265,26 +333,23 @@ export async function runDailyJobs() {
     const penaltyDays = Number(inv.overdue_days) - GRACE_DAYS;
     if (penaltyDays <= 0) continue;
     const expectedFee = roundVND(penaltyDays * LATE_FEE_PER_DAY);
-    const existingFee = Number(inv.existing_late_fee || 0);
-    const deltaFee = expectedFee - existingFee;
+    const grossAccruedFee = Number(inv.gross_accrued_late_fee || 0);
+    const deltaFee = Math.max(0, expectedFee - grossAccruedFee);
 
     if (deltaFee > 0) {
       const txClient = await adminPool.connect();
       try {
         await txClient.query('BEGIN');
-        await txClient.query(
-          `DELETE FROM invoice_line WHERE invoice_id = $1 AND item_type = 'LATE_FEE'`,
-          [inv.id]
-        );
+        const deltaDays = Math.round(deltaFee / LATE_FEE_PER_DAY);
         await txClient.query(
           `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
            VALUES ($1, 'LATE_FEE', $2, $3, 'ngày', $4, $5)`,
           [
             inv.id,
             `Phạt chậm thanh toán (${penaltyDays} ngày sau ${GRACE_DAYS} ngày ân hạn × 100.000 ₫/ngày)`,
-            penaltyDays,
+            deltaDays,
             LATE_FEE_PER_DAY,
-            expectedFee,
+            deltaFee,
           ]
         );
         await txClient.query(
@@ -304,6 +369,19 @@ export async function runDailyJobs() {
              AND status IN ('OPEN', 'PARTIALLY_PAID')`,
           [deltaFee, inv.id]
         );
+        await txClient.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+           VALUES (NULL, 'ACCRUE_LATE_FEE', 'invoice', $1, NULL, $2)`,
+          [
+            inv.id,
+            JSON.stringify({
+              delta_fee: deltaFee,
+              expected_fee: expectedFee,
+              gross_accrued_fee: grossAccruedFee,
+              penalty_days: penaltyDays,
+            }),
+          ]
+        );
         await txClient.query('COMMIT');
       } catch (lfErr) {
         await txClient.query('ROLLBACK').catch(() => {});
@@ -312,6 +390,128 @@ export async function runDailyJobs() {
         txClient.release();
       }
     }
+  }
+
+  // 8. FR-039 & PRD Mục 10.1 & 12.4: Nhắc nợ tự động đa mốc (-3, 0, +3, +7, +15 ngày)
+  try {
+    const billingConfigsRes = await adminPool.query(
+      `SELECT org_id, value FROM system_setting WHERE key = 'billing_config'`
+    );
+    const orgReminderDaysMap = new Map();
+    for (const r of billingConfigsRes.rows) {
+      const val = r.value || {};
+      const days = Array.isArray(val.reminder_days) ? val.reminder_days.map(Number) : [3, 7, 15];
+      orgReminderDaysMap.set(r.org_id, days);
+    }
+
+    const unpaidInvoicesRes = await adminPool.query(
+      `SELECT i.id,
+              i.org_id,
+              i.contract_id,
+              i.invoice_code,
+              i.period,
+              i.total_amount,
+              i.paid_amount,
+              i.due_date,
+              ((NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date - i.due_date)::int AS days_diff,
+              c.building_id,
+              b.name AS building_name,
+              a.code AS apartment_code,
+              au.id AS resident_user_id
+       FROM invoice i
+       JOIN contract c ON c.id = i.contract_id
+       JOIN building b ON b.id = c.building_id
+       JOIN apartment a ON a.id = c.apartment_id
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN person p ON p.id = t.person_id
+       JOIN app_user au ON au.person_id = p.id
+       WHERE i.status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED')
+         AND i.paid_amount < i.total_amount
+         AND au.status = 'ACTIVE'`
+    );
+
+    let remindersSent = 0;
+    for (const inv of unpaidInvoicesRes.rows) {
+      const daysDiff = Number(inv.days_diff);
+      const reminderDays = orgReminderDaysMap.get(inv.org_id) || [3, 7, 15];
+
+      let stageKey = null;
+      let title = null;
+      let content = null;
+      const remainingAmount = Number(inv.total_amount) - Number(inv.paid_amount);
+      const dueDateStr = getTodayVnDateStr(inv.due_date);
+
+      if (daysDiff === -3) {
+        stageKey = 'PRE_DUE_3D';
+        title = `Nhắc thanh toán hóa đơn ${inv.invoice_code} (còn 3 ngày)`;
+        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) sẽ đến hạn vào ngày ${dueDateStr}. Vui lòng thanh toán đúng hạn.`;
+      } else if (daysDiff === 0) {
+        stageKey = 'DUE_TODAY';
+        title = `Hóa đơn ${inv.invoice_code} đến hạn thanh toán hôm nay`;
+        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đến hạn thanh toán hôm nay (${dueDateStr}). Vui lòng thanh toán để tránh phát sinh phí phạt chậm.`;
+      } else if (daysDiff > 0 && reminderDays.includes(daysDiff)) {
+        stageKey = `OVERDUE_${daysDiff}D`;
+        title = `[QUÁ HẠN] Nhắc nợ hóa đơn ${inv.invoice_code} quá hạn ${daysDiff} ngày`;
+        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đã quá hạn ${daysDiff} ngày. Vui lòng hoàn tất thanh toán để tránh các biện pháp xử lý công nợ tiếp theo.`;
+      }
+
+      if (!stageKey) continue;
+
+      const payload = {
+        invoice_id: inv.id,
+        contract_id: inv.contract_id,
+        reminder_stage: stageKey,
+        days_diff: daysDiff,
+        remaining_amount: remainingAmount,
+        link: '/resident',
+      };
+
+      const insRes = await adminPool.query(
+        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+         SELECT $1, $2, $3, $4, 'PAYMENT_REMINDER', $5::jsonb
+         WHERE NOT EXISTS (
+           SELECT 1 FROM notification n
+           WHERE n.user_id = $2
+             AND n.type = 'PAYMENT_REMINDER'
+             AND n.payload->>'invoice_id' = $6::text
+             AND n.payload->>'reminder_stage' = $7::text
+         )
+         RETURNING id`,
+        [
+          inv.org_id,
+          inv.resident_user_id,
+          title,
+          content,
+          JSON.stringify(payload),
+          inv.id,
+          stageKey,
+        ]
+      );
+
+      if (insRes.rowCount > 0) {
+        await adminPool.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+           VALUES (NULL, 'SEND_DEBT_REMINDER', 'invoice', $1, NULL, $2::jsonb)`,
+          [
+            inv.id,
+            JSON.stringify({
+              reminder_stage: stageKey,
+              days_diff: daysDiff,
+              remaining_amount: remainingAmount,
+              user_id: inv.resident_user_id,
+              notification_id: insRes.rows[0].id,
+            }),
+          ]
+        );
+        remindersSent++;
+      }
+    }
+
+    if (remindersSent > 0) {
+      console.log(`[DailyJob] sent FR-039 debt reminders: ${remindersSent}`);
+    }
+  } catch (reminderErr) {
+    console.error('[DailyJob] debt reminder step error:', reminderErr.message);
   }
 
   // 8. FR-018 & R-22: Cảnh báo hợp đồng sắp hết hạn (60 ngày chỉ MANAGER; 30 & 15 ngày cả MANAGER + RESIDENT)

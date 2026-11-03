@@ -627,7 +627,7 @@ test('M05 Contract Creation & Activation 7-Item Fix Suite', async (t) => {
       'SELECT status FROM service_subscription WHERE contract_id = $1',
       [cCancelId]
     );
-    assert.equal(cancelledSubs.rows[0]?.status, 'CANCELLED');
+    assert.equal(cancelledSubs.rows[0]?.status, 'TERMINATED');
 
     // 3. Activating cId flips subscriptions to ACTIVE, creates initial contract_version #1, sends notifications, and returns invoice_schedule
     const pdfContent = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'ascii');
