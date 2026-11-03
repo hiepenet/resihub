@@ -1,4 +1,5 @@
 import { roundVND } from './pricing.js';
+import { getCanonicalServiceAliases } from './serviceBilling.js';
 
 const SERVICE_CODE_LABELS = {
   ELECTRICITY: { name: 'Điện sinh hoạt', unit: 'kWh' },
@@ -80,25 +81,34 @@ export function buildContractTemplateServiceRows({
 
   // 1. Các gói dịch vụ đăng ký đi kèm (PENDING_APPROVAL hoặc ACTIVE, không phải METERED)
   for (const sub of subscriptions || []) {
-    const status = String(sub?.status || '').toUpperCase();
-    if (status !== 'PENDING_APPROVAL' && status !== 'ACTIVE') continue;
-
     const billingType = String(sub?.billing_type || '').toUpperCase();
     if (billingType === 'METERED') continue;
 
     const codeKey = String(sub?.service_code || '').trim().toUpperCase();
     const catKey = String(sub?.service_category || '').trim().toUpperCase();
 
+    // Register all non-METERED subscription codes and bidirectional aliases in consumedPriceCodes
+    // before continue, so terminated subscriptions do not resurface via standalone contract_service_price
+    if (codeKey) {
+      consumedPriceCodes.add(codeKey);
+    }
+    for (const alias of getCanonicalServiceAliases(codeKey, catKey)) {
+      consumedPriceCodes.add(alias);
+    }
+
+    const status = String(sub?.status || '').toUpperCase();
+    if (status !== 'PENDING_APPROVAL' && status !== 'ACTIVE') continue;
+
     let overrideEntry = codeKey ? priceMap.get(codeKey) : undefined;
     let matchedPriceCode = overrideEntry ? codeKey : null;
 
     if (!overrideEntry) {
-      if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
-        overrideEntry = priceMap.get('INTERNET');
-        if (overrideEntry) matchedPriceCode = 'INTERNET';
-      } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
-        overrideEntry = priceMap.get('COMMON_SERVICE');
-        if (overrideEntry) matchedPriceCode = 'COMMON_SERVICE';
+      for (const alias of getCanonicalServiceAliases(codeKey, catKey)) {
+        if (priceMap.has(alias)) {
+          overrideEntry = priceMap.get(alias);
+          matchedPriceCode = alias;
+          break;
+        }
       }
     }
 
@@ -214,4 +224,3 @@ export function buildContractTemplateServiceRows({
 
   return rows;
 }
-

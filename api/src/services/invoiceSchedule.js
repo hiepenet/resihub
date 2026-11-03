@@ -1,96 +1,40 @@
 import { roundVND } from './pricing.js';
-
-function toDateStr(val) {
-  if (!val) return '';
-  if (typeof val === 'string') return val.slice(0, 10);
-  if (val instanceof Date && !Number.isNaN(val.getTime())) {
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const d = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
-  return String(val).slice(0, 10);
-}
-
-function parseYmd(ymd) {
-  const [y, m, d] = String(ymd).split('-').map(Number);
-  return { y, m, d };
-}
+import {
+  toDateOnlyYmd,
+  addDaysYmd,
+  diffDaysYmd,
+  getMonthBoundsYmd,
+  normalizeSubscriptionStatusInput,
+  normalizeInvoiceStatusInput,
+  computeSubscriptionPeriodCharge,
+} from './serviceBilling.js';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-function formatYmd(y, m, d) {
-  return `${y}-${pad2(m)}-${pad2(d)}`;
-}
-
-function daysInMonthUtc(y, m) {
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-}
-
-function addDaysYmd(ymd, deltaDays) {
-  const { y, m, d } = parseYmd(ymd);
-  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
-  return formatYmd(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
-}
-
-function diffDaysYmd(startYmd, endYmd) {
-  const a = parseYmd(startYmd);
-  const b = parseYmd(endYmd);
-  const msA = Date.UTC(a.y, a.m - 1, a.d);
-  const msB = Date.UTC(b.y, b.m - 1, b.d);
-  return Math.round((msB - msA) / 86400000);
-}
-
-function resolveSubscriptionUnitPrice(sub, cspMap) {
-  const codeKey = String(sub.service_code || sub.code || '').toUpperCase();
-  const catKey = String(sub.service_category || sub.category || '').toUpperCase();
-
-  let overrideUnitPrice = cspMap.has(codeKey) ? cspMap.get(codeKey) : undefined;
-  if (overrideUnitPrice === undefined) {
-    if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
-      overrideUnitPrice = cspMap.get('INTERNET');
-    } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
-      overrideUnitPrice = cspMap.get('COMMON_SERVICE');
-    }
-  }
-
-  return overrideUnitPrice !== undefined ? Number(overrideUnitPrice) : Number(sub.unit_price || 0);
-}
-
-function buildCspMapForDate(servicePrices, asOfDateStr) {
-  const sorted = [...(Array.isArray(servicePrices) ? servicePrices : [])].sort((a, b) =>
-    toDateStr(b.effective_from).localeCompare(toDateStr(a.effective_from))
-  );
-  const cspMap = new Map();
-  for (const row of sorted) {
-    const eff = toDateStr(row.effective_from);
-    if (eff && eff > asOfDateStr) continue;
-    const key = String(row.service_code || '').toUpperCase();
-    if (key && !cspMap.has(key)) {
-      cspMap.set(key, Number(row.unit_price || 0));
-    }
-  }
-  return cspMap;
-}
-
 /**
  * Sinh lịch hóa đơn dự kiến (expected invoice schedule) cho toàn kỳ hợp đồng (FR-014).
- * Đồng bộ quy tắc tính ngày hiệu lực, pro-rata, ghi đè giá dịch vụ (FR-065) và kẹp ngày cuối tháng (1..31).
+ * Đồng bộ quy tắc tính ngày hiệu lực, pro-rata, ghi đè giá dịch vụ (FR-065), kẹp ngày cuối tháng (1..31),
+ * bảo toàn các kỳ lịch sử 1..N-1 cho các gói dịch vụ đã huỷ (TERMINATED), và hỗ trợ mốc cắt chuyển phòng tương lai (roomTransferChildStartDate).
  */
 export function buildExpectedInvoiceSchedule({
   contract,
   subscriptions = [],
   servicePrices = [],
   existingInvoices = [],
+  roomTransferChildStartDate = null,
+  catalogItems = [],
 } = {}) {
   if (!contract || contract.status === 'CANCELLED') {
     return [];
   }
 
-  const startStr = toDateStr(contract.start_date);
-  const rawEndStr = toDateStr(contract.terminated_at || contract.end_date);
+  const startStr = toDateOnlyYmd(contract.start_date);
+  const rawEndStr = roomTransferChildStartDate
+    ? toDateOnlyYmd(roomTransferChildStartDate)
+    : toDateOnlyYmd(contract.terminated_at || contract.end_date);
+
   if (!startStr || !rawEndStr || rawEndStr <= startStr) {
     return [];
   }
@@ -99,34 +43,47 @@ export function buildExpectedInvoiceSchedule({
   const billingCycle = contract.billing_cycle === 'quarterly' ? 'quarterly' : 'monthly';
   const billingDay = Math.min(31, Math.max(1, Number(contract.billing_day || 1)));
   const paymentDueDays = Math.min(60, Math.max(1, Number(contract.payment_due_days || 5)));
-  const isInclusiveEndStatus = ['TERMINATED', 'EXPIRED', 'TERMINATION_PENDING'].includes(contract.status);
 
-  const validSubs = (Array.isArray(subscriptions) ? subscriptions : []).filter(
-    (s) =>
-      s &&
-      String(s.billing_type || 'FIXED').toUpperCase() !== 'METERED' &&
-      !['CANCELLED', 'REJECTED'].includes(String(s.status || '').toUpperCase())
-  );
+  // If roomTransferChildStartDate is supplied, it is the half-open start of the new lease [oldStart, childStart),
+  // so no inclusive termination bonus is added.
+  const isInclusiveEndStatus =
+    !roomTransferChildStartDate &&
+    ['TERMINATED', 'EXPIRED', 'TERMINATION_PENDING'].includes(contract.status);
 
-  const startParts = parseYmd(startStr);
-  let curY = startParts.y;
-  let curM = startParts.m;
+  // Preserve historical periods 1..N-1 for TERMINATED (and legacy CANCELLED) subscriptions
+  // only exclude if METERED, REJECTED, or cancelled prior to start
+  const validSubs = (Array.isArray(subscriptions) ? subscriptions : []).filter((s) => {
+    if (!s) return false;
+    if (String(s.billing_type || 'FIXED').toUpperCase() === 'METERED') return false;
+    const status = normalizeSubscriptionStatusInput(s.status);
+    if (status === 'REJECTED') return false;
+    if (status === 'TERMINATED') {
+      const subStart = toDateOnlyYmd(s.start_date) || startStr;
+      const subEnd = toDateOnlyYmd(s.end_date);
+      if (!subEnd || subEnd < subStart) return false;
+    }
+    return true;
+  });
+
+  const [startYear, startMonth] = startStr.split('-').map(Number);
+  let curY = startYear;
+  let curM = startMonth;
 
   const monthlySlices = [];
   let guard = 0;
 
   while (guard < 240) {
     guard += 1;
-    const monthStart = formatYmd(curY, curM, 1);
+    const monthStart = `${curY}-${pad2(curM)}-01`;
     const nextY = curM === 12 ? curY + 1 : curY;
     const nextM = curM === 12 ? 1 : curM + 1;
-    const nextMonthStart = formatYmd(nextY, nextM, 1);
+    const nextMonthStart = `${nextY}-${pad2(nextM)}-01`;
 
     if (rawEndStr <= monthStart) {
       break;
     }
 
-    const totalDays = daysInMonthUtc(curY, curM);
+    const { daysInMonth: totalDays } = getMonthBoundsYmd(`${curY}-${pad2(curM)}`);
     const startBound = startStr > monthStart ? startStr : monthStart;
     const endBound = rawEndStr < nextMonthStart ? rawEndStr : nextMonthStart;
     const inclusiveBonus =
@@ -142,21 +99,18 @@ export function buildExpectedInvoiceSchedule({
         ? roundVND((fullRent * activeDays) / totalDays)
         : roundVND(fullRent);
 
-      const cspMap = buildCspMapForDate(servicePrices, periodEnd);
       let expectedFixedServices = 0;
-
       for (const sub of validSubs) {
-        const subStart = toDateStr(sub.start_date) || startStr;
-        const subEnd = toDateStr(sub.end_date);
-        if (subStart > periodEnd) continue;
-        if (subEnd && subEnd < periodStart) continue;
-
-        const unitPrice = resolveSubscriptionUnitPrice(sub, cspMap);
-        const qty = Math.max(1, Number(sub.quantity || 1));
-        const svcAmt = isProrated
-          ? roundVND((unitPrice * qty * activeDays) / totalDays)
-          : roundVND(unitPrice * qty);
-        expectedFixedServices += svcAmt;
+        const charge = computeSubscriptionPeriodCharge({
+          subscription: sub,
+          periodYm: periodStr,
+          boundStartYmd: periodStart,
+          boundEndYmd: periodEnd,
+          contractBuildingId: contract.building_id,
+          contractServicePrices: servicePrices,
+          catalogItems,
+        });
+        expectedFixedServices += charge.amount;
       }
 
       monthlySlices.push({
@@ -177,8 +131,9 @@ export function buildExpectedInvoiceSchedule({
     curM = nextM;
   }
 
+  // Exclude CANCELLED and VOID invoices, include ADJUSTED and other active actual invoices
   const nonCancelledInvoices = (Array.isArray(existingInvoices) ? existingInvoices : []).filter(
-    (inv) => inv && inv.status !== 'CANCELLED'
+    (inv) => inv && !['CANCELLED', 'VOID'].includes(normalizeInvoiceStatusInput(inv.status))
   );
 
   const chunkSize = billingCycle === 'quarterly' ? 3 : 1;
@@ -189,8 +144,8 @@ export function buildExpectedInvoiceSchedule({
     const first = chunk[0];
     const last = chunk[chunk.length - 1];
 
-    const clampedIssueDay = Math.min(billingDay, daysInMonthUtc(first.year, first.month));
-    const rawIssueDate = formatYmd(first.year, first.month, clampedIssueDay);
+    const clampedIssueDay = Math.min(billingDay, first.days_in_month);
+    const rawIssueDate = `${first.year}-${pad2(first.month)}-${pad2(clampedIssueDay)}`;
     const issueDate = rawIssueDate < first.period_start ? first.period_start : rawIssueDate;
     const dueDate = addDaysYmd(issueDate, paymentDueDays);
 
