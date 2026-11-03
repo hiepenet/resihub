@@ -184,8 +184,8 @@ export async function generateInvoicesCore(
          c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
          OR (
            c.status = 'TERMINATED'
-           AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
-           AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+           AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= ($2 || '-01')::date
+           AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
          )
          OR (
            c.status = 'EXPIRED'
@@ -245,8 +245,8 @@ export async function generateInvoicesCore(
       AND (
         (
           c.status = 'TERMINATED'
-          AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
-          AND COALESCE(c.terminated_at, c.end_date) >= c.start_date
+          AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= ($2 || '-01')::date
+          AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= c.start_date
         )
         OR (
           c.status != 'TERMINATED'
@@ -412,10 +412,13 @@ export async function generateInvoicesCore(
     if (existingDraftRes.rows.length > 0) {
       const existingDraft = existingDraftRes.rows[0];
 
+      await releaseInvoiceCreditsInTx(client, { invoiceId: existingDraft.id, actorId });
+
       await client.query(
         `DELETE FROM invoice_line
          WHERE invoice_id = $1
-           AND (item_type <> 'ADJUSTMENT' OR credit_id IS NOT NULL)`,
+           AND item_type <> 'ADJUSTMENT'
+           AND credit_id IS NULL`,
         [existingDraft.id]
       );
 
@@ -463,6 +466,7 @@ export async function generateInvoicesCore(
     const initStatus = autoIssue ? 'ISSUED' : 'DRAFT';
 
     let inv;
+    await client.query('SAVEPOINT sp_gen_inv');
     try {
       const invIns = await client.query(
         `INSERT INTO invoice (
@@ -490,59 +494,67 @@ export async function generateInvoicesCore(
         ]
       );
       inv = invIns.rows[0];
+
+      for (const l of lines) {
+        await client.query(
+          `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            inv.id,
+            l.item_type,
+            l.description,
+            l.quantity,
+            l.unit,
+            l.unit_price,
+            l.amount,
+            l.subscription_id || null,
+            JSON.stringify(l.formula_meta || {}),
+          ]
+        );
+      }
+
+      // Apply FIFO credit balance
+      await applyAvailableCreditsInTx(client, {
+        contractId: c.id,
+        invoiceId: inv.id,
+        subtotalAmount: grossSubtotal,
+        actorId,
+      });
+
+      const refreshedNewInv = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+      inv = refreshedNewInv.rows[0];
+
+      if (autoIssue) {
+        await issueDraftInvoiceInTx(client, {
+          invoiceId: inv.id,
+          actorId,
+          dueDate: dueDateStr,
+        });
+        const issuedRow = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+        inv = issuedRow.rows[0];
+      }
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         VALUES ($1, 'CREATE_INVOICE', 'invoice', $2, $3)`,
+        [actorId, inv.id, JSON.stringify(inv)]
+      );
+
+      await client.query('RELEASE SAVEPOINT sp_gen_inv');
+      createdInvoices.push(inv);
     } catch (insertErr) {
+      await client.query('ROLLBACK TO SAVEPOINT sp_gen_inv');
       if (insertErr.code === '23505') {
+        if (contractId) {
+          const err = new Error('Hóa đơn cho kỳ này đã tồn tại.');
+          err.code = 'INVOICE_PERIOD_ALREADY_EXISTS';
+          err.status = 409;
+          throw err;
+        }
         continue;
       }
       throw insertErr;
     }
-
-    for (const l of lines) {
-      await client.query(
-        `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          inv.id,
-          l.item_type,
-          l.description,
-          l.quantity,
-          l.unit,
-          l.unit_price,
-          l.amount,
-          l.subscription_id || null,
-          JSON.stringify(l.formula_meta || {}),
-        ]
-      );
-    }
-
-    // Apply FIFO credit balance
-    await applyAvailableCreditsInTx(client, {
-      contractId: c.id,
-      invoiceId: inv.id,
-      subtotalAmount: grossSubtotal,
-      actorId,
-    });
-
-    const refreshedNewInv = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
-    inv = refreshedNewInv.rows[0];
-
-    if (autoIssue) {
-      await issueDraftInvoiceInTx(client, {
-        invoiceId: inv.id,
-        actorId,
-        dueDate: dueDateStr,
-      });
-      const issuedRow = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
-      inv = issuedRow.rows[0];
-    }
-
-    await client.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
-       VALUES ($1, 'CREATE_INVOICE', 'invoice', $2, $3)`,
-      [actorId, inv.id, JSON.stringify(inv)]
-    );
-
-    createdInvoices.push(inv);
   }
 
   return {
@@ -716,7 +728,7 @@ router.get(
 router.post(
   '/generate-batch',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { building_id, contract_id, period, auto_issue = false } = req.body;
@@ -761,6 +773,12 @@ router.post(
         });
       } catch (innerErr) {
         await client.query('ROLLBACK');
+        if (innerErr.code === 'INVOICE_PERIOD_ALREADY_EXISTS' || innerErr.status === 409) {
+          return res.status(409).json({
+            code: 'INVOICE_PERIOD_ALREADY_EXISTS',
+            message: innerErr.message || 'Hóa đơn cho kỳ này đã tồn tại.',
+          });
+        }
         throw innerErr;
       } finally {
         await release();
@@ -850,7 +868,7 @@ router.get(
 router.post(
   '/:id/lines',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -926,7 +944,7 @@ router.post(
 router.patch(
   '/:id/lines/:lineId',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id, lineId } = req.params;
@@ -1015,7 +1033,7 @@ router.patch(
 router.delete(
   '/:id/lines/:lineId',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id, lineId } = req.params;
@@ -1085,7 +1103,7 @@ router.delete(
 router.post(
   '/:id/issue',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -1143,7 +1161,7 @@ router.post(
 router.patch(
   '/:id/status',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -1151,21 +1169,29 @@ router.patch(
 
     const { client, release } = await getUserClient(req);
     try {
+      await client.query('BEGIN');
+
       const scopeRes = await client.query(
         `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
         [id]
       );
       if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
       }
       const scope = scopeRes.rows[0];
 
       const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
       if (!ok) {
+        await client.query('ROLLBACK');
         return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
       }
 
       const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      if (invRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
       const inv = invRes.rows[0];
 
       let targetStatus = status || inv.status;
@@ -1176,6 +1202,7 @@ router.patch(
       // Check #1 FIRST: targetStatus === 'VOID' && Number(inv.paid_amount) > 0 -> 409 ALREADY_PAID
       // Preserves fullWebsiteWhiteBlackBox.test.js:1403-1408!
       if (targetStatus === 'VOID' && Number(inv.paid_amount || 0) > 0) {
+        await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'ALREADY_PAID',
           message: 'Không thể hủy hóa đơn đã phát sinh thanh toán.',
@@ -1185,14 +1212,13 @@ router.patch(
       // Check #2: inv.status !== 'DRAFT' with adjustment_amount or VOID -> 409 REQUIRES_FOUR_EYES_ADJUSTMENT
       if (inv.status !== 'DRAFT') {
         if (adjustment_amount !== undefined || targetStatus === 'VOID') {
+          await client.query('ROLLBACK');
           return res.status(409).json({
             code: 'REQUIRES_FOUR_EYES_ADJUSTMENT',
             message: 'Hóa đơn đã phát hành yêu cầu lập đề nghị điều chỉnh qua quy trình duyệt 4 mắt.',
           });
         }
       }
-
-      await client.query('BEGIN');
 
       // If DRAFT status:
       if (inv.status === 'DRAFT') {

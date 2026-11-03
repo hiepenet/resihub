@@ -143,7 +143,7 @@ router.get(
 router.post(
   '/',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { invoice_id, receivable_id, amount, method = 'BANK_TRANSFER', reference_code, note, proof_image } = req.body;
@@ -333,7 +333,7 @@ router.post(
 router.patch(
   '/:id/confirm',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
@@ -439,7 +439,7 @@ router.patch(
 router.patch(
   '/:id/reject',
   authenticateToken,
-  requireRole(['SYS_ADMIN', 'MANAGER']),
+  requireRole(['MANAGER']),
   idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;

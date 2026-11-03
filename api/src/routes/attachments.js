@@ -3,7 +3,7 @@
 import express from 'express';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { pool, adminPool } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import {
   getUserRoleCodes,
@@ -24,7 +24,13 @@ router.get('/:id/view', authenticateToken, async (req, res) => {
     }
 
     // Query lại qua pool (RLS) để đảm bảo chính sách RLS đồng thuận
-    const attRes = await pool.query('SELECT * FROM attachment WHERE id = $1', [id]);
+    const { client: userClient, release: releaseUserClient } = await getUserClient(req);
+    let attRes;
+    try {
+      attRes = await userClient.query('SELECT * FROM attachment WHERE id = $1', [id]);
+    } finally {
+      await releaseUserClient();
+    }
     if (attRes.rows.length === 0) {
       await logAccessDenied(req, 'attachment', id, 'RLS blocked attachment view');
       return res.status(403).json({ code: 'FORBIDDEN_ATTACHMENT', message: 'Bạn không có quyền xem tệp đính kèm này.' });

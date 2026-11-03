@@ -47,11 +47,6 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const API_BASE = `http://127.0.0.1:${server.address().port}`;
 
-  t.after(async () => {
-    await new Promise((resolve) => server.close(resolve));
-    await adminPool.end();
-  });
-
   async function apiFetch(path, token, options = {}) {
     const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -129,28 +124,32 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
   };
 
   t.after(async () => {
-    if (cleanups.adjustments.length > 0) {
-      await adminPool.query(`DELETE FROM invoice_adjustment WHERE id = ANY($1)`, [cleanups.adjustments]).catch(() => {});
-    }
-    if (cleanups.payments.length > 0) {
-      await adminPool.query(`DELETE FROM payment WHERE id = ANY($1)`, [cleanups.payments]).catch(() => {});
-    }
     if (cleanups.credits.length > 0) {
       await adminPool.query(`DELETE FROM credit_balance WHERE id = ANY($1)`, [cleanups.credits]).catch(() => {});
     }
     if (cleanups.receivables.length > 0) {
       await adminPool.query(`DELETE FROM receivable WHERE id = ANY($1)`, [cleanups.receivables]).catch(() => {});
     }
+    if (cleanups.payments.length > 0) {
+      await adminPool.query(`DELETE FROM payment WHERE id = ANY($1)`, [cleanups.payments]).catch(() => {});
+    }
+    if (cleanups.adjustments.length > 0) {
+      await adminPool.query(`DELETE FROM invoice_adjustment WHERE id = ANY($1)`, [cleanups.adjustments]).catch(() => {});
+    }
     if (cleanups.invoices.length > 0) {
       await adminPool.query(`DELETE FROM invoice_line WHERE invoice_id = ANY($1)`, [cleanups.invoices]).catch(() => {});
       await adminPool.query(`DELETE FROM invoice WHERE id = ANY($1)`, [cleanups.invoices]).catch(() => {});
     }
     if (cleanups.contracts.length > 0) {
+      await adminPool.query(`DELETE FROM contract_service_price WHERE contract_id = ANY($1)`, [cleanups.contracts]).catch(() => {});
       await adminPool.query(`DELETE FROM contract WHERE id = ANY($1)`, [cleanups.contracts]).catch(() => {});
     }
     if (cleanups.apartments.length > 0) {
+      await adminPool.query(`DELETE FROM meter_reading WHERE apartment_id = ANY($1)`, [cleanups.apartments]).catch(() => {});
       await adminPool.query(`DELETE FROM apartment WHERE id = ANY($1)`, [cleanups.apartments]).catch(() => {});
     }
+    await new Promise((resolve) => server.close(resolve));
+    await adminPool.end().catch(() => {});
   });
 
   // =========================================================================
@@ -542,10 +541,83 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
     assert.equal(cbCheck.rows.length, 1, 'Must mint credit_balance row on standalone receivable overpayment');
     assert.equal(cbCheck.rows[0].reason_type, 'OVERPAYMENT');
     assert.equal(Number(cbCheck.rows[0].amount), 100000);
-    assert.equal(cbCheck.rows[0].status, 'AVAILABLE');
+    assert.equal(cbCheck[0]?.status || cbCheck.rows[0].status, 'AVAILABLE');
     cleanups.credits.push(cbCheck.rows[0].id);
 
-    // 3b. PATCH /api/v1/payments/:id/reject writes REJECT_PAYMENT audit_log
+    // 3b. Order B confirmation overpayment commutativity:
+    // Create an invoice with total_amount = 500,000, paid_amount = 0
+    const orderBPeriod = `2038-${String(1 + (Number(suffix.slice(-2)) % 12)).padStart(2, '0')}`;
+    const oldInvRes = await adminPool.query('SELECT id FROM invoice WHERE contract_id = $1 AND period = $2', [c.id, orderBPeriod]);
+    if (oldInvRes.rows.length > 0) {
+      const oldInvId = oldInvRes.rows[0].id;
+      await adminPool.query('DELETE FROM credit_balance WHERE source_payment_id IN (SELECT id FROM payment WHERE invoice_id = $1)', [oldInvId]);
+      await adminPool.query('DELETE FROM payment WHERE invoice_id = $1', [oldInvId]);
+      await adminPool.query('DELETE FROM invoice_line WHERE invoice_id = $1', [oldInvId]);
+      await adminPool.query('DELETE FROM invoice WHERE id = $1', [oldInvId]);
+    }
+    const invOrderBRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, due_date, subtotal_amount, adjustment_amount,
+         total_amount, paid_amount, status
+       ) VALUES (
+         $1, $2, (SELECT apartment_id FROM contract WHERE id = $3), $3, $4,
+         $5, $6, CURRENT_DATE + 5, 500000, 0, 500000, 0, 'ISSUED'
+       ) RETURNING id`,
+      [orgId, vopAId, c.id, c.primary_tenant_id, `INV-ORDERB-${suffix}`, orderBPeriod]
+    );
+    const invOrderBId = invOrderBRes.rows[0].id;
+    cleanups.invoices.push(invOrderBId);
+
+    // Create a pending payment of 600,000 targeting invOrderBId (excess 100,000)
+    const pendingOrderBPay = await adminPool.query(
+      `INSERT INTO payment (
+         org_id, building_id, contract_id, tenant_id, invoice_id, payment_code,
+         amount, method, status
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6,
+         600000, 'BANK_TRANSFER', 'PENDING_CONFIRMATION'
+       ) RETURNING id`,
+      [orgId, vopAId, c.id, c.primary_tenant_id, invOrderBId, `PAY-ORDERB-${suffix}`]
+    );
+    const orderBPayId = pendingOrderBPay.rows[0].id;
+    cleanups.payments.push(orderBPayId);
+
+    // Manager confirms payment via PATCH /api/v1/payments/:id/confirm
+    const confirmRes = await apiFetch(`/api/v1/payments/${orderBPayId}/confirm`, mgrVopA.token, {
+      method: 'PATCH',
+      headers: { 'Idempotency-Key': `idem-confirm-orderb-${suffix}` },
+    });
+    assert.equal(confirmRes.status, 200, `Confirm payment failed: ${JSON.stringify(confirmRes.body)}`);
+
+    // Verify invoice paid_amount capped at total_amount (500,000)
+    const invOrderBAfter = await adminPool.query('SELECT paid_amount, total_amount, status FROM invoice WHERE id = $1', [invOrderBId]);
+    assert.equal(Number(invOrderBAfter.rows[0].paid_amount), 500000);
+    assert.equal(invOrderBAfter.rows[0].status, 'PAID');
+
+    // Verify overpayment 100,000 minted in credit_balance linked to source_payment_id
+    const cbOrderB = await adminPool.query(
+      'SELECT * FROM credit_balance WHERE source_payment_id = $1',
+      [orderBPayId]
+    );
+    assert.equal(cbOrderB.rows.length, 1, 'Order B confirm must mint credit_balance for excess');
+    assert.equal(cbOrderB.rows[0].reason_type, 'OVERPAYMENT');
+    assert.equal(Number(cbOrderB.rows[0].amount), 100000);
+    assert.equal(cbOrderB.rows[0].status, 'AVAILABLE');
+    cleanups.credits.push(cbOrderB.rows[0].id);
+
+    // Idempotent re-confirm must not duplicate credit_balance
+    await apiFetch(`/api/v1/payments/${orderBPayId}/confirm`, mgrVopA.token, {
+      method: 'PATCH',
+      headers: { 'Idempotency-Key': `idem-confirm-orderb-2-${suffix}` },
+    });
+    const cbOrderB2 = await adminPool.query(
+      'SELECT COUNT(*)::int AS cnt FROM credit_balance WHERE source_payment_id = $1',
+      [orderBPayId]
+    );
+    assert.equal(cbOrderB2.rows[0].cnt, 1, 'Idempotent confirm must not duplicate credit balance');
+
+    // 3c. PATCH /api/v1/payments/:id/reject writes REJECT_PAYMENT audit_log
     const pendingPayRes = await adminPool.query(
       `INSERT INTO payment (
          org_id, building_id, contract_id, tenant_id, payment_code,
@@ -596,7 +668,9 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
     // 4a. Setup available credit balance for refund
     const contractRes = await adminPool.query(
       `SELECT c.id, c.building_id, c.primary_tenant_id FROM contract c
-       WHERE c.building_id = $1 AND c.status = 'ACTIVE' LIMIT 1`,
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       JOIN person p ON p.id = t.person_id
+       WHERE c.building_id = $1 AND c.status = 'ACTIVE' AND p.email = 'tenant1@resihub.vn' LIMIT 1`,
       [vopAId]
     );
     const c = contractRes.rows[0];
@@ -650,6 +724,15 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
     // MANAGER assigned to VOP-A should be allowed (200)
     const mgrAttRes = await apiFetch(`/api/v1/attachments/${attId}/view`, mgrVopA.token);
     assert.equal(mgrAttRes.status, 200, 'Assigned MANAGER must be able to view credit_balance attachment');
+
+    // RESIDENT on the contract should be allowed (200)
+    const resAttRes = await apiFetch(`/api/v1/attachments/${attId}/view`, resident1.token);
+    assert.equal(resAttRes.status, 200, 'RESIDENT on contract must be able to view credit_balance attachment');
+
+    // Unassigned MANAGER (manager.vop.b@resihub.vn) must be blocked (403)
+    const mgrVopB = await loginEmail('manager.vop.b@resihub.vn', 'Demo@123456');
+    const unassignedAttRes = await apiFetch(`/api/v1/attachments/${attId}/view`, mgrVopB.token);
+    assert.equal(unassignedAttRes.status, 403, 'Unassigned MANAGER must be blocked from viewing attachment');
 
     // 4d. Split / Reject merge-back via POST /api/v1/payments/credits/:id/refund/reject
     const rejectRefundRes = await apiFetch(`/api/v1/payments/credits/${childCreditId}/refund/reject`, ownerVop.token, {
