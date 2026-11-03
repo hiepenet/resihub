@@ -337,6 +337,7 @@ Tại màn hình đăng nhập, hệ thống cung cấp các nút bấm nhanh:
 - `POST /api/v1/buildings/:id/floors` — Thêm tầng hầm, trệt, lầu (Chặn trùng level).
 - `GET /api/v1/apartments` — Danh sách căn hộ có lọc theo tòa nhà và trạng thái (`AVAILABLE`, `OCCUPIED`, `RESERVED`).
 - `POST /api/v1/apartments` — Tạo căn hộ mới với giá thuê định dạng BigInt.
+- `POST /api/v1/apartments/bulk` — Tạo hàng loạt căn hộ theo mẫu tầng trên 1..n tầng; gửi `dry_run: true` để xem trước mã căn và danh sách trùng.
 - `PATCH /api/v1/apartments/:id` — Cập nhật thông tin căn hộ, giá thuê, tiện nghi.
 
 #### Cọc & Hợp đồng (`/api/v1/reservations`, `/api/v1/contracts`, `/api/v1/deposits`)
