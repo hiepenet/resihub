@@ -578,12 +578,10 @@ serviceSubscriptionsRouter.patch(
             nextProrata = 0;
           } else {
             nextEnd = targetEnd;
-            const [termCspRes, termCatRes] = await Promise.all([
-              sub.contract_id
-                ? client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
-                : Promise.resolve({ rows: [] }),
-              client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [orgId]),
-            ]);
+            const termCspRes = sub.contract_id
+              ? await client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
+              : { rows: [] };
+            const termCatRes = await client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [orgId]);
             nextProrata = computeSubscriptionPeriodCharge({
               subscription: {
                 ...sub,

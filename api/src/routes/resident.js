@@ -1524,7 +1524,18 @@ router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), asyn
         prorata = 0;
       } else {
         effEnd = reqEndYmd || todayVnYmd;
-        prorata = computeProrata(sub.unit_price, sub.quantity, effEnd, 'cancel');
+        const cancelSvcRes = await client.query('SELECT code AS service_code, name AS service_name, category AS service_category, billing_type FROM service_catalog WHERE id = $1', [sub.service_id]);
+        const cancelCspRes = sub.contract_id
+          ? await client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
+          : { rows: [] };
+        const cancelCatRes = await client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [sub.org_id]);
+        prorata = computeSubscriptionPeriodCharge({
+          subscription: { ...sub, ...(cancelSvcRes.rows[0] || {}), end_date: effEnd, status: 'CANCELLATION_PENDING' },
+          periodYm: effEnd.slice(0, 7),
+          contractBuildingId: sub.building_id,
+          contractServicePrices: cancelCspRes.rows,
+          catalogItems: cancelCatRes.rows,
+        }).amount;
       }
     }
 

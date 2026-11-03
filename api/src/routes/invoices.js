@@ -142,18 +142,16 @@ export async function generateInvoicesCore(
   const { monthEnd } = getMonthBoundsYmd(targetPeriod);
   const effectiveIssueDateYmd = issueDateYmd || todayVietnamYmd();
 
-  const [catalogRes, settingRes] = await Promise.all([
-    client.query(
-      `SELECT id, building_id, code, category, unit_price, is_active
-       FROM service_catalog
-       WHERE org_id = $1 AND is_active = TRUE`,
-      [orgId]
-    ),
-    client.query(
-      `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
-      [orgId]
-    ),
-  ]);
+  const catalogRes = await client.query(
+    `SELECT id, building_id, code, category, unit_price, is_active
+     FROM service_catalog
+     WHERE org_id = $1 AND is_active = TRUE`,
+    [orgId]
+  );
+  const settingRes = await client.query(
+    `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
+    [orgId]
+  );
   const catalogItems = catalogRes.rows;
   const billingConfig = settingRes.rows[0]?.value || {};
   const defaultDueOffsetDays = Number.isFinite(Number(billingConfig.due_date_offset_days))
