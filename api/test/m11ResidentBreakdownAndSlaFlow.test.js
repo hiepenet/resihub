@@ -637,4 +637,45 @@ test('M11 Resident Breakdown Lifecycle, 24h Duplicate Check, Confidentiality & S
     );
     assert.ok(deniedAudit.rows.length > 0, 'Must log ACCESS_DENIED on cross-building service_request write');
   });
+
+  await t.test('6. Legacy /service-requests/:id/rating writes audit_log + manager notification & resolution_images use unified service_request folder', async () => {
+    const rateRes = await apiFetch(`/api/v1/service-requests/${primarySrId}/rating`, primaryRes.token, {
+      method: 'POST',
+      body: JSON.stringify({ rating: 5, rating_note: 'Xử lý triệt để, rất hài lòng' }),
+    });
+    assert.equal(rateRes.status, 200, `Rating failed: ${JSON.stringify(rateRes.body)}`);
+    assert.equal(rateRes.body.data.status, 'CLOSED');
+    assert.equal(rateRes.body.data.internal_note, undefined, 'internal_note must not leak on legacy rating');
+
+    const rateAudit = await localAdminPool.query(
+      `SELECT id FROM audit_log
+       WHERE action = 'RATE_SERVICE_REQUEST' AND entity = 'service_request' AND entity_id = $1`,
+      [primarySrId]
+    );
+    assert.equal(rateAudit.rows.length, 1, 'Legacy /service-requests/:id/rating must write RATE_SERVICE_REQUEST audit_log');
+
+    const rateNotifs = await localAdminPool.query(
+      `SELECT user_id FROM notification
+       WHERE type = 'SERVICE_REQUEST_RATED' AND (payload->>'service_request_id') = $1`,
+      [primarySrId]
+    );
+    assert.equal(
+      rateNotifs.rows.some((r) => r.user_id === mgrVopARow.id),
+      true,
+      'Legacy /service-requests/:id/rating must notify building MANAGER'
+    );
+
+    const attRows = await localAdminPool.query(
+      `SELECT storage_path FROM attachment WHERE owner_entity = 'service_request' AND owner_id = $1`,
+      [primarySrId]
+    );
+    assert.ok(attRows.rows.length >= 1, 'Expected at least 1 attachment on primarySrId');
+    for (const row of attRows.rows) {
+      assert.equal(
+        row.storage_path.startsWith('uploads/service_request/'),
+        true,
+        `Expected unified uploads/service_request/ folder, got: ${row.storage_path}`
+      );
+    }
+  });
 });

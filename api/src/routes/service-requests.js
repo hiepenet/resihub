@@ -289,7 +289,7 @@ router.post(
         if (typeof img === 'string' && img.startsWith('data:image/')) {
           const uploaded = await saveBase64Image({
             imageBase64: img,
-            folder: 'service-requests',
+            folder: 'service_request',
             entityId: created.id,
             entity: 'service_request',
             ownerId: created.id,
@@ -591,7 +591,7 @@ router.patch(
           if (typeof img === 'string' && img.startsWith('data:image/')) {
             const uploaded = await saveBase64Image({
               imageBase64: img,
-              folder: 'service-requests',
+              folder: 'service_request',
               entityId: id,
               entity: 'service_request',
               ownerId: id,
@@ -739,6 +739,7 @@ router.post('/:id/rating', authenticateToken, idempotencyGuard(), async (req, re
   }
 
   const { client, release } = await getUserClient(req);
+  let inTx = false;
   try {
     const scopeRes = await client.query(
       `SELECT * FROM fn_get_ops_resource_scope('service_request', $1)`,
@@ -748,7 +749,13 @@ router.post('/:id/rating', authenticateToken, idempotencyGuard(), async (req, re
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu.' });
     }
 
-    const existingRes = await client.query(`SELECT * FROM service_request WHERE id = $1`, [id]);
+    const existingRes = await client.query(
+      `SELECT sr.*, a.code AS apartment_code
+       FROM service_request sr
+       JOIN apartment a ON a.id = sr.apartment_id
+       WHERE sr.id = $1`,
+      [id]
+    );
     if (existingRes.rows.length === 0) {
       await logAccessDenied(req, 'service_request', id, 'Unauthorized rating attempt');
       return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền đánh giá yêu cầu này.' });
@@ -762,6 +769,9 @@ router.post('/:id/rating', authenticateToken, idempotencyGuard(), async (req, re
       });
     }
 
+    await client.query('BEGIN');
+    inTx = true;
+
     const updated = await client.query(
       `UPDATE service_request
        SET rating = $1,
@@ -773,9 +783,39 @@ router.post('/:id/rating', authenticateToken, idempotencyGuard(), async (req, re
       [numRating, rating_note?.trim() || null, id]
     );
 
-    const { internal_note: _strip, ...safeData } = updated.rows[0];
+    const { internal_note: _stripBefore, apartment_code: _aptCode, ...safeBefore } = sr;
+    const { internal_note: _stripAfter, ...safeData } = updated.rows[0];
+
+    await client.query(
+      `SELECT fn_notify_service_request_managers($1, $2, $3, $4, $5::jsonb)`,
+      [
+        id,
+        'SERVICE_REQUEST_RATED',
+        `Cư dân căn ${sr.apartment_code} đánh giá ${numRating}/5 sao (${sr.tracking_code})`,
+        rating_note?.trim()
+          ? `Nhận xét: ${rating_note.trim()}`
+          : `Đã nghiệm thu đóng phiếu ${sr.tracking_code}.`,
+        JSON.stringify({
+          rating: numRating,
+          apartment_code: sr.apartment_code,
+        }),
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'RATE_SERVICE_REQUEST', 'service_request', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(safeBefore), JSON.stringify(safeData)]
+    );
+
+    await client.query('COMMIT');
+    inTx = false;
+
     res.json({ message: 'Cảm ơn bạn đã gửi đánh giá!', data: safeData });
   } catch (err) {
+    if (inTx) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
     console.error('[ServiceRequest Rating Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lưu đánh giá.' });
   } finally {
