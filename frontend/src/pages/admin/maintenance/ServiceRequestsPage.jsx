@@ -52,7 +52,8 @@ import { extractErrorMessage } from '../../../utils/validation';
 import {
   buildRoomMaintenanceZaloText,
   computeSlaBadgeMeta,
-  copyTextToClipboard,
+  parseZaloBoldSegments,
+  copyZaloMessageToClipboard,
 } from '../../../utils/zaloFormat';
 
 const OPEN_STATUSES = ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'];
@@ -432,11 +433,11 @@ export function ServiceRequestsPage() {
   const handleCopyRoomZalo = async () => {
     if (!detail) return;
     const text = buildRoomMaintenanceZaloText(detail);
-    const ok = await copyTextToClipboard(text);
+    const ok = await copyZaloMessageToClipboard(text);
     if (ok) {
       setCopiedRoomZalo(true);
       setTimeout(() => setCopiedRoomZalo(false), 2500);
-      toast.success('Đã sao chép tin nhắn cập nhật Zalo phòng vào bộ nhớ tạm!');
+      toast.success('Đã sao chép tin nhắn cập nhật Zalo phòng (kèm chữ in đậm cho Zalo PC/Web)!');
     } else {
       toast.error('Không thể truy cập bộ nhớ tạm để sao chép.');
     }
@@ -1086,6 +1087,21 @@ export function ServiceRequestsPage() {
                   Nhóm liên kết: <strong>{detail.apartment_zalo_group.name}</strong>
                 </p>
               ) : null}
+
+              <div className="p-2.5 rounded-lg bg-white/90 border border-sky-200/80 text-xs text-slate-700 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto">
+                {parseZaloBoldSegments(buildRoomMaintenanceZaloText(detail)).map((seg, idx) =>
+                  seg.bold ? (
+                    <strong key={idx} className="font-bold text-slate-950">
+                      {seg.text}
+                    </strong>
+                  ) : (
+                    <span key={idx}>{seg.text}</span>
+                  )
+                )}
+              </div>
+              <p className="text-[11px] text-sky-700">
+                Mẹo trên Zalo PC / Zalo Web: nhấn <strong>Ctrl+V</strong> (hoặc chuột phải chọn <strong>Dán giữ định dạng</strong>) để giữ nguyên chữ in đậm.
+              </p>
             </div>
 
             {/* Thông tin chung & SLA */}

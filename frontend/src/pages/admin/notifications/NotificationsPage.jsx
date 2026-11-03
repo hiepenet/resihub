@@ -41,7 +41,8 @@ import {
   ZALO_QUICK_TEMPLATES,
   buildZaloPreviewText,
   isValidZaloGroupUrl,
-  copyTextToClipboard,
+  parseZaloBoldSegments,
+  copyZaloMessageToClipboard,
 } from '../../../utils/zaloFormat';
 
 const NOTIFICATION_TYPES = {
@@ -523,11 +524,11 @@ export function NotificationsPage() {
 
   const handleCopyZaloContent = async () => {
     if (!zaloCopyModal?.zalo_content) return;
-    const ok = await copyTextToClipboard(zaloCopyModal.zalo_content);
+    const ok = await copyZaloMessageToClipboard(zaloCopyModal.zalo_content);
     if (ok) {
       setCopiedZaloBody(true);
       setTimeout(() => setCopiedZaloBody(false), 2500);
-      toast.success('Đã sao chép nội dung chuẩn Zalo vào bộ nhớ tạm!');
+      toast.success('Đã sao chép nội dung chuẩn Zalo (kèm chữ in đậm cho Zalo PC/Web)!');
     } else {
       toast.error('Không thể sao chép tự động, vui lòng bôi đen văn bản để sao chép.');
     }
@@ -929,6 +930,22 @@ export function NotificationsPage() {
                       setForm((s) => ({ ...s, zalo_content: e.target.value }));
                     }}
                   />
+                  <p className="text-[11px] text-slate-500">
+                    Mẹo: Bọc <code className="px-1 py-0.5 rounded bg-slate-200/80 text-slate-700">**nội dung**</code> quanh các thông tin quan trọng để tự động <strong>in đậm</strong> khi dán sang Zalo PC/Web.
+                  </p>
+                  {form.zalo_content ? (
+                    <div className="p-2.5 rounded-lg bg-white border border-slate-200/90 text-xs text-slate-700 whitespace-pre-wrap leading-relaxed max-h-44 overflow-y-auto">
+                      {parseZaloBoldSegments(form.zalo_content).map((seg, idx) =>
+                        seg.bold ? (
+                          <strong key={idx} className="font-bold text-slate-950">
+                            {seg.text}
+                          </strong>
+                        ) : (
+                          <span key={idx}>{seg.text}</span>
+                        )
+                      )}
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Hẹn giờ gửi */}
@@ -1443,9 +1460,20 @@ export function NotificationsPage() {
               <p className="text-xs font-semibold text-slate-700">
                 Nội dung đã định dạng sẵn cho nhóm Zalo
               </p>
-              <pre className="p-3.5 rounded-xl bg-slate-900 text-slate-100 text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto">
-                {zaloCopyModal.zalo_content}
-              </pre>
+              <div className="p-3.5 rounded-xl bg-slate-900 text-slate-200 text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto">
+                {parseZaloBoldSegments(zaloCopyModal.zalo_content).map((seg, idx) =>
+                  seg.bold ? (
+                    <strong key={idx} className="font-bold text-white">
+                      {seg.text}
+                    </strong>
+                  ) : (
+                    <span key={idx}>{seg.text}</span>
+                  )
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Mẹo trên Zalo PC / Zalo Web: nhấn <strong>Ctrl+V</strong> (hoặc chuột phải chọn <strong>Dán giữ định dạng</strong>) để giữ nguyên các mục in đậm.
+              </p>
             </div>
 
             <div className="space-y-2">

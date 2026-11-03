@@ -5,7 +5,7 @@ export const ZALO_ANNOUNCEMENT_TEMPLATES = [
     label: 'Cắt điện / nước tạm thời',
     defaultTitle: 'Thông báo tạm ngừng cấp điện/nước để bảo dưỡng kỹ thuật',
     bodyTemplate:
-      'Ban Quản Lý xin thông báo lịch tạm ngừng cung cấp điện/nước tại khu vực từ [GIỜ BẮT ĐẦU] đến [GIỜ KẾT THÚC] ngày [NGÀY/THÁNG] để bảo trì hệ thống. Mong Quý Cư dân chủ động sắp xếp sinh hoạt.',
+      'Ban Quản Lý xin thông báo lịch **tạm ngừng cung cấp điện/nước** tại khu vực từ **[GIỜ BẮT ĐẦU]** đến **[GIỜ KẾT THÚC]** ngày **[NGÀY/THÁNG]** để bảo trì hệ thống. Mong Quý Cư dân chủ động sắp xếp sinh hoạt.',
   },
   {
     key: 'MAINTENANCE_NOTICE',
@@ -13,7 +13,7 @@ export const ZALO_ANNOUNCEMENT_TEMPLATES = [
     label: 'Bảo trì thang máy / PCCC định kỳ',
     defaultTitle: 'Thông báo lịch kiểm tra bảo trì hệ thống kỹ thuật & PCCC',
     bodyTemplate:
-      'Đội kỹ thuật tòa nhà sẽ tiến hành kiểm tra định kỳ hệ thống thang máy và chuông báo cháy vào khung giờ [KHUNG GIỜ] ngày [NGÀY/THÁNG]. Trong thời gian thử tải có thể phát sinh tiếng chuông ngắn, mong Quý Cư dân thông cảm.',
+      'Đội kỹ thuật tòa nhà sẽ tiến hành **kiểm tra định kỳ hệ thống thang máy và chuông báo cháy** vào khung giờ **[KHUNG GIỜ]** ngày **[NGÀY/THÁNG]**. Trong thời gian thử tải có thể phát sinh tiếng chuông ngắn, mong Quý Cư dân thông cảm.',
   },
   {
     key: 'HOUSE_RULES',
@@ -21,7 +21,7 @@ export const ZALO_ANNOUNCEMENT_TEMPLATES = [
     label: 'Nhắc nhở nội quy chung',
     defaultTitle: 'Nhắc nhở giữ gìn vệ sinh, an ninh & trật tự khu vực chung',
     bodyTemplate:
-      'Nhằm đảm bảo môi trường sống văn minh, an toàn cho toàn tòa nhà, BQL đề nghị Quý Cư dân để xe đúng vị trí quy định, phân loại rác đúng giờ và giữ yên tĩnh sau 22:00.',
+      'Nhằm đảm bảo môi trường sống văn minh, an toàn cho toàn tòa nhà, BQL đề nghị Quý Cư dân **để xe đúng vị trí quy định**, **phân loại rác đúng giờ** và **giữ yên tĩnh sau 22:00**.',
   },
   {
     key: 'SECURITY_ALERT',
@@ -29,7 +29,7 @@ export const ZALO_ANNOUNCEMENT_TEMPLATES = [
     label: 'Cảnh báo an ninh / an toàn',
     defaultTitle: 'Lưu ý tăng cường cảnh giác an ninh & an toàn phòng cháy',
     bodyTemplate:
-      'BQL đề nghị Quý Cư dân khóa cửa cẩn thận khi ra khỏi phòng, tắt các thiết bị điện công suất lớn và không cho người lạ đi cùng vào khu vực kiểm soát thẻ từ.',
+      'BQL đề nghị Quý Cư dân **khóa cửa cẩn thận** khi ra khỏi phòng, **tắt các thiết bị điện công suất lớn** và **không cho người lạ đi cùng** vào khu vực kiểm soát thẻ từ.',
   },
   {
     key: 'GENERAL_ANNOUNCEMENT',
@@ -37,7 +37,7 @@ export const ZALO_ANNOUNCEMENT_TEMPLATES = [
     label: 'Thông báo chung BQL',
     defaultTitle: 'Thông báo từ Ban Quản Lý tòa nhà',
     bodyTemplate:
-      'Ban Quản Lý trân trọng thông báo đến Quý Cư dân nội dung sau: [NỘI DUNG CHI TIẾT]. Mọi thắc mắc vui lòng liên hệ BQL để được hỗ trợ kịp thời.',
+      'Ban Quản Lý trân trọng thông báo đến Quý Cư dân nội dung sau: **[NỘI DUNG CHI TIẾT]**. Mọi thắc mắc vui lòng liên hệ BQL để được hỗ trợ kịp thời.',
   },
 ];
 
@@ -75,6 +75,7 @@ const CATEGORY_VI = {
   ELECTRICAL: 'Điện / Chiếu sáng',
   APPLIANCE: 'Thiết bị / Nội thất',
   HVAC: 'Điều hòa / Thông gió',
+  FURNITURE: 'Nội thất căn hộ',
   STRUCTURAL: 'Kết cấu / Cửa / Tường',
   INTERNET: 'Internet / Mạng',
   SECURITY: 'Khóa từ / An ninh',
@@ -134,6 +135,7 @@ export function validateZaloInviteLink(rawUrl) {
 
 /**
  * Deterministic Vietnamese formatter for pasting announcements into Building/Room Zalo groups (FR-069).
+ * Wraps key operational fields in **...** for Rich Text bold copy on Zalo PC/Web.
  */
 export function formatAnnouncementForZalo({
   type = 'ANNOUNCEMENT',
@@ -152,21 +154,21 @@ export function formatAnnouncementForZalo({
   const typeKey = String(type || 'ANNOUNCEMENT').trim().toUpperCase();
   const typeBadge = TYPE_HEADERS[typeKey] || 'THÔNG BÁO BQL';
 
-  const header = `[THÔNG BÁO BQL TÒA ${codeOrName}]`;
+  const header = `**[THÔNG BÁO BQL TÒA ${codeOrName}]**`;
 
-  let greeting = `Kính gửi Quý Cư dân Tòa ${buildingName || codeOrName},`;
+  let greeting = `Kính gửi Quý Cư dân **Tòa ${buildingName || codeOrName}**,`;
   if (scope === 'APARTMENT' && apartmentCode) {
-    greeting = `Kính gửi Anh/Chị Cư dân Phòng ${apartmentCode}${buildingCode ? ` (Tòa ${buildingCode})` : ''},`;
+    greeting = `Kính gửi Anh/Chị Cư dân **Phòng ${apartmentCode}**${buildingCode ? ` (**Tòa ${buildingCode}**)` : ''},`;
   } else if (scope === 'FLOOR' && floorName) {
-    greeting = `Kính gửi Quý Cư dân ${floorName}${buildingCode ? ` — Tòa ${buildingCode}` : ''},`;
+    greeting = `Kính gửi Quý Cư dân **${floorName}**${buildingCode ? ` — **Tòa ${buildingCode}**` : ''},`;
   }
 
   const lines = [header];
   if (typeKey !== 'ANNOUNCEMENT') {
-    lines.push(`🔔 Phân loại: ${typeBadge}`);
+    lines.push(`🔔 Phân loại: **${typeBadge}**`);
   }
   if (title) {
-    lines.push(`📌 ${String(title).trim()}`);
+    lines.push(`📌 **${String(title).trim()}**`);
   }
   lines.push('');
   lines.push(greeting);
@@ -178,18 +180,19 @@ export function formatAnnouncementForZalo({
   const hotline = resolveHotline(contactConfig);
   lines.push('');
   if (tsText) {
-    lines.push(`🕒 Thời gian phát hành: ${tsText}`);
+    lines.push(`🕒 Thời gian phát hành: **${tsText}**`);
   }
   if (hotline) {
-    lines.push(`📞 Hotline hỗ trợ kỹ thuật/BQL: ${hotline}`);
+    lines.push(`📞 Hotline hỗ trợ kỹ thuật/BQL: **${hotline}**`);
   }
-  lines.push(`Trân trọng, Ban Quản Lý Tòa ${codeOrName}.`);
+  lines.push(`Trân trọng, **Ban Quản Lý Tòa ${codeOrName}**.`);
 
   return lines.join('\n');
 }
 
 /**
  * Format a single apartment's service request status/resolution for pasting into the room's Zalo group.
+ * Wraps key operational fields in **...** for Rich Text bold copy on Zalo PC/Web.
  */
 export function formatServiceRequestForRoomZalo({
   trackingCode = '',
@@ -199,6 +202,7 @@ export function formatServiceRequestForRoomZalo({
   apartmentCode = '',
   buildingCode = '',
   preferredSlot = '',
+  holdReason = '',
   nextAppointmentAt = null,
   resolutionNote = '',
   assigneeName = '',
@@ -210,31 +214,34 @@ export function formatServiceRequestForRoomZalo({
   const catUpper = String(category || '').trim().toUpperCase();
 
   const lines = [
-    `[CẬP NHẬT KỸ THUẬT — ${roomLabel}${bldgSuffix}]`,
-    `Kính gửi Anh/Chị Cư dân ${roomLabel},`,
-    `• Mã yêu cầu: ${trackingCode || 'Đang cập nhật'}`,
-    `• Hạng mục: ${CATEGORY_VI[catUpper] || category || 'Sửa chữa kỹ thuật'}${title ? ` — ${title}` : ''}`,
-    `• Trạng thái hiện tại: ${SR_STATUS_LABELS[statusUpper] || statusUpper}`,
+    `**[CẬP NHẬT KỸ THUẬT — ${roomLabel}${bldgSuffix}]**`,
+    `Kính gửi Anh/Chị Cư dân **${roomLabel}**,`,
+    `• Mã yêu cầu: **${trackingCode || 'Đang cập nhật'}**`,
+    `• Hạng mục: **${CATEGORY_VI[catUpper] || category || 'Sửa chữa kỹ thuật'}**${title ? ` — ${title}` : ''}`,
+    `• Trạng thái hiện tại: **${SR_STATUS_LABELS[statusUpper] || statusUpper}**`,
   ];
 
   if (assigneeName) {
-    lines.push(`• Nhân sự phụ trách: ${assigneeName}`);
+    lines.push(`• Nhân sự phụ trách: **${assigneeName}**`);
   }
   if (preferredSlot) {
-    lines.push(`• Khung giờ cư dân đăng ký: ${PREFERRED_SLOT_VI[preferredSlot] || preferredSlot}`);
+    lines.push(`• Khung giờ cư dân đăng ký: **${PREFERRED_SLOT_VI[preferredSlot] || preferredSlot}**`);
+  }
+  if (holdReason) {
+    lines.push(`• Lý do tạm hoãn / hẹn lại: **${String(holdReason).trim()}**`);
   }
   const apptText = formatVietnamDateTime(nextAppointmentAt);
   if (apptText) {
-    lines.push(`• Lịch hẹn xử lý tiếp theo: ${apptText}`);
+    lines.push(`• Lịch hẹn xử lý tiếp theo: **${apptText}**`);
   }
   if (resolutionNote) {
-    lines.push(`• Phản hồi từ BQL/Kỹ thuật: ${String(resolutionNote).trim()}`);
+    lines.push(`• Phản hồi từ BQL/Kỹ thuật: **${String(resolutionNote).trim()}**`);
   }
 
   const hotline = resolveHotline(contactConfig);
   lines.push('');
   if (hotline) {
-    lines.push(`📞 Cần hỗ trợ thêm vui lòng liên hệ Hotline BQL: ${hotline}`);
+    lines.push(`📞 Cần hỗ trợ thêm vui lòng liên hệ Hotline BQL: **${hotline}**`);
   }
   lines.push('Vui lòng mở Cổng Cư dân ResiHub để xem hình ảnh chi tiết hoặc nghiệm thu yêu cầu.');
 

@@ -5,7 +5,7 @@ export const ZALO_QUICK_TEMPLATES = [
     label: 'Cắt điện / nước tạm thời',
     defaultTitle: 'Thông báo tạm ngừng cấp điện/nước để bảo dưỡng kỹ thuật',
     bodyTemplate:
-      'Ban Quản Lý xin thông báo lịch tạm ngừng cung cấp điện/nước tại khu vực từ [GIỜ BẮT ĐẦU] đến [GIỜ KẾT THÚC] ngày [NGÀY/THÁNG] để bảo trì hệ thống. Mong Quý Cư dân chủ động sắp xếp sinh hoạt.',
+      'Ban Quản Lý xin thông báo lịch **tạm ngừng cung cấp điện/nước** tại khu vực từ **[GIỜ BẮT ĐẦU]** đến **[GIỜ KẾT THÚC]** ngày **[NGÀY/THÁNG]** để bảo trì hệ thống. Mong Quý Cư dân chủ động sắp xếp sinh hoạt.',
   },
   {
     key: 'MAINTENANCE_NOTICE',
@@ -13,7 +13,7 @@ export const ZALO_QUICK_TEMPLATES = [
     label: 'Bảo trì thang máy / PCCC định kỳ',
     defaultTitle: 'Thông báo lịch kiểm tra bảo trì hệ thống kỹ thuật & PCCC',
     bodyTemplate:
-      'Đội kỹ thuật tòa nhà sẽ tiến hành kiểm tra định kỳ hệ thống thang máy và chuông báo cháy vào khung giờ [KHUNG GIỜ] ngày [NGÀY/THÁNG]. Trong thời gian thử tải có thể phát sinh tiếng chuông ngắn, mong Quý Cư dân thông cảm.',
+      'Đội kỹ thuật tòa nhà sẽ tiến hành **kiểm tra định kỳ hệ thống thang máy và chuông báo cháy** vào khung giờ **[KHUNG GIỜ]** ngày **[NGÀY/THÁNG]**. Trong thời gian thử tải có thể phát sinh tiếng chuông ngắn, mong Quý Cư dân thông cảm.',
   },
   {
     key: 'HOUSE_RULES',
@@ -21,7 +21,7 @@ export const ZALO_QUICK_TEMPLATES = [
     label: 'Nhắc nhở nội quy chung',
     defaultTitle: 'Nhắc nhở giữ gìn vệ sinh, an ninh & trật tự khu vực chung',
     bodyTemplate:
-      'Nhằm đảm bảo môi trường sống văn minh, an toàn cho toàn tòa nhà, BQL đề nghị Quý Cư dân để xe đúng vị trí quy định, phân loại rác đúng giờ và giữ yên tĩnh sau 22:00.',
+      'Nhằm đảm bảo môi trường sống văn minh, an toàn cho toàn tòa nhà, BQL đề nghị Quý Cư dân **để xe đúng vị trí quy định**, **phân loại rác đúng giờ** và **giữ yên tĩnh sau 22:00**.',
   },
   {
     key: 'SECURITY_ALERT',
@@ -29,7 +29,7 @@ export const ZALO_QUICK_TEMPLATES = [
     label: 'Cảnh báo an ninh / an toàn',
     defaultTitle: 'Lưu ý tăng cường cảnh giác an ninh & an toàn phòng cháy',
     bodyTemplate:
-      'BQL đề nghị Quý Cư dân khóa cửa cẩn thận khi ra khỏi phòng, tắt các thiết bị điện công suất lớn và không cho người lạ đi cùng vào khu vực kiểm soát thẻ từ.',
+      'BQL đề nghị Quý Cư dân **khóa cửa cẩn thận** khi ra khỏi phòng, **tắt các thiết bị điện công suất lớn** và **không cho người lạ đi cùng** vào khu vực kiểm soát thẻ từ.',
   },
   {
     key: 'GENERAL_ANNOUNCEMENT',
@@ -37,11 +37,12 @@ export const ZALO_QUICK_TEMPLATES = [
     label: 'Thông báo chung BQL',
     defaultTitle: 'Thông báo từ Ban Quản Lý tòa nhà',
     bodyTemplate:
-      'Ban Quản Lý trân trọng thông báo đến Quý Cư dân nội dung sau: [NỘI DUNG CHI TIẾT]. Mọi thắc mắc vui lòng liên hệ BQL để được hỗ trợ kịp thời.',
+      'Ban Quản Lý trân trọng thông báo đến Quý Cư dân nội dung sau: **[NỘI DUNG CHI TIẾT]**. Mọi thắc mắc vui lòng liên hệ BQL để được hỗ trợ kịp thời.',
   },
 ];
 
 const ZALO_INVITE_REGEX = /^https:\/\/(zalo\.me|chat\.zalo\.me)\/[A-Za-z0-9._/-]+$/;
+const BOLD_MARKER_REGEX = /\*\*([^\n]+?)\*\*/g;
 
 const TYPE_HEADERS = {
   UTILITY_INTERRUPTION: 'THÔNG BÁO ĐIỆN / NƯỚC',
@@ -91,6 +92,68 @@ function formatVnDateTimeShort(value) {
   }).format(dt);
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Parses **bold** markers into safe { text, bold } segments for React rendering & clipboard conversion.
+ * Unclosed ** or single * are preserved verbatim without dropping text.
+ */
+export function parseZaloBoldSegments(text) {
+  const input = String(text ?? '');
+  if (!input) return [];
+
+  const segments = [];
+  let lastIndex = 0;
+
+  for (const match of input.matchAll(BOLD_MARKER_REGEX)) {
+    const matchIndex = match.index ?? 0;
+    if (matchIndex > lastIndex) {
+      segments.push({ text: input.slice(lastIndex, matchIndex), bold: false });
+    }
+    segments.push({ text: match[1], bold: true });
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  if (lastIndex < input.length) {
+    segments.push({ text: input.slice(lastIndex), bold: false });
+  }
+
+  return segments;
+}
+
+/**
+ * Strips matched **...** markers for clean text/plain clipboard fallback.
+ */
+export function stripZaloBoldMarkers(text) {
+  return parseZaloBoldSegments(text)
+    .map((seg) => seg.text)
+    .join('');
+}
+
+/**
+ * Converts a Zalo message with **...** markers into escaped HTML (<b>...</b> + <br>) for Zalo PC/Web.
+ */
+export function zaloTextToHtml(text) {
+  const normalized = String(text ?? '').replace(/\r\n/g, '\n');
+  if (!normalized) return '';
+
+  return normalized
+    .split('\n')
+    .map((line) =>
+      parseZaloBoldSegments(line)
+        .map((seg) => (seg.bold ? `<b>${escapeHtml(seg.text)}</b>` : escapeHtml(seg.text)))
+        .join('')
+    )
+    .join('<br>');
+}
+
 export function isValidZaloGroupUrl(rawUrl) {
   if (rawUrl === undefined || rawUrl === null) return true;
   const trimmed = String(rawUrl).trim();
@@ -116,32 +179,32 @@ export function buildZaloPreviewText({
   const scope = String(targetScope || 'BUILDING').trim().toUpperCase();
   const codeOrName = String(buildingCode || buildingName || 'RESIHUB').trim();
   const typeBadge = TYPE_HEADERS[String(type || 'ANNOUNCEMENT').toUpperCase()] || 'THÔNG BÁO BQL';
-  const header = `[THÔNG BÁO BQL TÒA ${codeOrName}]`;
+  const header = `**[THÔNG BÁO BQL TÒA ${codeOrName}]**`;
 
-  let greeting = `Kính gửi Quý Cư dân Tòa ${buildingName || codeOrName},`;
+  let greeting = `Kính gửi Quý Cư dân **Tòa ${buildingName || codeOrName}**,`;
   if (scope === 'APARTMENT' && apartmentCode) {
-    greeting = `Kính gửi Anh/Chị Cư dân Phòng ${apartmentCode}${buildingCode ? ` (Tòa ${buildingCode})` : ''},`;
+    greeting = `Kính gửi Anh/Chị Cư dân **Phòng ${apartmentCode}**${buildingCode ? ` (**Tòa ${buildingCode}**)` : ''},`;
   } else if (scope === 'FLOOR' && floorName) {
-    greeting = `Kính gửi Quý Cư dân ${floorName} — Tòa ${buildingName || codeOrName},`;
+    greeting = `Kính gửi Quý Cư dân **${floorName}** — **Tòa ${buildingName || codeOrName}**,`;
   }
 
   const lines = [
     header,
-    `📌 Phân loại: ${typeBadge}`,
+    `📌 Phân loại: **${typeBadge}**`,
     greeting,
     '',
-    `🔹 ${String(title || '(Chưa nhập tiêu đề)').trim()}`,
+    `🔹 **${String(title || '(Chưa nhập tiêu đề)').trim()}**`,
     String(body || '(Chưa nhập nội dung)').trim(),
   ];
 
   const tsStr = formatVnDateTimeShort(scheduledOrSentAt);
   if (tsStr) {
-    lines.push('', `🕒 Thời điểm ghi nhận: ${tsStr}`);
+    lines.push('', `🕒 Thời điểm ghi nhận: **${tsStr}**`);
   }
   if (String(hotline || '').trim()) {
-    lines.push(`☎️ Hotline hỗ trợ BQL: ${String(hotline).trim()}`);
+    lines.push(`☎️ Hotline hỗ trợ BQL: **${String(hotline).trim()}**`);
   }
-  lines.push('', 'Trân trọng — Ban Quản Lý vận hành trên ResiHub.');
+  lines.push('', 'Trân trọng — **Ban Quản Lý vận hành trên ResiHub**.');
   return lines.join('\n');
 }
 
@@ -159,23 +222,23 @@ export function buildRoomMaintenanceZaloText(detail = {}) {
   const catLabel = SR_CATEGORY_LABELS[String(detail.category || 'OTHER').toUpperCase()] || detail.category;
 
   const lines = [
-    `[BQL TÒA ${codeLabel} — CẬP NHẬT SỬA CHỮA PHÒNG ${aptLabel}]`,
-    `🔧 Mã yêu cầu: #${detail.tracking_code || ''}`,
-    `📂 Hạng mục: ${catLabel}${detail.title ? ` — ${detail.title}` : ''}`,
-    `📍 Trạng thái: ${statusLabel}`,
+    `**[BQL TÒA ${codeLabel} — CẬP NHẬT SỬA CHỮA PHÒNG ${aptLabel}]**`,
+    `🔧 Mã yêu cầu: **#${detail.tracking_code || ''}**`,
+    `📂 Hạng mục: **${catLabel}**${detail.title ? ` — ${detail.title}` : ''}`,
+    `📍 Trạng thái: **${statusLabel}**`,
   ];
 
   if (detail.assigned_to_name) {
-    lines.push(`👷 Phụ trách xử lý: ${detail.assigned_to_name}`);
+    lines.push(`👷 Phụ trách xử lý: **${detail.assigned_to_name}**`);
   }
   if (detail.hold_reason) {
-    lines.push(`⏸️ Lý do tạm hoãn / hẹn lại: ${detail.hold_reason}`);
+    lines.push(`⏸️ Lý do tạm hoãn / hẹn lại: **${detail.hold_reason}**`);
   }
   if (detail.next_appointment_at) {
-    lines.push(`📅 Lịch hẹn xử lý tiếp theo: ${formatVnDateTimeShort(detail.next_appointment_at)}`);
+    lines.push(`📅 Lịch hẹn xử lý tiếp theo: **${formatVnDateTimeShort(detail.next_appointment_at)}**`);
   }
   if (detail.resolution_note) {
-    lines.push(`✅ Kết quả xử lý: ${detail.resolution_note}`);
+    lines.push(`✅ Kết quả xử lý: **${detail.resolution_note}**`);
   }
   lines.push('', 'Quý Cư dân có thể xem ảnh nghiệm thu & đánh giá trên Cổng cư dân ResiHub.');
   return lines.join('\n');
@@ -288,3 +351,62 @@ export async function copyTextToClipboard(text) {
   return false;
 }
 
+/**
+ * Copies a Zalo message with Rich Text HTML (<b>...</b> + <br>) for Zalo PC/Web
+ * alongside stripped text/plain so raw ** markers never leak on plain paste.
+ */
+export async function copyZaloMessageToClipboard(text) {
+  const raw = String(text ?? '');
+  if (!raw) return false;
+
+  const plainText = stripZaloBoldMarkers(raw);
+  const htmlText = zaloTextToHtml(raw);
+
+  if (
+    typeof ClipboardItem !== 'undefined' &&
+    typeof Blob !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.clipboard?.write === 'function'
+  ) {
+    try {
+      const item = new ClipboardItem({
+        'text/html': new Blob([htmlText], { type: 'text/html' }),
+        'text/plain': new Blob([plainText], { type: 'text/plain' }),
+      });
+      await navigator.clipboard.write([item]);
+      return true;
+    } catch {
+      // Fall through to contenteditable / plain text fallback
+    }
+  }
+
+  if (typeof document !== 'undefined' && typeof window !== 'undefined' && window.getSelection) {
+    try {
+      const container = document.createElement('div');
+      container.setAttribute('contenteditable', 'true');
+      container.innerHTML = htmlText;
+      container.style.position = 'fixed';
+      container.style.left = '-9999px';
+      container.style.top = '0';
+      container.style.opacity = '0';
+      container.style.pointerEvents = 'none';
+      container.style.whiteSpace = 'pre-wrap';
+      document.body.appendChild(container);
+
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      const copied = document.execCommand('copy');
+      selection.removeAllRanges();
+      document.body.removeChild(container);
+      if (copied) return true;
+    } catch {
+      // Fall through to plain text fallback
+    }
+  }
+
+  return copyTextToClipboard(plainText);
+}

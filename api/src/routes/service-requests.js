@@ -19,6 +19,7 @@ import {
   validateServiceRequestTransition,
 } from '../services/serviceRequestRules.js';
 import { formatServiceRequestForRoomZalo } from '../services/zaloFormatter.js';
+import { triggerAsyncTicketTriage, reviewAiSuggestion } from '../services/aiGateway.js';
 
 const router = express.Router();
 
@@ -88,6 +89,7 @@ router.get(
                p_req.full_name AS requester_name,
                p_req.phone AS requester_phone,
                p_ass.full_name AS assigned_to_name,
+               p_ai_ass.full_name AS ai_suggested_assignee_name,
                p_res.full_name AS resolved_by_name
         FROM service_request sr
         JOIN apartment a ON a.id = sr.apartment_id
@@ -96,6 +98,8 @@ router.get(
         LEFT JOIN person p_req ON p_req.id = au_req.person_id
         LEFT JOIN app_user au_ass ON au_ass.id = sr.assigned_to
         LEFT JOIN person p_ass ON p_ass.id = au_ass.person_id
+        LEFT JOIN app_user au_ai_ass ON au_ai_ass.id = sr.ai_suggested_assignee_id
+        LEFT JOIN person p_ai_ass ON p_ai_ass.id = au_ai_ass.person_id
         LEFT JOIN app_user au_res ON au_res.id = sr.resolved_by
         LEFT JOIN person p_res ON p_res.id = au_res.person_id
         WHERE sr.org_id = $1
@@ -325,6 +329,13 @@ router.post(
       await client.query('COMMIT');
       inTx = false;
 
+      triggerAsyncTicketTriage({
+        actorId: req.user.sub,
+        orgId,
+        buildingId,
+        serviceRequestId: finalRow.id,
+      });
+
       res.status(201).json({ message: 'Tạo yêu cầu bảo trì thành công.', data: finalRow });
     } catch (err) {
       if (inTx) {
@@ -378,6 +389,7 @@ router.get(
                 p_req.full_name AS requester_name,
                 p_req.phone AS requester_phone,
                 p_ass.full_name AS assigned_to_name,
+                p_ai_ass.full_name AS ai_suggested_assignee_name,
                 p_res.full_name AS resolved_by_name
          FROM service_request sr
          JOIN apartment a ON a.id = sr.apartment_id
@@ -386,6 +398,8 @@ router.get(
          LEFT JOIN person p_req ON p_req.id = au_req.person_id
          LEFT JOIN app_user au_ass ON au_ass.id = sr.assigned_to
          LEFT JOIN person p_ass ON p_ass.id = au_ass.person_id
+         LEFT JOIN app_user au_ai_ass ON au_ai_ass.id = sr.ai_suggested_assignee_id
+         LEFT JOIN person p_ai_ass ON p_ai_ass.id = au_ai_ass.person_id
          LEFT JOIN app_user au_res ON au_res.id = sr.resolved_by
          LEFT JOIN person p_res ON p_res.id = au_res.person_id
          WHERE sr.id = $1`,
@@ -443,6 +457,7 @@ router.get(
         apartmentCode: sr.apartment_code,
         buildingCode: sr.building_code,
         preferredSlot: sr.preferred_slot,
+        holdReason: sr.hold_reason,
         nextAppointmentAt: sr.next_appointment_at,
         resolutionNote: sr.resolution_note,
         assigneeName: sr.assigned_to_name,
@@ -718,6 +733,207 @@ router.patch(
 );
 
 /**
+ * POST /api/v1/service-requests/:id/apply-triage
+ * Áp dụng 1-click hoặc ghi đè gợi ý phân loại & định tuyến AI (AI-03 — FR-043, US-011, AC-011.1)
+ */
+router.post(
+  '/:id/apply-triage',
+  authenticateToken,
+  requireRole(['MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { category, priority, assigned_to } = req.body || {};
+    const orgId = req.user.org_id;
+
+    const { client, release } = await getUserClient(req);
+    let inTx = false;
+    try {
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_ops_resource_scope('service_request', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu.' });
+      }
+      const buildingId = scopeRes.rows[0].building_id;
+      const ok = await checkBuildingAccess(req, buildingId, 'service_request', id);
+      if (!ok) {
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn không có quyền xử lý yêu cầu của tòa nhà này.',
+        });
+      }
+
+      const existingRes = await client.query(`SELECT * FROM service_request WHERE id = $1`, [id]);
+      if (existingRes.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu.' });
+      }
+      const before = existingRes.rows[0];
+
+      if (['RESOLVED', 'CLOSED', 'CANCELLED'].includes(before.status)) {
+        return res.status(409).json({
+          code: 'INVALID_STATUS',
+          message: `Không thể áp dụng phân loại AI cho phiếu đang ở trạng thái ${before.status}.`,
+        });
+      }
+
+      const nextCategory = category || before.ai_suggested_category || before.category;
+      const nextPriority = priority || before.ai_suggested_priority || before.priority;
+      const nextAssigned =
+        assigned_to !== undefined
+          ? assigned_to || null
+          : before.ai_suggested_assignee_id || before.assigned_to || null;
+
+      if (!VALID_CATEGORIES.includes(nextCategory)) {
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Danh mục sự cố không hợp lệ.' });
+      }
+      if (!VALID_PRIORITIES.includes(nextPriority)) {
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Mức độ ưu tiên không hợp lệ.' });
+      }
+
+      if (nextAssigned) {
+        const assigneesRes = await client.query(
+          `SELECT * FROM fn_list_building_assignees($1)`,
+          [buildingId]
+        );
+        const allowedSet = new Set(assigneesRes.rows.map((a) => String(a.user_id || a.id)));
+        if (allowedSet.size > 0 && !allowedSet.has(String(nextAssigned))) {
+          return res.status(422).json({
+            code: 'INVALID_ASSIGNEE',
+            message: 'Nhân sự được phân công không thuộc phạm vi tòa nhà này.',
+          });
+        }
+      }
+
+      const nextStatus = nextAssigned && before.status === 'NEW' ? 'ASSIGNED' : before.status;
+      const firstRespondedAt =
+        nextStatus !== 'NEW'
+          ? before.first_responded_at || new Date().toISOString()
+          : before.first_responded_at;
+
+      let nextSlaDueAt = before.sla_due_at;
+      let nextSlaResponseDueAt = before.sla_response_due_at;
+      if (nextPriority !== before.priority) {
+        const settingsMap = await loadOrgSettingsMap((s, p) => client.query(s, p), orgId);
+        const { slaResponseDueAt, slaDueAt } = computeServiceRequestSlaDeadlines({
+          createdAt: before.created_at,
+          priority: nextPriority,
+          slaConfig: settingsMap.sla_config || {},
+        });
+        nextSlaDueAt = slaDueAt.toISOString();
+        nextSlaResponseDueAt = slaResponseDueAt.toISOString();
+      }
+
+      const hasAiSuggestion = Boolean(before.ai_suggested_category || before.ai_suggested_priority);
+      const isExactKeep =
+        hasAiSuggestion &&
+        nextCategory === before.ai_suggested_category &&
+        nextPriority === before.ai_suggested_priority &&
+        (before.ai_suggested_assignee_id || null) === (nextAssigned || null);
+      const nextAiTriageStatus = isExactKeep ? 'ACCEPTED' : 'OVERRIDDEN';
+
+      await client.query('BEGIN');
+      inTx = true;
+
+      const updated = await client.query(
+        `UPDATE service_request
+         SET category = $1,
+             priority = $2,
+             assigned_to = $3,
+             status = $4,
+             first_responded_at = $5,
+             sla_response_due_at = $6,
+             sla_due_at = $7,
+             ai_triage_status = $8,
+             updated_at = NOW()
+         WHERE id = $9
+         RETURNING *`,
+        [
+          nextCategory,
+          nextPriority,
+          nextAssigned,
+          nextStatus,
+          firstRespondedAt,
+          nextSlaResponseDueAt,
+          nextSlaDueAt,
+          nextAiTriageStatus,
+          id,
+        ]
+      );
+      const afterRow = updated.rows[0];
+
+      if (before.ai_suggestion_id) {
+        try {
+          await reviewAiSuggestion(client, {
+            suggestionId: before.ai_suggestion_id,
+            actorId: req.user.sub,
+            decision: 'ACCEPT',
+            finalValues: {
+              category: nextCategory,
+              priority: nextPriority,
+              suggested_assignee_id: nextAssigned,
+            },
+            targetEntityId: id,
+          });
+        } catch (aiErr) {
+          if (aiErr.code !== 'SUGGESTION_NOT_PENDING') {
+            throw aiErr;
+          }
+        }
+      }
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'APPLY_AI_TRIAGE', 'service_request', $2, $3, $4)`,
+        [req.user.sub, id, JSON.stringify(before), JSON.stringify(afterRow)]
+      );
+
+      if (nextAssigned && nextAssigned !== before.assigned_to && nextAssigned !== req.user.sub) {
+        await client.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'SERVICE_REQUEST_ASSIGNED', $5::jsonb)`,
+          [
+            orgId,
+            nextAssigned,
+            `Được phân công xử lý #${before.tracking_code}`,
+            `Bạn vừa được giao xử lý yêu cầu "${before.title}".`,
+            JSON.stringify({
+              sent_by: req.user.sub,
+              service_request_id: id,
+              tracking_code: before.tracking_code,
+              status: nextStatus,
+            }),
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+      inTx = false;
+
+      return res.json({
+        message:
+          nextAiTriageStatus === 'ACCEPTED'
+            ? 'Đã áp dụng đề xuất phân loại AI cho yêu cầu bảo trì.'
+            : 'Đã lưu phân loại & phân công (ghi đè đề xuất AI).',
+        data: afterRow,
+      });
+    } catch (err) {
+      if (inTx) {
+        await client.query('ROLLBACK').catch(() => {});
+      }
+      console.error('[Apply AI Triage Error]:', err);
+      return res.status(err.status || 500).json({
+        code: err.code || 'DB_ERROR',
+        message: err.message || 'Lỗi khi áp dụng phân loại AI.',
+      });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
  * POST /api/v1/service-requests/:id/rating
  * Đánh giá chất lượng xử lý (1-5 sao) — tương thích ngược cho cư dân gọi trực tiếp
  */
@@ -783,8 +999,29 @@ router.post('/:id/rating', authenticateToken, idempotencyGuard(), async (req, re
       [numRating, rating_note?.trim() || null, id]
     );
 
-    const { internal_note: _stripBefore, apartment_code: _aptCode, ...safeBefore } = sr;
-    const { internal_note: _stripAfter, ...safeData } = updated.rows[0];
+    const {
+      internal_note: _stripBefore,
+      apartment_code: _aptCode,
+      ai_suggestion_id: _b1,
+      ai_triage_status: _b2,
+      ai_suggested_category: _b3,
+      ai_suggested_priority: _b4,
+      ai_suggested_assignee_id: _b5,
+      ai_summary: _b6,
+      ai_confidence: _b7,
+      ...safeBefore
+    } = sr;
+    const {
+      internal_note: _stripAfter,
+      ai_suggestion_id: _a1,
+      ai_triage_status: _a2,
+      ai_suggested_category: _a3,
+      ai_suggested_priority: _a4,
+      ai_suggested_assignee_id: _a5,
+      ai_summary: _a6,
+      ai_confidence: _a7,
+      ...safeData
+    } = updated.rows[0];
 
     await client.query(
       `SELECT fn_notify_service_request_managers($1, $2, $3, $4, $5::jsonb)`,

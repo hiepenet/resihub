@@ -287,4 +287,21 @@ test('formatAnnouncementForZalo & formatServiceRequestForRoomZalo generate clean
   assert.match(srMsg, /SR-20261103-0001/);
   assert.match(srMsg, /A101/);
   assert.match(srMsg, /Đã khóa van tạm/);
+
+  // Bold emphasis on critical operational fields for Zalo PC/Web Rich Text copy
+  assert.ok(bldgMsg.includes('**[THÔNG BÁO BQL TÒA VOP-A]**'));
+  assert.ok(bldgMsg.includes('**THÔNG BÁO ĐIỆN / NƯỚC**'));
+  assert.ok(bldgMsg.includes('**Tạm ngừng cấp nước định kỳ**'));
+  assert.ok(bldgMsg.includes('**0901234567**'));
+  assert.ok(roomMsg.includes('**Phòng A101**'));
+
+  assert.ok(srMsg.includes('**[CẬP NHẬT KỸ THUẬT — Phòng A101 — Tòa VOP-A]**'));
+  assert.ok(srMsg.includes('**SR-20261103-0001**'));
+  assert.ok(srMsg.includes('**Tạm hoãn / Hẹn lại**'));
+  assert.ok(srMsg.includes('**Đã khóa van tạm, hẹn sáng mai thay gioăng**'));
+  assert.ok(srMsg.includes('**0901234567**'));
+
+  const utilTpl = ZALO_ANNOUNCEMENT_TEMPLATES.find((t) => t.key === 'UTILITY_INTERRUPTION');
+  assert.ok(utilTpl?.bodyTemplate.includes('**[GIỜ BẮT ĐẦU]**'));
+  assert.ok(utilTpl?.bodyTemplate.includes('**[GIỜ KẾT THÚC]**'));
 });
