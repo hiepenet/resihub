@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import {
   Wallet,
   Plus,
@@ -12,6 +12,9 @@ import {
   Download,
   RefreshCw,
   CheckCircle2,
+  Sparkles,
+  ArrowRight,
+  ShieldCheck,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -32,9 +35,10 @@ import { invoicesService } from '../../../services/invoices.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
-import { PAYMENT_STATUS, RECEIVABLE_STATUS } from '../../../constants/statuses';
+import { PAYMENT_STATUS, RECEIVABLE_STATUS, CREDIT_BALANCE_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDate, formatDateTime, exportToCsv } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import { resolvePrdAgingBucket, canActorApproveCreditRefund, PRD_AGING_BUCKETS } from '../../../utils/billing';
 
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
@@ -56,19 +60,22 @@ const PAYMENT_METHODS = {
   OTHER: 'Khác',
 };
 
+// Chuẩn hóa 5 nhóm tuổi nợ PRD AC-016.1
 const AGING_LABELS = {
-  '0_30': { label: '0 – 30 ngày', variant: 'sky' },
-  '31_60': { label: '31 – 60 ngày', variant: 'amber' },
-  '61_90': { label: '61 – 90 ngày', variant: 'amber' },
-  OVER_90: { label: '> 90 ngày', variant: 'red' },
+  current_not_due: { label: 'Chưa đến hạn', variant: 'slate' },
+  '0_15': { label: '0–15 ngày', variant: 'emerald' },
+  '16_30': { label: '16–30 ngày', variant: 'amber' },
+  '31_60': { label: '31–60 ngày', variant: 'orange' },
+  over_60: { label: '>60 ngày', variant: 'red' },
 };
 
 export function PaymentsPage() {
   const toast = useToast();
-  const { canManagePayments } = usePermission();
+  const location = useLocation();
+  const { canManagePayments, canApproveCreditRefunds, user } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [activeTab, setActiveTab] = useState('transactions'); // transactions | aging | overpayments
+  const [activeTab, setActiveTab] = useState('transactions'); // transactions | aging | credits | overpayments
 
   // Tab 1: Giao dịch thanh toán
   const [payments, setPayments] = useState([]);
@@ -77,13 +84,14 @@ export function PaymentsPage() {
   const [payMethodFilter, setPayMethodFilter] = useState('');
   const [paySearch, setPaySearch] = useState('');
 
-  // Tab 2: Công nợ Aging
+  // Tab 2: Công nợ Aging (AC-016.1)
   const [receivables, setReceivables] = useState([]);
   const [agingSummary, setAgingSummary] = useState({
-    bucket_0_30: 0,
+    current_not_due: 0,
+    bucket_0_15: 0,
+    bucket_16_30: 0,
     bucket_31_60: 0,
-    bucket_61_90: 0,
-    bucket_over_90: 0,
+    bucket_over_60: 0,
     total_balance: 0,
   });
   const [agingLoading, setAgingLoading] = useState(false);
@@ -91,7 +99,26 @@ export function PaymentsPage() {
   const [agingBucketFilter, setAgingBucketFilter] = useState('');
   const [recSearch, setRecSearch] = useState('');
 
-  // Tab 3: Thanh toán thừa
+  // Tab 3: Sổ tín dụng & Hoàn tiền (4 mắt) (FR-040 & Ruling 2)
+  const [credits, setCredits] = useState([]);
+  const [creditsLoading, setCreditsLoading] = useState(false);
+  const [creditStatusFilter, setCreditStatusFilter] = useState('');
+  const [creditSearch, setCreditSearch] = useState('');
+
+  // Modal yêu cầu hoàn tiền tín dụng
+  const [refundRequestModalTarget, setRefundRequestModalTarget] = useState(null);
+  const [refundForm, setRefundForm] = useState({
+    amount: '',
+    reason: '',
+    bank_info: '',
+    proof_image: '',
+  });
+
+  // Modal từ chối hoàn tiền tín dụng (4 mắt)
+  const [rejectCreditTarget, setRejectCreditTarget] = useState(null);
+  const [creditRejectReason, setCreditRejectReason] = useState('');
+
+  // Tab 4: Thanh toán thừa
   const [overpayments, setOverpayments] = useState([]);
   const [overLoading, setOverLoading] = useState(false);
 
@@ -141,21 +168,36 @@ export function PaymentsPage() {
         status: recStatusFilter,
       });
       setReceivables(res.data || []);
-      setAgingSummary(
-        res.aging_summary || {
-          bucket_0_30: 0,
-          bucket_31_60: 0,
-          bucket_61_90: 0,
-          bucket_over_90: 0,
-          total_balance: 0,
-        }
-      );
+      const s = res.aging_summary_prd || res.aging_summary || {};
+      setAgingSummary({
+        current_not_due: Number(s.current_not_due ?? 0),
+        bucket_0_15: Number(s.bucket_0_15 ?? s['0_15'] ?? 0),
+        bucket_16_30: Number(s.bucket_16_30 ?? s['16_30'] ?? 0),
+        bucket_31_60: Number(s.bucket_31_60 ?? s['31_60'] ?? 0),
+        bucket_over_60: Number(s.bucket_over_60 ?? s.over_60 ?? 0),
+        total_balance: Number(s.total_balance ?? 0),
+      });
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải báo cáo công nợ tuổi nợ.'));
     } finally {
       setAgingLoading(false);
     }
   }, [selectedBuildingId, recStatusFilter, toast]);
+
+  const fetchCredits = useCallback(async () => {
+    setCreditsLoading(true);
+    try {
+      const res = await paymentsService.getCredits({
+        building_id: selectedBuildingId || undefined,
+        status: creditStatusFilter || undefined,
+      });
+      setCredits(res.data || []);
+    } catch {
+      setCredits([]);
+    } finally {
+      setCreditsLoading(false);
+    }
+  }, [selectedBuildingId, creditStatusFilter]);
 
   const fetchOverpayments = useCallback(async () => {
     setOverLoading(true);
@@ -174,6 +216,18 @@ export function PaymentsPage() {
     }
   }, [selectedBuildingId, toast]);
 
+  // Hỗ trợ drill-down từ Dashboard: ?tab=credits hoặc ?status=PENDING_DIRECT_REFUND (Ruling 2)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (
+      params.get('tab') === 'credits' ||
+      params.get('tab') === 'refunds' ||
+      params.get('status') === 'PENDING_DIRECT_REFUND'
+    ) {
+      setActiveTab('credits');
+    }
+  }, [location.search]);
+
   useEffect(() => {
     const t = setTimeout(() => {
       fetchPayments();
@@ -184,16 +238,25 @@ export function PaymentsPage() {
   useEffect(() => {
     fetchReceivables();
     fetchOverpayments();
-  }, [fetchReceivables, fetchOverpayments]);
+    fetchCredits();
+  }, [fetchReceivables, fetchOverpayments, fetchCredits]);
 
   const pendingConfirmList = useMemo(
     () => payments.filter((p) => p.status === 'PENDING_CONFIRMATION'),
     [payments]
   );
 
+  const pendingRefundsCount = useMemo(
+    () => credits.filter((c) => c.status === 'PENDING_DIRECT_REFUND').length,
+    [credits]
+  );
+
   const filteredReceivables = useMemo(() => {
     return receivables.filter((r) => {
-      if (agingBucketFilter && r.aging_bucket !== agingBucketFilter) return false;
+      if (agingBucketFilter) {
+        const bucket = resolvePrdAgingBucket(r.days_overdue);
+        if (bucket !== agingBucketFilter) return false;
+      }
       if (recSearch.trim()) {
         const q = recSearch.trim().toLowerCase();
         const hit =
@@ -206,6 +269,22 @@ export function PaymentsPage() {
       return true;
     });
   }, [receivables, agingBucketFilter, recSearch]);
+
+  const filteredCredits = useMemo(() => {
+    return credits.filter((c) => {
+      if (creditStatusFilter && c.status !== creditStatusFilter) return false;
+      if (creditSearch.trim()) {
+        const q = creditSearch.trim().toLowerCase();
+        return (
+          c.apartment_code?.toLowerCase().includes(q) ||
+          c.tenant_name?.toLowerCase().includes(q) ||
+          c.description?.toLowerCase().includes(q) ||
+          c.source_type?.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [credits, creditStatusFilter, creditSearch]);
 
   const totalOverpaymentSum = useMemo(
     () => overpayments.reduce((s, p) => s + Number(p.overpayment_amount || 0), 0),
@@ -226,7 +305,7 @@ export function PaymentsPage() {
     try {
       const res = await invoicesService.list({
         building_id: selectedBuildingId || undefined,
-        status: 'ISSUED,PARTIALLY_PAID,OVERDUE',
+        status: 'ISSUED,PARTIALLY_PAID,OVERDUE,ADJUSTED',
       });
       setOpenInvoices(res.data || []);
     } catch {
@@ -328,8 +407,11 @@ export function PaymentsPage() {
         { label: 'Hạn thanh toán', accessor: (r) => formatDate(r.due_date) },
         { label: 'Số ngày quá hạn', accessor: (r) => Number(r.days_overdue || 0) },
         {
-          label: 'Nhóm tuổi nợ',
-          accessor: (r) => AGING_LABELS[r.aging_bucket]?.label || r.aging_bucket,
+          label: 'Nhóm tuổi nợ (AC-016.1)',
+          accessor: (r) => {
+            const key = resolvePrdAgingBucket(r.days_overdue);
+            return AGING_LABELS[key]?.label || 'Chưa đến hạn';
+          },
         },
         { label: 'Phải thu (VNĐ)', accessor: (r) => Number(r.amount || 0) },
         { label: 'Đã thu (VNĐ)', accessor: (r) => Number(r.paid_amount || 0) },
@@ -549,11 +631,13 @@ export function PaymentsPage() {
       },
       {
         key: 'aging_bucket',
-        label: 'Nhóm tuổi nợ',
+        label: 'Nhóm tuổi nợ (AC-016.1)',
         align: 'center',
         sortable: true,
+        sortValue: (row) => Number(row.days_overdue || 0),
         render: (row) => {
-          const b = AGING_LABELS[row.aging_bucket] || AGING_LABELS['0_30'];
+          const key = resolvePrdAgingBucket(row.days_overdue);
+          const b = AGING_LABELS[key] || AGING_LABELS.current_not_due;
           return <Badge variant={b.variant}>{b.label}</Badge>;
         },
       },
@@ -598,6 +682,237 @@ export function PaymentsPage() {
       },
     ],
     [canManagePayments]
+  );
+
+  const handleApproveCreditRefund = async (credit) => {
+    if (!window.confirm(`Xác nhận phê duyệt hoàn tiền ${formatMoney(credit.amount)} cho khách thuê?`)) {
+      return;
+    }
+    setProcessingAction(true);
+    try {
+      const res = await paymentsService.approveCreditRefund(credit.id);
+      toast.success(res.message || 'Đã phê duyệt hoàn tiền tín dụng thành công.');
+      fetchCredits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể phê duyệt hoàn tiền tín dụng.'));
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  const handleRejectCreditRefund = async () => {
+    if (!rejectCreditTarget) return;
+    if (!creditRejectReason.trim()) {
+      toast.warning('Vui lòng nhập lý do từ chối hoàn tiền.');
+      return;
+    }
+    setProcessingAction(true);
+    try {
+      const res = await paymentsService.rejectCreditRefund(rejectCreditTarget.id, {
+        rejection_reason: creditRejectReason.trim(),
+      });
+      toast.success(res.message || 'Đã từ chối đề nghị hoàn tiền tín dụng.');
+      setRejectCreditTarget(null);
+      setCreditRejectReason('');
+      fetchCredits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể từ chối đề nghị hoàn tiền.'));
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  const handleRequestCreditRefund = async (e) => {
+    e.preventDefault();
+    if (!refundRequestModalTarget) return;
+    const amt = Math.round(Number(refundForm.amount || 0));
+    const avail = Math.max(
+      0,
+      Number(refundRequestModalTarget.amount || 0) - Number(refundRequestModalTarget.applied_amount || 0)
+    );
+    if (!amt || amt <= 0) {
+      toast.warning('Số tiền hoàn trả phải lớn hơn 0.');
+      return;
+    }
+    if (amt > avail) {
+      toast.warning(`Số tiền hoàn tối đa là ${formatMoney(avail)}.`);
+      return;
+    }
+    if (!refundForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do hoàn tiền.');
+      return;
+    }
+    setProcessingAction(true);
+    try {
+      const res = await paymentsService.requestCreditRefund(refundRequestModalTarget.id, {
+        amount: amt,
+        reason: refundForm.reason.trim(),
+        bank_info: refundForm.bank_info.trim() || undefined,
+        proof_image: refundForm.proof_image || undefined,
+      });
+      toast.success(res.message || 'Đã gửi đề nghị hoàn tiền tín dụng (chờ duyệt 4 mắt).');
+      setRefundRequestModalTarget(null);
+      fetchCredits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể gửi đề nghị hoàn tiền tín dụng.'));
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  const creditColumns = useMemo(
+    () => [
+      {
+        key: 'apartment_code',
+        label: 'Căn hộ / Khách thuê',
+        sortable: true,
+        render: (row) => (
+          <div>
+            <p className="font-semibold text-slate-900">
+              Căn {row.apartment_code || '—'}{' '}
+              <span className="text-xs font-normal text-slate-500">({row.building_code})</span>
+            </p>
+            <p className="text-xs text-slate-500 mt-0.5">{row.tenant_name || '—'}</p>
+          </div>
+        ),
+      },
+      {
+        key: 'amount',
+        label: 'Số tiền tín dụng',
+        align: 'right',
+        sortable: true,
+        render: (row) => (
+          <span className="font-mono font-bold text-slate-900">{formatMoney(row.amount)}</span>
+        ),
+      },
+      {
+        key: 'applied_amount',
+        label: 'Đã cấn trừ',
+        align: 'right',
+        sortable: true,
+        render: (row) => (
+          <span className="font-mono text-slate-500">{formatMoney(row.applied_amount || 0)}</span>
+        ),
+      },
+      {
+        key: 'available_balance',
+        label: 'Còn khả dụng',
+        align: 'right',
+        sortable: true,
+        render: (row) => {
+          const avail = Math.max(0, Number(row.amount || 0) - Number(row.applied_amount || 0));
+          return (
+            <span className="font-mono font-semibold text-emerald-600">{formatMoney(avail)}</span>
+          );
+        },
+      },
+      {
+        key: 'status',
+        label: 'Trạng thái',
+        align: 'center',
+        sortable: true,
+        render: (row) => <StatusBadge status={row.status} domain="credit_balance" />,
+      },
+      {
+        key: 'description',
+        label: 'Diễn giải / Lý do',
+        render: (row) => (
+          <div className="text-xs text-slate-600 max-w-xs break-words">
+            <p>{row.description || '—'}</p>
+            {row.rejection_reason ? (
+              <p className="text-rose-600 mt-0.5 font-medium">Lý do từ chối: {row.rejection_reason}</p>
+            ) : null}
+          </div>
+        ),
+      },
+      {
+        key: 'created_at',
+        label: 'Thời gian',
+        align: 'center',
+        render: (row) => (
+          <span className="text-xs text-slate-400 whitespace-nowrap">
+            {formatDateTime(row.created_at)}
+          </span>
+        ),
+      },
+      {
+        key: 'actions',
+        label: 'Thao tác (4 mắt)',
+        align: 'center',
+        className: 'whitespace-nowrap',
+        render: (row) => {
+          const avail = Math.max(0, Number(row.amount || 0) - Number(row.applied_amount || 0));
+          const canApprove =
+            row.status === 'PENDING_DIRECT_REFUND' &&
+            canActorApproveCreditRefund({
+              actor: user,
+              record: row,
+              buildingHasActiveOwner: true,
+            }) &&
+            canApproveCreditRefunds;
+
+          if (row.status === 'PENDING_DIRECT_REFUND') {
+            return (
+              <div className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                {canApprove ? (
+                  <>
+                    <Button
+                      size="xs"
+                      variant="success"
+                      icon={CheckCircle2}
+                      loading={processingAction}
+                      onClick={() => handleApproveCreditRefund(row)}
+                    >
+                      Duyệt
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="danger"
+                      loading={processingAction}
+                      onClick={() => {
+                        setRejectCreditTarget(row);
+                        setCreditRejectReason('');
+                      }}
+                    >
+                      Từ chối
+                    </Button>
+                  </>
+                ) : (
+                  <Badge variant="amber" size="xs">
+                    Chờ người khác duyệt (4 mắt)
+                  </Badge>
+                )}
+              </div>
+            );
+          }
+
+          if (['AVAILABLE', 'PARTIALLY_APPLIED'].includes(row.status) && canManagePayments && avail > 0) {
+            return (
+              <Button
+                size="xs"
+                variant="outline"
+                icon={TrendingUp}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRefundRequestModalTarget(row);
+                  setRefundForm({
+                    amount: String(avail),
+                    reason: '',
+                    bank_info: '',
+                    proof_image: '',
+                  });
+                }}
+              >
+                Đề nghị hoàn tiền
+              </Button>
+            );
+          }
+
+          return <span className="text-xs text-slate-400">—</span>;
+        },
+      },
+    ],
+    [canManagePayments, canApproveCreditRefunds, user, processingAction]
   );
 
   const overpaymentColumns = useMemo(
@@ -701,9 +1016,15 @@ export function PaymentsPage() {
           },
           {
             id: 'aging',
-            label: 'Công nợ theo tuổi nợ (Aging)',
+            label: 'Công nợ theo tuổi nợ (AC-016.1)',
             icon: Clock,
             count: receivables.length,
+          },
+          {
+            id: 'credits',
+            label: 'Sổ tín dụng / Hoàn tiền (4 mắt)',
+            icon: Sparkles,
+            count: pendingRefundsCount > 0 ? `${pendingRefundsCount} chờ duyệt` : credits.length,
           },
           {
             id: 'overpayments',
@@ -861,48 +1182,58 @@ export function PaymentsPage() {
         </div>
       ) : null}
 
-      {/* TAB 2: CÔNG NỢ THEO TUỔI NỢ (AGING) */}
+      {/* TAB 2: CÔNG NỢ THEO TUỔI NỢ (AGING) — NÂNG CẤP AC-016.1 */}
       {activeTab === 'aging' ? (
         <div className="space-y-5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             <StatsCard
-              title="Tuổi nợ 0 – 30 ngày"
-              value={formatMoney(agingSummary.bucket_0_30)}
-              subtext="Trong hạn hoặc mới quá hạn nhẹ"
+              title="Chưa đến hạn"
+              value={formatMoney(agingSummary.current_not_due)}
+              subtext="Trong hạn chưa đến ngày đến hạn"
               icon={Clock}
-              color="sky"
+              color="slate"
               onClick={() =>
-                setAgingBucketFilter((b) => (b === '0_30' ? '' : '0_30'))
+                setAgingBucketFilter((b) => (b === 'current_not_due' ? '' : 'current_not_due'))
               }
             />
             <StatsCard
-              title="Tuổi nợ 31 – 60 ngày"
-              value={formatMoney(agingSummary.bucket_31_60)}
-              subtext="Cần gửi thông báo nhắc nợ lần 2"
+              title="Tuổi nợ 0–15 ngày"
+              value={formatMoney(agingSummary.bucket_0_15)}
+              subtext="Mới quá hạn 0–15 ngày (AC-016.1)"
+              icon={Clock}
+              color="emerald"
+              onClick={() =>
+                setAgingBucketFilter((b) => (b === '0_15' ? '' : '0_15'))
+              }
+            />
+            <StatsCard
+              title="Tuổi nợ 16–30 ngày"
+              value={formatMoney(agingSummary.bucket_16_30)}
+              subtext="Quá hạn 16–30 ngày (AC-016.1)"
               icon={AlertTriangle}
               color="amber"
+              onClick={() =>
+                setAgingBucketFilter((b) => (b === '16_30' ? '' : '16_30'))
+              }
+            />
+            <StatsCard
+              title="Tuổi nợ 31–60 ngày"
+              value={formatMoney(agingSummary.bucket_31_60)}
+              subtext="Quá hạn 31–60 ngày (AC-016.1)"
+              icon={AlertTriangle}
+              color="indigo"
               onClick={() =>
                 setAgingBucketFilter((b) => (b === '31_60' ? '' : '31_60'))
               }
             />
             <StatsCard
-              title="Tuổi nợ 61 – 90 ngày"
-              value={formatMoney(agingSummary.bucket_61_90)}
-              subtext="Rủi ro cao — cần làm việc trực tiếp"
-              icon={AlertTriangle}
-              color="indigo"
-              onClick={() =>
-                setAgingBucketFilter((b) => (b === '61_90' ? '' : '61_90'))
-              }
-            />
-            <StatsCard
-              title="Tuổi nợ > 90 ngày"
-              value={formatMoney(agingSummary.bucket_over_90)}
-              subtext="Nợ quá hạn nghiêm trọng"
+              title="Tuổi nợ > 60 ngày"
+              value={formatMoney(agingSummary.bucket_over_60)}
+              subtext="Quá hạn nghiêm trọng >60 ngày"
               icon={AlertTriangle}
               color="rose"
               onClick={() =>
-                setAgingBucketFilter((b) => (b === 'OVER_90' ? '' : 'OVER_90'))
+                setAgingBucketFilter((b) => (b === 'over_60' ? '' : 'over_60'))
               }
             />
           </div>
@@ -919,7 +1250,7 @@ export function PaymentsPage() {
               <Select
                 value={agingBucketFilter}
                 onChange={(e) => setAgingBucketFilter(e.target.value)}
-                placeholder="Tất cả nhóm tuổi nợ"
+                placeholder="Tất cả nhóm tuổi nợ (AC-016.1)"
                 options={Object.entries(AGING_LABELS).map(([value, info]) => ({
                   value,
                   label: info.label,
@@ -947,6 +1278,77 @@ export function PaymentsPage() {
             loading={agingLoading}
             emptyTitle="Không có khoản công nợ quá hạn"
             emptyDescription="Tất cả các khoản phải thu hiện đang được thanh toán đúng hạn."
+          />
+        </div>
+      ) : null}
+
+      {/* TAB 3: SỔ TÍN DỤNG & HOÀN TIỀN (4 MẮT) — (FR-040 & Ruling 2) */}
+      {activeTab === 'credits' ? (
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <StatsCard
+              title="Tổng số dư tín dụng"
+              value={formatMoney(
+                credits.reduce((s, c) => s + Number(c.amount || 0), 0)
+              )}
+              subtext={`${credits.length} khoản nộp thừa / giảm trừ`}
+              icon={Sparkles}
+              color="indigo"
+            />
+            <StatsCard
+              title="Khả dụng (Chờ cấn trừ kỳ sau)"
+              value={formatMoney(
+                credits
+                  .filter((c) => ['AVAILABLE', 'PARTIALLY_APPLIED'].includes(c.status))
+                  .reduce(
+                    (s, c) => s + (Number(c.amount || 0) - Number(c.applied_amount || 0)),
+                    0
+                  )
+              )}
+              subtext="Tự động bù trừ khi sinh hóa đơn DRAFT kỳ kế tiếp"
+              icon={CheckCircle2}
+              color="emerald"
+            />
+            <StatsCard
+              title="Đề nghị hoàn tiền chờ duyệt"
+              value={pendingRefundsCount}
+              subtext="Quy trình 4 mắt: Cần OWNER/MANAGER thứ 2 phê duyệt"
+              icon={AlertTriangle}
+              color="amber"
+            />
+          </div>
+
+          <Card className="p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
+              <div className="sm:col-span-2">
+                <SearchBar
+                  value={creditSearch}
+                  onChange={setCreditSearch}
+                  placeholder="Tìm căn hộ, khách thuê, lý do ghi nhận tín dụng..."
+                />
+              </div>
+              <Select
+                value={creditStatusFilter}
+                onChange={(e) => setCreditStatusFilter(e.target.value)}
+                placeholder="Tất cả trạng thái tín dụng"
+                options={[
+                  { value: '', label: 'Tất cả trạng thái' },
+                  { value: 'AVAILABLE', label: 'Khả dụng' },
+                  { value: 'PARTIALLY_APPLIED', label: 'Đã dùng một phần' },
+                  { value: 'APPLIED', label: 'Đã cấn trừ đủ' },
+                  { value: 'PENDING_DIRECT_REFUND', label: 'Chờ duyệt hoàn tiền (4 mắt)' },
+                  { value: 'REFUNDED_DIRECT', label: 'Đã hoàn tiền trực tiếp' },
+                ]}
+              />
+            </div>
+          </Card>
+
+          <DataTable
+            columns={creditColumns}
+            data={filteredCredits}
+            loading={creditsLoading}
+            emptyTitle="Chưa có khoản tín dụng nào"
+            emptyDescription="Các khoản cư dân thanh toán thừa hoặc được giảm trừ sau thanh lý dịch vụ sẽ tự động ghi nhận vào sổ tín dụng."
           />
         </div>
       ) : null}
@@ -1250,6 +1652,128 @@ export function PaymentsPage() {
             onChange={(e) => setRejectReason(e.target.value)}
           />
         </form>
+      </Modal>
+
+      {/* Modal đề nghị hoàn tiền tín dụng (FR-040) */}
+      <Modal
+        open={Boolean(refundRequestModalTarget)}
+        onClose={() => setRefundRequestModalTarget(null)}
+        title="Lập đề nghị hoàn tiền từ Sổ tín dụng"
+        subtitle={
+          refundRequestModalTarget
+            ? `Căn ${refundRequestModalTarget.apartment_code || '—'} • Khách: ${refundRequestModalTarget.tenant_name || '—'}`
+            : ''
+        }
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setRefundRequestModalTarget(null)}
+              disabled={processingAction}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleRequestCreditRefund}
+              loading={processingAction}
+            >
+              Gửi đề nghị hoàn tiền
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleRequestCreditRefund} className="space-y-4">
+          <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 space-y-1">
+            <p>
+              Số dư tín dụng khả dụng:{' '}
+              <strong className="font-mono font-bold text-sky-800">
+                {refundRequestModalTarget
+                  ? formatMoney(
+                      Number(refundRequestModalTarget.amount || 0) -
+                        Number(refundRequestModalTarget.applied_amount || 0)
+                    )
+                  : '0 ₫'}
+              </strong>
+            </p>
+            <p className="text-slate-600">
+              Đề nghị hoàn tiền sẽ được chuyển tới cấp thẩm quyền phê duyệt 4 mắt trước khi tiến hành chi trả.
+            </p>
+          </div>
+
+          <MoneyInput
+            label="Số tiền cần hoàn trả (₫)"
+            required
+            value={refundForm.amount}
+            onChange={(e) => setRefundForm((s) => ({ ...s, amount: e.target.value }))}
+          />
+
+          <Input
+            label="Thông tin ngân hàng nhận tiền"
+            placeholder="VD: 1903... Techcombank - NGUYEN VAN A"
+            value={refundForm.bank_info}
+            onChange={(e) => setRefundForm((s) => ({ ...s, bank_info: e.target.value }))}
+          />
+
+          <Input
+            label="Lý do hoàn tiền bắt buộc"
+            multiline
+            rows={2}
+            required
+            placeholder="VD: Khách thuê đã chấm dứt hợp đồng và thanh lý hết công nợ, hoàn trả số tiền nộp thừa..."
+            value={refundForm.reason}
+            onChange={(e) => setRefundForm((s) => ({ ...s, reason: e.target.value }))}
+          />
+
+          <FileUpload
+            label="Ảnh chứng từ đối soát / Đơn đề nghị hoàn tiền (tùy chọn)"
+            multiple={false}
+            value={refundForm.proof_image}
+            onChange={(img) => setRefundForm((s) => ({ ...s, proof_image: img }))}
+          />
+        </form>
+      </Modal>
+
+      {/* Modal từ chối hoàn tiền tín dụng (4 mắt) */}
+      <Modal
+        open={Boolean(rejectCreditTarget)}
+        onClose={() => setRejectCreditTarget(null)}
+        title="Từ chối đề nghị hoàn tiền tín dụng"
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setRejectCreditTarget(null)}
+              disabled={processingAction}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleRejectCreditRefund}
+              loading={processingAction}
+            >
+              Xác nhận từ chối
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-slate-600">
+            Vui lòng nhập lý do từ chối hoàn tiền tín dụng để ghi nhận vào lịch sử kiểm toán:
+          </p>
+          <Input
+            label="Lý do từ chối"
+            multiline
+            rows={2}
+            required
+            value={creditRejectReason}
+            onChange={(e) => setCreditRejectReason(e.target.value)}
+            placeholder="VD: Thông tin số tài khoản nhận tiền chưa khớp hợp đồng..."
+          />
+        </div>
       </Modal>
     </div>
   );

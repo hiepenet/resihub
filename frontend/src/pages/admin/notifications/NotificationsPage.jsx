@@ -38,6 +38,14 @@ const NOTIFICATION_TYPES = {
   PAYMENT_REJECTED: { label: 'Từ chối chứng từ', variant: 'red' },
   MAINTENANCE_UPDATE: { label: 'Cập nhật báo hỏng', variant: 'amber' },
   SERVICE_UPDATE: { label: 'Cập nhật dịch vụ', variant: 'purple' },
+  CREDIT_APPLIED: { label: 'Tín dụng cấn trừ', variant: 'emerald' },
+  CREDIT_REFUND_PENDING: { label: 'Chờ duyệt hoàn tiền', variant: 'amber' },
+  CREDIT_REFUNDED: { label: 'Đã hoàn tiền tín dụng', variant: 'emerald' },
+  CREDIT_REFUND_REJECTED: { label: 'Từ chối hoàn tín dụng', variant: 'red' },
+  INVOICE_ADJUSTMENT_PENDING: { label: 'Chờ duyệt điều chỉnh HĐ', variant: 'amber' },
+  INVOICE_ADJUSTED: { label: 'Hóa đơn đã điều chỉnh', variant: 'purple' },
+  INVOICE_VOIDED: { label: 'Hóa đơn đã hủy (VOID)', variant: 'slate' },
+  SERVICE_TERMINATED: { label: 'Dịch vụ đã chấm dứt', variant: 'red' },
 };
 
 const COMPOSE_TYPE_OPTIONS = [

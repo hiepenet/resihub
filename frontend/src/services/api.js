@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
+import { createIdempotencyKey } from '../utils/idempotency';
 
 const api = axios.create({
   baseURL: '',
@@ -8,12 +9,33 @@ const api = axios.create({
   },
 });
 
+const MUTATING_METHODS = new Set(['POST', 'PATCH', 'DELETE']);
+const IDEMPOTENT_FINANCIAL_ENDPOINTS = [
+  '/api/v1/invoices',
+  '/api/v1/payments',
+  '/api/v1/service-catalog',
+  '/api/v1/service-subscriptions',
+  '/api/v1/contracts',
+  '/api/v1/deposits',
+  '/api/v1/resident',
+];
+
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('accessToken');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
+
+    const method = String(config.method || 'get').toUpperCase();
+    if (MUTATING_METHODS.has(method)) {
+      const url = config.url || '';
+      const isTarget = IDEMPOTENT_FINANCIAL_ENDPOINTS.some((ep) => url.includes(ep));
+      if (isTarget && !config.headers['Idempotency-Key']) {
+        config.headers['Idempotency-Key'] = createIdempotencyKey();
+      }
+    }
+
     return config;
   },
   (error) => Promise.reject(error)

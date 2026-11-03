@@ -98,6 +98,28 @@ export const INVOICE_STATUS = {
   PARTIALLY_PAID: { label: 'Thanh toán một phần', variant: 'amber' },
   PAID: { label: 'Đã thanh toán', variant: 'emerald' },
   OVERDUE: { label: 'Quá hạn', variant: 'red' },
+  ADJUSTED: { label: 'Đã điều chỉnh', variant: 'purple' },
+  VOID: { label: 'Đã hủy', variant: 'slate' },
+  CANCELLED: { label: 'Đã hủy', variant: 'slate' },
+};
+
+export const INVOICE_ADJUSTMENT_STATUS = {
+  PENDING_APPROVAL: { label: 'Chờ phê duyệt', variant: 'amber' },
+  APPROVED: { label: 'Đã duyệt', variant: 'emerald' },
+  REJECTED: { label: 'Từ chối', variant: 'red' },
+  CANCELLED: { label: 'Đã hủy', variant: 'slate' },
+};
+
+export const CREDIT_BALANCE_STATUS = {
+  AVAILABLE: { label: 'Khả dụng', variant: 'emerald' },
+  PARTIALLY_APPLIED: { label: 'Đã dùng một phần', variant: 'indigo' },
+  APPLIED: { label: 'Đã cấn trừ đủ', variant: 'sky' },
+  PENDING_DIRECT_REFUND: { label: 'Chờ duyệt hoàn tiền', variant: 'amber' },
+  REFUNDED_DIRECT: { label: 'Đã hoàn tiền', variant: 'emerald' },
+  PENDING_SETTLEMENT_PAYOUT: { label: 'Chờ chi quyết toán', variant: 'amber' },
+  REFUNDED_IN_SETTLEMENT: { label: 'Đã hoàn theo quyết toán', variant: 'emerald' },
+  TRANSFERRED: { label: 'Đã kết chuyển', variant: 'indigo' },
+  VOID: { label: 'Đã hủy', variant: 'slate' },
   CANCELLED: { label: 'Đã hủy', variant: 'slate' },
 };
 
@@ -145,6 +167,7 @@ export const SUBSCRIPTION_STATUS = {
   PENDING_APPROVAL: { label: 'Chờ phê duyệt', variant: 'amber' },
   ACTIVE: { label: 'Đang sử dụng', variant: 'emerald' },
   CANCELLATION_PENDING: { label: 'Chờ hủy', variant: 'amber' },
+  TERMINATED: { label: 'Đã chấm dứt', variant: 'red' },
   CANCELLED: { label: 'Đã hủy', variant: 'slate' },
   REJECTED: { label: 'Từ chối', variant: 'red' },
 };
@@ -191,4 +214,6 @@ export const ALL_STATUS_MAPS = {
   subscription: SUBSCRIPTION_STATUS,
   tenant: TENANT_STATUS,
   user: USER_STATUS,
+  invoice_adjustment: INVOICE_ADJUSTMENT_STATUS,
+  credit_balance: CREDIT_BALANCE_STATUS,
 };

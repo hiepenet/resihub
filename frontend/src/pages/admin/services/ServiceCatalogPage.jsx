@@ -160,6 +160,10 @@ export function ServiceCatalogPage() {
   };
 
   const openEditModal = (item) => {
+    if (!item.building_id) {
+      toast.warning('Không thể chỉnh sửa danh mục mặc định dùng chung liên tòa.');
+      return;
+    }
     setEditingItem(item);
     setForm({
       code: item.code || '',
@@ -222,6 +226,10 @@ export function ServiceCatalogPage() {
   };
 
   const handleToggleActive = async (item) => {
+    if (!item.building_id) {
+      toast.warning('Không thể thay đổi trạng thái danh mục mặc định dùng chung liên tòa.');
+      return;
+    }
     try {
       await servicesService.updateCatalog(item.id, { is_active: !item.is_active });
       toast.success(
@@ -408,24 +416,30 @@ export function ServiceCatalogPage() {
                   </div>
 
                   {canManageServiceCatalog ? (
-                    <div className="flex items-center gap-1.5">
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        icon={Edit3}
-                        onClick={() => openEditModal(svc)}
-                      >
-                        Sửa
-                      </Button>
-                      <Button
-                        variant={svc.is_active ? 'outline' : 'soft'}
-                        size="xs"
-                        icon={Power}
-                        onClick={() => handleToggleActive(svc)}
-                      >
-                        {svc.is_active ? 'Ngưng' : 'Mở lại'}
-                      </Button>
-                    </div>
+                    svc.building_id ? (
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          icon={Edit3}
+                          onClick={() => openEditModal(svc)}
+                        >
+                          Sửa
+                        </Button>
+                        <Button
+                          variant={svc.is_active ? 'outline' : 'soft'}
+                          size="xs"
+                          icon={Power}
+                          onClick={() => handleToggleActive(svc)}
+                        >
+                          {svc.is_active ? 'Ngưng' : 'Mở lại'}
+                        </Button>
+                      </div>
+                    ) : (
+                      <Badge variant="slate" size="xs">
+                        Mặc định (Chỉ đọc)
+                      </Badge>
+                    )
                   ) : null}
                 </div>
               </Card>

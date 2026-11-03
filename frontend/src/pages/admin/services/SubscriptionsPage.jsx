@@ -42,20 +42,13 @@ import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+import { previewSubscriptionProrata } from '../../../utils/billing';
 
 function estimateProrata(unitPrice, quantity, dateStr, mode = 'subscribe') {
-  const dt = dateStr ? new Date(dateStr) : new Date();
-  if (Number.isNaN(dt.getTime())) return 0;
-  const year = dt.getFullYear();
-  const month = dt.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const day = dt.getDate();
-  const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  return {
-    amount: Math.round((Number(unitPrice || 0) * Number(quantity || 1) * activeDays) / daysInMonth),
-    activeDays,
-    daysInMonth,
-  };
+  if (mode === 'cancel') {
+    return previewSubscriptionProrata({ unitPrice, quantity, endDate: dateStr });
+  }
+  return previewSubscriptionProrata({ unitPrice, quantity, startDate: dateStr });
 }
 
 const STATUS_FILTER_PILLS = [
@@ -63,6 +56,7 @@ const STATUS_FILTER_PILLS = [
   { value: 'PENDING_APPROVAL', label: 'Chờ phê duyệt' },
   { value: 'ACTIVE', label: 'Đang sử dụng' },
   { value: 'CANCELLATION_PENDING', label: 'Chờ hủy' },
+  { value: 'TERMINATED', label: 'Đã chấm dứt' },
   { value: 'CANCELLED', label: 'Đã hủy' },
   { value: 'REJECTED', label: 'Đã từ chối' },
 ];
@@ -100,6 +94,7 @@ export function SubscriptionsPage() {
   const [cancelTarget, setCancelTarget] = useState(null);
   const [cancelEndDate, setCancelEndDate] = useState(toInputDate(new Date()));
   const [cancelNote, setCancelNote] = useState('');
+  const [cancelZeroUsage, setCancelZeroUsage] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
 
   // Confirm từ chối đăng ký
@@ -273,6 +268,7 @@ export function SubscriptionsPage() {
       : maxDateStr(toInputDate(new Date()), subStart);
     setCancelEndDate(initialEnd);
     setCancelNote(sub.note || '');
+    setCancelZeroUsage(false);
   };
 
   const cancelStartDateStr = toDateOnlyStr(cancelTarget?.start_date);
@@ -288,13 +284,14 @@ export function SubscriptionsPage() {
 
   const cancelProrataPreview = useMemo(() => {
     if (!cancelTarget || cancelEndDateError) return null;
-    return estimateProrata(
-      cancelTarget.unit_price,
-      cancelTarget.quantity,
-      cancelEndDate,
-      'cancel'
-    );
-  }, [cancelTarget, cancelEndDate, cancelEndDateError]);
+    return previewSubscriptionProrata({
+      unitPrice: cancelTarget.unit_price,
+      quantity: cancelTarget.quantity,
+      startDate: cancelTarget.start_date,
+      endDate: cancelEndDate,
+      zeroUsage: cancelZeroUsage,
+    });
+  }, [cancelTarget, cancelEndDate, cancelEndDateError, cancelZeroUsage]);
 
   const handleConfirmCancel = async () => {
     if (!cancelTarget) return;
@@ -305,15 +302,45 @@ export function SubscriptionsPage() {
     setSubmittingAction(true);
     try {
       const res = await servicesService.updateSubscription(cancelTarget.id, {
-        status: 'CANCELLED',
+        status: 'TERMINATED',
         end_date: cancelEndDate,
+        zero_usage: cancelZeroUsage,
+        cancel_reason: cancelNote.trim() || undefined,
         note: cancelNote.trim() || null,
       });
-      toast.success(res.message || 'Đã xác nhận hủy dịch vụ và chốt phí Pro-rata.');
+
+      const sync = res.invoice_sync;
+      let syncMsg = res.message || 'Đã xác nhận chấm dứt dịch vụ và chốt phí Pro-rata.';
+      if (sync) {
+        if (sync.scenario === 1 || sync.status === 'NO_INVOICE' || sync.scenario === 'NO_INVOICE') {
+          syncMsg += ' (Kỳ hiện tại chưa có hóa đơn, phí sẽ không phát sinh).';
+        } else if (sync.scenario === 2 || sync.status === 'UPDATED_DRAFT' || sync.scenario === 'UPDATED_DRAFT') {
+          syncMsg += ' (Đã cập nhật tự động lại hóa đơn DRAFT kỳ này).';
+        } else if (sync.scenario === 3 || sync.status === 'ADJUSTMENT_CREATED' || sync.scenario === 'ADJUSTMENT_CREATED') {
+          syncMsg += ' (Hóa đơn đã phát hành: Đã tạo đề nghị điều chỉnh hóa đơn chờ duyệt 4 mắt).';
+        }
+      }
+      toast.success(syncMsg);
       setCancelTarget(null);
       fetchSubscriptions();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể hủy đăng ký dịch vụ.'));
+      toast.error(extractErrorMessage(err, 'Không thể chấm dứt đăng ký dịch vụ.'));
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
+  const handleKeepService = async (sub) => {
+    setSubmittingAction(true);
+    try {
+      const res = await servicesService.updateSubscription(sub.id, {
+        status: 'ACTIVE',
+        note: 'Giữ lại dịch vụ tiếp tục sử dụng',
+      });
+      toast.success(res.message || 'Đã giữ lại dịch vụ, tiếp tục duy trì hoạt động.');
+      fetchSubscriptions();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể giữ lại dịch vụ.'));
     } finally {
       setSubmittingAction(false);
     }
@@ -457,17 +484,25 @@ export function SubscriptionsPage() {
 
           if (row.status === 'CANCELLATION_PENDING') {
             return (
-              <Button
-                size="xs"
-                variant="warning"
-                icon={Ban}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openCancelModal(row);
-                }}
-              >
-                Xác nhận hủy
-              </Button>
+              <div className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  icon={Check}
+                  loading={submittingAction}
+                  onClick={() => handleKeepService(row)}
+                >
+                  Giữ lại dịch vụ
+                </Button>
+                <Button
+                  size="xs"
+                  variant="warning"
+                  icon={Ban}
+                  onClick={() => openCancelModal(row)}
+                >
+                  Xác nhận hủy
+                </Button>
+              </div>
             );
           }
 
@@ -798,6 +833,16 @@ export function SubscriptionsPage() {
               value={cancelEndDate}
               onChange={(e) => setCancelEndDate(e.target.value)}
             />
+
+            <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700 select-none">
+              <input
+                type="checkbox"
+                checked={cancelZeroUsage}
+                onChange={(e) => setCancelZeroUsage(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500"
+              />
+              <span>Miễn phí hoàn toàn (zero_usage: 0 ₫ do chưa từng sử dụng thực tế)</span>
+            </label>
 
             {cancelProrataPreview ? (
               <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 space-y-1.5 text-xs">

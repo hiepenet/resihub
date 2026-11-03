@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import {
   Receipt,
   Sparkles,
@@ -9,6 +9,8 @@ import {
   Eye,
   Send,
   RefreshCw,
+  Clock,
+  ExternalLink,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Select } from '../../../components/ui/Select';
@@ -35,6 +37,7 @@ const STATUS_OPTIONS = Object.entries(INVOICE_STATUS).map(([value, info]) => ({
 
 export function InvoicesPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const toast = useToast();
   const { canManageInvoices } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
@@ -48,6 +51,11 @@ export function InvoicesPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
 
+  // Hàng đợi 4 mắt: Điều chỉnh hóa đơn chờ duyệt (Ruling 2)
+  const [pendingAdjustments, setPendingAdjustments] = useState([]);
+  const [adjustmentsLoading, setAdjustmentsLoading] = useState(false);
+  const [showAdjustmentsModal, setShowAdjustmentsModal] = useState(false);
+
   // Modal sinh hóa đơn hàng loạt
   const [batchOpen, setBatchOpen] = useState(false);
   const [buildings, setBuildings] = useState([]);
@@ -56,6 +64,32 @@ export function InvoicesPage() {
   const [autoIssue, setAutoIssue] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [issuingId, setIssuingId] = useState(null);
+
+  // Kết quả sinh hóa đơn hàng loạt & hợp đồng bỏ qua (AC-015.1)
+  const [batchResult, setBatchResult] = useState(null);
+
+  const fetchAdjustmentsQueue = useCallback(async () => {
+    setAdjustmentsLoading(true);
+    try {
+      const res = await invoicesService.getAdjustments({
+        status: 'PENDING_APPROVAL',
+        building_id: selectedBuildingId || undefined,
+      });
+      setPendingAdjustments(res.data || []);
+    } catch {
+      setPendingAdjustments([]);
+    } finally {
+      setAdjustmentsLoading(false);
+    }
+  }, [selectedBuildingId]);
+
+  // Tự động mở hàng đợi khi URL chứa ?status=PENDING_APPROVAL hoặc ?tab=adjustments
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('status') === 'PENDING_APPROVAL' || params.get('tab') === 'adjustments') {
+      setShowAdjustmentsModal(true);
+    }
+  }, [location.search]);
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -78,9 +112,10 @@ export function InvoicesPage() {
   useEffect(() => {
     const t = setTimeout(() => {
       fetchInvoices();
+      fetchAdjustmentsQueue();
     }, 200);
     return () => clearTimeout(t);
-  }, [fetchInvoices]);
+  }, [fetchInvoices, fetchAdjustmentsQueue]);
 
   const openBatchModal = async () => {
     setBatchPeriod(period || getCurrentPeriod());
@@ -110,6 +145,7 @@ export function InvoicesPage() {
       });
       toast.success(res.message || 'Đã xử lý sinh hóa đơn hàng loạt.');
       setBatchOpen(false);
+      setBatchResult(res);
       setPeriod(batchPeriod);
       fetchInvoices();
     } catch (err) {
@@ -245,9 +281,10 @@ export function InvoicesPage() {
         className: 'font-mono tabular-nums font-semibold whitespace-nowrap',
         render: (row) => {
           const rem = Math.max(0, Number(row.remaining_amount || 0));
+          const isVoidOrCancelled = ['CANCELLED', 'VOID'].includes(row.status);
           return (
-            <span className={rem > 0 && row.status !== 'CANCELLED' ? 'text-rose-600' : 'text-slate-400'}>
-              {row.status === 'CANCELLED' ? '0 ₫' : formatMoney(rem)}
+            <span className={rem > 0 && !isVoidOrCancelled ? 'text-rose-600' : 'text-slate-400'}>
+              {isVoidOrCancelled ? '0 ₫' : formatMoney(rem)}
             </span>
           );
         },
@@ -319,12 +356,37 @@ export function InvoicesPage() {
         }
       />
 
+      {/* Cảnh báo hàng đợi 4 mắt: Điều chỉnh hóa đơn chờ duyệt (Ruling 2) */}
+      {pendingAdjustments.length > 0 ? (
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-start gap-3">
+            <Clock className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-semibold text-amber-900">
+                Có {pendingAdjustments.length} đề nghị điều chỉnh hóa đơn đang chờ phê duyệt 4 mắt
+              </p>
+              <p className="text-xs text-amber-800/80 mt-0.5">
+                Các đề nghị điều chỉnh tăng/giảm hoặc hủy (VOID) sau phát hành cần được kiểm duyệt trước khi đồng bộ tài chính.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="warning"
+            onClick={() => setShowAdjustmentsModal(true)}
+            className="self-start sm:self-center whitespace-nowrap"
+          >
+            Xem hàng đợi ({pendingAdjustments.length})
+          </Button>
+        </div>
+      ) : null}
+
       {/* KPI tổng phát hành / đã thu / chưa thu */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <StatsCard
           title={`Tổng phát hành ${period ? `(${period})` : '(Tất cả kỳ)'}`}
           value={formatMoney(summary.total_billed)}
-          subtext={`${invoices.filter((i) => i.status !== 'CANCELLED').length} hóa đơn hợp lệ`}
+          subtext={`${invoices.filter((i) => !['CANCELLED', 'VOID'].includes(i.status)).length} hóa đơn hợp lệ`}
           icon={Receipt}
           color="sky"
         />
@@ -339,7 +401,7 @@ export function InvoicesPage() {
           title="Chưa thu / Còn phải thu"
           value={formatMoney(summary.total_unpaid)}
           subtext={`${
-            invoices.filter((i) => ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(i.status)).length
+            invoices.filter((i) => ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(i.status)).length
           } hóa đơn đang chờ thanh toán`}
           icon={AlertTriangle}
           color="rose"
@@ -465,6 +527,169 @@ export function InvoicesPage() {
             </div>
           </label>
         </form>
+      </Modal>
+
+      {/* Modal báo cáo kết quả sinh hóa đơn hàng loạt & skipped_contracts (AC-015.1) */}
+      <Modal
+        open={Boolean(batchResult)}
+        onClose={() => setBatchResult(null)}
+        title="Báo cáo kết quả sinh hóa đơn"
+        subtitle={`Kỳ thanh toán: ${batchPeriod}`}
+        size="lg"
+        footer={
+          <Button variant="primary" onClick={() => setBatchResult(null)}>
+            Đóng
+          </Button>
+        }
+      >
+        {batchResult ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-center">
+                <p className="text-xs text-emerald-700 font-medium">Hóa đơn tạo mới</p>
+                <p className="text-xl font-bold text-emerald-800 mt-0.5">
+                  {batchResult.created_count ?? 0}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-center">
+                <p className="text-xs text-sky-700 font-medium">Bản nháp đã cập nhật</p>
+                <p className="text-xl font-bold text-sky-800 mt-0.5">
+                  {batchResult.updated_draft_count ?? 0}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-center">
+                <p className="text-xs text-amber-700 font-medium">Hợp đồng bỏ qua</p>
+                <p className="text-xl font-bold text-amber-800 mt-0.5">
+                  {(batchResult.skipped_contracts || []).length}
+                </p>
+              </div>
+            </div>
+
+            {Array.isArray(batchResult.skipped_contracts) && batchResult.skipped_contracts.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-800">
+                  Chi tiết hợp đồng không sinh hóa đơn kỳ này (Bảo toàn dữ liệu):
+                </p>
+                <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-200">
+                  <table className="w-full text-xs text-left">
+                    <thead className="bg-slate-50 text-slate-600 font-semibold sticky top-0 border-b border-slate-200">
+                      <tr>
+                        <th className="p-2.5">Mã Hợp đồng</th>
+                        <th className="p-2.5">Căn hộ</th>
+                        <th className="p-2.5">Lý do bỏ qua</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {batchResult.skipped_contracts.map((sc, idx) => (
+                        <tr key={idx} className="hover:bg-slate-50/50">
+                          <td className="p-2.5 font-mono font-medium text-slate-800">
+                            {sc.contract_code || sc.contract_id?.slice(0, 8)}
+                          </td>
+                          <td className="p-2.5 text-slate-700 font-semibold">
+                            {sc.apartment_code || '—'}
+                          </td>
+                          <td className="p-2.5 text-amber-700">{sc.reason || 'Đã có hóa đơn trong kỳ'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500 italic text-center py-2">
+                Tất cả hợp đồng đủ điều kiện đều đã được sinh hoặc làm mới hóa đơn thành công.
+              </p>
+            )}
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Modal Hàng đợi 4 mắt: Đề nghị điều chỉnh hóa đơn chờ duyệt (Ruling 2) */}
+      <Modal
+        open={showAdjustmentsModal}
+        onClose={() => setShowAdjustmentsModal(false)}
+        title="Hàng đợi Điều chỉnh Hóa đơn chờ duyệt 4 mắt"
+        subtitle="Danh sách các đề nghị tăng/giảm hoặc hủy hóa đơn (VOID) cần phê duyệt độc lập."
+        size="xl"
+        footer={
+          <Button variant="outline" onClick={() => setShowAdjustmentsModal(false)}>
+            Đóng
+          </Button>
+        }
+      >
+        <div className="space-y-4">
+          {adjustmentsLoading ? (
+            <div className="py-8 text-center text-xs text-slate-400">
+              Đang tải danh sách chờ duyệt...
+            </div>
+          ) : pendingAdjustments.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">
+              Không có đề nghị điều chỉnh hóa đơn nào đang chờ phê duyệt.
+            </div>
+          ) : (
+            <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-slate-200">
+              <table className="w-full text-xs text-left">
+                <thead className="bg-slate-50 text-slate-600 font-semibold sticky top-0 border-b border-slate-200">
+                  <tr>
+                    <th className="p-2.5">Hóa đơn</th>
+                    <th className="p-2.5">Căn hộ</th>
+                    <th className="p-2.5">Loại điều chỉnh</th>
+                    <th className="p-2.5 text-right">Số tiền thay đổi</th>
+                    <th className="p-2.5">Lý do</th>
+                    <th className="p-2.5 text-center">Thao tác</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {pendingAdjustments.map((adj) => (
+                    <tr key={adj.id} className="hover:bg-slate-50/50">
+                      <td className="p-2.5 font-mono font-semibold text-primary-600">
+                        <Link
+                          to={`/admin/invoices/${adj.invoice_id}`}
+                          className="hover:underline flex items-center gap-1"
+                        >
+                          {adj.invoice_code || adj.invoice_id?.slice(0, 8)}
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </Link>
+                      </td>
+                      <td className="p-2.5 font-medium text-slate-800">
+                        {adj.apartment_code || '—'}
+                      </td>
+                      <td className="p-2.5">
+                        <Badge
+                          variant={adj.action_type === 'VOID' ? 'slate' : 'purple'}
+                          size="xs"
+                        >
+                          {adj.action_type === 'VOID' ? 'Hủy hóa đơn (VOID)' : `Điều chỉnh ${adj.adjustment_target || ''}`}
+                        </Badge>
+                      </td>
+                      <td className="p-2.5 text-right font-mono font-semibold text-slate-900">
+                        {adj.delta_amount != null
+                          ? `${Number(adj.delta_amount) > 0 ? '+' : ''}${formatMoney(adj.delta_amount)}`
+                          : '—'}
+                      </td>
+                      <td className="p-2.5 text-slate-600 max-w-xs break-words">
+                        {adj.reason || '—'}
+                      </td>
+                      <td className="p-2.5 text-center">
+                        <Button
+                          size="xs"
+                          variant="soft"
+                          icon={Eye}
+                          onClick={() => {
+                            setShowAdjustmentsModal(false);
+                            navigate(`/admin/invoices/${adj.invoice_id}`);
+                          }}
+                        >
+                          Chi tiết & Phê duyệt
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </Modal>
     </div>
   );

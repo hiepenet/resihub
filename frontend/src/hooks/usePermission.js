@@ -23,8 +23,8 @@ export function usePermission() {
     isManager,
     isResident,
     // Ma trận quyền 4 vai trò (PRD Mục 6.2 & FR-014):
-    // - SYS_ADMIN: cấu hình hệ thống & BĐS cấp cao, CHỈ ĐỌC (R) trên Hợp đồng & Sổ cọc khi tòa nhà đã có OWNER hoạt động.
-    // - OWNER: xem tài sản sở hữu & phê duyệt hợp đồng lệch khung giá (>10%) / tất toán hoàn cọc / hủy giữ chỗ của tòa nhà sở hữu.
+    // - SYS_ADMIN: cấu hình hệ thống & BĐS cấp cao, CHỈ ĐỌC (R) trên Hợp đồng, Dịch vụ & Hóa đơn khi tòa nhà đã có OWNER hoạt động.
+    // - OWNER: xem tài sản sở hữu & phê duyệt hợp đồng lệch khung giá (>10%) / điều chỉnh hóa đơn / hoàn tiền tín dụng / tất toán hoàn cọc.
     // - MANAGER: toàn quyền tác nghiệp vận hành, hợp đồng, cư dân, dịch vụ, hóa đơn, kỹ thuật, chi hoàn tiền cọc trên tòa được gán.
     canCreateBuildings: isSysAdmin || isManager,
     canManageBuildings: isSysAdmin,
@@ -40,10 +40,13 @@ export function usePermission() {
     canExecuteDepositPayout: isManager,
     canApproveDepositRefund: isOwner || isManager || isSysAdmin,
     canManageMeters: isSysAdmin || isManager,
-    canManageServiceCatalog: isSysAdmin || isManager,
-    canManageServices: isSysAdmin || isManager,
-    canManageInvoices: isSysAdmin || isManager,
-    canManagePayments: isSysAdmin || isManager,
+    canManageServiceCatalog: isManager,
+    canManageServices: isManager,
+    canManageInvoices: isManager,
+    canManagePayments: isManager,
+    canApproveInvoiceAdjustments: isOwner || isManager || isSysAdmin,
+    canApproveCreditRefunds: isOwner || isManager || isSysAdmin,
+    canViewFinancialAuditLogs: isSysAdmin || isOwner || isManager,
     canHandleMaintenance: isSysAdmin || isManager,
     canSendNotifications: isSysAdmin || isManager,
     canManageUsers: isSysAdmin,

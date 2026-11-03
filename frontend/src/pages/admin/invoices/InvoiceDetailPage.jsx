@@ -11,6 +11,12 @@ import {
   User,
   Calendar,
   Eye,
+  Plus,
+  Trash2,
+  Edit3,
+  History,
+  AlertTriangle,
+  CheckCircle,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -20,6 +26,7 @@ import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Table, THead, TBody, TH, TD } from '../../../components/ui/Table';
+import { Tabs } from '../../../components/ui/Tabs';
 import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -33,6 +40,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, minDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+import { canConfirmInvoiceVoid, canActorApproveInvoiceAdjustment } from '../../../utils/billing';
 
 const LINE_TYPE_LABELS = {
   RENT: { label: 'Tiền thuê phòng', variant: 'sky' },
@@ -64,25 +72,70 @@ const PAYMENT_METHODS = {
   OTHER: 'Khác',
 };
 
+const ADJUSTMENT_TARGET_OPTIONS = [
+  { value: 'SERVICE', label: 'Dịch vụ tiện ích (SERVICE)' },
+  { value: 'RENT', label: 'Tiền thuê phòng (RENT)' },
+  { value: 'LATE_FEE', label: 'Miễn giảm/phạt chậm thanh toán (LATE_FEE)' },
+  { value: 'MANUAL', label: 'Điều chỉnh thủ công khác (MANUAL)' },
+];
+
 export function InvoiceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { canManageInvoices, canManagePayments } = usePermission();
+  const {
+    canManageInvoices,
+    canManagePayments,
+    canApproveInvoiceAdjustments,
+    canViewFinancialAuditLogs,
+    user,
+  } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
+  const [activeTab, setActiveTab] = useState('details'); // details | audit
   const [invoice, setInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  // Modal điều chỉnh hóa đơn
+  // Tab Lịch sử / Kiểm toán (PRD 8.2)
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+
+  // Danh sách đề nghị điều chỉnh 4 mắt (FR-064)
+  const [adjustments, setAdjustments] = useState([]);
+  const [adjLoading, setAdjLoading] = useState(false);
+
+  // Modal thêm/sửa dòng DRAFT (PRD Mục 8.2)
+  const [lineEditOpen, setLineEditOpen] = useState(false);
+  const [editingLine, setEditingLine] = useState(null);
+  const [lineForm, setLineForm] = useState({
+    item_type: 'SERVICE',
+    description: '',
+    quantity: '1',
+    unit_price: '',
+    unit: 'tháng',
+  });
+
+  // Modal xác nhận ngữ cảnh khi phát hành (PRD 16.1)
+  const [issueConfirmOpen, setIssueConfirmOpen] = useState(false);
+
+  // Modal xác nhận 2 bước gõ lại invoice_code khi VOID (PRD 16.2)
+  const [voidOpen, setVoidOpen] = useState(false);
+  const [typedVoidCode, setTypedVoidCode] = useState('');
+  const [voidReason, setVoidReason] = useState('');
+
+  // Modal đề nghị điều chỉnh 4 mắt (ADJUST / LATE_FEE)
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [adjustForm, setAdjustForm] = useState({
-    adjustment_amount: '0',
-    adjustment_reason: '',
-    due_date: '',
-    note: '',
+    adjustment_target: 'SERVICE',
+    delta_amount: '0',
+    reason: '',
+    subscription_id: '',
   });
+
+  // Modal từ chối điều chỉnh (4 mắt)
+  const [rejectAdjTarget, setRejectAdjTarget] = useState(null);
+  const [rejectionReason, setRejectionReason] = useState('');
 
   // Modal ghi nhận thu tiền nhanh
   const [payOpen, setPayOpen] = useState(false);
@@ -93,9 +146,6 @@ export function InvoiceDetailPage() {
     note: '',
     proof_image: '',
   });
-
-  // Confirm hủy hóa đơn
-  const [cancelOpen, setCancelOpen] = useState(false);
 
   // Lightbox xem ảnh chứng từ
   const [previewProof, setPreviewProof] = useState(null);
@@ -111,18 +161,136 @@ export function InvoiceDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [id, selectedBuildingId, toast]);
+  }, [id, toast]);
+
+  const fetchAdjustments = useCallback(async () => {
+    if (!id) return;
+    setAdjLoading(true);
+    try {
+      const res = await invoicesService.getAdjustments({ invoice_id: id });
+      setAdjustments(res.data || []);
+    } catch {
+      setAdjustments([]);
+    } finally {
+      setAdjLoading(false);
+    }
+  }, [id]);
+
+  const fetchAuditLogs = useCallback(async () => {
+    if (!id) return;
+    setAuditLoading(true);
+    try {
+      const res = await invoicesService.getAuditLogs(id);
+      setAuditLogs(res.data || []);
+    } catch {
+      setAuditLogs([]);
+    } finally {
+      setAuditLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
     fetchDetail();
-  }, [fetchDetail]);
+    fetchAdjustments();
+  }, [fetchDetail, fetchAdjustments]);
 
-  const handleIssue = async () => {
+  useEffect(() => {
+    if (activeTab === 'audit') {
+      fetchAuditLogs();
+    }
+  }, [activeTab, fetchAuditLogs]);
+
+  // --- 1. DRAFT Line Editor Handlers ---
+  const openAddLineModal = () => {
+    setEditingLine(null);
+    setLineForm({
+      item_type: 'SERVICE',
+      description: '',
+      quantity: '1',
+      unit_price: '',
+      unit: 'tháng',
+    });
+    setLineEditOpen(true);
+  };
+
+  const openEditLineModal = (line) => {
+    setEditingLine(line);
+    setLineForm({
+      item_type: line.item_type || 'SERVICE',
+      description: line.description || '',
+      quantity: String(line.quantity || 1),
+      unit_price: String(line.unit_price || 0),
+      unit: line.unit || 'tháng',
+    });
+    setLineEditOpen(true);
+  };
+
+  const handleSaveLine = async (e) => {
+    e.preventDefault();
+    if (!lineForm.description.trim()) {
+      toast.warning('Vui lòng nhập diễn giải chi tiết cho dòng phí.');
+      return;
+    }
+    const qty = Number(lineForm.quantity);
+    const unitPrice = Number(lineForm.unit_price);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      toast.warning('Số lượng phải lớn hơn 0.');
+      return;
+    }
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      toast.warning('Đơn giá không hợp lệ.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        item_type: lineForm.item_type,
+        description: lineForm.description.trim(),
+        quantity: qty,
+        unit_price: Math.round(unitPrice),
+        unit: lineForm.unit.trim() || 'lần',
+      };
+      if (editingLine) {
+        await invoicesService.updateLine(invoice.id, editingLine.id, payload);
+        toast.success('Đã cập nhật dòng khoản phí.');
+      } else {
+        await invoicesService.addLine(invoice.id, payload);
+        toast.success('Đã thêm dòng khoản phí mới vào bản nháp.');
+      }
+      setLineEditOpen(false);
+      fetchDetail();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể lưu dòng chi tiết khoản phí.'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteLine = async (line) => {
+    if (!window.confirm(`Bạn có chắc chắn muốn xóa dòng "${line.description}" khỏi hóa đơn nháp?`)) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await invoicesService.deleteLine(invoice.id, line.id);
+      toast.success('Đã xóa dòng khoản phí.');
+      fetchDetail();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa dòng khoản phí.'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // --- 2. Contextual Issue Handler (PRD 16.1) ---
+  const handleConfirmIssue = async () => {
     if (!invoice) return;
     setSubmitting(true);
     try {
-      const res = await invoicesService.updateStatus(invoice.id, { status: 'ISSUED' });
-      toast.success(res.message || 'Đã phát hành hóa đơn cho cư dân.');
+      const res = await invoicesService.issue(invoice.id);
+      toast.success(res.message || 'Đã phát hành hóa đơn và thông báo cho cư dân.');
+      setIssueConfirmOpen(false);
       fetchDetail();
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể phát hành hóa đơn.'));
@@ -131,81 +299,125 @@ export function InvoiceDetailPage() {
     }
   };
 
+  // --- 3. 2-Step VOID Handler (PRD 16.2) ---
+  const handleConfirmVoid = async () => {
+    if (!invoice) return;
+    const canVoid = canConfirmInvoiceVoid({
+      invoice,
+      typedInvoiceCode: typedVoidCode,
+      reason: voidReason,
+    });
+    if (!canVoid) {
+      toast.warning('Vui lòng gõ chính xác mã hóa đơn và nhập lý do hủy đầy đủ.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await invoicesService.requestAdjustment(invoice.id, {
+        action_type: 'VOID',
+        confirm_invoice_code: typedVoidCode.trim(),
+        reason: voidReason.trim(),
+      });
+      toast.success(res.message || 'Đã lập đề nghị hủy hóa đơn (chờ duyệt 4 mắt).');
+      setVoidOpen(false);
+      setTypedVoidCode('');
+      setVoidReason('');
+      fetchDetail();
+      fetchAdjustments();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể gửi đề nghị hủy hóa đơn.'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // --- 4. 4-Eyes Adjust Handlers (FR-064) ---
   const openAdjustModal = () => {
     if (!invoice) return;
-    const adjLine = (invoice.lines || []).find((l) => l.item_type === 'ADJUSTMENT');
     setAdjustForm({
-      adjustment_amount: String(Number(invoice.adjustment_amount || 0)),
-      adjustment_reason: adjLine?.description || 'Điều chỉnh phí hóa đơn',
-      due_date: toInputDate(invoice.due_date),
-      note: invoice.note || '',
+      adjustment_target: 'SERVICE',
+      delta_amount: '0',
+      reason: '',
+      subscription_id: '',
     });
     setAdjustOpen(true);
   };
 
-  const invoiceIssueDateStr = toDateOnlyStr(invoice?.issue_date || invoice?.created_at);
-  const currentInvoiceDueStr = toDateOnlyStr(invoice?.due_date);
-  const minAdjustDueDate =
-    currentInvoiceDueStr && invoiceIssueDateStr
-      ? minDateStr(invoiceIssueDateStr, currentInvoiceDueStr)
-      : invoiceIssueDateStr;
-  const adjustDueDateError =
-    adjustForm.due_date && minAdjustDueDate
-      ? getDateOrderError(minAdjustDueDate, adjustForm.due_date, {
-          strictAfter: false,
-          startLabel: invoiceIssueDateStr
-            ? `Ngày lập hóa đơn (${formatDateVi(invoiceIssueDateStr)})`
-            : 'Ngày lập hóa đơn',
-          endLabel: 'Hạn thanh toán',
-        })
-      : '';
-
   const handleSaveAdjustment = async (e) => {
     e.preventDefault();
     if (!invoice) return;
-    if (adjustDueDateError) {
-      toast.warning(adjustDueDateError);
+    const deltaNum = Math.round(Number(adjustForm.delta_amount || 0));
+    if (deltaNum === 0) {
+      toast.warning('Số tiền điều chỉnh delta phải khác 0 (dương để tăng, âm để giảm).');
       return;
     }
-    const adjNum = Math.round(Number(adjustForm.adjustment_amount || 0));
-    if (adjNum !== 0 && !adjustForm.adjustment_reason.trim()) {
-      toast.warning('Vui lòng nhập lý do điều chỉnh số tiền.');
+    if (!adjustForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do điều chỉnh bắt buộc.');
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await invoicesService.updateStatus(invoice.id, {
-        adjustment_amount: adjNum,
-        adjustment_reason: adjustForm.adjustment_reason.trim() || 'Điều chỉnh hóa đơn',
-        due_date: adjustForm.due_date || undefined,
-        note: adjustForm.note.trim() || null,
+      const res = await invoicesService.requestAdjustment(invoice.id, {
+        action_type: 'ADJUST',
+        adjustment_target: adjustForm.adjustment_target,
+        delta_amount: deltaNum,
+        reason: adjustForm.reason.trim(),
+        subscription_id: adjustForm.subscription_id || undefined,
       });
-      toast.success(res.message || 'Đã cập nhật điều chỉnh hóa đơn.');
+      toast.success(res.message || 'Đã tạo đề nghị điều chỉnh hóa đơn (chờ duyệt 4 mắt).');
       setAdjustOpen(false);
       fetchDetail();
+      fetchAdjustments();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể điều chỉnh hóa đơn.'));
+      toast.error(extractErrorMessage(err, 'Không thể tạo đề nghị điều chỉnh hóa đơn.'));
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleCancelInvoice = async () => {
-    if (!invoice) return;
+  const handleApproveAdjustment = async (adj) => {
+    if (!window.confirm('Xác nhận phê duyệt đề nghị điều chỉnh hóa đơn này? Thay đổi sẽ cập nhật trực tiếp vào số dư công nợ.')) {
+      return;
+    }
     setSubmitting(true);
     try {
-      const res = await invoicesService.updateStatus(invoice.id, { status: 'CANCELLED' });
-      toast.success(res.message || 'Đã hủy hóa đơn.');
-      setCancelOpen(false);
+      const res = await invoicesService.approveAdjustment(invoice.id, adj.id);
+      toast.success(res.message || 'Đã phê duyệt điều chỉnh hóa đơn thành công.');
       fetchDetail();
+      fetchAdjustments();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể hủy hóa đơn.'));
+      toast.error(extractErrorMessage(err, 'Không thể phê duyệt điều chỉnh hóa đơn.'));
     } finally {
       setSubmitting(false);
     }
   };
 
+  const handleRejectAdjustment = async () => {
+    if (!rejectAdjTarget) return;
+    if (!rejectionReason.trim()) {
+      toast.warning('Vui lòng nhập lý do từ chối.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await invoicesService.rejectAdjustment(invoice.id, rejectAdjTarget.id, {
+        rejection_reason: rejectionReason.trim(),
+      });
+      toast.success(res.message || 'Đã từ chối đề nghị điều chỉnh hóa đơn.');
+      setRejectAdjTarget(null);
+      setRejectionReason('');
+      fetchDetail();
+      fetchAdjustments();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể từ chối đề nghị điều chỉnh.'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // --- 5. Quick Pay Handler ---
   const openQuickPayModal = () => {
     if (!invoice) return;
     const rem = Math.max(0, Number(invoice.total_amount || 0) - Number(invoice.paid_amount || 0));
@@ -219,12 +431,12 @@ export function InvoiceDetailPage() {
     setPayOpen(true);
   };
 
-  const handleQuickPay = async (e) => {
+  const handleSaveQuickPayment = async (e) => {
     e.preventDefault();
     if (!invoice) return;
     const amt = Math.round(Number(payForm.amount || 0));
-    if (amt <= 0) {
-      toast.warning('Số tiền thu phải lớn hơn 0.');
+    if (!amt || amt <= 0) {
+      toast.warning('Số tiền thanh toán phải lớn hơn 0.');
       return;
     }
 
@@ -236,7 +448,7 @@ export function InvoiceDetailPage() {
         method: payForm.method,
         reference_code: payForm.reference_code.trim() || undefined,
         note: payForm.note.trim() || undefined,
-        proof_image: payForm.proof_image || undefined,
+        proof_images: payForm.proof_image ? [payForm.proof_image] : [],
       });
       toast.success(res.message || 'Ghi nhận thanh toán thành công.');
       setPayOpen(false);
@@ -277,20 +489,13 @@ export function InvoiceDetailPage() {
     0,
     Number(invoice.total_amount || 0) - Number(invoice.paid_amount || 0)
   );
-  const canAdjust = canManageInvoices && !['PAID', 'CANCELLED'].includes(invoice.status);
-  const canCancel =
-    canManageInvoices &&
-    invoice.status !== 'CANCELLED' &&
-    Number(invoice.paid_amount || 0) === 0;
-  const canCollect =
-    canManagePayments &&
-    !['PAID', 'CANCELLED', 'DRAFT'].includes(invoice.status) &&
-    remaining > 0;
+  const isDraft = invoice.status === 'DRAFT';
+  const isVoid = invoice.status === 'VOID';
+  const isCancelled = invoice.status === 'CANCELLED';
 
-  const previewAdjustedTotal = Math.max(
-    0,
-    Number(invoice.subtotal_amount || 0) + Math.round(Number(adjustForm.adjustment_amount || 0))
-  );
+  const canRequestAdjust = canManageInvoices && !isDraft && !isVoid && !isCancelled;
+  const canVoidInvoice = canManageInvoices && !isDraft && !isVoid && !isCancelled && Number(invoice.paid_amount || 0) === 0;
+  const canCollect = canManagePayments && !isDraft && !isVoid && !isCancelled && remaining > 0;
 
   return (
     <div className="space-y-6">
@@ -302,7 +507,7 @@ export function InvoiceDetailPage() {
         title={`Chi tiết Hóa đơn ${invoice.invoice_code}`}
         subtitle={`Kỳ thanh toán ${invoice.period} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
         actions={
-          <>
+          <div className="flex flex-wrap items-center gap-2">
             <Link to="/admin/invoices">
               <Button variant="outline" icon={ArrowLeft}>
                 Quay lại
@@ -313,20 +518,20 @@ export function InvoiceDetailPage() {
               In hóa đơn PDF
             </Button>
 
-            {canManageInvoices && invoice.status === 'DRAFT' ? (
+            {canManageInvoices && isDraft ? (
               <Button
                 variant="primary"
                 icon={Send}
                 loading={submitting}
-                onClick={handleIssue}
+                onClick={() => setIssueConfirmOpen(true)}
               >
                 Phát hành hóa đơn
               </Button>
             ) : null}
 
-            {canAdjust ? (
+            {canRequestAdjust ? (
               <Button variant="outline" icon={SlidersHorizontal} onClick={openAdjustModal}>
-                Điều chỉnh số tiền
+                Đề nghị điều chỉnh (4 mắt)
               </Button>
             ) : null}
 
@@ -336,406 +541,705 @@ export function InvoiceDetailPage() {
               </Button>
             ) : null}
 
-            {canCancel ? (
-              <Button variant="danger" icon={Ban} onClick={() => setCancelOpen(true)}>
-                Hủy hóa đơn
+            {canVoidInvoice ? (
+              <Button variant="danger" icon={Ban} onClick={() => setVoidOpen(true)}>
+                Hủy hóa đơn (VOID)
               </Button>
             ) : null}
-          </>
+          </div>
         }
       />
 
-      {/* Tờ Hóa Đơn Chuẩn Chuyên Nghiệp (Hỗ trợ in A4 PDF) */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-6 sm:p-8 print-area space-y-8">
-        {/* Header Tờ Hóa Đơn */}
-        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 pb-6 border-b border-slate-200">
-          <div>
-            <div className="inline-flex items-center gap-2 text-primary-600 font-bold text-sm uppercase tracking-wider">
-              <Building2 className="w-4 h-4" />
-              <span>Hệ thống Quản lý Căn hộ ResiHub</span>
+      {/* Tabs Chuyển đổi: Chi tiết hóa đơn vs Lịch sử / Kiểm toán (PRD 8.2) */}
+      <div className="bg-white rounded-xl border border-slate-200 px-4 pt-2">
+        <Tabs
+          activeTab={activeTab}
+          onChange={setActiveTab}
+          tabs={[
+            { id: 'details', label: 'Tờ hóa đơn chi tiết' },
+            ...(canViewFinancialAuditLogs
+              ? [
+                  {
+                    id: 'audit',
+                    label: 'Lịch sử / Kiểm toán',
+                    icon: History,
+                    count: auditLogs.length || undefined,
+                  },
+                ]
+              : []),
+          ]}
+        />
+      </div>
+
+      {activeTab === 'details' ? (
+        <div className="space-y-6">
+          {/* Tờ Hóa Đơn Chuẩn Chuyên Nghiệp (Hỗ trợ in A4 PDF) */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-6 sm:p-8 print-area space-y-8">
+            {/* Header Tờ Hóa Đơn */}
+            <div className="flex flex-col sm:flex-row justify-between items-start gap-6 border-b border-slate-200 pb-6">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl font-bold tracking-tight text-slate-900">
+                    HÓA ĐƠN THU TIỀN KỲ
+                  </span>
+                  <StatusBadge status={invoice.status} domain="invoice" />
+                </div>
+                <p className="font-mono text-sm font-semibold text-primary-700">
+                  Mã số: {invoice.invoice_code}
+                </p>
+                <p className="text-xs text-slate-500">
+                  Đơn vị quản lý: <strong>{invoice.building_name}</strong>
+                </p>
+              </div>
+
+              <div className="sm:text-right space-y-1 text-xs text-slate-600">
+                <p>
+                  Kỳ đối soát: <strong className="text-slate-900">{invoice.period}</strong>
+                </p>
+                <p>
+                  Hạn thanh toán:{' '}
+                  <strong className="text-rose-600">{formatDate(invoice.due_date)}</strong>
+                </p>
+                <p>
+                  Ngày lập:{' '}
+                  <span className="text-slate-700">
+                    {formatDate(invoice.issue_date || invoice.created_at)}
+                  </span>
+                </p>
+              </div>
             </div>
-            <h2 className="text-xl font-bold text-slate-900 mt-1">{invoice.building_name}</h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Mã tòa nhà: {invoice.building_code}
-              {invoice.building_address ? ` • Địa chỉ: ${invoice.building_address}` : ''}
-            </p>
-          </div>
 
-          <div className="sm:text-right space-y-1.5">
-            <div className="flex sm:justify-end items-center gap-2">
-              <span className="text-xs uppercase tracking-wider font-semibold text-slate-400">
-                PHIẾU BÁO PHÍ & HÓA ĐƠN
-              </span>
-              <StatusBadge status={invoice.status} domain="invoice" />
+            {/* Thông tin Căn hộ & Khách thuê */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-xl bg-slate-50 border border-slate-100 text-xs">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 font-semibold text-slate-800">
+                  <Building2 className="w-4 h-4 text-primary-600" />
+                  <span>CĂN HỘ / MẶT BẰNG</span>
+                </div>
+                <p className="font-medium text-slate-900 text-sm">Căn {invoice.apartment_code}</p>
+                <p className="text-slate-500">{invoice.building_name}</p>
+                <p className="font-mono text-[11px] text-slate-400">HĐ: {invoice.contract_code}</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 font-semibold text-slate-800">
+                  <User className="w-4 h-4 text-primary-600" />
+                  <span>NGƯỜI THANH TOÁN (CƯ DÂN)</span>
+                </div>
+                <p className="font-medium text-slate-900 text-sm">
+                  {invoice.tenant_name || 'Khách thuê'}
+                </p>
+                <p className="text-slate-600">{invoice.tenant_phone || 'Chưa cập nhật SĐT'}</p>
+                <p className="text-slate-400">{invoice.tenant_email || ''}</p>
+              </div>
             </div>
-            <p className="font-mono text-lg font-bold text-slate-900">{invoice.invoice_code}</p>
-            <p className="text-xs text-slate-500">Kỳ hạch toán: Tháng {invoice.period}</p>
-          </div>
-        </div>
 
-        {/* Thông tin Khách thuê & Lịch thanh toán */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="p-4 rounded-xl bg-slate-50/80 border border-slate-200/70 space-y-2 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 flex items-center gap-1.5">
-              <User className="w-3.5 h-3.5" /> Thông tin Căn hộ & Cư dân
-            </p>
-            <div className="grid grid-cols-3 gap-1 pt-1 text-xs">
-              <span className="text-slate-500">Căn hộ:</span>
-              <span className="col-span-2 font-semibold text-slate-900">
-                Căn {invoice.apartment_code}{' '}
-                {invoice.area_m2 ? `(${invoice.area_m2} m²)` : ''}
-              </span>
+            {/* Bảng chi tiết khoản thu (DRAFT line editor) */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Chi tiết các khoản phí trong kỳ
+                </h3>
+                {canManageInvoices && isDraft ? (
+                  <Button size="xs" variant="outline" icon={Plus} onClick={openAddLineModal}>
+                    Thêm dòng phí
+                  </Button>
+                ) : null}
+              </div>
 
-              <span className="text-slate-500">Khách thuê chính:</span>
-              <span className="col-span-2 font-semibold text-slate-900">
-                {invoice.tenant_name || '—'}
-              </span>
-
-              <span className="text-slate-500">Số điện thoại:</span>
-              <span className="col-span-2 text-slate-700">{invoice.tenant_phone || '—'}</span>
-
-              <span className="text-slate-500">Email nhận HĐ:</span>
-              <span className="col-span-2 text-slate-700 break-all">{invoice.tenant_email || '—'}</span>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-slate-50/80 border border-slate-200/70 space-y-2 text-sm">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5" /> Thông tin Kỳ thanh toán
-            </p>
-            <div className="grid grid-cols-3 gap-1 pt-1 text-xs">
-              <span className="text-slate-500">Ngày lập hóa đơn:</span>
-              <span className="col-span-2 font-medium text-slate-800">
-                {formatDate(invoice.issue_date)}
-              </span>
-
-              <span className="text-slate-500">Hạn thanh toán:</span>
-              <span className="col-span-2 font-semibold text-rose-600">
-                {formatDate(invoice.due_date)}
-              </span>
-
-              <span className="text-slate-500">Thời điểm phát hành:</span>
-              <span className="col-span-2 text-slate-700">
-                {invoice.issued_at ? formatDateTime(invoice.issued_at) : 'Chưa phát hành (Nháp)'}
-              </span>
-
-              {invoice.note ? (
-                <>
-                  <span className="text-slate-500">Ghi chú HĐ:</span>
-                  <span className="col-span-2 text-slate-700">{invoice.note}</span>
-                </>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
-        {/* Bảng chi tiết khoản thu */}
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold text-slate-900">
-            Chi tiết các khoản phí trong kỳ
-          </h3>
-          <div className="border border-slate-200 rounded-xl overflow-hidden">
-            <Table>
-              <THead>
-                <tr>
-                  <TH className="w-14 text-center">STT</TH>
-                  <TH className="text-center">Hạng mục</TH>
-                  <TH>Diễn giải chi tiết</TH>
-                  <TH className="text-center">Số lượng</TH>
-                  <TH className="text-center">ĐVT</TH>
-                  <TH className="text-right">Đơn giá</TH>
-                  <TH className="text-right">Thành tiền</TH>
-                </tr>
-              </THead>
-              <TBody>
-                {(invoice.lines || []).length === 0 ? (
-                  <tr>
-                    <TD colSpan={7} className="text-center text-slate-400 py-6">
-                      Chưa có dòng chi tiết hóa đơn.
-                    </TD>
-                  </tr>
-                ) : (
-                  invoice.lines.map((line, idx) => {
-                    const typeMeta = LINE_TYPE_LABELS[line.item_type] || LINE_TYPE_LABELS.OTHER;
-                    return (
-                      <tr key={line.id || idx}>
-                        <TD className="text-center text-xs text-slate-400">{idx + 1}</TD>
-                        <TD className="text-center">
-                          <Badge variant={typeMeta.variant}>{typeMeta.label}</Badge>
-                        </TD>
-                        <TD className="font-medium text-slate-800">{line.description}</TD>
-                        <TD className="text-center font-mono whitespace-nowrap">{Number(line.quantity)}</TD>
-                        <TD className="text-center text-slate-500 whitespace-nowrap">{line.unit}</TD>
-                        <TD className="text-right font-mono tabular-nums whitespace-nowrap">{formatMoney(line.unit_price)}</TD>
-                        <TD
-                          className={`text-right font-mono tabular-nums font-semibold whitespace-nowrap ${
-                            Number(line.amount) < 0 ? 'text-emerald-600' : 'text-slate-900'
-                          }`}
-                        >
-                          {Number(line.amount) > 0 && line.item_type === 'ADJUSTMENT' ? '+' : ''}
-                          {formatMoney(line.amount)}
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <Table>
+                  <THead>
+                    <tr>
+                      <TH className="w-12 text-center">STT</TH>
+                      <TH className="text-center">Hạng mục</TH>
+                      <TH>Diễn giải chi tiết</TH>
+                      <TH className="text-center">Số lượng</TH>
+                      <TH className="text-center">ĐVT</TH>
+                      <TH className="text-right">Đơn giá</TH>
+                      <TH className="text-right">Thành tiền</TH>
+                      {isDraft && canManageInvoices ? (
+                        <TH className="w-20 text-center">Thao tác</TH>
+                      ) : null}
+                    </tr>
+                  </THead>
+                  <TBody>
+                    {(invoice.lines || []).length === 0 ? (
+                      <tr>
+                        <TD colSpan={isDraft ? 8 : 7} className="text-center text-slate-400 py-6">
+                          Chưa có dòng chi tiết khoản phí nào.
                         </TD>
                       </tr>
-                    );
-                  })
-                )}
-              </TBody>
-            </Table>
+                    ) : (
+                      invoice.lines.map((line, idx) => {
+                        const typeMeta = LINE_TYPE_LABELS[line.item_type] || LINE_TYPE_LABELS.OTHER;
+                        return (
+                          <tr key={line.id || idx}>
+                            <TD className="text-center text-xs text-slate-400">{idx + 1}</TD>
+                            <TD className="text-center">
+                              <Badge variant={typeMeta.variant}>{typeMeta.label}</Badge>
+                            </TD>
+                            <TD className="font-medium text-slate-800">
+                              {line.description}
+                              {line.formula_meta?.description ? (
+                                <p className="text-[11px] font-normal text-slate-500">
+                                  {line.formula_meta.description}
+                                </p>
+                              ) : null}
+                            </TD>
+                            <TD className="text-center font-mono whitespace-nowrap">
+                              {Number(line.quantity)}
+                            </TD>
+                            <TD className="text-center text-slate-500 whitespace-nowrap">
+                              {line.unit || 'tháng'}
+                            </TD>
+                            <TD className="text-right font-mono tabular-nums whitespace-nowrap">
+                              {formatMoney(line.unit_price)}
+                            </TD>
+                            <TD
+                              className={`text-right font-mono tabular-nums font-semibold whitespace-nowrap ${
+                                Number(line.amount) < 0 ? 'text-emerald-600' : 'text-slate-900'
+                              }`}
+                            >
+                              {Number(line.amount) > 0 && line.item_type === 'ADJUSTMENT' ? '+' : ''}
+                              {formatMoney(line.amount)}
+                            </TD>
+                            {isDraft && canManageInvoices ? (
+                              <TD className="text-center">
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditLineModal(line)}
+                                    className="p-1 rounded text-slate-500 hover:text-primary-600 hover:bg-slate-100"
+                                    title="Sửa dòng"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteLine(line)}
+                                    className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50"
+                                    title="Xóa dòng"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </TD>
+                            ) : null}
+                          </tr>
+                        );
+                      })
+                    )}
+                  </TBody>
+                </Table>
+              </div>
+            </div>
+
+            {/* Tổng hợp tài chính */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-6 pt-4 border-t border-slate-200">
+              <div className="space-y-1 text-xs text-slate-500 max-w-sm">
+                <p>
+                  * Hóa đơn điện tử nội bộ phát hành theo quy chế quản lý tòa nhà ResiHub.
+                </p>
+                <p>
+                  * Mọi thắc mắc về số liệu vui lòng liên hệ Ban quản lý trước hạn thanh toán.
+                </p>
+              </div>
+
+              <div className="w-full sm:w-80 space-y-2 text-xs">
+                <div className="flex justify-between text-slate-600">
+                  <span>Cộng tiền trước điều chỉnh:</span>
+                  <span className="font-mono tabular-nums font-medium">
+                    {formatMoney(invoice.subtotal_amount)}
+                  </span>
+                </div>
+
+                {Number(invoice.adjustment_amount) !== 0 ? (
+                  <div className="flex justify-between text-indigo-700 font-medium">
+                    <span>Điều chỉnh:</span>
+                    <span className="font-mono tabular-nums">
+                      {Number(invoice.adjustment_amount) > 0 ? '+' : ''}
+                      {formatMoney(invoice.adjustment_amount)}
+                    </span>
+                  </div>
+                ) : null}
+
+                {Number(invoice.credit_offset_amount || 0) > 0 ? (
+                  <div className="flex justify-between text-emerald-700 font-medium">
+                    <span>Tín dụng cấn trừ kỳ trước:</span>
+                    <span className="font-mono tabular-nums">
+                      -{formatMoney(invoice.credit_offset_amount)}
+                    </span>
+                  </div>
+                ) : null}
+
+                <div className="flex justify-between items-center pt-2 border-t border-slate-200 text-sm font-bold text-slate-900">
+                  <span>TỔNG CỘNG PHẢI THU:</span>
+                  <span className="text-base text-primary-700 font-mono">
+                    {formatMoney(invoice.total_amount)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between text-emerald-700 font-medium pt-1">
+                  <span>Đã thanh toán thực tế:</span>
+                  <span className="font-mono tabular-nums">{formatMoney(invoice.paid_amount)}</span>
+                </div>
+
+                <div className="flex justify-between text-sm font-bold pt-1 border-t border-dashed border-slate-200">
+                  <span>CÒN PHẢI THU:</span>
+                  <span
+                    className={`font-mono ${
+                      remaining > 0 && !isVoid && !isCancelled ? 'text-rose-600' : 'text-slate-400'
+                    }`}
+                  >
+                    {isVoid || isCancelled ? '0 ₫' : formatMoney(remaining)}
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
+
+          {/* Danh sách đề nghị điều chỉnh hóa đơn 4 mắt (FR-064) */}
+          {adjustments.length > 0 ? (
+            <Card className="p-5 space-y-3">
+              <CardHeader
+                title="Đề nghị điều chỉnh hóa đơn (Quy trình 4 mắt)"
+                subtitle="Lịch sử các đề nghị tăng/giảm hoặc hủy hóa đơn được lập và phê duyệt độc lập."
+              />
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <Table>
+                  <THead>
+                    <tr>
+                      <TH className="text-center">Trạng thái</TH>
+                      <TH className="text-center">Loại</TH>
+                      <TH className="text-right">Số tiền thay đổi</TH>
+                      <TH>Lý do đề xuất</TH>
+                      <TH className="text-center">Thời gian</TH>
+                      <TH className="text-center">Thao tác</TH>
+                    </tr>
+                  </THead>
+                  <TBody>
+                    {adjustments.map((adj) => {
+                      const canApprove = canActorApproveInvoiceAdjustment({
+                        actor: user,
+                        record: adj,
+                        buildingHasActiveOwner: true,
+                      }) && canApproveInvoiceAdjustments && adj.status === 'PENDING_APPROVAL';
+
+                      return (
+                        <tr key={adj.id}>
+                          <TD className="text-center">
+                            <StatusBadge status={adj.status} domain="invoice_adjustment" />
+                          </TD>
+                          <TD className="text-center">
+                            <Badge variant={adj.action_type === 'VOID' ? 'slate' : 'purple'} size="xs">
+                              {adj.action_type === 'VOID' ? 'HỦY HÓA ĐƠN' : adj.adjustment_target}
+                            </Badge>
+                          </TD>
+                          <TD className="text-right font-mono font-semibold text-slate-800">
+                            {adj.delta_amount != null
+                              ? `${Number(adj.delta_amount) > 0 ? '+' : ''}${formatMoney(adj.delta_amount)}`
+                              : '—'}
+                          </TD>
+                          <TD className="text-xs text-slate-700 max-w-xs break-words">
+                            {adj.reason}
+                            {adj.rejection_reason ? (
+                              <p className="text-rose-600 mt-0.5">
+                                Lý do từ chối: {adj.rejection_reason}
+                              </p>
+                            ) : null}
+                          </TD>
+                          <TD className="text-center text-xs text-slate-500 whitespace-nowrap">
+                            {formatDateTime(adj.created_at)}
+                          </TD>
+                          <TD className="text-center whitespace-nowrap">
+                            {canApprove ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <Button
+                                  size="xs"
+                                  variant="success"
+                                  icon={CheckCircle}
+                                  loading={submitting}
+                                  onClick={() => handleApproveAdjustment(adj)}
+                                >
+                                  Duyệt
+                                </Button>
+                                <Button
+                                  size="xs"
+                                  variant="danger"
+                                  loading={submitting}
+                                  onClick={() => {
+                                    setRejectAdjTarget(adj);
+                                    setRejectionReason('');
+                                  }}
+                                >
+                                  Từ chối
+                                </Button>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">—</span>
+                            )}
+                          </TD>
+                        </tr>
+                      );
+                    })}
+                  </TBody>
+                </Table>
+              </div>
+            </Card>
+          ) : null}
         </div>
+      ) : (
+        /* TAB 2: LỊCH SỬ / KIỂM TOÁN (PRD 8.2) */
+        <Card className="p-5 space-y-4">
+          <CardHeader
+            title="Nhật ký kiểm toán tài chính hóa đơn"
+            subtitle="Toàn bộ lịch sử thêm dòng nháp, phát hành, yêu cầu điều chỉnh và phê duyệt 4 mắt."
+          />
+          {auditLoading ? (
+            <div className="py-10 text-center text-xs text-slate-400">
+              Đang tải nhật ký kiểm toán...
+            </div>
+          ) : auditLogs.length === 0 ? (
+            <div className="py-10 text-center text-xs text-slate-500">
+              Chưa có bản ghi kiểm toán nào được tạo cho hóa đơn này.
+            </div>
+          ) : (
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <Table>
+                <THead>
+                  <tr>
+                    <TH className="w-40 text-center">Thời gian</TH>
+                    <TH>Hành động</TH>
+                    <TH>Người thực hiện</TH>
+                    <TH>Chi tiết thay đổi</TH>
+                  </tr>
+                </THead>
+                <TBody>
+                  {auditLogs.map((log) => (
+                    <tr key={log.id}>
+                      <TD className="text-center font-mono text-xs text-slate-500 whitespace-nowrap">
+                        {formatDateTime(log.created_at)}
+                      </TD>
+                      <TD>
+                        <Badge variant="indigo" size="xs">
+                          {log.action}
+                        </Badge>
+                      </TD>
+                      <TD className="text-xs font-medium text-slate-800">
+                        {log.actor_name || log.actor_email || log.actor_id || 'Hệ thống'}
+                      </TD>
+                      <TD className="text-xs text-slate-600 max-w-md break-words font-mono text-[11px]">
+                        {log.after ? JSON.stringify(log.after) : log.before ? JSON.stringify(log.before) : '—'}
+                      </TD>
+                    </tr>
+                  ))}
+                </TBody>
+              </Table>
+            </div>
+          )}
+        </Card>
+      )}
 
-        {/* Tổng kết số tiền */}
-        <div className="flex flex-col sm:flex-row justify-end">
-          <div className="w-full sm:w-96 rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-2.5 text-sm">
-            <div className="flex items-center justify-between text-slate-600">
-              <span>Cộng tiền dịch vụ (Tạm tính):</span>
-              <span className="font-mono font-medium text-slate-900">
-                {formatMoney(invoice.subtotal_amount)}
+      {/* Modal thêm / sửa dòng DRAFT (PRD 8.2) */}
+      <Modal
+        open={lineEditOpen}
+        onClose={() => setLineEditOpen(false)}
+        title={editingLine ? 'Chỉnh sửa khoản phí' : 'Thêm khoản phí vào hóa đơn nháp'}
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setLineEditOpen(false)} disabled={submitting}>
+              Hủy
+            </Button>
+            <Button variant="primary" onClick={handleSaveLine} loading={submitting}>
+              {editingLine ? 'Lưu thay đổi' : 'Thêm dòng'}
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSaveLine} className="space-y-4">
+          <Select
+            label="Loại khoản phí"
+            value={lineForm.item_type}
+            onChange={(e) => setLineForm((s) => ({ ...s, item_type: e.target.value }))}
+            options={Object.entries(LINE_TYPE_LABELS).map(([value, info]) => ({
+              value,
+              label: info.label,
+            }))}
+          />
+          <Input
+            label="Diễn giải chi tiết"
+            required
+            placeholder="VD: Phí giặt là tháng 11, Sửa khóa căn hộ..."
+            value={lineForm.description}
+            onChange={(e) => setLineForm((s) => ({ ...s, description: e.target.value }))}
+          />
+          <div className="grid grid-cols-3 gap-3">
+            <Input
+              label="Số lượng"
+              type="number"
+              min="0.01"
+              step="any"
+              required
+              value={lineForm.quantity}
+              onChange={(e) => setLineForm((s) => ({ ...s, quantity: e.target.value }))}
+            />
+            <Input
+              label="Đơn vị tính"
+              value={lineForm.unit}
+              onChange={(e) => setLineForm((s) => ({ ...s, unit: e.target.value }))}
+            />
+            <MoneyInput
+              label="Đơn giá (₫)"
+              required
+              value={lineForm.unit_price}
+              onChange={(e) => setLineForm((s) => ({ ...s, unit_price: e.target.value }))}
+            />
+          </div>
+        </form>
+      </Modal>
+
+      {/* Hộp thoại xác nhận ngữ cảnh khi phát hành (PRD 16.1) */}
+      <Modal
+        open={issueConfirmOpen}
+        onClose={() => setIssueConfirmOpen(false)}
+        title="Xác nhận phát hành hóa đơn"
+        subtitle="Vui lòng rà soát kỹ số tiền trước khi công bố tới cư dân."
+        size="md"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setIssueConfirmOpen(false)}
+              disabled={submitting}
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              icon={Send}
+              onClick={handleConfirmIssue}
+              loading={submitting}
+            >
+              Xác nhận phát hành ngay
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="p-4 rounded-xl bg-sky-50 border border-sky-200 space-y-2">
+            <div className="flex justify-between">
+              <span className="text-slate-600">Mã hóa đơn:</span>
+              <span className="font-mono font-bold text-slate-900">{invoice.invoice_code}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-600">Căn hộ:</span>
+              <span className="font-semibold text-slate-900">
+                Căn {invoice.apartment_code} ({invoice.tenant_name || 'Khách thuê'})
               </span>
             </div>
-
-            <div className="flex items-center justify-between text-slate-600">
-              <span>Điều chỉnh tăng / giảm:</span>
-              <span className="font-mono font-medium text-indigo-700">
-                {Number(invoice.adjustment_amount) > 0 ? '+' : ''}
-                {formatMoney(invoice.adjustment_amount)}
-              </span>
-            </div>
-
-            <div className="pt-2.5 border-t border-slate-200 flex items-center justify-between text-base font-bold text-slate-900">
-              <span>Tổng cộng phải thu:</span>
-              <span className="font-mono text-primary-700">
+            <div className="flex justify-between">
+              <span className="text-slate-600">Tổng tiền phát hành:</span>
+              <span className="font-mono font-bold text-base text-primary-700">
                 {formatMoney(invoice.total_amount)}
               </span>
             </div>
-
-            <div className="flex items-center justify-between text-emerald-700 text-xs font-medium">
-              <span>Đã thanh toán:</span>
-              <span className="font-mono">{formatMoney(invoice.paid_amount)}</span>
-            </div>
-
-            <div className="pt-2 border-t border-dashed border-slate-200 flex items-center justify-between font-bold">
-              <span className="text-slate-800">Số tiền còn phải thanh toán:</span>
-              <span
-                className={`font-mono text-base ${
-                  remaining > 0 && invoice.status !== 'CANCELLED'
-                    ? 'text-rose-600'
-                    : 'text-emerald-600'
-                }`}
-              >
-                {invoice.status === 'CANCELLED' ? '0 ₫' : formatMoney(remaining)}
-              </span>
+            <div className="flex justify-between">
+              <span className="text-slate-600">Hạn thanh toán:</span>
+              <span className="font-semibold text-rose-600">{formatDate(invoice.due_date)}</span>
             </div>
           </div>
-        </div>
 
-        {/* Chữ ký khi in PDF */}
-        <div className="hidden print:grid grid-cols-2 gap-8 pt-10 text-center text-xs text-slate-600">
-          <div>
-            <p className="font-semibold text-slate-900 uppercase">Người lập phiếu / Ban quản lý</p>
-            <p className="italic mt-1">(Ký và ghi rõ họ tên)</p>
-          </div>
-          <div>
-            <p className="font-semibold text-slate-900 uppercase">Khách thuê căn hộ</p>
-            <p className="italic mt-1">(Ký xác nhận)</p>
+          <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-amber-900">
+            <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+            <p className="leading-relaxed">
+              <strong>Lưu ý bất biến:</strong> Sau khi phát hành, hóa đơn sẽ bị khóa bất biến
+              (không được thêm, sửa, xóa dòng trực tiếp). Mọi điều chỉnh sau đó bắt buộc phải tạo
+              đề nghị qua quy trình kiểm duyệt 4 mắt. Cư dân sẽ nhận được thông báo nợ phí ngay lập tức.
+            </p>
           </div>
         </div>
-      </div>
+      </Modal>
 
-      {/* Lịch sử giao dịch thanh toán của hóa đơn này */}
-      <Card className="no-print" padding={false}>
-        <div className="p-5 border-b border-slate-100">
-          <CardHeader
-            title={`Lịch sử thanh toán (${(invoice.payments || []).length})`}
-            subtitle="Các giao dịch thu tiền trực tiếp hoặc chứng từ chuyển khoản do cư dân gửi lên."
-            className="mb-0"
-          />
+      {/* Hộp thoại xác nhận 2 bước gõ lại invoice_code khi VOID (PRD 16.2) */}
+      <Modal
+        open={voidOpen}
+        onClose={() => setVoidOpen(false)}
+        title="Xác nhận Hủy hóa đơn đã phát hành (VOID)"
+        subtitle="Yêu cầu kiểm soát 2 bước an toàn để tránh thao tác nhầm lẫn."
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setVoidOpen(false)} disabled={submitting}>
+              Đóng
+            </Button>
+            <Button
+              variant="danger"
+              icon={Ban}
+              onClick={handleConfirmVoid}
+              loading={submitting}
+              disabled={
+                !canConfirmInvoiceVoid({
+                  invoice,
+                  typedInvoiceCode: typedVoidCode,
+                  reason: voidReason,
+                })
+              }
+            >
+              Xác nhận gửi đề nghị VOID
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 space-y-1">
+            <p className="font-semibold">Cảnh báo hủy hóa đơn sau phát hành:</p>
+            <p className="leading-relaxed">
+              Đề nghị hủy (VOID) sẽ được gửi đến cấp thẩm quyền (OWNER / 4-Eyes) phê duyệt. Sau khi duyệt,
+              hóa đơn và công nợ liên quan sẽ được hủy bỏ hoàn toàn.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block font-semibold text-slate-800">
+              Bước 1: Gõ lại chính xác mã hóa đơn{' '}
+              <span className="font-mono font-bold text-rose-600 select-all">
+                {invoice.invoice_code}
+              </span>{' '}
+              để xác nhận
+            </label>
+            <Input
+              value={typedVoidCode}
+              onChange={(e) => setTypedVoidCode(e.target.value)}
+              placeholder={`Gõ lại "${invoice.invoice_code}"`}
+              className="font-mono font-semibold"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block font-semibold text-slate-800">
+              Bước 2: Nhập lý do hủy bắt buộc <span className="text-rose-500">*</span>
+            </label>
+            <Input
+              multiline
+              rows={2}
+              required
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              placeholder="VD: Khách đã thanh lý hợp đồng và dọn đi trước kỳ hóa đơn..."
+            />
+          </div>
         </div>
+      </Modal>
 
-        {(invoice.payments || []).length === 0 ? (
-          <EmptyState
-            icon={Wallet}
-            title="Chưa có giao dịch thanh toán nào"
-            description="Hóa đơn này chưa phát sinh khoản thu nào."
-          />
-        ) : (
-          <Table>
-            <THead>
-              <tr>
-                <TH>Mã giao dịch</TH>
-                <TH className="text-center">Thời gian</TH>
-                <TH>Phương thức</TH>
-                <TH className="text-right">Số tiền nộp</TH>
-                <TH className="text-center">Trạng thái</TH>
-                <TH className="text-center">Người xác nhận</TH>
-                <TH className="w-px whitespace-nowrap text-center">Chứng từ</TH>
-              </tr>
-            </THead>
-            <TBody>
-              {invoice.payments.map((py) => (
-                <tr key={py.id}>
-                  <TD className="font-mono text-xs font-semibold text-slate-800 whitespace-nowrap">
-                    {py.payment_code}
-                  </TD>
-                  <TD className="text-center text-xs text-slate-600 whitespace-nowrap">{formatDateTime(py.paid_at)}</TD>
-                  <TD>
-                    <p className="text-xs font-medium text-slate-800 whitespace-nowrap">
-                      {PAYMENT_METHODS[py.method] || py.method}
-                    </p>
-                    {py.reference_code ? (
-                      <p className="text-[11px] font-mono text-slate-500 break-all">
-                        Ref: {py.reference_code}
-                      </p>
-                    ) : null}
-                    {py.note ? (
-                      <p className="text-[11px] text-slate-600 whitespace-pre-line break-words mt-0.5">
-                        {py.note}
-                      </p>
-                    ) : null}
-                  </TD>
-                  <TD className="text-right whitespace-nowrap">
-                    <p className="font-mono tabular-nums font-semibold text-emerald-700">
-                      {formatMoney(py.amount)}
-                    </p>
-                    {Number(py.overpayment_amount) > 0 ? (
-                      <p className="text-[11px] text-indigo-600">
-                        Nộp thừa: {formatMoney(py.overpayment_amount)}
-                      </p>
-                    ) : null}
-                  </TD>
-                  <TD className="text-center">
-                    <StatusBadge status={py.status} domain="payment" />
-                  </TD>
-                  <TD className="text-center text-xs text-slate-600 whitespace-nowrap">
-                    <div>
-                      <p>{py.confirmed_by_name || '—'}</p>
-                      {py.confirmed_at ? (
-                        <p className="text-[11px] text-slate-400">{formatDateTime(py.confirmed_at)}</p>
-                      ) : null}
-                    </div>
-                  </TD>
-                  <TD className="w-px whitespace-nowrap text-center">
-                    {Array.isArray(py.proof_images) && py.proof_images.length > 0 ? (
-                      <Button
-                        size="xs"
-                        variant="soft"
-                        icon={Eye}
-                        onClick={() => setPreviewProof(py.proof_images)}
-                      >
-                        Xem UNC {py.proof_images.length > 1 ? `(${py.proof_images.length})` : ''}
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-slate-400">—</span>
-                    )}
-                  </TD>
-                </tr>
-              ))}
-            </TBody>
-          </Table>
-        )}
-      </Card>
-
-      {/* Modal Điều chỉnh số tiền */}
+      {/* Modal đề nghị điều chỉnh 4 mắt (ADJUST / LATE_FEE) */}
       <Modal
         open={adjustOpen}
         onClose={() => setAdjustOpen(false)}
-        title="Điều chỉnh số tiền hóa đơn"
-        subtitle="Nhập số dương (+) để phụ thu thêm hoặc số âm (-) để giảm trừ khuyến mãi/khấu trừ."
+        title="Lập đề nghị điều chỉnh hóa đơn"
+        subtitle="Tạo đề nghị tăng/giảm số tiền hóa đơn để gửi phê duyệt 4 mắt."
         size="md"
         footer={
           <>
             <Button variant="outline" onClick={() => setAdjustOpen(false)} disabled={submitting}>
               Hủy
             </Button>
-            <Button
-              variant="primary"
-              onClick={handleSaveAdjustment}
-              loading={submitting}
-              disabled={Boolean(adjustDueDateError)}
-            >
-              Lưu điều chỉnh
+            <Button variant="primary" onClick={handleSaveAdjustment} loading={submitting}>
+              Gửi đề nghị điều chỉnh
             </Button>
           </>
         }
       >
         <form onSubmit={handleSaveAdjustment} className="space-y-4">
+          <Select
+            label="Mục tiêu điều chỉnh"
+            value={adjustForm.adjustment_target}
+            onChange={(e) => setAdjustForm((s) => ({ ...s, adjustment_target: e.target.value }))}
+            options={ADJUSTMENT_TARGET_OPTIONS}
+          />
+
           <MoneyInput
-            label="Số tiền điều chỉnh (VNĐ)"
-            allowNegative
+            label="Số tiền điều chỉnh delta (₫)"
             required
-            placeholder="VD: -200.000 (giảm trừ) hoặc 150.000 (phụ thu)"
-            value={adjustForm.adjustment_amount}
-            onChange={(e) =>
-              setAdjustForm((s) => ({ ...s, adjustment_amount: e.target.value }))
-            }
-          />
-
-          <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200 flex items-center justify-between text-xs">
-            <span className="text-indigo-800">Tổng phải thu sau điều chỉnh:</span>
-            <span className="text-base font-bold text-indigo-700 font-mono">
-              {formatMoney(previewAdjustedTotal)}
-            </span>
-          </div>
-
-          <Input
-            label="Lý do điều chỉnh (hiển thị trên dòng chi tiết hóa đơn)"
-            required
-            placeholder="VD: Hỗ trợ miễn phí gửi xe tháng đầu / Truy thu phí thẻ từ..."
-            value={adjustForm.adjustment_reason}
-            onChange={(e) =>
-              setAdjustForm((s) => ({ ...s, adjustment_reason: e.target.value }))
-            }
+            hint="Nhập số âm để giảm trừ (VD: -150.000) hoặc số dương để tính bổ sung."
+            value={adjustForm.delta_amount}
+            onChange={(e) => setAdjustForm((s) => ({ ...s, delta_amount: e.target.value }))}
           />
 
           <Input
-            label="Gia hạn ngày thanh toán (nếu có)"
-            type="date"
-            min={minAdjustDueDate || undefined}
-            error={adjustDueDateError}
-            value={adjustForm.due_date}
-            onChange={(e) => setAdjustForm((s) => ({ ...s, due_date: e.target.value }))}
-          />
-
-          <Input
-            label="Ghi chú hóa đơn"
+            label="Lý do điều chỉnh bắt buộc"
             multiline
             rows={2}
-            value={adjustForm.note}
-            onChange={(e) => setAdjustForm((s) => ({ ...s, note: e.target.value }))}
+            required
+            placeholder="VD: Giảm trừ phí dịch vụ do ngắt mạng 3 ngày, hoặc miễn giảm phí chậm nộp..."
+            value={adjustForm.reason}
+            onChange={(e) => setAdjustForm((s) => ({ ...s, reason: e.target.value }))}
           />
         </form>
       </Modal>
 
-      {/* Modal Ghi nhận thu tiền nhanh */}
+      {/* Modal từ chối điều chỉnh (4 mắt) */}
+      <Modal
+        open={Boolean(rejectAdjTarget)}
+        onClose={() => setRejectAdjTarget(null)}
+        title="Từ chối đề nghị điều chỉnh hóa đơn"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setRejectAdjTarget(null)} disabled={submitting}>
+              Đóng
+            </Button>
+            <Button variant="danger" onClick={handleRejectAdjustment} loading={submitting}>
+              Xác nhận từ chối
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-xs text-slate-600">
+            Vui lòng nhập lý do từ chối đề nghị điều chỉnh để người lập được biết:
+          </p>
+          <Input
+            label="Lý do từ chối"
+            multiline
+            rows={2}
+            required
+            value={rejectionReason}
+            onChange={(e) => setRejectionReason(e.target.value)}
+            placeholder="VD: Không đủ căn cứ chứng minh sự cố gián đoạn dịch vụ..."
+          />
+        </div>
+      </Modal>
+
+      {/* Modal ghi nhận thu tiền nhanh */}
       <Modal
         open={payOpen}
         onClose={() => setPayOpen(false)}
-        title={`Ghi nhận thu tiền — ${invoice.invoice_code}`}
-        subtitle={`Còn phải thu: ${formatMoney(remaining)}`}
+        title="Ghi nhận thu tiền nhanh"
+        subtitle={`Hóa đơn ${invoice.invoice_code} • Căn ${invoice.apartment_code}`}
         size="md"
         footer={
           <>
             <Button variant="outline" onClick={() => setPayOpen(false)} disabled={submitting}>
               Hủy
             </Button>
-            <Button variant="success" onClick={handleQuickPay} loading={submitting}>
+            <Button variant="success" icon={Wallet} onClick={handleSaveQuickPayment} loading={submitting}>
               Xác nhận thu tiền
             </Button>
           </>
         }
       >
-        <form onSubmit={handleQuickPay} className="space-y-4">
+        <form onSubmit={handleSaveQuickPayment} className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <MoneyInput
-              label="Số tiền thực thu (VNĐ)"
+              label="Số tiền thu (₫)"
               required
-              placeholder="VD: 8.500.000"
               value={payForm.amount}
               onChange={(e) => setPayForm((s) => ({ ...s, amount: e.target.value }))}
             />
             <Select
-              label="Phương thức thanh toán"
-              required
+              label="Phương thức"
               value={payForm.method}
               onChange={(e) => setPayForm((s) => ({ ...s, method: e.target.value }))}
               options={PAYMENT_METHOD_OPTIONS}
@@ -763,17 +1267,6 @@ export function InvoiceDetailPage() {
           />
         </form>
       </Modal>
-
-      {/* Hộp thoại xác nhận hủy hóa đơn */}
-      <ConfirmDialog
-        open={cancelOpen}
-        onClose={() => setCancelOpen(false)}
-        onConfirm={handleCancelInvoice}
-        loading={submitting}
-        title="Xác nhận hủy hóa đơn"
-        message={`Bạn có chắc chắn muốn hủy hóa đơn ${invoice.invoice_code}? Khoản công nợ gắn liền (nếu có) sẽ tự động được xóa bỏ (WRITTEN_OFF).`}
-        confirmLabel="Xác nhận hủy"
-      />
 
       {/* Lightbox xem ảnh chứng từ */}
       <Modal

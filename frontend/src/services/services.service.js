@@ -8,5 +8,5 @@ export const servicesService = {
   listSubscriptions: (params) => api.get('/api/v1/service-subscriptions', { params }).then((r) => r.data),
   createSubscription: (payload) => api.post('/api/v1/service-subscriptions', payload).then((r) => r.data),
   updateSubscription: (id, payload) => api.patch(`/api/v1/service-subscriptions/${id}`, payload).then((r) => r.data),
+  terminateSubscription: (id, payload) => api.patch(`/api/v1/service-subscriptions/${id}`, payload).then((r) => r.data),
 };
-
