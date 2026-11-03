@@ -595,8 +595,9 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
  * Gộp 2 hồ sơ cư dân bị trùng lặp (FR-021 / P0)
  * Quyền theo PRD 6.2: SYS_ADMIN hoặc MANAGER (CRU). OWNER chỉ có quyền R.
  */
-router.post('/merge', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { source_tenant_id, target_tenant_id, reason } = req.body;
+router.post(['/merge', '/:id/merge'], authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+  const target_tenant_id = req.body.target_tenant_id || req.params.id;
+  const { source_tenant_id, reason } = req.body;
   const orgId = req.user.org_id;
   const cleanReason = reason ? String(reason).trim() : '';
 
@@ -723,6 +724,10 @@ router.post('/merge', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), 
     );
     await client.query(
       `UPDATE receivable SET tenant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
+      [target_tenant_id, source_tenant_id]
+    );
+    await client.query(
+      `UPDATE credit_balance SET tenant_id = $1, updated_at = NOW() WHERE tenant_id = $2`,
       [target_tenant_id, source_tenant_id]
     );
 

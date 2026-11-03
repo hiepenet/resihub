@@ -7,12 +7,114 @@ import {
   checkBuildingAccess,
 } from '../services/ownerScope.js';
 import { roundVND } from '../services/pricing.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
+import {
+  toDateOnlyYmd,
+  resolveContractLastActiveDay,
+  computeContractRentPeriodCharge,
+  computeSubscriptionPeriodCharge,
+} from '../services/serviceBilling.js';
+import {
+  recalculateDraftInvoiceTotalsInTx,
+  applyAvailableCreditsInTx,
+  releaseInvoiceCreditsInTx,
+  notifyBuildingInvoiceAdjustmentApprovers,
+} from '../services/invoiceLifecycle.js';
 
 const router = express.Router();
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 
 /**
- * Core batch invoice generator dùng chung cho API /generate-batch và Cron Job hằng ngày theo billing_day (FR-032, FR-033, FR-066, R-04, R-05, R-10, R-11, R-16)
+ * Shared helper to issue a DRAFT invoice in transaction (0 ₫ -> PAID, zero receivable)
+ */
+export async function issueDraftInvoiceInTx(
+  client,
+  { invoiceId, actorId = null, dueDate = null, note = null }
+) {
+  const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [invoiceId]);
+  if (invRes.rows.length === 0) {
+    const err = new Error('Không tìm thấy hóa đơn.');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const inv = invRes.rows[0];
+  if (inv.status !== 'DRAFT') {
+    const err = new Error('Chỉ có thể phát hành hóa đơn ở trạng thái DRAFT.');
+    err.code = 'INVALID_STATUS';
+    throw err;
+  }
+
+  const totalAmount = Number(inv.total_amount || 0);
+  const targetStatus = totalAmount === 0 ? 'PAID' : 'ISSUED';
+  const effectiveDueDate = dueDate || inv.due_date || new Date().toISOString().slice(0, 10);
+
+  const upRes = await client.query(
+    `UPDATE invoice
+     SET status = $1,
+         due_date = COALESCE($2, due_date),
+         note = COALESCE($3, note),
+         issued_by = $4,
+         issued_at = NOW(),
+         paid_amount = CASE WHEN $1 = 'PAID' THEN 0 ELSE paid_amount END,
+         updated_at = NOW()
+     WHERE id = $5
+     RETURNING *`,
+    [targetStatus, dueDate || null, note !== undefined ? note : null, actorId, invoiceId]
+  );
+  const updatedInv = upRes.rows[0];
+
+  // If totalAmount > 0, insert receivable and send notification
+  if (totalAmount > 0) {
+    const recExist = await client.query('SELECT id FROM receivable WHERE invoice_id = $1 LIMIT 1', [invoiceId]);
+    if (recExist.rows.length === 0) {
+      await client.query(
+        `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
+         VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
+        [
+          inv.org_id,
+          inv.building_id,
+          inv.contract_id,
+          inv.tenant_id,
+          invoiceId,
+          totalAmount,
+          effectiveDueDate,
+          `Công nợ hóa đơn ${inv.invoice_code} kỳ ${inv.period}`,
+        ]
+      );
+    }
+
+    if (inv.tenant_id) {
+      const uRes = await adminPool.query(
+        `SELECT au.id FROM app_user au JOIN tenant t ON t.person_id = au.person_id WHERE t.id = $1 LIMIT 1`,
+        [inv.tenant_id]
+      );
+      if (uRes.rows[0]?.id) {
+        await adminPool.query(
+          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+           VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
+          [
+            inv.org_id,
+            uRes.rows[0].id,
+            `Phát hành hóa đơn ${inv.invoice_code}`,
+            `Hóa đơn kỳ ${inv.period} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
+            JSON.stringify({ invoice_id: invoiceId, invoice_code: inv.invoice_code }),
+          ]
+        );
+      }
+    }
+  }
+
+  await client.query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+     VALUES ($1, 'UPDATE_INVOICE_STATUS', 'invoice', $2, $3, $4)`,
+    [actorId, invoiceId, JSON.stringify(inv), JSON.stringify(updatedInv)]
+  );
+
+  return updatedInv;
+}
+
+/**
+ * Core batch invoice generator dùng chung cho API /generate-batch và Cron Job hằng ngày (FR-032, FR-033, FR-066, AC-015.1)
  */
 export async function generateInvoicesCore(
   client,
@@ -20,9 +122,11 @@ export async function generateInvoicesCore(
     orgId,
     targetPeriod,
     buildingId = null,
+    contractId = null,
     applyScope = null,
     matchBillingDays = null,
     onlyOngoingContracts = false,
+    excludeSettledDeposits = false,
     autoIssue = false,
     actorId = null,
   }
@@ -38,6 +142,10 @@ export async function generateInvoicesCore(
     futureParams.push(buildingId);
     futureFilterSql += ` AND c.building_id = $${futureParams.length}`;
   }
+  if (contractId) {
+    futureParams.push(contractId);
+    futureFilterSql += ` AND c.id = $${futureParams.length}`;
+  }
   const futureCountRes = await client.query(
     `SELECT COUNT(*)::int AS cnt
      FROM contract c
@@ -50,7 +158,7 @@ export async function generateInvoicesCore(
   );
   const skippedFutureCount = futureCountRes.rows[0]?.cnt || 0;
 
-  // Lọc HĐ có giao thoa thực sự với kỳ (mở rộng cho HĐ TERMINATED/EXPIRED kết thúc trong kỳ — R-04; tính inclusive ngày trả phòng — R-16)
+  // Lọc HĐ có giao thoa thực sự với kỳ
   const params = [orgId, targetPeriod];
   let filterSql = '';
   if (typeof applyScope === 'function') {
@@ -60,6 +168,10 @@ export async function generateInvoicesCore(
   if (buildingId) {
     params.push(buildingId);
     filterSql += ` AND c.building_id = $${params.length}`;
+  }
+  if (contractId) {
+    params.push(contractId);
+    filterSql += ` AND c.id = $${params.length}`;
   }
   if (Array.isArray(matchBillingDays) && matchBillingDays.length > 0) {
     params.push(matchBillingDays);
@@ -82,32 +194,53 @@ export async function generateInvoicesCore(
          )
        )`;
 
+  let settledClause = '';
+  if (excludeSettledDeposits) {
+    settledClause = `
+      AND NOT EXISTS (
+        SELECT 1 FROM deposit d
+        WHERE d.contract_id = c.id
+          AND d.status IN ('PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT', 'RETURNED', 'DISPUTED')
+      )
+    `;
+  }
+
+  const invoiceExistsClause = contractId
+    ? `NOT EXISTS (
+         SELECT 1 FROM invoice inv
+         WHERE inv.contract_id = c.id
+           AND inv.period = $2
+           AND inv.status NOT IN ('VOID', 'CANCELLED', 'DRAFT')
+       )`
+    : `NOT EXISTS (
+         SELECT 1 FROM invoice inv
+         WHERE inv.contract_id = c.id
+           AND inv.period = $2
+           AND inv.status NOT IN ('VOID', 'CANCELLED')
+       )`;
+
   const contractSql = `
     SELECT c.*, a.code AS apartment_code, b.code AS building_code,
            au.id AS resident_user_id,
            ((($2 || '-01')::date + INTERVAL '1 month')::date - ($2 || '-01')::date)::int AS days_in_month,
-           (
-             (LEAST(COALESCE(c.terminated_at, c.end_date), (($2 || '-01')::date + INTERVAL '1 month')::date)
-              - GREATEST(c.start_date, ($2 || '-01')::date))::int
-             + CASE
-                 WHEN c.status IN ('TERMINATED', 'TERMINATION_PENDING')
-                  AND COALESCE(c.terminated_at, c.end_date) >= ($2 || '-01')::date
-                  AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
-                 THEN 1
-                 WHEN c.status = 'EXPIRED'
-                  AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
-                  AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
-                 THEN 1
-                 ELSE 0
-               END
-           ) AS active_days
+           rt.child_start_date AS room_transfer_child_start_date
     FROM contract c
     JOIN apartment a ON a.id = c.apartment_id
     JOIN building b ON b.id = c.building_id
     LEFT JOIN tenant t ON t.id = c.primary_tenant_id
     LEFT JOIN app_user au ON au.person_id = t.person_id
+    LEFT JOIN LATERAL (
+      SELECT ch.start_date AS child_start_date
+      FROM contract ch
+      WHERE ch.parent_contract_id = c.id
+        AND ch.is_room_transfer = TRUE
+        AND ch.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')
+      ORDER BY ch.created_at DESC
+      LIMIT 1
+    ) rt ON TRUE
     WHERE b.org_id = $1
       AND ${statusClause}
+      ${settledClause}
       AND c.start_date < (($2 || '-01')::date + INTERVAL '1 month')::date
       AND (
         (
@@ -121,42 +254,49 @@ export async function generateInvoicesCore(
           AND COALESCE(c.terminated_at, c.end_date) > c.start_date
         )
       )
-      AND NOT EXISTS (
-        SELECT 1 FROM invoice inv
-        WHERE inv.contract_id = c.id
-          AND inv.period = $2
-          AND inv.status != 'CANCELLED'
-      )
+      AND ${invoiceExistsClause}
       ${filterSql}
     ORDER BY c.start_date ASC, c.created_at ASC
   `;
 
   const contractsRes = await client.query(contractSql, params);
   const createdInvoices = [];
+  const skippedContracts = [];
+  let updatedDraftCount = 0;
 
   for (const c of contractsRes.rows) {
     const lines = [];
-    const fullRent = Number(c.rent_amount || 0);
-    const daysInMonth = Math.max(1, Number(c.days_in_month || 30));
-    const activeDays = Math.max(0, Math.min(daysInMonth, Number(c.active_days || daysInMonth)));
-    if (activeDays <= 0) continue;
 
-    const isProrataRent = activeDays < daysInMonth;
-    const rentAmt = isProrataRent ? roundVND((fullRent * activeDays) / daysInMonth) : roundVND(fullRent);
-    const rentDesc = isProrataRent
-      ? `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod} (Pro-rata ${activeDays}/${daysInMonth} ngày)`
-      : `Tiền thuê căn hộ ${c.apartment_code} kỳ ${targetPeriod}`;
-
-    lines.push({
-      item_type: 'RENT',
-      description: rentDesc,
-      quantity: isProrataRent ? Number((activeDays / daysInMonth).toFixed(4)) : 1,
-      unit: 'tháng',
-      unit_price: fullRent,
-      amount: rentAmt,
+    // Room transfer cutoff & last active day resolution
+    const roomTransferChildStartDate = c.room_transfer_child_start_date
+      ? toDateOnlyYmd(c.room_transfer_child_start_date)
+      : null;
+    const resolvedActive = resolveContractLastActiveDay(c, {
+      roomTransferChildStartDate,
+      isRoomTransfer: Boolean(roomTransferChildStartDate),
     });
 
-    // FR-065 & R-10: Bảng giá dịch vụ/điện/nước ghi đè theo hợp đồng (ưu tiên: giá hợp đồng -> giá đồng hồ/đăng ký -> giá danh mục)
+    const rentCharge = computeContractRentPeriodCharge({
+      contract: c,
+      periodYm: targetPeriod,
+      lastActiveDayYmd: resolvedActive.lastActiveDayYmd,
+    });
+
+    if (rentCharge.amount > 0) {
+      lines.push({
+        item_type: 'RENT',
+        description: rentCharge.description,
+        quantity: rentCharge.isProrated
+          ? Number((rentCharge.activeDays / rentCharge.daysInMonth).toFixed(4))
+          : 1,
+        unit: 'tháng',
+        unit_price: rentCharge.unitPrice,
+        amount: rentCharge.amount,
+        formula_meta: rentCharge.formulaMeta,
+      });
+    }
+
+    // FR-065 & R-10: Bảng giá dịch vụ/điện/nước ghi đè theo hợp đồng
     const cspRes = await client.query(
       `SELECT service_code, unit_price
        FROM contract_service_price
@@ -173,7 +313,7 @@ export async function generateInvoicesCore(
       }
     }
 
-    // Điện / Nước từ meter_reading kỳ này (chống thu trùng nếu căn hộ có 2 HĐ nối tiếp trong cùng tháng)
+    // Điện / Nước từ meter_reading kỳ này
     const mrRes = await client.query(
       `SELECT mr.consumption, mr.previous_reading, mr.current_reading, m.meter_type, m.unit, m.unit_price
        FROM meter_reading mr
@@ -189,10 +329,11 @@ export async function generateInvoicesCore(
          JOIN invoice_line il2 ON il2.invoice_id = i2.id
          WHERE i2.apartment_id = $1
            AND i2.period = $2
-           AND i2.status != 'CANCELLED'
-           AND il2.item_type = $3
+           AND i2.status NOT IN ('VOID', 'CANCELLED')
+           AND i2.contract_id <> $3
+           AND il2.item_type = $4
          LIMIT 1`,
-        [c.apartment_id, targetPeriod, itemType]
+        [c.apartment_id, targetPeriod, c.id, itemType]
       );
       if (alreadyBilledRes.rows.length > 0) continue;
 
@@ -208,80 +349,110 @@ export async function generateInvoicesCore(
           unit: mr.unit,
           unit_price: price,
           amount: lineAmt,
+          formula_meta: {
+            meter_type: itemType,
+            consumption: cons,
+            unit_price: price,
+            amount: lineAmt,
+          },
         });
       }
     }
 
-    // Dịch vụ tiện ích đang ACTIVE hoặc vừa CANCELLED trong kỳ (R-04)
+    // Dịch vụ tiện ích (service_subscription)
     const subRes = await client.query(
       `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
        FROM service_subscription ss
        JOIN service_catalog sc ON sc.id = ss.service_id
        WHERE ss.contract_id = $1
          AND sc.billing_type != 'METERED'
-         AND (
-           ss.status = 'ACTIVE'
-           OR (
-             (ss.status = 'CANCELLED' OR ss.status = 'TERMINATED')
-             AND ss.end_date >= ($2 || '-01')::date
-             AND ss.end_date < (($2 || '-01')::date + INTERVAL '1 month')::date
-           )
-         )`,
-      [c.id, targetPeriod]
+         AND ss.status IN ('ACTIVE', 'PENDING_APPROVAL', 'CANCELLATION_PENDING', 'CANCELLED', 'TERMINATED')`,
+      [c.id]
     );
     for (const sub of subRes.rows) {
-      const codeKey = String(sub.service_code || '').toUpperCase();
-      const catKey = String(sub.service_category || '').toUpperCase();
-      let overrideUnitPrice = cspMap.has(codeKey) ? cspMap.get(codeKey) : undefined;
-      if (overrideUnitPrice === undefined) {
-        if (codeKey === 'INTERNET_FIBER' || catKey === 'INTERNET') {
-          overrideUnitPrice = cspMap.get('INTERNET');
-        } else if (codeKey === 'MANAGEMENT_FEE' || catKey === 'MANAGEMENT') {
-          overrideUnitPrice = cspMap.get('COMMON_SERVICE');
-        }
-      }
-
-      const effectiveUnitPrice =
-        overrideUnitPrice !== undefined ? Number(overrideUnitPrice) : Number(sub.unit_price || 0);
-      const qty = Number(sub.quantity || 1);
-      const subStartPeriod = sub.start_date ? new Date(sub.start_date).toISOString().slice(0, 7) : '';
-      const subEndPeriod = sub.end_date ? new Date(sub.end_date).toISOString().slice(0, 7) : '';
-      const isCancelledThisPeriod = (sub.status === 'CANCELLED' || sub.status === 'TERMINATED') && subEndPeriod === targetPeriod;
-      const isStartedThisPeriod = subStartPeriod === targetPeriod && Number(sub.prorata_amount) > 0;
-      const useProrata = isCancelledThisPeriod || isStartedThisPeriod;
-
-      let amt = roundVND(effectiveUnitPrice * qty);
-      if (isCancelledThisPeriod) {
-        if (overrideUnitPrice !== undefined && sub.end_date) {
-          const endDay = new Date(sub.end_date).getDate();
-          const subActiveDays = Math.max(1, Math.min(daysInMonth, endDay));
-          amt = roundVND((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
-        } else if (Number(sub.prorata_amount) > 0) {
-          amt = roundVND(Number(sub.prorata_amount));
-        }
-      } else if (isStartedThisPeriod) {
-        if (overrideUnitPrice !== undefined && sub.start_date) {
-          const startDay = new Date(sub.start_date).getDate();
-          const subActiveDays = Math.max(1, daysInMonth - startDay + 1);
-          amt = roundVND((effectiveUnitPrice * qty * subActiveDays) / daysInMonth);
-        } else {
-          amt = roundVND(Number(sub.prorata_amount));
-        }
-      }
-
-      if (amt > 0) {
+      const subCharge = computeSubscriptionPeriodCharge({
+        subscription: sub,
+        periodYm: targetPeriod,
+        contractBuildingId: c.building_id,
+        contractServicePrices: cspRes.rows,
+      });
+      if (subCharge.amount > 0) {
         lines.push({
           item_type: 'SERVICE',
-          description: `${sub.service_name}${useProrata ? ' (Pro-rata)' : ''}${overrideUnitPrice !== undefined ? ' (Giá HĐ)' : ''}`,
-          quantity: qty,
+          description: subCharge.description,
+          quantity: subCharge.quantity,
           unit: sub.unit || 'tháng',
-          unit_price: effectiveUnitPrice,
-          amount: amt,
+          unit_price: subCharge.unitPrice,
+          amount: subCharge.amount,
+          subscription_id: sub.id,
+          formula_meta: subCharge.formulaMeta,
         });
       }
     }
 
-    const subtotal = roundVND(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
+    const grossSubtotal = roundVND(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
+
+    // Billable check: AC-015.1
+    if (lines.length === 0 || grossSubtotal <= 0) {
+      skippedContracts.push({
+        contract_id: c.id,
+        contract_code: c.code || c.id,
+        apartment_code: c.apartment_code,
+        reason: 'Không có khoản phí nào phát sinh trong kỳ.',
+      });
+      continue;
+    }
+
+    // Existing DRAFT in-place refresh
+    const existingDraftRes = await client.query(
+      `SELECT * FROM invoice WHERE contract_id = $1 AND period = $2 AND status = 'DRAFT' FOR UPDATE`,
+      [c.id, targetPeriod]
+    );
+
+    if (existingDraftRes.rows.length > 0) {
+      const existingDraft = existingDraftRes.rows[0];
+
+      await client.query(
+        `DELETE FROM invoice_line
+         WHERE invoice_id = $1
+           AND (item_type <> 'ADJUSTMENT' OR credit_id IS NOT NULL)`,
+        [existingDraft.id]
+      );
+
+      for (const l of lines) {
+        await client.query(
+          `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            existingDraft.id,
+            l.item_type,
+            l.description,
+            l.quantity,
+            l.unit,
+            l.unit_price,
+            l.amount,
+            l.subscription_id || null,
+            JSON.stringify(l.formula_meta || {}),
+          ]
+        );
+      }
+
+      await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: existingDraft.id, actorId });
+
+      await applyAvailableCreditsInTx(client, {
+        contractId: c.id,
+        invoiceId: existingDraft.id,
+        subtotalAmount: grossSubtotal,
+        actorId,
+      });
+
+      const refreshedInv = await client.query('SELECT * FROM invoice WHERE id = $1', [existingDraft.id]);
+      createdInvoices.push(refreshedInv.rows[0]);
+      updatedDraftCount++;
+      continue;
+    }
+
+    // Create new DRAFT invoice
     const dueDays = Number(c.payment_due_days || 5);
     const dueDate = new Date();
     dueDate.setDate(dueDate.getDate() + dueDays);
@@ -291,76 +462,98 @@ export async function generateInvoicesCore(
     const invCode = `INV-${targetPeriod.replace('-', '')}-${c.building_code}-${c.apartment_code}-${randSuffix}`;
     const initStatus = autoIssue ? 'ISSUED' : 'DRAFT';
 
-    const invIns = await client.query(
-      `INSERT INTO invoice (
-         org_id, building_id, apartment_id, contract_id, tenant_id,
-         invoice_code, period, issue_date, due_date,
-         subtotal_amount, adjustment_amount, total_amount, paid_amount,
-         status, created_by, issued_by, issued_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, 0, $9, 0, $10, $11, $12, $13)
-       RETURNING *`,
-      [
-        orgId,
-        c.building_id,
-        c.apartment_id,
-        c.id,
-        c.primary_tenant_id,
-        invCode,
-        targetPeriod,
-        dueDateStr,
-        subtotal,
-        initStatus,
-        actorId,
-        autoIssue ? actorId : null,
-        autoIssue ? new Date().toISOString() : null,
-      ]
-    );
-    const inv = invIns.rows[0];
-
-    for (const l of lines) {
-      await client.query(
-        `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [inv.id, l.item_type, l.description, l.quantity, l.unit, l.unit_price, l.amount]
-      );
-    }
-
-    if (autoIssue && subtotal > 0) {
-      await client.query(
-        `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
-         VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
+    let inv;
+    try {
+      const invIns = await client.query(
+        `INSERT INTO invoice (
+           org_id, building_id, apartment_id, contract_id, tenant_id,
+           invoice_code, period, issue_date, due_date,
+           subtotal_amount, adjustment_amount, total_amount, paid_amount,
+           status, created_by, issued_by, issued_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, 0, $9, 0, $10, $11, $12, $13)
+         RETURNING *`,
         [
           orgId,
           c.building_id,
+          c.apartment_id,
           c.id,
           c.primary_tenant_id,
-          inv.id,
-          subtotal,
+          invCode,
+          targetPeriod,
           dueDateStr,
-          `Công nợ hóa đơn ${invCode} kỳ ${targetPeriod}`,
+          grossSubtotal,
+          initStatus,
+          actorId,
+          autoIssue ? actorId : null,
+          autoIssue ? new Date().toISOString() : null,
         ]
       );
-
-      if (c.resident_user_id) {
-        await adminPool.query(
-          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-           VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
-          [
-            orgId,
-            c.resident_user_id,
-            `Hóa đơn mới kỳ ${targetPeriod}`,
-            `Hóa đơn ${invCode} cho căn ${c.apartment_code} với tổng số tiền ${subtotal.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
-            JSON.stringify({ invoice_id: inv.id, invoice_code: invCode, period: targetPeriod }),
-          ]
-        );
+      inv = invIns.rows[0];
+    } catch (insertErr) {
+      if (insertErr.code === '23505') {
+        continue;
       }
+      throw insertErr;
     }
+
+    for (const l of lines) {
+      await client.query(
+        `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          inv.id,
+          l.item_type,
+          l.description,
+          l.quantity,
+          l.unit,
+          l.unit_price,
+          l.amount,
+          l.subscription_id || null,
+          JSON.stringify(l.formula_meta || {}),
+        ]
+      );
+    }
+
+    // Apply FIFO credit balance
+    await applyAvailableCreditsInTx(client, {
+      contractId: c.id,
+      invoiceId: inv.id,
+      subtotalAmount: grossSubtotal,
+      actorId,
+    });
+
+    const refreshedNewInv = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+    inv = refreshedNewInv.rows[0];
+
+    if (autoIssue) {
+      await issueDraftInvoiceInTx(client, {
+        invoiceId: inv.id,
+        actorId,
+        dueDate: dueDateStr,
+      });
+      const issuedRow = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+      inv = issuedRow.rows[0];
+    }
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'CREATE_INVOICE', 'invoice', $2, $3)`,
+      [actorId, inv.id, JSON.stringify(inv)]
+    );
 
     createdInvoices.push(inv);
   }
 
-  return { createdInvoices, skippedFutureCount };
+  return {
+    created_count: createdInvoices.length,
+    updated_draft_count: updatedDraftCount,
+    skipped_contracts: skippedContracts,
+    warnings: [],
+    data: createdInvoices,
+    createdInvoices,
+    skippedFutureCount,
+  };
 }
 
 /**
@@ -428,7 +621,7 @@ router.get(
 
       const summary = rows.reduce(
         (acc, r) => {
-          if (r.status !== 'CANCELLED') {
+          if (r.status !== 'CANCELLED' && r.status !== 'VOID') {
             acc.total_billed += Number(r.total_amount || 0);
             acc.total_paid += Number(r.paid_amount || 0);
             acc.total_unpaid += Math.max(0, Number(r.total_amount || 0) - Number(r.paid_amount || 0));
@@ -447,15 +640,86 @@ router.get(
 );
 
 /**
+ * GET /api/v1/invoices/adjustments
+ * Danh sách yêu cầu điều chỉnh hóa đơn (Mục 16.2, FR-034, FR-035)
+ */
+router.get(
+  '/adjustments',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
+  async (req, res) => {
+    const { building_id, status, invoice_id } = req.query;
+    const orgId = req.user.org_id;
+
+    try {
+      if (building_id) {
+        const ok = await checkBuildingAccess(req, building_id, 'invoice_adjustment');
+        if (!ok) {
+          return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền truy cập yêu cầu điều chỉnh của tòa nhà này.' });
+        }
+      }
+
+      const params = [orgId];
+      const { sql: scopeSql } = await scopedBuildingFilter(req, 'ia.building_id', params);
+
+      let sql = `
+        SELECT ia.*,
+               i.invoice_code,
+               i.period AS invoice_period,
+               i.total_amount AS invoice_total,
+               i.paid_amount AS invoice_paid,
+               a.code AS apartment_code,
+               b.name AS building_name,
+               b.code AS building_code,
+               p_creator.full_name AS created_by_name,
+               p_resolver.full_name AS approved_by_name
+        FROM invoice_adjustment ia
+        JOIN building b ON b.id = ia.building_id
+        JOIN invoice i ON i.id = ia.invoice_id
+        JOIN apartment a ON a.id = i.apartment_id
+        LEFT JOIN app_user u_creator ON u_creator.id = ia.created_by
+        LEFT JOIN person p_creator ON p_creator.id = u_creator.person_id
+        LEFT JOIN app_user u_resolver ON u_resolver.id = ia.approved_by
+        LEFT JOIN person p_resolver ON p_resolver.id = u_resolver.person_id
+        WHERE ia.org_id = $1
+        ${scopeSql}
+      `;
+
+      if (building_id) {
+        params.push(building_id);
+        sql += ` AND ia.building_id = $${params.length}`;
+      }
+      if (invoice_id) {
+        params.push(invoice_id);
+        sql += ` AND ia.invoice_id = $${params.length}`;
+      }
+      if (status) {
+        params.push(status);
+        sql += ` AND ia.status = ANY(string_to_array($${params.length}, ','))`;
+      }
+
+      sql += ` ORDER BY ia.created_at DESC`;
+
+      const result = await pool.query(sql, params);
+      res.json({ data: result.rows });
+    } catch (err) {
+      console.error('[Invoice Adjustments List Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách yêu cầu điều chỉnh.' });
+    }
+  }
+);
+
+/**
  * POST /api/v1/invoices/generate-batch
- * Sinh hóa đơn hàng loạt cho các hợp đồng ACTIVE trong kỳ (FR-032, FR-033)
+ * Sinh hóa đơn hàng loạt hoặc theo từng hợp đồng (FR-032, FR-033, AC-015.1)
  */
 router.post(
   '/generate-batch',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
-    const { building_id, period, auto_issue = false } = req.body;
+    const { building_id, contract_id, period, auto_issue = false } = req.body;
     const orgId = req.user.org_id;
     const targetPeriod = period && PERIOD_RE.test(period) ? period : new Date().toISOString().slice(0, 7);
 
@@ -471,25 +735,29 @@ router.post(
       try {
         await client.query('BEGIN');
 
-        const { createdInvoices, skippedFutureCount } = await generateInvoicesCore(client, {
+        const result = await generateInvoicesCore(client, {
           orgId,
           targetPeriod,
           buildingId: building_id || null,
+          contractId: contract_id || null,
           applyScope: (p) => scopedBuildingFilter(req, 'c.building_id', p),
           autoIssue: Boolean(auto_issue),
           actorId: req.user.sub,
         });
 
         await client.query('COMMIT');
-        const skippedNote = skippedFutureCount > 0 ? ` (Đã bỏ qua ${skippedFutureCount} hợp đồng tương lai chưa tới kỳ).` : '';
+        const skippedNote = result.skippedFutureCount > 0 ? ` (Đã bỏ qua ${result.skippedFutureCount} hợp đồng tương lai chưa tới kỳ).` : '';
         res.status(201).json({
           message:
-            createdInvoices.length > 0
-              ? `Đã sinh thành công ${createdInvoices.length} hóa đơn kỳ ${targetPeriod}.${skippedNote}`
+            result.created_count > 0 || result.updated_draft_count > 0
+              ? `Đã xử lý thành công (${result.created_count} tạo mới, ${result.updated_draft_count} cập nhật nháp) kỳ ${targetPeriod}.${skippedNote}`
               : `Tất cả hợp đồng đủ điều kiện trong kỳ ${targetPeriod} đều đã có hóa đơn.${skippedNote}`,
-          created_count: createdInvoices.length,
-          skipped_future_count: skippedFutureCount,
-          data: createdInvoices,
+          created_count: result.created_count,
+          updated_draft_count: result.updated_draft_count,
+          skipped_future_count: result.skippedFutureCount,
+          skipped_contracts: result.skipped_contracts,
+          warnings: result.warnings,
+          data: result.data,
         });
       } catch (innerErr) {
         await client.query('ROLLBACK');
@@ -576,163 +844,707 @@ router.get(
 );
 
 /**
- * PATCH /api/v1/invoices/:id/status
- * Phát hành (ISSUED), điều chỉnh số tiền (adjustment_amount), hoặc hủy hóa đơn (CANCELLED) (FR-034, FR-035)
+ * POST /api/v1/invoices/:id/lines
+ * Thêm dòng chi tiết trên hóa đơn DRAFT (FR-033, FR-034)
  */
-router.patch(
-  '/:id/status',
+router.post(
+  '/:id/lines',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
   async (req, res) => {
     const { id } = req.params;
-    const { status, adjustment_amount, adjustment_reason, note, due_date } = req.body;
-    const orgId = req.user.org_id;
+    const { item_type = 'OTHER', description, quantity = 1, unit = 'lần', unit_price = 0, amount } = req.body;
+
+    if (!description?.trim()) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng nhập mô tả dòng chi tiết.' });
+    }
+
+    const numQty = Number(quantity || 1);
+    const numPrice = Math.round(Number(unit_price || 0));
+    const numAmount = amount !== undefined ? Math.round(Number(amount)) : roundVND(numQty * numPrice);
 
     const { client, release } = await getUserClient(req);
     try {
-      const existRes = await adminPool.query(
-        'SELECT * FROM invoice WHERE id = $1 AND org_id = $2',
-        [id, orgId]
+      await client.query('BEGIN');
+
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
       );
-      if (existRes.rows.length === 0) {
+      if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
       }
-      const inv = existRes.rows[0];
-      const ok = await checkBuildingAccess(req, inv.building_id, 'invoice', id);
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
       if (!ok) {
+        await client.query('ROLLBACK');
         return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
       }
 
-      await client.query('BEGIN');
-
-      // 1. Trường hợp điều chỉnh số tiền (FR-035)
-      let nextAdj = inv.adjustment_amount;
-      let nextTotal = Number(inv.total_amount);
-      if (adjustment_amount !== undefined) {
-        if (['PAID', 'CANCELLED'].includes(inv.status)) {
-          await client.query('ROLLBACK');
-          return res.status(409).json({ code: 'INVALID_STATUS', message: 'Không thể điều chỉnh hóa đơn đã thanh toán hoặc đã hủy.' });
-        }
-        nextAdj = Math.round(Number(adjustment_amount));
-        nextTotal = Math.max(0, Number(inv.subtotal_amount) + nextAdj);
-
-        await client.query(`DELETE FROM invoice_line WHERE invoice_id = $1 AND item_type = 'ADJUSTMENT'`, [id]);
-        if (nextAdj !== 0) {
-          await client.query(
-            `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
-             VALUES ($1, 'ADJUSTMENT', $2, 1, 'lần', $3, $3)`,
-            [id, adjustment_reason?.trim() || 'Điều chỉnh hóa đơn', nextAdj]
-          );
-        }
+      const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      const inv = invRes.rows[0];
+      if (inv.status !== 'DRAFT') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'INVALID_STATUS', message: 'Chỉ có thể thêm dòng trên hóa đơn nháp (DRAFT).' });
       }
 
-      // 2. Trường hợp chuyển trạng thái
-      let nextStatus = status || inv.status;
-      if (nextStatus === 'CANCELLED') {
-        if (Number(inv.paid_amount) > 0) {
-          await client.query('ROLLBACK');
-          return res.status(409).json({
-            code: 'ALREADY_PAID',
-            message: 'Không thể hủy hóa đơn đã phát sinh thanh toán.',
-          });
-        }
-        await client.query(
-          `UPDATE receivable SET status = 'WRITTEN_OFF', updated_at = NOW() WHERE invoice_id = $1 AND status = 'OPEN'`,
-          [id]
-        );
-      }
-
-      const isIssuing = nextStatus === 'ISSUED' && inv.status === 'DRAFT';
-      const updated = await client.query(
-        `UPDATE invoice
-         SET status = $1,
-             adjustment_amount = $2,
-             total_amount = $3,
-             due_date = COALESCE($4, due_date),
-             note = COALESCE($5, note),
-             issued_by = CASE WHEN $6 THEN $7::uuid ELSE issued_by END,
-             issued_at = CASE WHEN $6 THEN NOW() ELSE issued_at END,
-             updated_at = NOW()
-         WHERE id = $8
+      const insLine = await client.query(
+        `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING *`,
-        [
-          nextStatus,
-          nextAdj,
-          nextTotal,
-          due_date || null,
-          note !== undefined ? note : null,
-          isIssuing,
-          req.user.sub,
-          id,
-        ]
+        [id, item_type, description.trim(), numQty, unit || 'lần', numPrice, numAmount]
       );
+      const newLine = insLine.rows[0];
 
-      const updatedInv = updated.rows[0];
-
-      // Đồng bộ bảng receivable khi phát hành hoặc điều chỉnh
-      if (isIssuing && nextTotal > 0) {
-        const recExist = await client.query('SELECT id FROM receivable WHERE invoice_id = $1 LIMIT 1', [id]);
-        if (recExist.rows.length === 0) {
-          await client.query(
-            `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
-             VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
-            [
-              orgId,
-              inv.building_id,
-              inv.contract_id,
-              inv.tenant_id,
-              id,
-              nextTotal,
-              updatedInv.due_date,
-              `Công nợ hóa đơn ${inv.invoice_code} kỳ ${inv.period}`,
-            ]
-          );
-        }
-
-        // Gửi thông báo phát hành cho cư dân
-        if (inv.tenant_id) {
-          const uRes = await adminPool.query(
-            `SELECT au.id FROM app_user au JOIN tenant t ON t.person_id = au.person_id WHERE t.id = $1 LIMIT 1`,
-            [inv.tenant_id]
-          );
-          if (uRes.rows[0]?.id) {
-            await adminPool.query(
-              `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-               VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
-              [
-                orgId,
-                uRes.rows[0].id,
-                `Phát hành hóa đơn ${inv.invoice_code}`,
-                `Hóa đơn kỳ ${inv.period} với tổng số tiền ${nextTotal.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
-                JSON.stringify({ invoice_id: id, invoice_code: inv.invoice_code }),
-              ]
-            );
-          }
-        }
-      } else if (adjustment_amount !== undefined && nextStatus !== 'CANCELLED') {
-        await client.query(
-          `UPDATE receivable SET amount = $1, updated_at = NOW() WHERE invoice_id = $2 AND status IN ('OPEN', 'PARTIALLY_PAID')`,
-          [Math.max(1, nextTotal), id]
-        );
-      }
-
-      await client.query(
-        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-         VALUES ($1, 'UPDATE_INVOICE', 'invoice', $2, $3, $4)`,
-        [req.user.sub, id, JSON.stringify(inv), JSON.stringify(updatedInv)]
-      );
+      const recalc = await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: id, actorId: req.user.sub });
 
       await client.query('COMMIT');
-      res.json({ message: 'Cập nhật hóa đơn thành công.', data: updatedInv });
+      res.status(201).json({
+        message: 'Thêm dòng chi tiết thành công.',
+        data: {
+          line: newLine,
+          invoice: recalc.invoice,
+        },
+      });
     } catch (err) {
       await client.query('ROLLBACK');
-      console.error('[Invoice Update Error]:', err);
-      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật hóa đơn.' });
+      console.error('[Add Invoice Line Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi thêm dòng chi tiết.' });
     } finally {
       await release();
     }
   }
 );
 
-export default router;
+/**
+ * PATCH /api/v1/invoices/:id/lines/:lineId
+ * Sửa dòng chi tiết trên hóa đơn DRAFT (FR-033, FR-034)
+ */
+router.patch(
+  '/:id/lines/:lineId',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id, lineId } = req.params;
+    const { item_type, description, quantity, unit, unit_price, amount } = req.body;
 
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
+      }
+
+      const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      const inv = invRes.rows[0];
+      if (inv.status !== 'DRAFT') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'INVALID_STATUS', message: 'Chỉ có thể sửa dòng trên hóa đơn nháp (DRAFT).' });
+      }
+
+      const lineRes = await client.query('SELECT * FROM invoice_line WHERE id = $1 AND invoice_id = $2', [lineId, id]);
+      if (lineRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy dòng chi tiết.' });
+      }
+      const line = lineRes.rows[0];
+
+      if (line.credit_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'CREDIT_LINE_READONLY', message: 'Không thể chỉnh sửa trực tiếp dòng bù trừ số dư tín dụng.' });
+      }
+
+      const nextQty = quantity !== undefined ? Number(quantity) : line.quantity;
+      const nextPrice = unit_price !== undefined ? Math.round(Number(unit_price)) : line.unit_price;
+      const nextAmount = amount !== undefined ? Math.round(Number(amount)) : roundVND(nextQty * nextPrice);
+
+      const upLine = await client.query(
+        `UPDATE invoice_line
+         SET item_type = COALESCE($1, item_type),
+             description = COALESCE($2, description),
+             quantity = $3,
+             unit = COALESCE($4, unit),
+             unit_price = $5,
+             amount = $6
+         WHERE id = $7
+         RETURNING *`,
+        [item_type || null, description?.trim() || null, nextQty, unit || null, nextPrice, nextAmount, lineId]
+      );
+
+      const recalc = await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: id, actorId: req.user.sub });
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Cập nhật dòng chi tiết thành công.',
+        data: {
+          line: upLine.rows[0],
+          invoice: recalc.invoice,
+        },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Update Invoice Line Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật dòng chi tiết.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * DELETE /api/v1/invoices/:id/lines/:lineId
+ * Xóa dòng chi tiết trên hóa đơn DRAFT (FR-033, FR-034)
+ */
+router.delete(
+  '/:id/lines/:lineId',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id, lineId } = req.params;
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
+      }
+
+      const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      const inv = invRes.rows[0];
+      if (inv.status !== 'DRAFT') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'INVALID_STATUS', message: 'Chỉ có thể xóa dòng trên hóa đơn nháp (DRAFT).' });
+      }
+
+      const lineRes = await client.query('SELECT * FROM invoice_line WHERE id = $1 AND invoice_id = $2', [lineId, id]);
+      if (lineRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy dòng chi tiết.' });
+      }
+      const line = lineRes.rows[0];
+
+      if (line.credit_id) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'CREDIT_LINE_READONLY', message: 'Không thể xóa trực tiếp dòng bù trừ số dư tín dụng.' });
+      }
+
+      await client.query('DELETE FROM invoice_line WHERE id = $1', [lineId]);
+
+      const recalc = await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: id, actorId: req.user.sub });
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Đã xóa dòng chi tiết thành công.',
+        data: { invoice: recalc.invoice },
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Delete Invoice Line Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi xóa dòng chi tiết.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/invoices/:id/issue
+ * Phát hành hóa đơn DRAFT (0 ₫ -> PAID, zero receivable) (FR-034)
+ */
+router.post(
+  '/:id/issue',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { due_date, note } = req.body;
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
+      }
+
+      const issuedInv = await issueDraftInvoiceInTx(client, {
+        invoiceId: id,
+        actorId: req.user.sub,
+        dueDate: due_date,
+        note,
+      });
+
+      await client.query('COMMIT');
+      res.json({
+        message: 'Phát hành hóa đơn thành công.',
+        data: issuedInv,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === 'INVALID_STATUS') {
+        return res.status(409).json({ code: 'INVALID_STATUS', message: err.message });
+      }
+      console.error('[Issue Invoice Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phát hành hóa đơn.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/invoices/:id/status
+ * Phát hành, điều chỉnh manual adjustment hoặc hủy hóa đơn nháp (FR-034, FR-035)
+ */
+router.patch(
+  '/:id/status',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { status, adjustment_amount, adjustment_reason, note, due_date, confirm_invoice_code } = req.body;
+
+    const { client, release } = await getUserClient(req);
+    try {
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
+      }
+
+      const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      const inv = invRes.rows[0];
+
+      let targetStatus = status || inv.status;
+      if (targetStatus === 'CANCELLED') {
+        targetStatus = 'VOID';
+      }
+
+      // Check #1 FIRST: targetStatus === 'VOID' && Number(inv.paid_amount) > 0 -> 409 ALREADY_PAID
+      // Preserves fullWebsiteWhiteBlackBox.test.js:1403-1408!
+      if (targetStatus === 'VOID' && Number(inv.paid_amount || 0) > 0) {
+        return res.status(409).json({
+          code: 'ALREADY_PAID',
+          message: 'Không thể hủy hóa đơn đã phát sinh thanh toán.',
+        });
+      }
+
+      // Check #2: inv.status !== 'DRAFT' with adjustment_amount or VOID -> 409 REQUIRES_FOUR_EYES_ADJUSTMENT
+      if (inv.status !== 'DRAFT') {
+        if (adjustment_amount !== undefined || targetStatus === 'VOID') {
+          return res.status(409).json({
+            code: 'REQUIRES_FOUR_EYES_ADJUSTMENT',
+            message: 'Hóa đơn đã phát hành yêu cầu lập đề nghị điều chỉnh qua quy trình duyệt 4 mắt.',
+          });
+        }
+      }
+
+      await client.query('BEGIN');
+
+      // If DRAFT status:
+      if (inv.status === 'DRAFT') {
+        if (targetStatus === 'ISSUED') {
+          const issuedInv = await issueDraftInvoiceInTx(client, {
+            invoiceId: id,
+            actorId: req.user.sub,
+            dueDate: due_date,
+            note,
+          });
+          await client.query('COMMIT');
+          return res.json({ message: 'Phát hành hóa đơn thành công.', data: issuedInv });
+        }
+
+        if (targetStatus === 'VOID') {
+          if (confirm_invoice_code && confirm_invoice_code.trim() !== inv.invoice_code) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({ code: 'CONFIRM_CODE_MISMATCH', message: 'Mã xác nhận hủy hóa đơn không khớp.' });
+          }
+
+          await releaseInvoiceCreditsInTx(client, { invoiceId: id, actorId: req.user.sub });
+
+          const voidedRes = await client.query(
+            `UPDATE invoice
+             SET status = 'VOID',
+                 subtotal_amount = 0,
+                 adjustment_amount = 0,
+                 total_amount = 0,
+                 credit_offset_amount = 0,
+                 updated_at = NOW()
+             WHERE id = $1
+             RETURNING *`,
+            [id]
+          );
+
+          await client.query(
+            `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+             VALUES ($1, 'UPDATE_INVOICE_STATUS', 'invoice', $2, $3, $4)`,
+            [req.user.sub, id, JSON.stringify(inv), JSON.stringify(voidedRes.rows[0])]
+          );
+
+          await client.query('COMMIT');
+          return res.json({ message: 'Đã hủy hóa đơn nháp thành công.', data: voidedRes.rows[0] });
+        }
+
+        if (adjustment_amount !== undefined) {
+          const nextAdj = Math.round(Number(adjustment_amount));
+          await client.query(
+            `DELETE FROM invoice_line
+             WHERE invoice_id = $1 AND item_type = 'ADJUSTMENT' AND credit_id IS NULL`,
+            [id]
+          );
+
+          if (nextAdj !== 0) {
+            await client.query(
+              `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+               VALUES ($1, 'ADJUSTMENT', $2, 1, 'lần', $3, $3)`,
+              [id, adjustment_reason?.trim() || 'Điều chỉnh thủ công', nextAdj]
+            );
+          }
+
+          const recalc = await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: id, actorId: req.user.sub });
+          await client.query('COMMIT');
+          return res.json({ message: 'Cập nhật điều chỉnh thành công.', data: recalc.invoice });
+        }
+      }
+
+      const updated = await client.query(
+        `UPDATE invoice
+         SET due_date = COALESCE($1, due_date),
+             note = COALESCE($2, note),
+             updated_at = NOW()
+         WHERE id = $3
+         RETURNING *`,
+        [due_date || null, note !== undefined ? note : null, id]
+      );
+
+      await client.query('COMMIT');
+      res.json({ message: 'Cập nhật hóa đơn thành công.', data: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Invoice Status Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật trạng thái hóa đơn.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/invoices/:id/adjust
+ * Lập đề nghị điều chỉnh hóa đơn đã phát hành (FR-034, FR-035, FR-064)
+ */
+router.post(
+  '/:id/adjust',
+  authenticateToken,
+  requireRole(['MANAGER']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { id } = req.params;
+    const { adjustment_target = 'AMOUNT', action_type, delta_amount, reason, confirm_invoice_code } = req.body;
+    const orgId = req.user.org_id;
+
+    if (!reason?.trim()) {
+      return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Vui lòng nhập lý do điều chỉnh.' });
+    }
+    const validTargets = ['AMOUNT', 'LATE_FEE'];
+    if (!validTargets.includes(adjustment_target)) {
+      return res.status(400).json({ code: 'INVALID_TARGET', message: 'Mục tiêu điều chỉnh không hợp lệ (AMOUNT hoặc LATE_FEE).' });
+    }
+    const validActions = ['INCREASE', 'DECREASE', 'WAIVE', 'VOID'];
+    if (!validActions.includes(action_type)) {
+      return res.status(400).json({ code: 'INVALID_ACTION', message: 'Hành động điều chỉnh không hợp lệ (INCREASE, DECREASE, WAIVE, VOID).' });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const scopeRes = await client.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà của hóa đơn này.' });
+      }
+
+      const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [id]);
+      const inv = invRes.rows[0];
+
+      if (inv.status === 'DRAFT') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'INVALID_STATUS', message: 'Hóa đơn DRAFT được sửa trực tiếp qua bộ API dòng nháp, không cần lập yêu cầu duyệt 4 mắt.' });
+      }
+      if (['CANCELLED', 'VOID'].includes(inv.status)) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'INVALID_STATUS', message: 'Không thể điều chỉnh hóa đơn đã hủy.' });
+      }
+
+      const rawAction = String(action_type || 'ADJUST').trim().toUpperCase();
+      const mappedActionType = rawAction === 'VOID' ? 'VOID' : 'ADJUST';
+
+      let targetUpper = String(adjustment_target || 'MANUAL').trim().toUpperCase();
+      if (!['SERVICE', 'RENT', 'LATE_FEE', 'MANUAL'].includes(targetUpper)) {
+        targetUpper = 'MANUAL';
+      }
+
+      if (mappedActionType === 'VOID' && Number(inv.paid_amount || 0) > 0) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ code: 'ALREADY_PAID', message: 'Không thể hủy hóa đơn đã phát sinh thanh toán.' });
+      }
+
+      if (confirm_invoice_code && confirm_invoice_code.trim() !== inv.invoice_code) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ code: 'CONFIRM_CODE_MISMATCH', message: 'Mã xác nhận hóa đơn không khớp.' });
+      }
+
+      const numDelta = mappedActionType === 'VOID' ? 0 : (delta_amount !== undefined ? Math.round(Number(delta_amount)) : 0);
+      if (mappedActionType === 'ADJUST' && numDelta === 0) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ code: 'INVALID_DELTA', message: 'Số tiền điều chỉnh không được bằng 0.' });
+      }
+
+      const insAdj = await client.query(
+        `INSERT INTO invoice_adjustment (
+           org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, status, created_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING_APPROVAL', $8)
+         RETURNING *`,
+        [orgId, inv.building_id, id, targetUpper, mappedActionType, numDelta, reason.trim(), req.user.sub]
+      );
+      const adjRow = insAdj.rows[0];
+
+      await notifyBuildingInvoiceAdjustmentApprovers(client, {
+        orgId,
+        buildingId: inv.building_id,
+        invoiceId: id,
+        invoiceCode: inv.invoice_code,
+        adjustmentId: adjRow.id,
+        actionType: mappedActionType,
+        deltaAmount: numDelta,
+        actorId: req.user.sub,
+      });
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         VALUES ($1, 'CREATE_INVOICE_ADJUSTMENT', 'invoice_adjustment', $2, $3)`,
+        [req.user.sub, adjRow.id, JSON.stringify(adjRow)]
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json({
+        message: 'Đã lập đề nghị điều chỉnh hóa đơn thành công. Đang chờ cấp trên phê duyệt.',
+        data: adjRow,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Invoice Adjust Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lập đề nghị điều chỉnh hóa đơn.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/invoices/:id/adjustments/:adjId/approve
+ * Phê duyệt điều chỉnh hóa đơn (fn_resolve_invoice_adjustment)
+ */
+router.post(
+  '/:id/adjustments/:adjId/approve',
+  authenticateToken,
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { adjId } = req.params;
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+      const rpcRes = await client.query(
+        `SELECT fn_resolve_invoice_adjustment($1, 'APPROVED') AS result`,
+        [adjId]
+      );
+      await client.query('COMMIT');
+      res.json({ message: 'Phê duyệt điều chỉnh hóa đơn thành công.', data: rpcRes.rows[0]?.result });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === '42501' && err.message?.includes('SELF_APPROVAL')) {
+        return res.status(403).json({ code: 'SELF_APPROVAL', message: 'Người tạo đề xuất không được tự phê duyệt yêu cầu điều chỉnh hóa đơn.' });
+      }
+      if (err.code === '42501') {
+        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn không có quyền duyệt yêu cầu điều chỉnh này.' });
+      }
+      if (err.code === 'P0002') {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu điều chỉnh.' });
+      }
+      if (err.code === 'P0001') {
+        return res.status(409).json({ code: err.message || 'INVALID_STATUS', message: 'Trạng thái yêu cầu không hợp lệ hoặc đã xử lý.' });
+      }
+      if (err.code === '22023') {
+        return res.status(422).json({ code: err.message || 'VALIDATION_ERROR', message: 'Dữ liệu không hợp lệ.' });
+      }
+      console.error('[Approve Adjustment Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi phê duyệt điều chỉnh hóa đơn.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * POST /api/v1/invoices/:id/adjustments/:adjId/reject
+ * Từ chối điều chỉnh hóa đơn (fn_resolve_invoice_adjustment)
+ */
+router.post(
+  '/:id/adjustments/:adjId/reject',
+  authenticateToken,
+  requireRole(['OWNER', 'MANAGER', 'SYS_ADMIN']),
+  idempotencyGuard(),
+  async (req, res) => {
+    const { adjId } = req.params;
+    const { reason } = req.body;
+    if (!reason?.trim()) {
+      return res.status(422).json({ code: 'MISSING_REASON', message: 'Vui lòng cung cấp lý do từ chối.' });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+      const rpcRes = await client.query(
+        `SELECT fn_resolve_invoice_adjustment($1, 'REJECTED', $2) AS result`,
+        [adjId, reason.trim()]
+      );
+      await client.query('COMMIT');
+      res.json({ message: 'Đã từ chối đề nghị điều chỉnh hóa đơn.', data: rpcRes.rows[0]?.result });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === '42501' && err.message?.includes('SELF_APPROVAL')) {
+        return res.status(403).json({ code: 'SELF_APPROVAL', message: 'Người tạo đề xuất không được tự phê duyệt yêu cầu điều chỉnh hóa đơn.' });
+      }
+      if (err.code === '42501') {
+        return res.status(403).json({ code: 'FORBIDDEN', message: 'Bạn không có quyền từ chối yêu cầu điều chỉnh này.' });
+      }
+      if (err.code === 'P0002') {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy yêu cầu điều chỉnh.' });
+      }
+      if (err.code === 'P0001') {
+        return res.status(409).json({ code: err.message || 'INVALID_STATUS', message: 'Trạng thái yêu cầu không hợp lệ hoặc đã xử lý.' });
+      }
+      if (err.code === '22023') {
+        return res.status(422).json({ code: err.message || 'VALIDATION_ERROR', message: 'Dữ liệu không hợp lệ hoặc thiếu lý do từ chối.' });
+      }
+      console.error('[Reject Adjustment Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi từ chối điều chỉnh hóa đơn.' });
+    } finally {
+      await release();
+    }
+  }
+);
+
+/**
+ * GET /api/v1/invoices/:id/audit-logs
+ * Nhật ký kiểm toán / lịch sử thao tác của hóa đơn (PRD 8.2)
+ */
+router.get(
+  '/:id/audit-logs',
+  authenticateToken,
+  requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const scopeRes = await pool.query(
+        `SELECT * FROM fn_get_finance_resource_scope('invoice', $1)`,
+        [id]
+      );
+      if (scopeRes.rows.length === 0) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn.' });
+      }
+      const scope = scopeRes.rows[0];
+
+      const ok = await checkBuildingAccess(req, scope.building_id, 'invoice', id);
+      if (!ok) {
+        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không có quyền truy cập kiểm toán hóa đơn này.' });
+      }
+
+      const logsRes = await pool.query(
+        `SELECT al.*, p.full_name AS actor_name, p.email AS actor_email
+         FROM audit_log al
+         LEFT JOIN app_user au ON au.id = al.actor_id
+         LEFT JOIN person p ON p.id = au.person_id
+         WHERE (al.entity = 'invoice' AND al.entity_id = $1)
+            OR (al.entity = 'invoice_adjustment' AND al.after->>'invoice_id' = $1::text)
+            OR (al.entity = 'invoice_line' AND al.after->>'invoice_id' = $1::text)
+         ORDER BY al.at DESC`,
+        [id]
+      );
+
+      res.json({ data: logsRes.rows });
+    } catch (err) {
+      console.error('[Invoice Audit Logs Error]:', err);
+      res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải lịch sử kiểm toán hóa đơn.' });
+    }
+  }
+);
+
+export default router;
