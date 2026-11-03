@@ -36,6 +36,7 @@ router.get(
     const { building_id } = req.query;
     const orgId = req.user.org_id;
 
+    const { client, release } = await getUserClient(req);
     try {
       if (building_id) {
         const ok = await checkBuildingAccess(req, building_id, 'report');
@@ -55,7 +56,7 @@ router.get(
         aptParams.push(building_id);
         aptFilter = ` AND a.building_id = $${aptParams.length}`;
       }
-      const aptStatsRes = await pool.query(
+      const aptStatsRes = await client.query(
         `SELECT a.status, COUNT(*)::int AS count
          FROM apartment a
          JOIN building b ON b.id = a.building_id
@@ -87,7 +88,7 @@ router.get(
         revParams.push(building_id);
         revFilter = ` AND i.building_id = $${revParams.length}`;
       }
-      const revRes = await pool.query(
+      const revRes = await client.query(
         `SELECT i.period,
                 COALESCE(SUM(i.total_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS billed,
                 COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS inv_paid,
@@ -108,13 +109,13 @@ router.get(
         pmtParams.push(building_id);
         pmtFilter = ` AND p.building_id = $${pmtParams.length}`;
       }
-      const pmtRes = await pool.query(
-        `SELECT to_char(COALESCE(p.paid_at, p.created_at::date), 'YYYY-MM') AS period,
+      const pmtRes = await client.query(
+        `SELECT to_char(COALESCE(p.paid_at AT TIME ZONE 'Asia/Ho_Chi_Minh', p.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh'), 'YYYY-MM') AS period,
                 COALESCE(SUM(p.amount), 0)::bigint AS collected_gross
          FROM payment p
          WHERE p.org_id = $1
            AND p.status = 'CONFIRMED'
-           AND to_char(COALESCE(p.paid_at, p.created_at::date), 'YYYY-MM') = ANY($2::text[])
+           AND to_char(COALESCE(p.paid_at AT TIME ZONE 'Asia/Ho_Chi_Minh', p.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh'), 'YYYY-MM') = ANY($2::text[])
            ${pmtScope} ${pmtFilter}
          GROUP BY 1`,
         pmtParams
@@ -129,7 +130,7 @@ router.get(
         refParams.push(building_id);
         refFilter = ` AND cb.building_id = $${refParams.length}`;
       }
-      const refRes = await pool.query(
+      const refRes = await client.query(
         `SELECT to_char(cb.refunded_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM') AS period,
                 COALESCE(SUM(
                   CASE WHEN cb.status = 'REFUNDED_DIRECT' THEN cb.amount
@@ -184,7 +185,7 @@ router.get(
         debtParams.push(building_id);
         debtFilter = ` AND r.building_id = $${debtParams.length}`;
       }
-      const debtRes = await pool.query(
+      const debtRes = await client.query(
         `SELECT COALESCE(SUM(r.amount - r.paid_amount), 0)::bigint AS unpaid_debt
          FROM receivable r
          WHERE r.org_id = $1
@@ -203,7 +204,7 @@ router.get(
         srFilter = ` AND sr.building_id = $${srParams.length}`;
       }
       const [srCountRes, srRecentRes] = await Promise.all([
-        pool.query(
+        client.query(
           `SELECT COUNT(*)::int AS pending_count
            FROM service_request sr
            WHERE sr.org_id = $1
@@ -211,7 +212,7 @@ router.get(
              ${srScope} ${srFilter}`,
           srParams
         ),
-        pool.query(
+        client.query(
           `SELECT sr.id, sr.tracking_code, sr.title, sr.category, sr.priority, sr.status, sr.created_at,
                   a.code AS apartment_code, b.name AS building_name, b.code AS building_code
            FROM service_request sr
@@ -232,7 +233,7 @@ router.get(
         expParams.push(building_id);
         expFilter = ` AND c.building_id = $${expParams.length}`;
       }
-      const expRes = await pool.query(
+      const expRes = await client.query(
         `SELECT c.id, c.end_date, c.rent_amount,
                 (c.end_date - CURRENT_DATE)::int AS days_left,
                 a.code AS apartment_code,
@@ -287,7 +288,7 @@ router.get(
       }
 
       const [depKpiRes, rsvKpiRes, adjKpiRes, cbKpiRes] = await Promise.all([
-        pool.query(
+        client.query(
           `SELECT
              COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_deposit_approvals,
              COUNT(*) FILTER (WHERE d.status IN ('APPROVED_PENDING_PAYOUT', 'RETURNED'))::int AS pending_deposit_payouts,
@@ -303,7 +304,7 @@ router.get(
            WHERE b.org_id = $1 ${depKpiScope} ${depKpiFilter}`,
           depKpiParams
         ),
-        pool.query(
+        client.query(
           `SELECT
              COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_reservation_confirms,
              COUNT(*) FILTER (WHERE r.status = 'CANCEL_PENDING_APPROVAL')::int AS pending_reservation_approvals,
@@ -315,7 +316,7 @@ router.get(
              ${rsvKpiScope} ${rsvKpiFilter}`,
           rsvKpiParams
         ),
-        pool.query(
+        client.query(
           `SELECT COUNT(*)::int AS pending_adjustments
            FROM invoice_adjustment ia
            JOIN invoice i ON i.id = ia.invoice_id
@@ -323,7 +324,7 @@ router.get(
            ${adjKpiScope} ${adjKpiFilter}`,
           adjKpiParams
         ),
-        pool.query(
+        client.query(
           `SELECT COUNT(*)::int AS pending_credit_refunds
            FROM credit_balance cb
            WHERE cb.org_id = $1 AND cb.status = 'PENDING_DIRECT_REFUND'
@@ -367,6 +368,8 @@ router.get(
     } catch (err) {
       console.error('[Reports Dashboard Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tổng hợp dữ liệu Dashboard.' });
+    } finally {
+      await release();
     }
   }
 );
@@ -400,6 +403,7 @@ router.get(
       });
     }
 
+    const { client, release } = await getUserClient(req);
     try {
       if (building_id) {
         const ok = await checkBuildingAccess(req, building_id, 'report');
@@ -553,8 +557,8 @@ router.get(
       `;
 
       const [ledgerRes, rsvRes] = await Promise.all([
-        pool.query(ledgerSql, ledgerParams),
-        pool.query(rsvSql, rsvParams),
+        client.query(ledgerSql, ledgerParams),
+        client.query(rsvSql, rsvParams),
       ]);
 
       const summary = {
@@ -780,6 +784,8 @@ router.get(
         code: 'DB_ERROR',
         message: 'Lỗi khi tổng hợp Báo cáo Sổ cọc (RP-07).',
       });
+    } finally {
+      await release();
     }
   }
 );
@@ -796,6 +802,7 @@ router.get(
     const { building_id } = req.query;
     const orgId = req.user.org_id;
 
+    const { client, release } = await getUserClient(req);
     try {
       if (building_id) {
         const ok = await checkBuildingAccess(req, building_id, 'report');
@@ -814,12 +821,13 @@ router.get(
         revParams.push(building_id);
         revFilter = ` AND i.building_id = $${revParams.length}`;
       }
-      const revRes = await pool.query(
+      const revRes = await client.query(
         `SELECT i.period,
-                COUNT(*) FILTER (WHERE i.status != 'CANCELLED')::int AS invoice_count,
-                COALESCE(SUM(i.total_amount) FILTER (WHERE i.status != 'CANCELLED'), 0)::bigint AS billed,
-                COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status != 'CANCELLED'), 0)::bigint AS collected,
-                COALESCE(SUM(i.total_amount - i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'PAID')), 0)::bigint AS outstanding
+                COUNT(i.id)::int AS invoice_count,
+                COALESCE(SUM(i.total_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS billed,
+                COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS collected,
+                COALESCE(SUM(i.paid_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS invoice_settled,
+                COALESCE(SUM(i.total_amount - i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID', 'PAID')), 0)::bigint AS outstanding
          FROM invoice i
          WHERE i.org_id = $1 AND i.period = ANY($2::text[]) ${revScope} ${revFilter}
          GROUP BY i.period`,
@@ -827,12 +835,20 @@ router.get(
       );
       const revMap = new Map(revRes.rows.map((r) => [r.period, {
         period: r.period,
-        invoice_count: r.invoice_count,
+        invoice_count: Number(r.invoice_count || 0),
         billed: Number(r.billed || 0),
         collected: Number(r.collected || 0),
+        invoice_settled: Number(r.invoice_settled || 0),
         outstanding: Number(r.outstanding || 0),
       }]));
-      const revenue12m = periods12.map((p) => revMap.get(p) || { period: p, invoice_count: 0, billed: 0, collected: 0, outstanding: 0 });
+      const revenue12m = periods12.map((p) => revMap.get(p) || {
+        period: p,
+        invoice_count: 0,
+        billed: 0,
+        collected: 0,
+        invoice_settled: 0,
+        outstanding: 0,
+      });
 
       // 2. Lấp đầy theo từng tòa nhà
       const occParams = [orgId];
@@ -842,7 +858,7 @@ router.get(
         occParams.push(building_id);
         occFilter = ` AND b.id = $${occParams.length}`;
       }
-      const occRes = await pool.query(
+      const occRes = await client.query(
         `SELECT b.id AS building_id,
                 b.code AS building_code,
                 b.name AS building_name,
@@ -871,7 +887,7 @@ router.get(
         ageParams.push(building_id);
         ageFilter = ` AND r.building_id = $${ageParams.length}`;
       }
-      const ageRes = await pool.query(
+      const ageRes = await client.query(
         `SELECT b.code AS building_code,
                 b.name AS building_name,
                 COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE r.due_date >= CURRENT_DATE), 0)::bigint AS current_not_due,
@@ -901,7 +917,7 @@ router.get(
         slaParams.push(building_id);
         slaFilter = ` AND sr.building_id = $${slaParams.length}`;
       }
-      const slaRes = await pool.query(
+      const slaRes = await client.query(
         `SELECT sr.category,
                 COUNT(*)::int AS total_requests,
                 COUNT(*) FILTER (WHERE sr.status IN ('RESOLVED', 'CLOSED'))::int AS resolved_count,
@@ -1028,6 +1044,8 @@ router.get(
     } catch (err) {
       console.error('[Reports Summary Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải báo cáo tổng hợp.' });
+    } finally {
+      await release();
     }
   }
 );

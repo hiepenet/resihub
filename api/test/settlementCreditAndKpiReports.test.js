@@ -449,6 +449,137 @@ test('Task 7: M06 Two-Step Deposit Settlement & KPI / RP-08 XLSX Reports', async
   // Test 3: Review Focus #1 & #2 Pins: Case A0, Case A1 (Zero UTILITY_DEBT double deduction + OWNER FORCE RLS approve), Case A, Case B
   await t.test('3. Review Focus #1 & #2: Case A0, Case A1, Case A, Case B', async () => {
     // -------------------------------------------------------------
+    // Case A0: 'ADJUSTED' mixed RENT + SERVICE debt split & cross-bucket negative spill
+    //          Exact match between JS preview and SQL fn_apply_deposit_settlement_accounting
+    // -------------------------------------------------------------
+    const contA0 = await adminPool.query(
+      `INSERT INTO contract (building_id, apartment_id, primary_tenant_id, start_date, end_date, terminated_at, status, rent_amount, deposit_amount, billing_day)
+       VALUES ($1, $2, $3, '2026-01-01', '2026-04-30', '2026-04-30', 'TERMINATED', 4000000, 5000000, 5)
+       RETURNING id`,
+      [buildingId, aptId, tenantId]
+    );
+    const contractA0Id = contA0.rows[0].id;
+    cleanup.contractIds.push(contractA0Id);
+
+    const depA0 = await adminPool.query(
+      `INSERT INTO deposit (contract_id, amount_held, status)
+       VALUES ($1, 5000000, 'HELD')
+       RETURNING id`,
+      [contractA0Id]
+    );
+    const depositA0Id = depA0.rows[0].id;
+    cleanup.depositIds.push(depositA0Id);
+
+    // Seed 'ADJUSTED' invoice with RENT 4M, SERVICE 1M, and negative adjustment -2M on SERVICE
+    // raw_service = 1M - 2M = -1M < 0 -> negative spill to raw_rent = 4M - 1M = 3M, raw_service = 0
+    // total = 3M, rentDebt = 3M, serviceDebt = 0
+    const invA0 = await adminPool.query(
+      `INSERT INTO invoice (org_id, building_id, apartment_id, contract_id, tenant_id, invoice_code, period, due_date, subtotal_amount, adjustment_amount, total_amount, paid_amount, status)
+       VALUES ($1, $2, $3, $4, $5, $6, '2026-04', '2026-04-10', 5000000, -2000000, 3000000, 0, 'ADJUSTED')
+       RETURNING id`,
+      [orgId, buildingId, aptId, contractA0Id, tenantId, `INV_A0_${suffix}`]
+    );
+    cleanup.invoiceIds.push(invA0.rows[0].id);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền phòng', 1, 'tháng', 4000000, 4000000),
+              ($1, 'SERVICE', 'Dịch vụ tiện ích', 1, 'tháng', 1000000, 1000000)`,
+      [invA0.rows[0].id]
+    );
+
+    // Negative adjustment line: adjusts SERVICE by -2,000,000
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
+       VALUES ($1, 'ADJUSTMENT', 'Giảm trừ phí dịch vụ kỳ cuối', 1, 'lần', -2000000, -2000000, $2::jsonb)`,
+      [invA0.rows[0].id, JSON.stringify({ adjusts_item_type: 'SERVICE' })]
+    );
+
+    // Available credit of 1,000,000 VND
+    const cbA0 = await adminPool.query(
+      `INSERT INTO credit_balance (org_id, building_id, contract_id, tenant_id, amount, applied_amount, reason_type, status, description, created_by)
+       VALUES ($1, $2, $3, $4, 1000000, 0, 'OVERPAYMENT', 'AVAILABLE', 'Số dư thừa đối trừ tiền thuê', $5)
+       RETURNING id`,
+      [orgId, buildingId, contractA0Id, tenantId, managerUser.userId]
+    );
+
+    // Manager submits settlement
+    const subA0 = await apiFetch(`/api/v1/deposits/${depositA0Id}/settlement`, managerUser.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [],
+        refund_method: 'BANK_TRANSFER',
+        bank_info: {
+          bank_name: 'Vietcombank',
+          account_number: '0123456789',
+          account_holder: 'NGUYEN VAN A',
+        },
+        inspection_evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(subA0.status, 200, `Submit A0 failed: ${JSON.stringify(subA0.body)}`);
+
+    // Verify JS preview in settlement:
+    const sA0 = subA0.body.data.settlement;
+    assert.equal(Number(sA0.rent_debt), 3000000, 'Case A0: Negative spill must reduce rent_debt to 3M');
+    assert.equal(Number(sA0.service_debt), 0, 'Case A0: Negative spill must leave service_debt at 0');
+    assert.equal(Number(sA0.credit_applied_to_rent), 1000000, 'Case A0: Credit 1M pays RENT');
+    assert.equal(Number(sA0.credit_applied_to_service), 0);
+    assert.equal(Number(sA0.remaining_rent_debt), 2000000, 'Case A0: Remaining rent debt 2M');
+    assert.equal(Number(sA0.covered_service_debt), 0);
+    assert.equal(Number(sA0.deposit_refund_amount), 5000000, 'Case A0: Full deposit 5M refunded (rent debt not deducted)');
+    assert.equal(Number(sA0.total_payout_amount), 5000000);
+
+    // Owner approves settlement under FORCE RLS -> APPROVED_PENDING_PAYOUT
+    const appA0 = await apiFetch(`/api/v1/deposits/${depositA0Id}/settlement/approve`, ownerUser.token, {
+      method: 'POST',
+    });
+    assert.equal(appA0.status, 200, `Approve A0 failed: ${JSON.stringify(appA0.body)}`);
+    assert.equal(appA0.body.data.status, 'APPROVED_PENDING_PAYOUT');
+
+    // Manager executes payout -> commits settlement accounting in SQL via fn_apply_deposit_settlement_accounting
+    const payA0 = await apiFetch(`/api/v1/deposits/${depositA0Id}/payout`, managerUser.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        refund_method: 'BANK_TRANSFER',
+        bank_info: {
+          bank_name: 'Vietcombank',
+          account_number: '0123456789',
+          account_holder: 'NGUYEN VAN A',
+        },
+        evidence: [TINY_PNG_B64],
+      }),
+    });
+    assert.equal(payA0.status, 200, `Payout A0 failed: ${JSON.stringify(payA0.body)}`);
+    assert.equal(payA0.body.data.status, 'REFUNDED');
+
+    // Verify exact match between JS preview and SQL accounting execution:
+    const postInvA0 = await adminPool.query(
+      `SELECT credit_offset_amount, paid_amount, total_amount FROM invoice WHERE id = $1`,
+      [invA0.rows[0].id]
+    );
+    assert.equal(Number(postInvA0.rows[0].credit_offset_amount), 1000000, 'SQL: credit_offset_amount must match JS credit_applied_to_rent (1M)');
+    const sqlRemainingDebt = Number(postInvA0.rows[0].total_amount) - Number(postInvA0.rows[0].paid_amount);
+    assert.equal(sqlRemainingDebt, 2000000, 'SQL remaining debt must match JS remaining_rent_debt (2M)');
+
+    const postCbA0 = await adminPool.query(
+      `SELECT applied_amount, status FROM credit_balance WHERE id = $1`,
+      [cbA0.rows[0].id]
+    );
+    assert.equal(Number(postCbA0.rows[0].applied_amount), 1000000, 'SQL: Credit applied_amount must be 1M');
+    assert.equal(postCbA0.rows[0].status, 'APPLIED');
+
+    // Deposit status and no UTILITY_DEBT deduct row
+    const depPostA0 = await adminPool.query(`SELECT status, amount_held FROM deposit WHERE id = $1`, [depositA0Id]);
+    assert.equal(depPostA0.rows[0].status, 'REFUNDED');
+    assert.equal(Number(depPostA0.rows[0].amount_held), 0);
+
+    const txA0 = await adminPool.query(`SELECT * FROM deposit_transaction WHERE deposit_id = $1`, [depositA0Id]);
+    assert.equal(txA0.rows.filter(r => r.category === 'UTILITY_DEBT').length, 0, 'No UTILITY_DEBT deduct row when serviceDebt is 0');
+    assert.equal(txA0.rows.filter(r => r.type === 'refund').length, 1);
+    assert.equal(Number(txA0.rows.find(r => r.type === 'refund').amount), 5000000);
+
+    // -------------------------------------------------------------
     // Case A1: heldBefore = 5M, credit = 1.5M, serviceDebt = 1.5M, rentDebt = 0, items = []
     // -------------------------------------------------------------
     const contA1 = await adminPool.query(
