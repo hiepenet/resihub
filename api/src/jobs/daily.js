@@ -37,42 +37,64 @@ export async function runDailyJobs() {
   }
 
   // 1a. Hợp đồng đang chờ bàn giao chấm dứt (TERMINATION_PENDING) đã đến ngày hẹn trả phòng -> tự động chuyển sang TERMINATED
-  const scheduledTerminated = await adminPool.query(
-    `UPDATE contract
-     SET status = 'TERMINATED',
-         terminated_at = COALESCE(terminated_at, end_date),
-         updated_at = NOW()
+  const candidateTerminated = await adminPool.query(
+    `SELECT id, building_id, apartment_id, start_date, COALESCE(terminated_at, end_date) AS eff_end_date
+     FROM contract
      WHERE status = 'TERMINATION_PENDING'
-       AND COALESCE(terminated_at, end_date) <= CURRENT_DATE
-     RETURNING *, COALESCE(terminated_at, end_date) AS eff_end_date`
+       AND COALESCE(terminated_at, end_date) <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`
   );
-  for (const row of scheduledTerminated.rows) {
-    const termStr = getTodayVnDateStr(row.eff_end_date);
-    const sDateStr = getTodayVnDateStr(row.start_date);
-    const refundDays = await resolveBuildingRefundDays(row.building_id);
-    const { dueAt } = refundDeadline(termStr, refundDays);
-    await adminPool.query(
-      `UPDATE deposit
-       SET refund_due_date = $1, updated_at = NOW()
-       WHERE contract_id = $2
-         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
-         AND refund_due_date IS NULL`,
-      [dueAt, row.id]
-    );
-
-    // 6A Sync: đồng bộ hóa đơn & đóng subscription cho hợp đồng kết thúc lịch trả phòng
+  let finalizedCount = 0;
+  for (const cand of candidateTerminated.rows) {
+    const txClient = await adminPool.connect();
+    let row = null;
     try {
-      await closeContractBillingAndSubscriptionsInTx(adminPool, {
+      await txClient.query('BEGIN');
+      const updRes = await txClient.query(
+        `UPDATE contract
+         SET status = 'TERMINATED',
+             terminated_at = COALESCE(terminated_at, end_date),
+             updated_at = NOW()
+         WHERE id = $1 AND status = 'TERMINATION_PENDING'
+         RETURNING *, COALESCE(terminated_at, end_date) AS eff_end_date`,
+        [cand.id]
+      );
+      if (updRes.rows.length === 0) {
+        await txClient.query('ROLLBACK');
+        continue;
+      }
+      row = updRes.rows[0];
+      const termStr = getTodayVnDateStr(row.eff_end_date);
+      const refundDays = await resolveBuildingRefundDays(row.building_id);
+      const { dueAt } = refundDeadline(termStr, refundDays);
+      await txClient.query(
+        `UPDATE deposit
+         SET refund_due_date = $1, updated_at = NOW()
+         WHERE contract_id = $2
+           AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
+           AND refund_due_date IS NULL`,
+        [dueAt, row.id]
+      );
+
+      // 6A Sync: đồng bộ hóa đơn & đóng subscription cho hợp đồng kết thúc lịch trả phòng
+      await closeContractBillingAndSubscriptionsInTx(txClient, {
         contract: row,
         explicitEndYmd: termStr,
         actorId: null,
         reason: 'Kết thúc hợp đồng theo lịch trả phòng (TERMINATION_PENDING)',
       });
+
+      await txClient.query('COMMIT');
+      finalizedCount++;
     } catch (closeErr) {
+      await txClient.query('ROLLBACK').catch(() => {});
       console.error('[DailyJob] Step 1a closeContract error:', closeErr.message);
+    } finally {
+      txClient.release();
     }
 
-    if (row.apartment_id) {
+    if (row && row.apartment_id) {
+      const termStr = getTodayVnDateStr(row.eff_end_date);
+      const sDateStr = getTodayVnDateStr(row.start_date);
       const movedIn = Boolean(sDateStr && termStr >= sDateStr);
       if (!movedIn) {
         otherAffectedAptIds.add(row.apartment_id);
@@ -82,8 +104,8 @@ export async function runDailyJobs() {
            WHERE parent_contract_id = $1
              AND apartment_id = $2
              AND status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-             AND start_date <= CURRENT_DATE
-             AND COALESCE(terminated_at, end_date) > CURRENT_DATE
+             AND start_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+             AND COALESCE(terminated_at, end_date) > (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
            LIMIT 1`,
           [row.id, row.apartment_id]
         );
@@ -95,45 +117,57 @@ export async function runDailyJobs() {
       }
     }
   }
-  if (scheduledTerminated.rowCount > 0) {
-    console.log(`[DailyJob] scheduled contract terminations finalized: ${scheduledTerminated.rowCount}`);
+  if (finalizedCount > 0) {
+    console.log(`[DailyJob] scheduled contract terminations finalized: ${finalizedCount}`);
   }
 
   // 1b. Hợp đồng đến/quá ngày kết thúc (nửa mở [start_date, end_date) -> end_date <= CURRENT_DATE là đã kết thúc) (R-02)
-  const expired = await adminPool.query(
-    `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
-     WHERE status IN ('ACTIVE', 'RENEWAL_PENDING') AND end_date <= CURRENT_DATE
-     RETURNING *`
+  const candidateExpired = await adminPool.query(
+    `SELECT id, building_id, apartment_id, end_date
+     FROM contract
+     WHERE status IN ('ACTIVE', 'RENEWAL_PENDING')
+       AND end_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`
   );
-  for (const row of expired.rows) {
-    const endDateStr = getTodayVnDateStr(row.end_date);
-    const refundDays = await resolveBuildingRefundDays(row.building_id);
-    const { dueAt } = refundDeadline(endDateStr, refundDays);
-    await adminPool.query(
-      `UPDATE deposit
-       SET refund_due_date = $1, updated_at = NOW()
-       WHERE contract_id = $2
-         AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
-         AND refund_due_date IS NULL`,
-      [dueAt, row.id]
-    );
-
-    // 6A Sync: đồng bộ hóa đơn & đóng subscription khi hợp đồng hết hạn tự nhiên
+  let expiredCount = 0;
+  for (const cand of candidateExpired.rows) {
+    const txClient = await adminPool.connect();
+    let row = null;
     try {
-      await closeContractBillingAndSubscriptionsInTx(adminPool, {
+      await txClient.query('BEGIN');
+      const updRes = await txClient.query(
+        `UPDATE contract SET status = 'EXPIRED', updated_at = NOW()
+         WHERE id = $1 AND status IN ('ACTIVE', 'RENEWAL_PENDING')
+         RETURNING *`,
+        [cand.id]
+      );
+      if (updRes.rows.length === 0) {
+        await txClient.query('ROLLBACK');
+        continue;
+      }
+      row = updRes.rows[0];
+      const endDateStr = getTodayVnDateStr(row.end_date);
+      const refundDays = await resolveBuildingRefundDays(row.building_id);
+      const { dueAt } = refundDeadline(endDateStr, refundDays);
+      await txClient.query(
+        `UPDATE deposit
+         SET refund_due_date = $1, updated_at = NOW()
+         WHERE contract_id = $2
+           AND status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
+           AND refund_due_date IS NULL`,
+        [dueAt, row.id]
+      );
+
+      // 6A Sync: đồng bộ hóa đơn & đóng subscription khi hợp đồng hết hạn tự nhiên
+      await closeContractBillingAndSubscriptionsInTx(txClient, {
         contract: row,
         explicitEndYmd: endDateStr,
         isNaturalExpiry: true,
         actorId: null,
         reason: 'Hết hạn hợp đồng tự nhiên',
       });
-    } catch (closeErr) {
-      console.error('[DailyJob] Step 1b closeContract error:', closeErr.message);
-    }
 
-    // Kết chuyển credit_balance sang hợp đồng gia hạn con (nếu có)
-    try {
-      const childRenewRes = await adminPool.query(
+      // Kết chuyển credit_balance sang hợp đồng gia hạn con (nếu có)
+      const childRenewRes = await txClient.query(
         `SELECT id, building_id FROM contract
          WHERE parent_contract_id = $1
            AND status IN ('ACTIVE', 'RENEWAL_PENDING')
@@ -141,7 +175,7 @@ export async function runDailyJobs() {
         [row.id]
       );
       if (childRenewRes.rows.length > 0) {
-        await transferContractCreditsInTx(adminPool, {
+        await transferContractCreditsInTx(txClient, {
           fromContractId: row.id,
           toContractId: childRenewRes.rows[0].id,
           toBuildingId: childRenewRes.rows[0].building_id,
@@ -149,19 +183,25 @@ export async function runDailyJobs() {
           reason: 'Kết chuyển số dư tín dụng khi hợp đồng cũ hết hạn',
         });
       }
-    } catch (xferErr) {
-      console.error('[DailyJob] Step 1b transferCredits error:', xferErr.message);
+
+      await txClient.query('COMMIT');
+      expiredCount++;
+    } catch (closeErr) {
+      await txClient.query('ROLLBACK').catch(() => {});
+      console.error('[DailyJob] Step 1b closeContract/transferCredits error:', closeErr.message);
+    } finally {
+      txClient.release();
     }
 
-    if (row.apartment_id) {
+    if (row && row.apartment_id) {
       // Nếu có HĐ gia hạn con nối tiếp bắt đầu hôm nay (cùng khách ở tiếp), không ép sang MAINTENANCE
       const childContinue = await adminPool.query(
         `SELECT 1 FROM contract
          WHERE parent_contract_id = $1
            AND apartment_id = $2
            AND status IN ('ACTIVE', 'RENEWAL_PENDING')
-           AND start_date <= CURRENT_DATE
-           AND COALESCE(terminated_at, end_date) > CURRENT_DATE
+           AND start_date <= (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
+           AND COALESCE(terminated_at, end_date) > (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
          LIMIT 1`,
         [row.id, row.apartment_id]
       );
@@ -172,7 +212,7 @@ export async function runDailyJobs() {
       }
     }
   }
-  console.log(`[DailyJob] contract expired: ${expired.rowCount}`);
+  console.log(`[DailyJob] contract expired: ${expiredCount}`);
 
   // 2. Các căn hộ đang RESERVED/AVAILABLE nhưng HĐ ACTIVE đã tới ngày bắt đầu (start_date <= CURRENT_DATE)
   const dueStartApts = await adminPool.query(

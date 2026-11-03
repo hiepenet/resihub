@@ -126,7 +126,7 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
   const isResident = !!options.isResident;
   const invoiceFilterSql = isResident
     ? `AND status NOT IN ('CANCELLED', 'VOID', 'DRAFT')`
-    : `AND status <> 'CANCELLED'`;
+    : `AND status NOT IN ('CANCELLED', 'VOID')`;
 
   const [subsRes, pricesRes, invRes, creditRes, adjRes] = await Promise.all([
     adminPool.query(
@@ -315,9 +315,9 @@ async function syncDraftContractServicesInTx(
       const subIns = await client.query(
         `INSERT INTO service_subscription (
            org_id, building_id, apartment_id, contract_id, service_id,
-           quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by
+           quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by, is_price_locked
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11, $12, $13)
          RETURNING *`,
         [
           orgId,
@@ -332,6 +332,7 @@ async function syncDraftContractServicesInTx(
           cleanNote,
           cleanVehiclePlates,
           actorId,
+          Boolean(svcItem.is_price_locked),
         ]
       );
       createdServices.push({
@@ -4569,7 +4570,7 @@ router.get('/:id/template', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER'
       [id]
     );
     const subRes = await client.query(
-      `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.status, ss.note, ss.vehicle_plates,
+      `SELECT ss.quantity, ss.unit_price, ss.start_date, ss.end_date, ss.status, ss.note, ss.vehicle_plates, ss.is_price_locked,
               sc.code AS service_code,
               sc.name AS service_name,
               sc.category AS service_category,
