@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import pg from 'pg';
 import dotenv from 'dotenv';
 
@@ -38,6 +39,12 @@ async function apiFetch(path, token, options = {}) {
   }
   return { status: res.status, body };
 }
+
+test('apartments router registers POST /bulk exactly once', () => {
+  const src = fs.readFileSync(new URL('../src/routes/apartments.js', import.meta.url), 'utf8');
+  const matches = src.match(/router\.post\(\s*['"]\/bulk['"]/g) || [];
+  assert.equal(matches.length, 1);
+});
 
 test('FR-009 — bulk apartment creation by floor template', async (t) => {
   let healthOk = false;
