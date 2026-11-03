@@ -254,11 +254,13 @@ async function checkSettlementPreconditions(
       `SELECT m.meter_type
        FROM meter m
        WHERE m.apartment_id = $1
+         AND m.status = 'ACTIVE'
          AND m.created_at::date <= $2::date
          AND NOT EXISTS (
            SELECT 1 FROM meter_reading mr
            WHERE mr.meter_id = m.id
              AND mr.period >= $3
+             AND mr.status = 'CONFIRMED'
          )`,
       [contractRow.apartment_id, endRefStr, endPeriod]
     );
@@ -268,8 +270,8 @@ async function checkSettlementPreconditions(
       const unbilledRes = await client.query(
         `SELECT DISTINCT m.meter_type
          FROM meter m
-         JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period = $3
-         WHERE m.apartment_id = $1
+         JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period = $3 AND mr.status = 'CONFIRMED'
+         WHERE m.apartment_id = $1 AND m.status = 'ACTIVE'
            AND m.created_at::date <= $2::date
            AND COALESCE(mr.consumption, mr.current_reading - mr.previous_reading, 0) > 0
            AND NOT EXISTS (
