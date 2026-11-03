@@ -236,6 +236,11 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     assert.equal(relResult1.releasedAmount, 100000);
     assert.equal(relResult1.remainingCreditOffset, 250000);
 
+    // Verify standalone release on DRAFT updates total_amount = total_amount + totalReleased
+    const invCheckRel1 = await adminPool.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+    assert.equal(Number(invCheckRel1.rows[0].credit_offset_amount), 250000);
+    assert.equal(Number(invCheckRel1.rows[0].total_amount), 100000);
+
     // cr2 should have dropped applied_amount from 150,000 to 50,000 (still PARTIALLY_APPLIED)
     const cr2Check2 = await adminPool.query('SELECT * FROM credit_balance WHERE id = $1', [cr2.id]);
     assert.equal(Number(cr2Check2.rows[0].applied_amount), 50000);
@@ -252,6 +257,11 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     assert.equal(relResult2.releasedAmount, 250000);
     assert.equal(relResult2.remainingCreditOffset, 0);
 
+    // Verify draft invoice totals fully restored to 350,000
+    const invCheckRel2 = await adminPool.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+    assert.equal(Number(invCheckRel2.rows[0].credit_offset_amount), 0);
+    assert.equal(Number(invCheckRel2.rows[0].total_amount), 350000);
+
     // Both credits should now be AVAILABLE with applied_amount = 0
     const cr1Check3 = await adminPool.query('SELECT * FROM credit_balance WHERE id = $1', [cr1.id]);
     assert.equal(Number(cr1Check3.rows[0].applied_amount), 0);
@@ -265,6 +275,43 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     const crRefundedCheck = await adminPool.query('SELECT * FROM credit_balance WHERE id = $1', [crRefunded.id]);
     assert.equal(crRefundedCheck.rows[0].status, 'REFUNDED_DIRECT');
     assert.equal(Number(crRefundedCheck.rows[0].applied_amount), 300000);
+
+    // Verify applyAvailableCreditsInTx rejects on non-DRAFT (ISSUED) invoice (FR-034, NFR-016)
+    const issuedInvForCreditRes = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date,
+        subtotal_amount, adjustment_amount, total_amount, paid_amount, credit_offset_amount,
+        status, created_by, issued_by, issued_at
+      ) VALUES (
+        $1, $2, $3, $4, $5,
+        $6, '2029-11', CURRENT_DATE, CURRENT_DATE + INTERVAL '5 days',
+        350000, 0, 350000, 0, 0,
+        'ISSUED', $7, $7, NOW()
+      ) RETURNING *
+    `, [
+      orgId, buildingId, contract.apartment_id, contract.id, contract.primary_tenant_id,
+      `INV-ISSUED-CR-${Date.now().toString().slice(-6)}`, mgrId,
+    ]);
+    cleanups.invoices.push(issuedInvForCreditRes.rows[0].id);
+
+    await assert.rejects(
+      asManagerTx(mgrId, async (client) => {
+        return applyAvailableCreditsInTx(client, {
+          contractId: contract.id,
+          invoiceId: issuedInvForCreditRes.rows[0].id,
+          subtotalAmount: 350000,
+          actorId: mgrId,
+        });
+      }),
+      (err) => {
+        assert.ok(
+          err.message.includes('IMMUTABLE_AFTER_ISSUED') || err.code === 'IMMUTABLE_AFTER_ISSUED',
+          `Expected IMMUTABLE_AFTER_ISSUED error, got: ${err.message}`
+        );
+        return true;
+      }
+    );
   });
 
   // =========================================================================
@@ -350,7 +397,7 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
       ) VALUES (
         $1, $2, $3, $4, $5,
         $6, '2029-06', CURRENT_DATE, CURRENT_DATE + INTERVAL '5 days',
-        300000, 0, 0, 0, 300000,
+        350000, 0, 50000, 0, 300000,
         'DRAFT', $7
       ) RETURNING *
     `, [
@@ -365,6 +412,14 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
       VALUES ($1, 'SERVICE', 'Dịch vụ tiện ích (2029-06)', 1, 'tháng', 300000, 300000, $2)
       RETURNING *
     `, [draftM6.id, sub.id]);
+
+    // Also seed an ad-hoc SERVICE line (subscription_id IS NULL) to verify it remains 100% untouched
+    const adhocDraftLineRes = await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id)
+      VALUES ($1, 'SERVICE', 'Phí dọn dẹp theo yêu cầu (ad-hoc)', 1, 'lần', 50000, 50000, NULL)
+      RETURNING *
+    `, [draftM6.id]);
+    const adhocDraftLineId = adhocDraftLineRes.rows[0].id;
 
     await adminPool.query(`
       INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, credit_id)
@@ -401,15 +456,25 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     assert.ok(updatedLineRes.rows[0].formula_meta);
     assert.equal(updatedLineRes.rows[0].formula_meta.active_days, 10);
 
-    // Verify surplus credit balance (300,000 - 100,000 = 200,000) was RELEASED back to credit_balance!
+    // Verify ad-hoc SERVICE line (subscription_id IS NULL) remains 100% untouched
+    const adhocDraftLineCheck = await adminPool.query(
+      'SELECT * FROM invoice_line WHERE id = $1',
+      [adhocDraftLineId]
+    );
+    assert.equal(adhocDraftLineCheck.rows.length, 1);
+    assert.equal(Number(adhocDraftLineCheck.rows[0].amount), 50000);
+    assert.equal(adhocDraftLineCheck.rows[0].subscription_id, null);
+    assert.equal(adhocDraftLineCheck.rows[0].description, 'Phí dọn dẹp theo yêu cầu (ad-hoc)');
+
+    // Verify surplus credit balance (300,000 - 150,000 = 150,000) was RELEASED back to credit_balance!
     const crMonth6Check = await adminPool.query('SELECT * FROM credit_balance WHERE id = $1', [crMonth6.id]);
-    assert.equal(Number(crMonth6Check.rows[0].applied_amount), 100000);
+    assert.equal(Number(crMonth6Check.rows[0].applied_amount), 150000);
     assert.equal(crMonth6Check.rows[0].status, 'PARTIALLY_APPLIED');
 
-    // Verify invoice totals updated
+    // Verify invoice totals updated: grossSubtotal (100k + 50k = 150k), creditOffset = 150k, total = 0
     const draftM6Check = await adminPool.query('SELECT * FROM invoice WHERE id = $1', [draftM6.id]);
-    assert.equal(Number(draftM6Check.rows[0].subtotal_amount), 100000);
-    assert.equal(Number(draftM6Check.rows[0].credit_offset_amount), 100000);
+    assert.equal(Number(draftM6Check.rows[0].subtotal_amount), 150000);
+    assert.equal(Number(draftM6Check.rows[0].credit_offset_amount), 150000);
     assert.equal(Number(draftM6Check.rows[0].total_amount), 0);
 
     // Verify UPDATE_DRAFT_INVOICE_LINES audit log was created
@@ -449,7 +514,7 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     const sub = subRes.rows[0];
     cleanups.subscriptions.push(sub.id);
 
-    // Seed an ISSUED invoice for 2029-07 with 600,000 VND
+    // Seed an ISSUED invoice for 2029-07 with 750,000 VND (600k sub + 150k ad-hoc)
     const issuedRes = await adminPool.query(`
       INSERT INTO invoice (
         org_id, building_id, apartment_id, contract_id, tenant_id,
@@ -459,7 +524,7 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
       ) VALUES (
         $1, $2, $3, $4, $5,
         $6, '2029-07', CURRENT_DATE, CURRENT_DATE + INTERVAL '5 days',
-        600000, 0, 600000, 0, 0,
+        750000, 0, 750000, 0, 0,
         'ISSUED', $7, $7, NOW()
       ) RETURNING *
     `, [
@@ -475,6 +540,14 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
       RETURNING *
     `, [issuedInv.id, sub.id]);
     const lineId = lineRes.rows[0].id;
+
+    // Seed ad-hoc SERVICE line (subscription_id IS NULL) on ISSUED invoice to prove it remains untouched
+    const adhocIssuedRes = await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id)
+      VALUES ($1, 'SERVICE', 'Phí sửa bóng đèn hành lang (ad-hoc)', 1, 'lần', 150000, 150000, NULL)
+      RETURNING *
+    `, [issuedInv.id]);
+    const adhocIssuedId = adhocIssuedRes.rows[0].id;
 
     // Terminate mid-month on 2029-07-15 (15/31 days = roundVND(600000 * 15 / 31) = 290000)
     // Delta = 290000 - 600000 = -310000
@@ -511,6 +584,46 @@ test('Invoice Lifecycle, 3-Scenario Sync, 6A Contract Closure & Credit Balance L
     const lineCheck = await adminPool.query('SELECT * FROM invoice_line WHERE id = $1', [lineId]);
     assert.equal(Number(lineCheck.rows[0].amount), 600000);
     assert.equal(lineCheck.rows[0].description, 'Dịch vụ cao cấp');
+
+    // CRITICAL: Ad-hoc service line (subscription_id IS NULL) must be 100% UNTOUCHED (Finding 1)
+    const adhocIssuedCheck = await adminPool.query('SELECT * FROM invoice_line WHERE id = $1', [adhocIssuedId]);
+    assert.equal(adhocIssuedCheck.rows.length, 1);
+    assert.equal(Number(adhocIssuedCheck.rows[0].amount), 150000);
+    assert.equal(adhocIssuedCheck.rows[0].subscription_id, null);
+    assert.equal(adhocIssuedCheck.rows[0].description, 'Phí sửa bóng đèn hành lang (ad-hoc)');
+
+    // Verify idempotency of syncSubscriptionTerminationInvoicesInTx (Finding 2):
+    // Re-running sync with identical parameters must NOT send duplicate notifications,
+    // must NOT push duplicate adjustments, and must return scenario 'NO_CHANGE'.
+    const notifCountBefore = await adminPool.query(
+      `SELECT count(*)::int AS cnt FROM notification WHERE payload->>'adjustment_id' = $1`,
+      [adj.id]
+    );
+    assert.ok(notifCountBefore.rows[0].cnt >= 1, 'Initial run must have sent a notification');
+
+    const syncRes2 = await asManagerTx(mgrId, async (client) => {
+      return syncSubscriptionTerminationInvoicesInTx(client, {
+        subscription: termSub,
+        contract,
+        actorId: mgrId,
+        reason: 'Hủy dịch vụ cao cấp giữa kỳ đã phát hành',
+      });
+    });
+
+    assert.equal(syncRes2.scenario, 'NO_CHANGE');
+    assert.equal(syncRes2.createdAdjustments.length, 0);
+    assert.equal(syncRes2.updatedDraftInvoiceIds.length, 0);
+    assert.equal(syncRes2.voidedDraftInvoiceIds.length, 0);
+
+    const notifCountAfter = await adminPool.query(
+      `SELECT count(*)::int AS cnt FROM notification WHERE payload->>'adjustment_id' = $1`,
+      [adj.id]
+    );
+    assert.equal(
+      notifCountAfter.rows[0].cnt,
+      notifCountBefore.rows[0].cnt,
+      'Idempotent run must not create additional notifications'
+    );
 
     // Test notifyBuildingInvoiceAdjustmentApprovers succeeds on BOTH appPool (as MANAGER) and adminPool (internal session)
     await asManagerTx(mgrId, async (client) => {

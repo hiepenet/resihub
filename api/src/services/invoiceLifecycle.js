@@ -25,8 +25,27 @@ export async function applyAvailableCreditsInTx(
   client,
   { contractId, invoiceId, subtotalAmount, actorId = null }
 ) {
+  if (!invoiceId) throw new Error('invoiceId is required');
+
+  // Verify and lock invoice; non-DRAFT invoices are immutable
+  const invRes = await client.query(
+    `SELECT id, status FROM invoice WHERE id = $1 FOR UPDATE`,
+    [invoiceId]
+  );
+  if (invRes.rows.length === 0) {
+    throw new Error(`Invoice not found: ${invoiceId}`);
+  }
+  const inv = invRes.rows[0];
+  if (inv.status !== 'DRAFT') {
+    const err = new Error(
+      `IMMUTABLE_AFTER_ISSUED: cannot apply credits to non-DRAFT invoice (status = ${inv.status})`
+    );
+    err.code = 'IMMUTABLE_AFTER_ISSUED';
+    throw err;
+  }
+
   const neededLimit = Math.max(0, Number(subtotalAmount || 0));
-  if (neededLimit <= 0 || !contractId || !invoiceId) {
+  if (neededLimit <= 0 || !contractId) {
     return { totalCreditUsed: 0, appliedItems: [] };
   }
 
@@ -190,47 +209,26 @@ export async function releaseInvoiceCreditsInTx(
     remainingToRelease -= rel;
   }
 
-  // Fallback: if there are credits with source_invoice_id = invoiceId that were applied
-  if (remainingToRelease > 0) {
-    const fallbackCreditsRes = await client.query(
-      `SELECT cb.id, cb.amount, cb.applied_amount, cb.status
-       FROM credit_balance cb
-       WHERE cb.source_invoice_id = $1
-         AND cb.status IN ('AVAILABLE', 'PARTIALLY_APPLIED', 'APPLIED')
-         AND cb.applied_amount > 0
-       ORDER BY cb.updated_at DESC
-       FOR UPDATE OF cb`,
-      [invoiceId]
-    );
-    for (const cr of fallbackCreditsRes.rows) {
-      if (remainingToRelease <= 0) break;
-      const cbApplied = Number(cr.applied_amount);
-      const rel = Math.min(remainingToRelease, cbApplied);
-      if (rel <= 0) continue;
-
-      const newApplied = Math.max(0, cbApplied - rel);
-      const newStatus = newApplied > 0 ? 'PARTIALLY_APPLIED' : 'AVAILABLE';
-
-      await client.query(
-        `UPDATE credit_balance
-         SET applied_amount = $1, status = $2, updated_by = $3, updated_at = NOW()
-         WHERE id = $4`,
-        [newApplied, newStatus, actorId, cr.id]
-      );
-
-      totalReleased += rel;
-      remainingToRelease -= rel;
-    }
-  }
-
   const newOffset = Math.max(0, currentOffset - totalReleased);
-  await client.query(
-    `UPDATE invoice
-     SET credit_offset_amount = $1,
-         updated_at = NOW()
-     WHERE id = $2`,
-    [newOffset, invoiceId]
-  );
+
+  if (inv.status === 'DRAFT' && totalReleased > 0) {
+    await client.query(
+      `UPDATE invoice
+       SET credit_offset_amount = $1,
+           total_amount = GREATEST(0, total_amount + $2),
+           updated_at = NOW()
+       WHERE id = $3`,
+      [newOffset, totalReleased, invoiceId]
+    );
+  } else {
+    await client.query(
+      `UPDATE invoice
+       SET credit_offset_amount = $1,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [newOffset, invoiceId]
+    );
+  }
 
   return { releasedAmount: totalReleased, remainingCreditOffset: newOffset };
 }
@@ -489,11 +487,11 @@ export async function syncSubscriptionTerminationInvoicesInTx(
   let foundAnyMatchingInvoice = false;
 
   for (const inv of invoicesRes.rows) {
-    // Find invoice_line corresponding to this subscription
+    // Find invoice_line corresponding to this subscription strictly
     const linesRes = await client.query(
       `SELECT * FROM invoice_line
        WHERE invoice_id = $1
-         AND (subscription_id = $2 OR (item_type = 'SERVICE' AND subscription_id IS NULL))`,
+         AND subscription_id = $2`,
       [inv.id, subscription.id]
     );
 
@@ -564,6 +562,7 @@ export async function syncSubscriptionTerminationInvoicesInTx(
       );
 
       let adj;
+      let isNewOrUpdated = false;
       if (existingAdjRes.rows.length > 0) {
         const existingAdj = existingAdjRes.rows[0];
         if (Number(existingAdj.delta_amount) !== delta) {
@@ -581,8 +580,10 @@ export async function syncSubscriptionTerminationInvoicesInTx(
             ]
           );
           adj = updAdj.rows[0];
+          isNewOrUpdated = true;
         } else {
           adj = existingAdj;
+          isNewOrUpdated = false;
         }
       } else {
         const insAdj = await client.query(
@@ -605,20 +606,23 @@ export async function syncSubscriptionTerminationInvoicesInTx(
           ]
         );
         adj = insAdj.rows[0];
+        isNewOrUpdated = true;
       }
 
-      await notifyBuildingInvoiceAdjustmentApprovers(client, {
-        orgId: inv.org_id,
-        buildingId: inv.building_id,
-        invoiceId: inv.id,
-        invoiceCode: inv.invoice_code,
-        adjustmentId: adj.id,
-        actionType: 'ADJUST',
-        deltaAmount: delta,
-        actorId,
-      });
+      if (isNewOrUpdated) {
+        await notifyBuildingInvoiceAdjustmentApprovers(client, {
+          orgId: inv.org_id,
+          buildingId: inv.building_id,
+          invoiceId: inv.id,
+          invoiceCode: inv.invoice_code,
+          adjustmentId: adj.id,
+          actionType: 'ADJUST',
+          deltaAmount: delta,
+          actorId,
+        });
 
-      createdAdjustments.push(adj);
+        createdAdjustments.push(adj);
+      }
     }
   }
 
