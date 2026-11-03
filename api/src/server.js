@@ -26,6 +26,7 @@ import adminUsersRoute from './routes/admin/users.js';
 import auditLogsRoute from './routes/admin/audit-logs.js';
 import settingsRoute from './routes/settings.js';
 import reportsRoute from './routes/reports.js'; import publicRoute from './routes/public.js';
+import aiRoute from './routes/ai.js';
 import { startDailyJobs } from './jobs/daily.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
@@ -77,6 +78,7 @@ app.use('/api/v1/admin/users', adminUsersRoute);
 app.use('/api/v1/audit-logs', auditLogsRoute);
 app.use('/api/v1/settings', settingsRoute);
 app.use('/api/v1/reports', reportsRoute); app.use('/api/v1/public', publicRoute);
+app.use('/api/v1/ai', aiRoute);
 
 // 404 Handler
 app.use((req, res) => {

@@ -24,6 +24,7 @@ import {
   maskName,
   maskPhone,
 } from '../utils/piiMask.js';
+import { reviewAiSuggestion } from '../services/aiGateway.js';
 
 const router = express.Router();
 const checkDupBuckets = new Map();
@@ -509,7 +510,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
  * Tự động chuẩn hóa SĐT và cấp tài khoản app_user (ACTIVE) + role RESIDENT.
  */
 router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { full_name, phone, email, dob, id_number, address, nationality, type, password, privacy_consent } = req.body;
+  const { full_name, phone, email, dob, id_number, address, nationality, type, password, privacy_consent, ai_suggestion_id } = req.body;
   const orgId = req.user.org_id;
 
   if (!full_name || !phone) {
@@ -547,6 +548,27 @@ router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async
          WHERE id = $1`,
         [personId]
       );
+    }
+
+    if (ai_suggestion_id && /^[0-9a-f-]{36}$/i.test(String(ai_suggestion_id))) {
+      try {
+        await reviewAiSuggestion(client, {
+          suggestionId: String(ai_suggestion_id),
+          actorId: req.user.sub,
+          decision: 'ACCEPT',
+          finalValues: {
+            full_name: String(full_name || '').trim(),
+            id_number: id_number ? String(id_number).trim() : '',
+            dob: dob ? String(dob).slice(0, 10) : '',
+            permanent_address: address ? String(address).trim() : '',
+          },
+          targetEntityId: tenant.id,
+        });
+      } catch (aiErr) {
+        if (aiErr.code !== 'SUGGESTION_NOT_PENDING') {
+          throw aiErr;
+        }
+      }
     }
 
     await client.query('COMMIT');
@@ -913,9 +935,9 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
 /**
  * PATCH /api/v1/tenants/:id — sửa hồ sơ + duyệt cư dân (A8, FR-021 & Điểm 2 Shared Profile Lock)
  */
-router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+async function handleUpdateTenant(req, res) {
   const { id } = req.params;
-  const { full_name, phone, email, dob, id_number, address, nationality, action, reason } = req.body;
+  const { full_name, phone, email, dob, id_number, address, nationality, action, reason, ai_suggestion_id } = req.body;
   const orgId = req.user.org_id;
   const userRoles = getUserRoleCodes(req);
   const isSysAdmin = userRoles.includes('SYS_ADMIN');
@@ -1155,6 +1177,27 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
       [req.user.sub, id, JSON.stringify(tenant), JSON.stringify({ ...tenant, ...nextPerson })]
     );
 
+    if (ai_suggestion_id && /^[0-9a-f-]{36}$/i.test(String(ai_suggestion_id))) {
+      try {
+        await reviewAiSuggestion(client, {
+          suggestionId: String(ai_suggestion_id),
+          actorId: req.user.sub,
+          decision: 'ACCEPT',
+          finalValues: {
+            full_name: nextPerson.full_name,
+            id_number: nextPerson.id_number || '',
+            dob: nextPerson.dob ? String(nextPerson.dob).slice(0, 10) : '',
+            permanent_address: nextPerson.address || '',
+          },
+          targetEntityId: id,
+        });
+      } catch (aiErr) {
+        if (aiErr.code !== 'SUGGESTION_NOT_PENDING') {
+          throw aiErr;
+        }
+      }
+    }
+
     await client.query('COMMIT');
     res.json({ message: 'Cập nhật hồ sơ cư dân thành công.', data: { ...tenant, ...nextPerson } });
   } catch (err) {
@@ -1164,7 +1207,10 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), a
   } finally {
     await release();
   }
-});
+}
+
+router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), handleUpdateTenant);
+router.put('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), handleUpdateTenant);
 
 /**
  * POST /api/v1/tenants/:id/id-images — upload ảnh CCCD (B7, L1)

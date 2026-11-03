@@ -22,6 +22,7 @@ import {
   buildContractTemplateServiceRows,
 } from '../services/contractTemplate.js';
 import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
+import { reviewAiSuggestion } from '../services/aiGateway.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -1368,6 +1369,7 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
     note,
   } = req.body;
 
+  const ai_suggestion_id = req.body?.ai_suggestion_id;
   const hasExistingTenant = Boolean(primary_tenant_id);
   const hasNewTenant = Boolean(
     new_tenant && typeof new_tenant === 'object' && new_tenant.full_name && new_tenant.phone
@@ -1676,6 +1678,64 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
       replaceExistingSubscriptions: false,
       allowNullPriceDelete: false,
     });
+
+    if (new_tenant?.ai_suggestion_id && inlineTenantResult && UUID_REGEX.test(String(new_tenant.ai_suggestion_id))) {
+      try {
+        await reviewAiSuggestion(client, {
+          suggestionId: String(new_tenant.ai_suggestion_id),
+          actorId: req.user.sub,
+          decision: 'ACCEPT',
+          finalValues: {
+            full_name: String(new_tenant.full_name || '').trim(),
+            id_number: new_tenant.id_number ? String(new_tenant.id_number).trim() : '',
+            dob: new_tenant.dob ? String(new_tenant.dob).slice(0, 10) : '',
+            permanent_address: new_tenant.address ? String(new_tenant.address).trim() : '',
+          },
+          targetEntityId: inlineTenantResult.tenant.id,
+        });
+      } catch (aiErr) {
+        if (aiErr.code !== 'SUGGESTION_NOT_PENDING') throw aiErr;
+      }
+    }
+
+    if (ai_suggestion_id && UUID_REGEX.test(String(ai_suggestion_id))) {
+      const [aptCodeRes, tenantPersonRes] = await Promise.all([
+        client.query(`SELECT code FROM apartment WHERE id = $1 LIMIT 1`, [apartment_id]),
+        effectiveTenantId
+          ? adminPool.query(
+              `SELECT p.full_name, p.phone, p.id_number
+               FROM tenant t JOIN person p ON p.id = t.person_id
+               WHERE t.id = $1 LIMIT 1`,
+              [effectiveTenantId]
+            )
+          : Promise.resolve({ rows: [] }),
+      ]);
+      const tp = tenantPersonRes.rows[0] || {};
+      try {
+        await reviewAiSuggestion(client, {
+          suggestionId: String(ai_suggestion_id),
+          actorId: req.user.sub,
+          decision: 'ACCEPT',
+          finalValues: {
+            tenant_full_name: tp.full_name || new_tenant?.full_name || '',
+            tenant_phone: tp.phone || new_tenant?.phone || '',
+            tenant_id_number: tp.id_number || new_tenant?.id_number || '',
+            apartment_code: aptCodeRes.rows[0]?.code || '',
+            start_date: sDateStr,
+            end_date: String(end_date).slice(0, 10),
+            rent_amount: Number(rent_amount),
+            deposit_amount: Number(finalDeposit),
+            billing_day: billingValidation.billingDay,
+            payment_due_days: billingValidation.paymentDueDays,
+            terms_note: note || '',
+            note: note || '',
+          },
+          targetEntityId: contract.id,
+        });
+      } catch (aiErr) {
+        if (aiErr.code !== 'SUGGESTION_NOT_PENDING') throw aiErr;
+      }
+    }
 
     // 2. Ghi audit log
     await client.query(

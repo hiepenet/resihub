@@ -23,6 +23,7 @@ import {
   isWithinDuplicateWindow,
   validateServiceRequestTransition,
 } from '../services/serviceRequestRules.js';
+import { triggerAsyncTicketTriage } from '../services/aiGateway.js';
 
 const router = express.Router();
 
@@ -44,7 +45,17 @@ const RESIDENT_SR_SAFE_COLUMNS = `
 
 function sanitizeResidentServiceRequest(row) {
   if (!row || typeof row !== 'object') return row;
-  const { internal_note: _omittedInternalNote, ...safeRow } = row;
+  const {
+    internal_note: _omittedInternalNote,
+    ai_suggestion_id: _omittedAiSuggestionId,
+    ai_triage_status: _omittedAiTriageStatus,
+    ai_suggested_category: _omittedAiCategory,
+    ai_suggested_priority: _omittedAiPriority,
+    ai_suggested_assignee_id: _omittedAiAssignee,
+    ai_summary: _omittedAiSummary,
+    ai_confidence: _omittedAiConfidence,
+    ...safeRow
+  } = row;
   return safeRow;
 }
 
@@ -1154,6 +1165,13 @@ router.post('/service-requests', authenticateToken, requireRole(['RESIDENT']), i
 
     await client.query('COMMIT');
     txStarted = false;
+
+    triggerAsyncTicketTriage({
+      actorId: req.user.sub,
+      orgId,
+      buildingId: bldgId,
+      serviceRequestId: finalRow.id,
+    });
 
     res.status(201).json({
       message: `Đã tiếp nhận yêu cầu báo hỏng. Mã tra cứu của bạn là ${finalRow.tracking_code}.`,

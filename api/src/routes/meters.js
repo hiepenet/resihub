@@ -11,7 +11,10 @@ import {
 import {
   currentVietnamPeriod,
   evaluateMeterReadingAnomaly,
+  getMonthBoundsYmd,
+  resolveUtilityUnitPrice,
 } from '../services/serviceBilling.js';
+import { reviewAiSuggestion } from '../services/aiGateway.js';
 
 const router = express.Router();
 
@@ -29,16 +32,27 @@ async function resolveResourceScope(queryable, entity, id) {
   return res.rows[0] || null;
 }
 
-async function loadAnomalyThresholdRatio(queryable, orgId) {
+async function loadBillingConfigValues(queryable, orgId) {
   const res = await queryable.query(
     `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
     [orgId]
   );
-  const pct = Number(res.rows[0]?.value?.meter_anomaly_threshold_pct);
-  if (Number.isFinite(pct) && pct > 0) {
-    return pct / 100;
-  }
-  return 0.3;
+  const cfg = res.rows[0]?.value || {};
+  const pct = Number(cfg.meter_anomaly_threshold_pct);
+  const anomalyThresholdPct = Number.isFinite(pct) && pct > 0 ? pct : 30;
+  const elecDef = Number(cfg.electricity_default_price);
+  const waterDef = Number(cfg.water_default_price);
+  return {
+    anomalyThresholdPct,
+    anomalyThresholdRatio: anomalyThresholdPct / 100,
+    electricityDefaultPrice: Number.isFinite(elecDef) && elecDef >= 0 ? Math.round(elecDef) : 3800,
+    waterDefaultPrice: Number.isFinite(waterDef) && waterDef >= 0 ? Math.round(waterDef) : 22000,
+  };
+}
+
+async function loadAnomalyThresholdRatio(queryable, orgId) {
+  const cfg = await loadBillingConfigValues(queryable, orgId);
+  return cfg.anomalyThresholdRatio;
 }
 
 /**
@@ -137,8 +151,89 @@ router.get(
 
       sql += ` ORDER BY b.code ASC, a.code ASC, m.meter_type ASC`;
 
-      const result = await pool.query(sql, params);
-      res.json({ data: result.rows, period: targetPeriod });
+      const [result, billingCfg] = await Promise.all([
+        pool.query(sql, params),
+        loadBillingConfigValues(pool, orgId),
+      ]);
+
+      let enrichedRows = result.rows;
+      if (enrichedRows.length > 0) {
+        const { monthStart: periodStartYmd, monthEnd: periodEndYmd } = getMonthBoundsYmd(targetPeriod);
+        const aptIds = [...new Set(enrichedRows.map((r) => r.apartment_id).filter(Boolean))];
+
+        const [contractsRes, catalogRes] = await Promise.all([
+          pool.query(
+            `SELECT c.id, c.apartment_id, c.building_id
+             FROM contract c
+             WHERE c.apartment_id = ANY($1::uuid[])
+               AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+               AND c.start_date <= $2::date
+               AND COALESCE(c.terminated_at, c.end_date) >= $3::date
+             ORDER BY (CASE WHEN c.status = 'ACTIVE' THEN 0 ELSE 1 END) ASC, c.start_date DESC`,
+            [aptIds, periodEndYmd, periodStartYmd]
+          ),
+          pool.query(
+            `SELECT id, code, building_id, unit_price, is_active
+             FROM service_catalog
+             WHERE org_id = $1 AND is_active = TRUE`,
+            [orgId]
+          ),
+        ]);
+
+        const activeContractByApt = new Map();
+        for (const c of contractsRes.rows) {
+          if (!activeContractByApt.has(c.apartment_id)) {
+            activeContractByApt.set(c.apartment_id, c);
+          }
+        }
+
+        const contractIds = [...new Set([...activeContractByApt.values()].map((c) => c.id))];
+        const cspByContract = new Map();
+        if (contractIds.length > 0) {
+          const cspRes = await pool.query(
+            `SELECT contract_id, service_code, unit_price, effective_from
+             FROM contract_service_price
+             WHERE contract_id = ANY($1::uuid[])
+               AND effective_from <= $2::date
+             ORDER BY effective_from DESC`,
+            [contractIds, periodEndYmd]
+          );
+          for (const csp of cspRes.rows) {
+            if (!cspByContract.has(csp.contract_id)) {
+              cspByContract.set(csp.contract_id, []);
+            }
+            cspByContract.get(csp.contract_id).push(csp);
+          }
+        }
+
+        enrichedRows = enrichedRows.map((m) => {
+          const matchedContract = activeContractByApt.get(m.apartment_id);
+          const defaultUtilityPrice =
+            m.meter_type === 'ELECTRICITY'
+              ? billingCfg.electricityDefaultPrice
+              : billingCfg.waterDefaultPrice;
+          const resolved = resolveUtilityUnitPrice({
+            meterType: m.meter_type,
+            meterUnitPrice: m.unit_price,
+            contractBuildingId: matchedContract?.building_id || m.building_id,
+            periodEndYmd,
+            contractServicePrices: matchedContract ? cspByContract.get(matchedContract.id) || [] : [],
+            catalogItems: catalogRes.rows,
+            defaultUtilityPrice,
+          });
+          return {
+            ...m,
+            effective_unit_price: resolved.unitPrice,
+            effective_price_source: resolved.priceSource,
+          };
+        });
+      }
+
+      res.json({
+        data: enrichedRows,
+        period: targetPeriod,
+        anomaly_threshold_pct: billingCfg.anomalyThresholdPct,
+      });
     } catch (err) {
       console.error('[Meters List Error]:', err);
       res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách đồng hồ điện/nước.' });
@@ -194,9 +289,13 @@ router.post(
       }
       const apt = aptRes.rows[0];
 
+      const billingCfg = await loadBillingConfigValues(client, orgId);
       const defaultCode = `${meter_type === 'ELECTRICITY' ? 'EL' : 'WT'}-${apt.building_code}-${apt.code}`;
       const defaultUnit = meter_type === 'ELECTRICITY' ? 'kWh' : 'm³';
-      const defaultPrice = meter_type === 'ELECTRICITY' ? 3800 : 22000;
+      const defaultPrice =
+        meter_type === 'ELECTRICITY'
+          ? billingCfg.electricityDefaultPrice
+          : billingCfg.waterDefaultPrice;
 
       const ins = await client.query(
         `INSERT INTO meter (org_id, building_id, apartment_id, meter_type, meter_code, unit, unit_price, initial_reading)
@@ -324,7 +423,18 @@ async function upsertSingleReading(
   client,
   req,
   meterId,
-  { period, current_reading, abnormal_note, image_base64, image_url, status, hold_if_abnormal },
+  {
+    period,
+    current_reading,
+    reading_value,
+    abnormal_note,
+    image_base64,
+    image_url,
+    status,
+    hold_if_abnormal,
+    ai_suggestion_id,
+    source,
+  },
   thresholdRatio = 0.3
 ) {
   if (!period || !PERIOD_RE.test(period)) {
@@ -371,7 +481,11 @@ async function upsertSingleReading(
   const previousReading = prevRes.rows.length > 0
     ? Number(prevRes.rows[0].current_reading)
     : Number(meter.initial_reading || 0);
-  const currentVal = Number(current_reading);
+  const rawReadingInput =
+    current_reading !== undefined && current_reading !== null && current_reading !== ''
+      ? current_reading
+      : reading_value;
+  const currentVal = Number(rawReadingInput);
 
   if (Number.isNaN(currentVal) || currentVal < previousReading) {
     throw Object.assign(
@@ -423,6 +537,9 @@ async function upsertSingleReading(
   }
 
   const confirmedBy = resolvedStatus === 'CONFIRMED' ? req.user.sub : null;
+  const validAiSuggestionId =
+    ai_suggestion_id && UUID_RE.test(String(ai_suggestion_id)) ? String(ai_suggestion_id) : null;
+  const resolvedSource = validAiSuggestionId ? 'AI' : source === 'IOT' ? 'IOT' : 'MANUAL';
 
   const upserted = await client.query(
     `INSERT INTO meter_reading (
@@ -430,14 +547,16 @@ async function upsertSingleReading(
        previous_reading, current_reading, consumption,
        is_abnormal, abnormal_note, image_url,
        recorded_by, recorded_at,
-       status, confirmed_by, confirmed_at, baseline_avg_consumption
+       status, confirmed_by, confirmed_at, baseline_avg_consumption,
+       source, ai_suggestion_id
      )
      VALUES (
        $1, $2, $3, $4, $5,
        $6, $7, $8,
        $9, $10, $11,
        $12, NOW(),
-       $13, $14, CASE WHEN $13 = 'CONFIRMED' THEN NOW() ELSE NULL END, $15
+       $13, $14, CASE WHEN $13 = 'CONFIRMED' THEN NOW() ELSE NULL END, $15,
+       $17, $18
      )
      ON CONFLICT (meter_id, period) DO UPDATE
        SET previous_reading = EXCLUDED.previous_reading,
@@ -455,7 +574,9 @@ async function upsertSingleReading(
            status = EXCLUDED.status,
            confirmed_by = EXCLUDED.confirmed_by,
            confirmed_at = CASE WHEN EXCLUDED.status = 'CONFIRMED' THEN NOW() ELSE NULL END,
-           baseline_avg_consumption = EXCLUDED.baseline_avg_consumption
+           baseline_avg_consumption = EXCLUDED.baseline_avg_consumption,
+           source = CASE WHEN $18::uuid IS NOT NULL THEN 'AI' ELSE meter_reading.source END,
+           ai_suggestion_id = COALESCE($18::uuid, meter_reading.ai_suggestion_id)
      RETURNING *`,
     [
       meter.org_id,
@@ -474,10 +595,27 @@ async function upsertSingleReading(
       confirmedBy,
       baselineAvg,
       explicitNoteProvided,
+      resolvedSource,
+      validAiSuggestionId,
     ]
   );
 
   let row = upserted.rows[0];
+  if (validAiSuggestionId) {
+    try {
+      await reviewAiSuggestion(client, {
+        suggestionId: validAiSuggestionId,
+        actorId: req.user.sub,
+        decision: 'ACCEPT',
+        finalValues: { reading_value: currentVal },
+        targetEntityId: row.id,
+      });
+    } catch (aiErr) {
+      if (aiErr.code !== 'SUGGESTION_NOT_PENDING') {
+        throw aiErr;
+      }
+    }
+  }
   if (image_base64 && typeof image_base64 === 'string' && image_base64.startsWith('data:image/')) {
     const uploaded = await saveBase64Image({
       imageBase64: image_base64,
@@ -541,19 +679,22 @@ router.post(
       const thresholdRatio = await loadAnomalyThresholdRatio(client, req.user.org_id);
       const saved = [];
       for (const item of readings) {
-        if (item.current_reading === undefined || item.current_reading === '' || item.current_reading === null) continue;
+        const rawItemReading = item.current_reading ?? item.reading_value;
+        if (rawItemReading === undefined || rawItemReading === '' || rawItemReading === null) continue;
         const row = await upsertSingleReading(
           client,
           req,
           item.meter_id,
           {
             period: item.period || period,
-            current_reading: item.current_reading,
+            current_reading: rawItemReading,
             abnormal_note: item.abnormal_note,
             image_base64: item.image_base64,
             image_url: item.image_url,
             status: item.status ?? status,
             hold_if_abnormal: item.hold_if_abnormal ?? hold_if_abnormal,
+            ai_suggestion_id: item.ai_suggestion_id,
+            source: item.source,
           },
           thresholdRatio
         );

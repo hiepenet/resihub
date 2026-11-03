@@ -5,6 +5,8 @@ import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
 import { runDailyJobs } from '../jobs/daily.js';
 import { todayVietnamYmd } from '../services/serviceBilling.js';
+import { normalizeAiConfig } from '../services/aiRules.js';
+import { isGeminiApiKeyConfigured } from '../services/geminiClient.js';
 
 const router = express.Router();
 const DATE_YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -106,7 +108,11 @@ router.get('/', authenticateToken, async (req, res) => {
     for (const row of result.rows) {
       map[row.key] = row.value;
     }
-    res.json({ data: map, items: result.rows });
+    res.json({
+      data: map,
+      items: result.rows,
+      ai_runtime: { api_key_configured: isGeminiApiKeyConfigured() },
+    });
   } catch (err) {
     console.error('[Settings Get Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải cấu hình hệ thống.' });
@@ -141,6 +147,15 @@ router.put('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) 
           ? normalizeBillingConfig(val, existingMap.billing_config)
           : key === 'sla_config'
           ? normalizeSlaConfig(val, existingMap.sla_config)
+          : key === 'ai_config'
+          ? normalizeAiConfig({
+              ...(existingMap.ai_config || {}),
+              ...val,
+              tasks: {
+                ...(existingMap.ai_config?.tasks || {}),
+                ...(val.tasks || {}),
+              },
+            })
           : { ...(existingMap[key] || {}), ...val };
 
       await pool.query(
@@ -170,7 +185,12 @@ router.put('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) 
       map[row.key] = row.value;
     }
 
-    res.json({ message: 'Lưu cấu hình hệ thống thành công.', data: map, items: refreshed.rows });
+    res.json({
+      message: 'Lưu cấu hình hệ thống thành công.',
+      data: map,
+      items: refreshed.rows,
+      ai_runtime: { api_key_configured: isGeminiApiKeyConfigured() },
+    });
   } catch (err) {
     if (err.status) {
       return res.status(err.status).json({ code: err.code || 'VALIDATION_ERROR', message: err.message });
