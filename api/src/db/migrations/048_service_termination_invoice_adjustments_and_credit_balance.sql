@@ -1195,8 +1195,12 @@ BEGIN
     RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
   END IF;
 
-  IF v_decision_upper NOT IN ('APPROVED', 'REJECTED') THEN
-    RAISE EXCEPTION 'INVALID_DECISION' USING ERRCODE = 'P0001';
+  IF v_decision_upper IN ('APPROVE', 'APPROVED') THEN
+    v_decision_upper := 'APPROVED';
+  ELSIF v_decision_upper IN ('REJECT', 'REJECTED') THEN
+    v_decision_upper := 'REJECTED';
+  ELSE
+    RAISE EXCEPTION 'INVALID_DECISION' USING ERRCODE = '22023';
   END IF;
 
   IF v_decision_upper = 'REJECTED' AND v_rejection_trimmed = '' THEN
@@ -1589,8 +1593,12 @@ BEGIN
     RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
   END IF;
 
-  IF v_decision_upper NOT IN ('APPROVED', 'REJECTED') THEN
-    RAISE EXCEPTION 'INVALID_DECISION' USING ERRCODE = 'P0001';
+  IF v_decision_upper IN ('APPROVE', 'APPROVED') THEN
+    v_decision_upper := 'APPROVED';
+  ELSIF v_decision_upper IN ('REJECT', 'REJECTED') THEN
+    v_decision_upper := 'REJECTED';
+  ELSE
+    RAISE EXCEPTION 'INVALID_DECISION' USING ERRCODE = '22023';
   END IF;
 
   IF v_decision_upper = 'REJECTED' AND v_rejection_trimmed = '' THEN
@@ -1857,12 +1865,14 @@ BEGIN
     -- Tính raw_rent và raw_service qua invoice_line & invoice_adjustment
     SELECT
       COALESCE(SUM(il.amount) FILTER (
-        WHERE il.item_type = 'RENT'
-           OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target = 'RENT' OR il.formula_meta->>'adjusts_item_type' = 'RENT'))
+        WHERE (il.item_type = 'RENT'
+           OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target = 'RENT' OR il.formula_meta->>'adjusts_item_type' = 'RENT')))
+          AND il.credit_id IS NULL
       ), 0)::bigint,
       COALESCE(SUM(il.amount) FILTER (
-        WHERE il.item_type IN ('SERVICE', 'ELECTRICITY', 'WATER', 'OTHER')
-           OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target IN ('SERVICE', 'LATE_FEE', 'MANUAL') OR il.formula_meta->>'adjusts_item_type' IN ('SERVICE', 'LATE_FEE') OR (ia.adjustment_target IS NULL AND il.formula_meta->>'adjusts_item_type' IS NULL)))
+        WHERE (il.item_type IN ('SERVICE', 'ELECTRICITY', 'WATER', 'OTHER')
+           OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target IN ('SERVICE', 'LATE_FEE', 'MANUAL') OR il.formula_meta->>'adjusts_item_type' IN ('SERVICE', 'LATE_FEE') OR (ia.adjustment_target IS NULL AND il.formula_meta->>'adjusts_item_type' IS NULL))))
+          AND il.credit_id IS NULL
       ), 0)::bigint
     INTO v_raw_rent, v_raw_service
     FROM invoice_line il

@@ -135,10 +135,17 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     deposits: [],
     attachments: [],
     notifications: [],
+    audit_logs: [],
+    payments: [],
+    receivables: [],
+    reservations: [],
   };
 
   t.after(async () => {
     try {
+      if (cleanups.audit_logs.length > 0) {
+        await adminPool.query('DELETE FROM audit_log WHERE id = ANY($1)', [cleanups.audit_logs]).catch(() => {});
+      }
       if (cleanups.attachments.length > 0) {
         await adminPool.query('DELETE FROM attachment WHERE id = ANY($1)', [cleanups.attachments]);
       }
@@ -148,8 +155,17 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
       if (cleanups.credits.length > 0) {
         await adminPool.query('DELETE FROM credit_balance WHERE id = ANY($1)', [cleanups.credits]);
       }
+      if (cleanups.payments.length > 0) {
+        await adminPool.query('DELETE FROM payment WHERE id = ANY($1)', [cleanups.payments]).catch(() => {});
+      }
+      if (cleanups.receivables.length > 0) {
+        await adminPool.query('DELETE FROM receivable WHERE id = ANY($1)', [cleanups.receivables]).catch(() => {});
+      }
       if (cleanups.invoices.length > 0) {
         await adminPool.query('DELETE FROM invoice WHERE id = ANY($1)', [cleanups.invoices]);
+      }
+      if (cleanups.reservations.length > 0) {
+        await adminPool.query('DELETE FROM reservation WHERE id = ANY($1)', [cleanups.reservations]).catch(() => {});
       }
       if (cleanups.subscriptions.length > 0) {
         await adminPool.query('DELETE FROM service_subscription WHERE id = ANY($1)', [cleanups.subscriptions]);
@@ -160,6 +176,10 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
       if (cleanups.deposits.length > 0) {
         await adminPool.query('DELETE FROM deposit WHERE id = ANY($1)', [cleanups.deposits]);
       }
+      await adminPool.query(`
+        UPDATE system_setting SET value = '{"allow_self_approval": false}'::jsonb
+        WHERE org_id = $1 AND key = 'approval_config'
+      `, [orgId]).catch(() => {});
     } finally {
       await adminPool.end();
       await appPool.end();
@@ -439,6 +459,132 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     assert.strictEqual(scopeCheck.length, 1, 'fn_get_finance_resource_scope must return 1 row for valid invoice');
     assert.strictEqual(scopeCheck[0].org_id, orgId);
     assert.strictEqual(scopeCheck[0].building_id, buildingId);
+
+    // 2g. 12-entity rls_audit_log_select testing for OWNER and MANAGER
+    // Entities: invoice, invoice_line, invoice_adjustment, payment, credit_balance, receivable,
+    // deposit, deposit_transaction, reservation, service_subscription, service_catalog, contract_service_price
+    const adjAudit = await adminPool.query(`
+      INSERT INTO invoice_adjustment (org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by)
+      VALUES ($1, $2, $3, 'MANUAL', 'ADJUST', 10000, 'Audit test', $4)
+      RETURNING id
+    `, [orgId, buildingId, draftInv.rows[0].id, mgrId]);
+    cleanups.adjustments.push(adjAudit.rows[0].id);
+
+    const payAudit = await adminPool.query(`
+      INSERT INTO payment (org_id, building_id, invoice_id, payment_code, amount, method, status)
+      VALUES ($1, $2, $3, $4, 10000, 'BANK_TRANSFER', 'CONFIRMED')
+      RETURNING id
+    `, [orgId, buildingId, draftInv.rows[0].id, `PAY_AUD_${Date.now()}`]);
+    cleanups.payments.push(payAudit.rows[0].id);
+
+    const recAudit = await adminPool.query(`
+      INSERT INTO receivable (org_id, building_id, contract_id, invoice_id, amount, due_date, status)
+      VALUES ($1, $2, $3, $4, 10000, CURRENT_DATE + 5, 'OPEN')
+      RETURNING id
+    `, [orgId, buildingId, contractId, draftInv.rows[0].id]);
+    cleanups.receivables.push(recAudit.rows[0].id);
+
+    const depAudit = await adminPool.query(`
+      SELECT id FROM deposit WHERE contract_id = $1 LIMIT 1
+    `, [contractId]);
+    let depositAuditId = depAudit.rows[0]?.id;
+    if (!depositAuditId) {
+      const dRes = await adminPool.query(`
+        INSERT INTO deposit (contract_id, amount_held, status)
+        VALUES ($1, 1000000, 'HELD')
+        RETURNING id
+      `, [contractId]);
+      depositAuditId = dRes.rows[0].id;
+      cleanups.deposits.push(depositAuditId);
+    }
+
+    const dtAudit = await adminPool.query(`
+      INSERT INTO deposit_transaction (deposit_id, type, amount, description)
+      VALUES ($1, 'collect', 1000000, 'Test transaction')
+      RETURNING id
+    `, [depositAuditId]);
+
+    const resAudit = await adminPool.query(`
+      INSERT INTO reservation (org_id, building_id, apartment_id, prospect_name, phone, hold_amount, hold_until, status)
+      VALUES ($1, $2, $3, 'Prospect Test', '0987654321', 1000000, CURRENT_DATE + 5, 'HELD')
+      RETURNING id
+    `, [orgId, buildingId, apartmentId]);
+    cleanups.reservations.push(resAudit.rows[0].id);
+
+    const catAudit = await adminPool.query(`
+      SELECT id FROM service_catalog WHERE org_id = $1 AND building_id IS NULL LIMIT 1
+    `, [orgId]);
+    const catAuditId = catAudit.rows[0].id;
+
+    const subAudit = await adminPool.query(`
+      INSERT INTO service_subscription (org_id, building_id, apartment_id, contract_id, service_id, quantity, unit_price, start_date, status, is_price_locked)
+      VALUES ($1, $2, $3, $4, $5, 1, 50000, CURRENT_DATE, 'ACTIVE', TRUE)
+      RETURNING id
+    `, [orgId, buildingId, apartmentId, contractId, catAuditId]);
+    cleanups.subscriptions.push(subAudit.rows[0].id);
+
+    const cspAudit = await adminPool.query(`
+      INSERT INTO contract_service_price (contract_id, service_code, unit_price, effective_from)
+      VALUES ($1, 'INTERNET', 200000, CURRENT_DATE)
+      ON CONFLICT (contract_id, service_code, effective_from) DO UPDATE SET unit_price = 200000
+      RETURNING id
+    `, [contractId]);
+
+    const auditEntities = [
+      { entity: 'invoice', id: draftInv.rows[0].id },
+      { entity: 'invoice_line', id: invLineIssued.rows[0].id },
+      { entity: 'invoice_adjustment', id: adjAudit.rows[0].id },
+      { entity: 'payment', id: payAudit.rows[0].id },
+      { entity: 'credit_balance', id: cbDummy.rows[0].id },
+      { entity: 'receivable', id: recAudit.rows[0].id },
+      { entity: 'deposit', id: depositAuditId },
+      { entity: 'deposit_transaction', id: dtAudit.rows[0].id },
+      { entity: 'reservation', id: resAudit.rows[0].id },
+      { entity: 'service_subscription', id: subAudit.rows[0].id },
+      { entity: 'service_catalog', id: catAuditId },
+      { entity: 'contract_service_price', id: cspAudit.rows[0].id },
+    ];
+
+    const seededAuditIds = [];
+    for (const ae of auditEntities) {
+      const aRes = await adminPool.query(`
+        INSERT INTO audit_log (actor_id, action, entity, entity_id)
+        VALUES ($1, 'TEST_AUDIT', $2, $3)
+        RETURNING id
+      `, [sysAdminId, ae.entity, ae.id]);
+      seededAuditIds.push(aRes.rows[0].id);
+      cleanups.audit_logs.push(aRes.rows[0].id);
+    }
+
+    // Also seed an audit_log for an unassigned building
+    const unassignedAudit = await adminPool.query(`
+      INSERT INTO audit_log (actor_id, action, entity, entity_id)
+      VALUES ($1, 'TEST_AUDIT', 'building', $2)
+      RETURNING id
+    `, [sysAdminId, otherBuildingId]);
+    cleanups.audit_logs.push(unassignedAudit.rows[0].id);
+
+    // Assert OWNER can read all 12 entities in assigned building and NOT unassigned
+    const ownerAuditRows = await asUser(ownerId, async (client) => {
+      const r = await client.query('SELECT entity, entity_id FROM audit_log WHERE id = ANY($1)', [seededAuditIds.concat(unassignedAudit.rows[0].id)]);
+      return r.rows;
+    });
+    assert.strictEqual(ownerAuditRows.length, 12, 'OWNER must be able to read all 12 financial entities in rls_audit_log_select');
+    const ownerEntities = new Set(ownerAuditRows.map(r => r.entity));
+    for (const ae of auditEntities) {
+      assert.ok(ownerEntities.has(ae.entity), `OWNER must see audit_log for entity: ${ae.entity}`);
+    }
+
+    // Assert MANAGER can read all 12 entities in assigned building and NOT unassigned
+    const mgrAuditRows = await asUser(mgrId, async (client) => {
+      const r = await client.query('SELECT entity, entity_id FROM audit_log WHERE id = ANY($1)', [seededAuditIds.concat(unassignedAudit.rows[0].id)]);
+      return r.rows;
+    });
+    assert.strictEqual(mgrAuditRows.length, 12, 'MANAGER must be able to read all 12 financial entities in rls_audit_log_select');
+    const mgrEntities = new Set(mgrAuditRows.map(r => r.entity));
+    for (const ae of auditEntities) {
+      assert.ok(mgrEntities.has(ae.entity), `MANAGER must see audit_log for entity: ${ae.entity}`);
+    }
   });
 
   await t.test('3. Review Focus #4 RPC Pins: fn_resolve_invoice_adjustment & fn_resolve_credit_refund', async () => {
@@ -502,9 +648,20 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
       WHERE org_id = $1 AND key = 'approval_config'
     `, [orgId]);
 
-    // Downward adjustment 1: -100_000 on 10_200_000 PAID invoice mints 100_000 credit
+    // Test invalid decision token throws ERRCODE = 22023
+    await assert.rejects(
+      async () => {
+        await asUserTx(ownerId, async (client) => {
+          await client.query('SELECT fn_resolve_invoice_adjustment($1, \'MAYBE\')', [adjSelf.rows[0].id]);
+        });
+      },
+      (err) => err.code === '22023' && err.message.includes('INVALID_DECISION'),
+      'Must raise 22023 on invalid decision'
+    );
+
+    // Downward adjustment 1: -100_000 on 10_200_000 PAID invoice mints 100_000 credit (using 'APPROVE' variant)
     const resAdj1 = await asUserTx(ownerId, async (client) => {
-      const r = await client.query('SELECT fn_resolve_invoice_adjustment($1, \'APPROVED\') AS out', [adjSelf.rows[0].id]);
+      const r = await client.query('SELECT fn_resolve_invoice_adjustment($1, \'APPROVE\') AS out', [adjSelf.rows[0].id]);
       return r.rows[0].out;
     });
     assert.strictEqual(resAdj1.status, 'APPROVED');
@@ -514,7 +671,23 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     assert.strictEqual(Number(invAfterAdj1.rows[0].total_amount), 10100000);
     assert.strictEqual(Number(invAfterAdj1.rows[0].paid_amount), 10100000);
 
-    // Downward adjustment 2: -5_000_000 on 10_100_000 PAID invoice
+    // Test 'REJECT' variant on invoice adjustment
+    const adjRej = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'SERVICE', 'ADJUST', -50000, 'Test reject variant', $4)
+      RETURNING id
+    `, [orgId, buildingId, invAdjTest.rows[0].id, mgrId]);
+    cleanups.adjustments.push(adjRej.rows[0].id);
+
+    const resRej = await asUserTx(ownerId, async (client) => {
+      const r = await client.query('SELECT fn_resolve_invoice_adjustment($1, \'REJECT\', \'Sai số liệu\') AS out', [adjRej.rows[0].id]);
+      return r.rows[0].out;
+    });
+    assert.strictEqual(resRej.status, 'REJECTED');
+
+    // Downward adjustment 2: -5_000_000 on 10_100_000 PAID invoice (using 'APPROVED')
     const adj2 = await adminPool.query(`
       INSERT INTO invoice_adjustment (
         org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
@@ -691,9 +864,9 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     `, [orgId, buildingId, contractId, tenantId, cbParent.rows[0].id, JSON.stringify({ requested_by: mgrId })]);
     cleanups.credits.push(cbChild.rows[0].id);
 
-    // Reject child: must merge back into parent and set child to VOID
+    // Reject child: must merge back into parent and set child to VOID (using 'REJECT' variant)
     await asUserTx(ownerId, async (client) => {
-      await client.query('SELECT fn_resolve_credit_refund($1, \'REJECTED\', \'Chứng từ mờ\')', [cbChild.rows[0].id]);
+      await client.query('SELECT fn_resolve_credit_refund($1, \'REJECT\', \'Chứng từ mờ\')', [cbChild.rows[0].id]);
     });
 
     const cbChildAfterReject = await adminPool.query('SELECT status, refund_meta FROM credit_balance WHERE id = $1', [cbChild.rows[0].id]);
@@ -709,8 +882,20 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     `, [orgId, buildingId, contractId, tenantId, cbParent.rows[0].id, JSON.stringify({ requested_by: mgrId })]);
     cleanups.credits.push(cbChild2.rows[0].id);
 
+    // Test invalid decision raises 22023 on fn_resolve_credit_refund
+    await assert.rejects(
+      async () => {
+        await asUserTx(ownerId, async (client) => {
+          await client.query('SELECT fn_resolve_credit_refund($1, \'INVALID\')', [cbChild2.rows[0].id]);
+        });
+      },
+      (err) => err.code === '22023' && err.message.includes('INVALID_DECISION'),
+      'fn_resolve_credit_refund must raise 22023 on invalid decision'
+    );
+
+    // Approve child using 'APPROVE' variant
     await asUserTx(ownerId, async (client) => {
-      await client.query('SELECT fn_resolve_credit_refund($1, \'APPROVED\')', [cbChild2.rows[0].id]);
+      await client.query('SELECT fn_resolve_credit_refund($1, \'APPROVE\')', [cbChild2.rows[0].id]);
     });
 
     const cbChild2Approved = await adminPool.query('SELECT status, refunded_at, applied_amount FROM credit_balance WHERE id = $1', [cbChild2.rows[0].id]);
@@ -725,11 +910,12 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
       SELECT id FROM apartment
       WHERE building_id = $1
         AND id NOT IN (SELECT apartment_id FROM contract WHERE status IN ('ACTIVE', 'PENDING_APPROVAL', 'RENEWAL_PENDING'))
-      LIMIT 2
+      LIMIT 3
     `, [buildingId]);
-    assert.ok(availApts.rows.length >= 2, 'Need 2 unoccupied apartments for settlement tests');
+    assert.ok(availApts.rows.length >= 3, 'Need 3 unoccupied apartments for settlement tests');
     const apt4Id = availApts.rows[0].id;
     const apt5Id = availApts.rows[1].id;
+    const apt6Id = availApts.rows[2].id;
 
     // Create dedicated contract for 4-pass settlement test to ensure 100% isolation of credit balances
     const ctr4Res = await adminPool.query(`
@@ -886,6 +1072,66 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     const invSpillAfter = await adminPool.query('SELECT paid_amount FROM invoice WHERE id = $1', [invSpill.rows[0].id]);
     assert.strictEqual(Number(invSpillAfter.rows[0].paid_amount), 0, 'Cross-bucket spill wiped service debt to 0, so deposit covered 0');
 
+    // Case D (Finding 2): Invoice that already has credit offset (credit_offset_amount > 0 + credit_id IS NOT NULL adjustment line)
+    // Must NOT have v_raw_service double-reduced by credit offset line
+    const ctr6Res = await adminPool.query(`
+      INSERT INTO contract (apartment_id, building_id, primary_tenant_id, start_date, end_date, rent_amount, billing_day, status)
+      VALUES ($1, $2, $3, '2026-01-01', '2026-12-31', 2000000, 1, 'ACTIVE')
+      RETURNING id
+    `, [apt6Id, buildingId, tenantId]);
+    const ctr6Id = ctr6Res.rows[0].id;
+
+    const dep6Res = await adminPool.query(`
+      INSERT INTO deposit (contract_id, amount_held, status, settlement)
+      VALUES ($1, 3000000, 'APPROVED_PENDING_PAYOUT', '{"refund_amount": 2500000}'::jsonb)
+      RETURNING id
+    `, [ctr6Id]);
+    cleanups.deposits.push(dep6Res.rows[0].id);
+
+    const cbOffsetDummy = await adminPool.query(`
+      INSERT INTO credit_balance (
+        org_id, building_id, contract_id, tenant_id, reason_type, amount, applied_amount, status, description
+      )
+      VALUES ($1, $2, $3, $4, 'OVERPAYMENT', 500000, 500000, 'APPLIED', 'Offset dummy credit')
+      RETURNING id
+    `, [orgId, buildingId, ctr6Id, tenantId]);
+    cleanups.credits.push(cbOffsetDummy.rows[0].id);
+
+    const invCaseD = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, credit_offset_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2026-09', CURRENT_DATE, CURRENT_DATE + 5, 2000000, 1500000, 0, 500000, 'ISSUED')
+      RETURNING id
+    `, [orgId, buildingId, apt6Id, ctr6Id, tenantId, `INV_CD_${Date.now()}`]);
+    cleanups.invoices.push(invCaseD.rows[0].id);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+      VALUES
+        ($1, 'RENT', 'Tiền thuê 1M', 1, 'tháng', 1000000, 1000000),
+        ($1, 'SERVICE', 'Dịch vụ 1M', 1, 'tháng', 1000000, 1000000)
+    `, [invCaseD.rows[0].id]);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, credit_id)
+      VALUES ($1, 'ADJUSTMENT', 'Đã khấu trừ tín dụng 500k', 1, 'lần', -500000, -500000, $2)
+    `, [invCaseD.rows[0].id, cbOffsetDummy.rows[0].id]);
+
+    // Accounting call with p_covered_service_debt = 1_000_000:
+    // With il.credit_id IS NULL filter, v_raw_rent = 1M, v_raw_service = 1M.
+    // v_rem = 1.5M -> v_rent_unpaid = 1.0M, v_service_unpaid = min(1.0M, 1.5M - 1.0M) = 500,000.
+    // Pass 4 pays min(v_service_unpaid = 500_000, p_covered_service_debt = 1_000_000) = 500_000 from deposit.
+    await asUserTx(ownerId, async (client) => {
+      await client.query('SELECT fn_apply_deposit_settlement_accounting($1, 1000000, 0)', [dep6Res.rows[0].id]);
+    });
+
+    const invCaseDAfter = await adminPool.query('SELECT paid_amount, credit_offset_amount FROM invoice WHERE id = $1', [invCaseD.rows[0].id]);
+    assert.strictEqual(Number(invCaseDAfter.rows[0].paid_amount), 500000, 'Deposit must cover exactly 500,000 remaining service debt');
+    assert.strictEqual(Number(invCaseDAfter.rows[0].credit_offset_amount), 500000, 'Existing credit_offset_amount must remain intact');
+
+
     // Test fn_update_deposit_refund_bank_info, fn_restore_returned_settlement_credits, and fn_recommit_returned_settlement_credits under FORCE RLS
     await asUserTx(ownerId, async (client) => {
       const updBank = await client.query(`
@@ -923,6 +1169,6 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     assert.ok(cbRecommitted.rows[0].refunded_at !== null);
 
     // Clean up contracts created
-    await adminPool.query('DELETE FROM contract WHERE id IN ($1, $2)', [ctr4Id, ctr5Id]);
+    await adminPool.query('DELETE FROM contract WHERE id IN ($1, $2, $3)', [ctr4Id, ctr5Id, ctr6Id]);
   });
 });
