@@ -24,6 +24,7 @@ import {
   Star,
   Wallet,
   FileSpreadsheet,
+  ScrollText,
   AlertTriangle,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
@@ -108,6 +109,7 @@ export function ReportsPage() {
   const [ledgerStatus, setLedgerStatus] = useState(() => searchParams.get('status') || '');
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [exportingLedgerFormat, setExportingLedgerFormat] = useState('');
+  const [exportingSummarySection, setExportingSummarySection] = useState('');
   const [ledgerData, setLedgerData] = useState({
     period: { from_date: defaultRange.from_date, to_date: defaultRange.to_date },
     summary: {
@@ -363,6 +365,60 @@ export function ReportsPage() {
     };
   }, [reportData.sla_by_category]);
 
+  const handleExportRevenue = async (format = 'xlsx') => {
+    setExportingSummarySection(`revenue-${format}`);
+    try {
+      const params = {
+        section: 'revenue',
+        ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
+      };
+      const blob =
+        format === 'xlsx'
+          ? await reportsService.exportSummaryXlsx(params)
+          : await reportsService.exportSummaryCsv(params);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bao-cao-doanh-thu-rp01-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Đã xuất báo cáo doanh thu (${format.toUpperCase()}).`);
+    } catch {
+      exportRevenueCsv();
+    } finally {
+      setExportingSummarySection('');
+    }
+  };
+
+  const handleExportAging = async (format = 'xlsx') => {
+    setExportingSummarySection(`aging-${format}`);
+    try {
+      const params = {
+        section: 'aging',
+        ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
+      };
+      const blob =
+        format === 'xlsx'
+          ? await reportsService.exportSummaryXlsx(params)
+          : await reportsService.exportSummaryCsv(params);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bao-cao-tuoi-no-rp02-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Đã xuất báo cáo tuổi nợ (${format.toUpperCase()}).`);
+    } catch {
+      exportAgingCsv();
+    } finally {
+      setExportingSummarySection('');
+    }
+  };
+
   // --- Hàm Xuất CSV cho từng Tab ---
   const exportRevenueCsv = () => {
     exportToCsv(
@@ -516,10 +572,11 @@ export function ReportsPage() {
         activeTab={activeTab}
         onChange={handleTabChange}
         tabs={[
-          { id: 'revenue', label: 'Doanh thu 12 tháng', icon: TrendingUp },
+          { id: 'revenue', label: 'Doanh thu 12 tháng (RP-01)', icon: TrendingUp },
           { id: 'occupancy', label: 'Tỷ lệ lấp đầy', icon: Building2 },
-          { id: 'aging', label: 'Báo cáo tuổi nợ', icon: Clock },
+          { id: 'aging', label: 'Báo cáo tuổi nợ (RP-02)', icon: Clock },
           { id: 'deposit-ledger', label: 'Sổ cọc (RP-07)', icon: Wallet },
+          { id: 'financial-audit', label: 'Nhật ký tài chính (RP-08)', icon: ScrollText },
           { id: 'sla', label: 'SLA Báo hỏng', icon: Wrench },
         ]}
       />

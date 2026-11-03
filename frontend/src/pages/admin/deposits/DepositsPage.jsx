@@ -2146,6 +2146,34 @@ export function DepositsPage() {
         ) : isManagerEditableSettlement ? (
           /* CHẾ ĐỘ LẬP BIÊN BẢN TẤT TOÁN DÀNH CHO MANAGER */
           <form onSubmit={handleSubmitSettlement} className="space-y-5">
+            {/* Cảnh báo kỳ cuối chưa sinh hóa đơn & Nút 1 chạm sinh Pro-rata kỳ cuối (FR-024) */}
+            {settlementPreconditions?.unbilled_final_period?.has_unbilled_period ? (
+              <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-900">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs">
+                    <p className="font-semibold text-sm">
+                      Hợp đồng có kỳ cuối chưa sinh hóa đơn: Kỳ {settlementPreconditions.unbilled_final_period.period}
+                    </p>
+                    <p className="text-amber-800 mt-0.5">
+                      Thời gian ở thực tế: {settlementPreconditions.unbilled_final_period.active_days} ngày.
+                      Khuyến nghị sinh hóa đơn Pro-rata kỳ cuối để đối soát đầy đủ tiền phòng và tiện ích trước khi lập biên bản tất toán.
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="primary"
+                  loading={generatingFinalInvoice}
+                  onClick={handleGenerateFinalInvoice}
+                  className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
+                >
+                  Sinh hóa đơn Pro-rata kỳ cuối
+                </Button>
+              </div>
+            ) : null}
+
             {/* Kiểm tra các điều kiện tiên quyết (R-06 Pre-conditions) */}
             {!isPreconditionsReady ? (
               <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 space-y-2.5">

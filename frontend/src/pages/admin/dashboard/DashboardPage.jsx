@@ -89,25 +89,33 @@ export function DashboardPage() {
   const recentRequests = data?.recent_service_requests || [];
 
   const lineData = {
-    labels: rev12m.map((r) => r.period),
+    labels: rev12m.map((r) => r.period || r.month),
     datasets: [
       {
-        label: 'Doanh thu thực thu (VND)',
-        data: rev12m.map((r) => r.collected),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.12)',
-        fill: true,
-        tension: 0.35,
-        pointRadius: 3,
-      },
-      {
-        label: 'Tổng phát hành hóa đơn (VND)',
-        data: rev12m.map((r) => r.billed),
+        label: 'Phát hành (Billed)',
+        data: rev12m.map((r) => Number(r.billed || 0)),
         borderColor: '#6366f1',
         borderDash: [5, 5],
         backgroundColor: 'transparent',
         tension: 0.35,
         pointRadius: 2,
+      },
+      {
+        label: 'Tất toán hóa đơn (Invoice Settled)',
+        data: rev12m.map((r) => Number(r.invoice_settled || 0)),
+        borderColor: '#10b981',
+        backgroundColor: 'transparent',
+        tension: 0.35,
+        pointRadius: 3,
+      },
+      {
+        label: 'Thực thu ròng (Collected)',
+        data: rev12m.map((r) => Number(r.collected || 0)),
+        borderColor: '#0ea5e9',
+        backgroundColor: 'rgba(14, 165, 233, 0.12)',
+        fill: true,
+        tension: 0.35,
+        pointRadius: 3,
       },
     ],
   };
