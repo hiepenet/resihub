@@ -2,17 +2,24 @@ import express from 'express';
 import { adminPool, getUserClient } from '../../db/client.js';
 import { authenticateToken } from '../../middleware/auth.js';
 import { requireRole } from '../../middleware/rbac.js';
-import { toUtf8BomCsv } from '../../utils/csv.js';
+import { toUtf8BomCsv, toXlsxBuffer } from '../../utils/csv.js';
+import { getUserRoleCodes } from '../../services/ownerScope.js';
 
 const router = express.Router();
 
 const FINANCIAL_AUDIT_ENTITIES = [
   'invoice',
+  'invoice_line',
+  'invoice_adjustment',
   'payment',
   'receivable',
+  'credit_balance',
   'deposit',
   'deposit_transaction',
   'reservation',
+  'service_subscription',
+  'service_catalog',
+  'contract_service_price',
 ];
 
 /**
@@ -22,7 +29,7 @@ const FINANCIAL_AUDIT_ENTITIES = [
  * - OWNER: Xem nhật ký thuộc các tòa nhà mình sở hữu (qua RLS rls_audit_log_select)
  * - Hỗ trợ scope=financial và format=csv (tối đa 5000 dòng, chống Formula Injection)
  */
-router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (req, res) => {
+router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']), async (req, res) => {
   const {
     page = 1,
     limit = 30,
@@ -37,7 +44,18 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
   } = req.query;
 
   const isCsv = String(format || '').toLowerCase() === 'csv';
+  const isXlsx = String(format || '').toLowerCase() === 'xlsx';
   const isFinancialScope = String(scope || '').toLowerCase() === 'financial';
+
+  const roleCodes = getUserRoleCodes(req);
+  if (roleCodes.includes('MANAGER') && !roleCodes.some((r) => ['SYS_ADMIN', 'OWNER'].includes(r))) {
+    if (!isFinancialScope) {
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Quản lý (MANAGER) chỉ có quyền xem nhật ký thao tác tài chính (scope=financial).',
+      });
+    }
+  }
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 30));
   const offset = (pageNum - 1) * limitNum;
@@ -87,7 +105,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
     let total = 0;
     let rowsRes;
 
-    if (isCsv) {
+    if (isCsv || isXlsx) {
       const csvParams = [...params, 5000];
       rowsRes = await client.query(
         `SELECT al.id,
@@ -164,7 +182,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
       };
     });
 
-    if (isCsv) {
+    if (isCsv || isXlsx) {
       const headers = [
         'Thời gian',
         'Người thực hiện',
@@ -176,7 +194,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
         'Trước thay đổi (Before)',
         'Sau thay đổi (After)',
       ];
-      const csvRows = enriched.map((row) => [
+      const exportRows = enriched.map((row) => [
         row.at ? new Date(row.at).toISOString() : '',
         row.actor_name,
         row.actor_email,
@@ -187,8 +205,25 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER']), async (r
         row.before ? JSON.stringify(row.before) : '',
         row.after ? JSON.stringify(row.after) : '',
       ]);
-      const csvContent = toUtf8BomCsv(headers, csvRows);
       const fileSlug = isFinancialScope ? 'nhat-ky-tai-chinh-rp08' : 'nhat-ky-kiem-toan';
+
+      if (isXlsx) {
+        const xlsxBuf = toXlsxBuffer([
+          {
+            name: isFinancialScope ? 'Nhat ky tai chinh RP-08' : 'Nhat ky he thong',
+            headers,
+            rows: exportRows,
+          },
+        ]);
+        res.setHeader(
+          'Content-Type',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        res.setHeader('Content-Disposition', `attachment; filename="${fileSlug}.xlsx"`);
+        return res.status(200).send(xlsxBuf);
+      }
+
+      const csvContent = toUtf8BomCsv(headers, exportRows);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${fileSlug}.csv"`);
       return res.status(200).send(csvContent);

@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import {
@@ -89,8 +89,9 @@ router.get(
       }
       const revRes = await pool.query(
         `SELECT i.period,
-                COALESCE(SUM(i.total_amount) FILTER (WHERE i.status != 'CANCELLED'), 0)::bigint AS billed,
-                COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status != 'CANCELLED'), 0)::bigint AS collected
+                COALESCE(SUM(i.total_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS billed,
+                COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS inv_paid,
+                COALESCE(SUM(i.paid_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS invoice_settled
          FROM invoice i
          WHERE i.org_id = $1
            AND i.period = ANY($2::text[])
@@ -99,15 +100,76 @@ router.get(
         revParams
       );
 
+      // Thu thực tế từ bảng payment (CONFIRMED) trừ hoàn tiền cọc/hoàn trực tiếp từ credit_balance trong kỳ (RP-08)
+      const pmtParams = [orgId, periods12];
+      const { sql: pmtScope } = await scopedBuildingFilter(req, 'p.building_id', pmtParams);
+      let pmtFilter = '';
+      if (building_id) {
+        pmtParams.push(building_id);
+        pmtFilter = ` AND p.building_id = $${pmtParams.length}`;
+      }
+      const pmtRes = await pool.query(
+        `SELECT to_char(COALESCE(p.paid_at, p.created_at::date), 'YYYY-MM') AS period,
+                COALESCE(SUM(p.amount), 0)::bigint AS collected_gross
+         FROM payment p
+         WHERE p.org_id = $1
+           AND p.status = 'CONFIRMED'
+           AND to_char(COALESCE(p.paid_at, p.created_at::date), 'YYYY-MM') = ANY($2::text[])
+           ${pmtScope} ${pmtFilter}
+         GROUP BY 1`,
+        pmtParams
+      );
+      const pmtMap = new Map(pmtRes.rows.map((r) => [r.period, Number(r.collected_gross || 0)]));
+
+      // Hoàn tiền trực tiếp hoặc qua quyết toán cọc từ credit_balance trong kỳ
+      const refParams = [orgId, periods12];
+      const { sql: refScope } = await scopedBuildingFilter(req, 'cb.building_id', refParams);
+      let refFilter = '';
+      if (building_id) {
+        refParams.push(building_id);
+        refFilter = ` AND cb.building_id = $${refParams.length}`;
+      }
+      const refRes = await pool.query(
+        `SELECT to_char(cb.refunded_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM') AS period,
+                COALESCE(SUM(
+                  CASE WHEN cb.status = 'REFUNDED_DIRECT' THEN cb.amount
+                       WHEN cb.status = 'REFUNDED_IN_SETTLEMENT' THEN cb.settlement_refund_amount
+                       ELSE 0 END
+                ), 0)::bigint AS refunded_amount
+         FROM credit_balance cb
+         WHERE cb.org_id = $1
+           AND cb.refunded_at IS NOT NULL
+           AND cb.status IN ('REFUNDED_DIRECT', 'REFUNDED_IN_SETTLEMENT')
+           AND to_char(cb.refunded_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM') = ANY($2::text[])
+           ${refScope} ${refFilter}
+         GROUP BY 1`,
+        refParams
+      );
+      const refMap = new Map(refRes.rows.map((r) => [r.period, Number(r.refunded_amount || 0)]));
+
       const revMap = new Map();
       for (const r of revRes.rows) {
+        const periodPmt = pmtMap.has(r.period) ? pmtMap.get(r.period) : Number(r.inv_paid || 0);
+        const periodRef = refMap.get(r.period) || 0;
+        const netCollected = Math.max(0, periodPmt - periodRef);
         revMap.set(r.period, {
           period: r.period,
           billed: Number(r.billed || 0),
-          collected: Number(r.collected || 0),
+          collected: netCollected,
+          invoice_settled: Number(r.invoice_settled || 0),
         });
       }
-      const revenue12m = periods12.map((p) => revMap.get(p) || { period: p, billed: 0, collected: 0 });
+      const revenue12m = periods12.map((p) => {
+        if (revMap.has(p)) return revMap.get(p);
+        const periodPmt = pmtMap.get(p) || 0;
+        const periodRef = refMap.get(p) || 0;
+        return {
+          period: p,
+          billed: 0,
+          collected: Math.max(0, periodPmt - periodRef),
+          invoice_settled: 0,
+        };
+      });
       const currentMonthRev = revenue12m[revenue12m.length - 1] || { billed: 0, collected: 0 };
       const prevMonthRev = revenue12m[revenue12m.length - 2] || { billed: 0, collected: 0 };
       const revenueGrowthPct = prevMonthRev.collected > 0
@@ -208,7 +270,23 @@ router.get(
         rsvKpiFilter = ` AND r.building_id = $${rsvKpiParams.length}`;
       }
 
-      const [depKpiRes, rsvKpiRes] = await Promise.all([
+      const adjKpiParams = [orgId];
+      const { sql: adjKpiScope } = await scopedBuildingFilter(req, 'i.building_id', adjKpiParams);
+      let adjKpiFilter = '';
+      if (building_id) {
+        adjKpiParams.push(building_id);
+        adjKpiFilter = ` AND i.building_id = $${adjKpiParams.length}`;
+      }
+
+      const cbKpiParams = [orgId];
+      const { sql: cbKpiScope } = await scopedBuildingFilter(req, 'cb.building_id', cbKpiParams);
+      let cbKpiFilter = '';
+      if (building_id) {
+        cbKpiParams.push(building_id);
+        cbKpiFilter = ` AND cb.building_id = $${cbKpiParams.length}`;
+      }
+
+      const [depKpiRes, rsvKpiRes, adjKpiRes, cbKpiRes] = await Promise.all([
         pool.query(
           `SELECT
              COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_deposit_approvals,
@@ -237,6 +315,21 @@ router.get(
              ${rsvKpiScope} ${rsvKpiFilter}`,
           rsvKpiParams
         ),
+        pool.query(
+          `SELECT COUNT(*)::int AS pending_adjustments
+           FROM invoice_adjustment ia
+           JOIN invoice i ON i.id = ia.invoice_id
+           WHERE i.org_id = $1 AND ia.status IN ('PENDING', 'PENDING_APPROVAL')
+           ${adjKpiScope} ${adjKpiFilter}`,
+          adjKpiParams
+        ),
+        pool.query(
+          `SELECT COUNT(*)::int AS pending_credit_refunds
+           FROM credit_balance cb
+           WHERE cb.org_id = $1 AND cb.status = 'PENDING_DIRECT_REFUND'
+           ${cbKpiScope} ${cbKpiFilter}`,
+          cbKpiParams
+        ),
       ]);
 
       const depKpiRow = depKpiRes.rows[0] || {};
@@ -262,6 +355,8 @@ router.get(
             pending_reservation_confirms: Number(rsvKpiRow.pending_reservation_confirms || 0),
             pending_reservation_approvals: Number(rsvKpiRow.pending_reservation_approvals || 0),
             pending_reservation_payouts: Number(rsvKpiRow.pending_reservation_payouts || 0),
+            pending_invoice_adjustments: Number(adjKpiRes?.rows[0]?.pending_adjustments || 0),
+            pending_credit_refunds: Number(cbKpiRes?.rows[0]?.pending_credit_refunds || 0),
           },
           apartment_status_breakdown: statusCounts,
           revenue_12m: revenue12m,
@@ -676,6 +771,7 @@ router.get(
           summary,
           reservation_summary: reservationSummary,
           items,
+          rows: items,
         },
       });
     } catch (err) {
@@ -767,7 +863,7 @@ router.get(
         occupancy_rate: r.total_apartments > 0 ? Number(((r.occupied / r.total_apartments) * 100).toFixed(1)) : 0,
       }));
 
-      // 3. Báo cáo tuổi nợ theo tòa
+      // 3. Báo cáo tuổi nợ theo tòa (AC-016.1 & RP-08)
       const ageParams = [orgId];
       const { sql: ageScope } = await scopedBuildingFilter(req, 'r.building_id', ageParams);
       let ageFilter = '';
@@ -778,8 +874,12 @@ router.get(
       const ageRes = await pool.query(
         `SELECT b.code AS building_code,
                 b.name AS building_name,
-                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) <= 30), 0)::bigint AS bucket_0_30,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE r.due_date >= CURRENT_DATE), 0)::bigint AS current_not_due,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) BETWEEN 1 AND 15), 0)::bigint AS bucket_0_15,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) BETWEEN 16 AND 30), 0)::bigint AS bucket_16_30,
                 COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) BETWEEN 31 AND 60), 0)::bigint AS bucket_31_60,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) > 60), 0)::bigint AS bucket_over_60,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) <= 30), 0)::bigint AS bucket_0_30,
                 COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) BETWEEN 61 AND 90), 0)::bigint AS bucket_61_90,
                 COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE (CURRENT_DATE - r.due_date) > 90), 0)::bigint AS bucket_over_90,
                 COALESCE(SUM(r.amount - r.paid_amount), 0)::bigint AS total_debt
@@ -788,7 +888,7 @@ router.get(
          WHERE r.org_id = $1
            AND r.status IN ('OPEN', 'PARTIALLY_PAID')
            ${ageScope} ${ageFilter}
-         GROUP BY b.id
+         GROUP BY b.id, b.code, b.name
          ORDER BY total_debt DESC`,
         ageParams
       );
@@ -815,18 +915,113 @@ router.get(
         slaParams
       );
 
+      const agingFormatted = ageRes.rows.map((r) => ({
+        building_code: r.building_code,
+        building_name: r.building_name,
+        current_not_due: Number(r.current_not_due || 0),
+        bucket_0_15: Number(r.bucket_0_15 || 0),
+        bucket_16_30: Number(r.bucket_16_30 || 0),
+        bucket_31_60: Number(r.bucket_31_60 || 0),
+        bucket_over_60: Number(r.bucket_over_60 || 0),
+        bucket_0_30: Number(r.bucket_0_30 || 0),
+        bucket_61_90: Number(r.bucket_61_90 || 0),
+        bucket_over_90: Number(r.bucket_over_90 || 0),
+        total_debt: Number(r.total_debt || 0),
+      }));
+
+      const exportFormat = String(req.query.format || '').toLowerCase();
+      if (exportFormat === 'csv') {
+        const headers = [
+          'Mã tòa',
+          'Tên tòa',
+          'Chưa đến hạn',
+          'Quá hạn 1-15 ngày',
+          'Quá hạn 16-30 ngày',
+          'Quá hạn 31-60 ngày',
+          'Quá hạn >60 ngày',
+          'Tổng nợ',
+        ];
+        const rows = agingFormatted.map((r) => [
+          r.building_code,
+          r.building_name,
+          r.current_not_due,
+          r.bucket_0_15,
+          r.bucket_16_30,
+          r.bucket_31_60,
+          r.bucket_over_60,
+          r.total_debt,
+        ]);
+        const csvContent = toUtf8BomCsv(headers, rows);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="bao-cao-tong-hop.csv"');
+        return res.status(200).send(csvContent);
+      }
+
+      if (exportFormat === 'xlsx') {
+        const revHeaders = ['Kỳ', 'Số HĐ', 'Tổng phát hành', 'Thực thu', 'Đã tất toán', 'Còn nợ'];
+        const revRows = revenue12m.map((r) => [
+          r.period,
+          r.invoice_count,
+          r.billed,
+          r.collected,
+          r.invoice_settled ?? r.collected,
+          r.outstanding,
+        ]);
+
+        const occHeaders = ['Mã tòa', 'Tên tòa', 'Tổng căn', 'Đang ở', 'Trống', 'Giữ chỗ', 'Bảo trì', 'Tỷ lệ lấp đầy (%)'];
+        const occRows = occupancyByBuilding.map((r) => [
+          r.building_code,
+          r.building_name,
+          r.total_apartments,
+          r.occupied,
+          r.available,
+          r.reserved,
+          r.maintenance,
+          r.occupancy_rate,
+        ]);
+
+        const ageHeaders = ['Mã tòa', 'Tên tòa', 'Chưa đến hạn', '1-15 ngày', '16-30 ngày', '31-60 ngày', '>60 ngày', 'Tổng nợ'];
+        const ageRows = agingFormatted.map((r) => [
+          r.building_code,
+          r.building_name,
+          r.current_not_due,
+          r.bucket_0_15,
+          r.bucket_16_30,
+          r.bucket_31_60,
+          r.bucket_over_60,
+          r.total_debt,
+        ]);
+
+        const slaHeaders = ['Danh mục', 'Tổng yêu cầu', 'Đã xử lý', 'Đang xử lý', 'Thời gian TB (giờ)', 'Đánh giá'];
+        const slaRows = slaRes.rows.map((r) => [
+          r.category,
+          r.total_requests,
+          r.resolved_count,
+          r.open_count,
+          r.avg_resolve_hours,
+          r.avg_rating,
+        ]);
+
+        const xlsxBuf = toXlsxBuffer([
+          { name: 'Doanh thu 12 thang', headers: revHeaders, rows: revRows },
+          { name: 'Lap day theo toa', headers: occHeaders, rows: occRows },
+          { name: 'Tuoi no theo toa', headers: ageHeaders, rows: ageRows },
+          { name: 'SLA bao tri', headers: slaHeaders, rows: slaRows },
+        ]);
+
+        res.setHeader(
+          'Content-Type',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        res.setHeader('Content-Disposition', 'attachment; filename="bao-cao-tong-hop.xlsx"');
+        return res.status(200).send(xlsxBuf);
+      }
+
       res.json({
         data: {
           revenue_12m: revenue12m,
           occupancy_by_building: occupancyByBuilding,
-          aging_by_building: ageRes.rows.map((r) => ({
-            ...r,
-            bucket_0_30: Number(r.bucket_0_30),
-            bucket_31_60: Number(r.bucket_31_60),
-            bucket_61_90: Number(r.bucket_61_90),
-            bucket_over_90: Number(r.bucket_over_90),
-            total_debt: Number(r.total_debt),
-          })),
+          aging_by_building: agingFormatted,
           sla_by_category: slaRes.rows,
         },
       });

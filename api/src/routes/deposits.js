@@ -9,11 +9,13 @@ import {
   getTodayVnDateStr,
   validateDeduction,
   computeRefund,
+  computeFinalSettlementWithCredit,
   resolvePostSettlementStatus,
   validateRefundBankInfo,
   normalizeOpenInvoiceSnapshot,
   isSettlementSnapshotStale,
 } from '../services/depositSettlement.js';
+import { resolveContractLastActiveDay } from '../services/serviceBilling.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -121,12 +123,21 @@ async function calculateContractOpenDebts(client, contractId) {
             i.total_amount,
             i.paid_amount,
             i.status,
-            COALESCE(SUM(il.amount) FILTER (WHERE il.item_type = 'RENT'), 0)::bigint AS rent_gross,
-            COALESCE(SUM(il.amount) FILTER (WHERE il.item_type <> 'RENT'), 0)::bigint AS non_rent_gross
+            COALESCE(SUM(il.amount) FILTER (
+              WHERE (il.item_type = 'RENT'
+                 OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target = 'RENT' OR il.formula_meta->>'adjusts_item_type' = 'RENT')))
+                AND il.credit_id IS NULL
+            ), 0)::bigint AS rent_gross,
+            COALESCE(SUM(il.amount) FILTER (
+              WHERE (il.item_type IN ('SERVICE', 'ELECTRICITY', 'WATER', 'OTHER')
+                 OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target IN ('SERVICE', 'LATE_FEE', 'MANUAL') OR il.formula_meta->>'adjusts_item_type' IN ('SERVICE', 'LATE_FEE') OR (ia.adjustment_target IS NULL AND il.formula_meta->>'adjusts_item_type' IS NULL))))
+                AND il.credit_id IS NULL
+            ), 0)::bigint AS non_rent_gross
      FROM invoice i
      LEFT JOIN invoice_line il ON il.invoice_id = i.id
+     LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id
      WHERE i.contract_id = $1
-       AND i.status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
+       AND i.status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED')
      GROUP BY i.id
      ORDER BY i.period ASC, i.created_at ASC`,
     [contractId]
@@ -142,8 +153,19 @@ async function calculateContractOpenDebts(client, contractId) {
     const remaining = Math.max(0, total - paid);
     if (remaining <= 0) continue;
 
-    const rentGross = Math.max(0, Number(row.rent_gross || 0));
-    const nonRentGross = Math.max(0, Number(row.non_rent_gross || 0));
+    let rentGross = Number(row.rent_gross || 0);
+    let nonRentGross = Number(row.non_rent_gross || 0);
+
+    // Negative spill:
+    if (nonRentGross < 0) {
+      rentGross += nonRentGross;
+      nonRentGross = 0;
+    } else if (rentGross < 0) {
+      nonRentGross += rentGross;
+      rentGross = 0;
+    }
+    rentGross = Math.max(0, rentGross);
+    nonRentGross = Math.max(0, nonRentGross);
 
     let invRentUnpaid = 0;
     let invServiceUnpaid = 0;
@@ -197,10 +219,33 @@ async function checkSettlementPreconditions(
 ) {
   const contractEnded = ['TERMINATED', 'EXPIRED'].includes(contractRow.contract_status);
 
-  const startStr = getTodayVnDateStr(contractRow.start_date);
-  const endRefStr = getTodayVnDateStr(contractRow.terminated_at) || getTodayVnDateStr(contractRow.end_date);
+  // Look up child room transfer contract if any
+  const childRes = await client.query(
+    `SELECT start_date
+     FROM contract
+     WHERE parent_contract_id = $1
+       AND is_room_transfer = TRUE
+       AND status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [contractRow.contract_id]
+  );
+  const childStartDate = childRes.rows[0]?.start_date || null;
+  const { movedIn, lastActiveDayYmd } = resolveContractLastActiveDay(
+    {
+      start_date: contractRow.start_date,
+      end_date: contractRow.end_date,
+      terminated_at: contractRow.terminated_at,
+    },
+    {
+      roomTransferChildStartDate: childStartDate,
+      isRoomTransfer: Boolean(childStartDate),
+      isNaturalExpiry: contractRow.contract_status === 'EXPIRED',
+    }
+  );
+
+  const endRefStr = lastActiveDayYmd || getTodayVnDateStr(contractRow.terminated_at) || getTodayVnDateStr(contractRow.end_date);
   const endPeriod = endRefStr ? endRefStr.slice(0, 7) : null;
-  const movedIn = Boolean(startStr && endRefStr && endRefStr >= startStr);
 
   let missingMeterTypes = [];
   let unbilledMeterTypes = [];
@@ -262,13 +307,62 @@ async function checkSettlementPreconditions(
     ? new Date(latestPhotoHandoverAt).toISOString()
     : null;
 
+  // Pending adjustments & pending credit refunds check
+  const pendingAdjRes = await client.query(
+    `SELECT COUNT(*)::int AS cnt
+     FROM invoice_adjustment ia
+     JOIN invoice inv ON inv.id = ia.invoice_id
+     WHERE inv.contract_id = $1 AND ia.status IN ('PENDING', 'PENDING_APPROVAL')`,
+    [contractRow.contract_id]
+  );
+  const pendingAdjCount = pendingAdjRes.rows[0]?.cnt || 0;
+  const noPendingInvoiceAdjustments = pendingAdjCount === 0;
+
+  const pendingCreditRes = await client.query(
+    `SELECT COUNT(*)::int AS cnt
+     FROM credit_balance
+     WHERE contract_id = $1 AND status = 'PENDING_DIRECT_REFUND'`,
+    [contractRow.contract_id]
+  );
+  const pendingCreditCount = pendingCreditRes.rows[0]?.cnt || 0;
+  const noPendingCreditRefunds = pendingCreditCount === 0;
+
+  let unbilledFinalPeriod = null;
+  if (lastActiveDayYmd && movedIn) {
+    const finalPeriodStr = lastActiveDayYmd.slice(0, 7);
+    const invEndRes = await client.query(
+      `SELECT 1 FROM invoice
+       WHERE contract_id = $1
+         AND period = $2
+         AND status NOT IN ('DRAFT', 'CANCELLED', 'VOID')
+       LIMIT 1`,
+      [contractRow.contract_id, finalPeriodStr]
+    );
+    const hasInvoice = invEndRes.rows.length > 0;
+    const periodStart = `${finalPeriodStr}-01`;
+    const startInMonth = (contractRow.start_date && String(contractRow.start_date).slice(0, 7) === finalPeriodStr)
+      ? String(contractRow.start_date).slice(0, 10)
+      : periodStart;
+    const d1 = new Date(startInMonth);
+    const d2 = new Date(lastActiveDayYmd);
+    const diffDays = Math.max(0, Math.round((d2 - d1) / (1000 * 60 * 60 * 24)) + 1);
+
+    unbilledFinalPeriod = {
+      has_unbilled_period: !hasInvoice,
+      period: finalPeriodStr,
+      active_days: diffDays,
+    };
+  }
+
   return {
     ready:
       contractEnded &&
       finalMetersRecorded &&
       noDraftInvoices &&
       finalInvoiceIssued &&
-      apartmentInspected,
+      apartmentInspected &&
+      noPendingInvoiceAdjustments &&
+      noPendingCreditRefunds,
     contract_ended: contractEnded,
     final_meters_recorded: finalMetersRecorded,
     missing_meter_types: missingMeterTypes,
@@ -278,6 +372,11 @@ async function checkSettlementPreconditions(
     unbilled_meter_types: unbilledMeterTypes,
     apartment_inspected: apartmentInspected,
     handover_recorded_at: handoverRecordedAt,
+    no_pending_invoice_adjustments: noPendingInvoiceAdjustments,
+    pending_invoice_adjustments_count: pendingAdjCount,
+    no_pending_credit_refunds: noPendingCreditRefunds,
+    pending_credit_refunds_count: pendingCreditCount,
+    unbilled_final_period: unbilledFinalPeriod,
   };
 }
 
@@ -656,6 +755,14 @@ router.get(
         existingSettlement: row.settlement,
       });
 
+      const creditRes = await client.query(
+        `SELECT COALESCE(SUM(amount - applied_amount), 0)::bigint AS available_credit
+         FROM credit_balance
+         WHERE contract_id = $1 AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')`,
+        [row.contract_id]
+      );
+      const availableCredit = Number(creditRes.rows[0]?.available_credit || 0);
+
       const saved = row.settlement || null;
       const isAccountingCommitted =
         Boolean(saved?.accounting_committed_at) ||
@@ -673,6 +780,7 @@ router.get(
               rentDebt: debts.rentDebt,
               heldAmount: row.amount_held,
               openInvoices: debts.openInvoices,
+              availableCredit,
             })
           : false;
 
@@ -693,6 +801,7 @@ router.get(
           tenant_name: row.tenant_name,
           calculated_service_debt: effectiveServiceDebt,
           calculated_rent_debt: effectiveRentDebt,
+          available_credit: availableCredit,
           open_invoices: debts.openInvoices || [],
           snapshot_stale: snapshotStale,
           preconditions,
@@ -1041,17 +1150,47 @@ router.post(
         });
       }
 
+      if (!preconditions.no_pending_invoice_adjustments) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'PENDING_INVOICE_ADJUSTMENT',
+          message: 'Hợp đồng còn yêu cầu điều chỉnh hóa đơn đang chờ duyệt.',
+          preconditions,
+        });
+      }
+
+      if (!preconditions.no_pending_credit_refunds) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'PENDING_CREDIT_REFUND',
+          message: 'Hợp đồng còn yêu cầu hoàn số dư có đang chờ xử lý.',
+          preconditions,
+        });
+      }
+
       const preAmountItems = items.map((item) => ({
         ...item,
         amount: Number(String(item.amount).trim()),
       }));
       const { serviceDebt, rentDebt, openInvoices } = await calculateContractOpenDebts(client, dep.contract_id);
 
-      const { refund, shortfall } = computeRefund({
-        depositAmount: dep.amount_held,
-        outstandingDebt: serviceDebt,
+      const creditRes = await client.query(
+        `SELECT COALESCE(SUM(amount - applied_amount), 0)::bigint AS available_credit
+         FROM credit_balance
+         WHERE contract_id = $1 AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')`,
+        [dep.contract_id]
+      );
+      const availableCredit = Number(creditRes.rows[0]?.available_credit || 0);
+
+      const settlementCalc = computeFinalSettlementWithCredit({
+        heldBefore: dep.amount_held,
+        availableCredit,
+        serviceDebt,
+        rentDebt,
         items: preAmountItems,
       });
+      const refund = settlementCalc.refund_amount;
+      const shortfall = settlementCalc.shortfall;
 
       const vBank = validateRefundBankInfo({
         refundAmount: refund,
@@ -1104,6 +1243,17 @@ router.post(
         service_debt: serviceDebt,
         rent_debt: rentDebt,
         deposit_held_before_settlement: Number(dep.amount_held),
+        available_credit: availableCredit,
+        credit_applied_to_rent: settlementCalc.credit_applied_to_rent,
+        credit_applied_to_service: settlementCalc.credit_applied_to_service,
+        credit_applied_to_damages: settlementCalc.credit_applied_to_damages,
+        remaining_rent_debt: settlementCalc.remaining_rent_debt,
+        remaining_service_debt: settlementCalc.remaining_service_debt,
+        covered_service_debt: settlementCalc.covered_service_debt,
+        uncovered_items_shortfall: settlementCalc.uncovered_items_shortfall,
+        deposit_refund_amount: settlementCalc.deposit_refund_amount,
+        credit_refund_amount: settlementCalc.credit_refund_amount,
+        total_payout_amount: settlementCalc.total_payout_amount,
         refund_amount: Number(refund),
         shortfall: Number(shortfall),
         refund_method,
@@ -1174,7 +1324,7 @@ router.post(
   }
 );
 
-async function commitSettlementAccounting(client, { depositId, settlement, heldBefore, serviceDebt, actorId }) {
+async function commitSettlementAccounting(client, { depositId, settlement, heldBefore, serviceDebt, creditAppliedToService = 0, actorId }) {
   const items = Array.isArray(settlement.items) ? settlement.items : [];
   const sumItems = items.reduce((s, it) => s + Math.max(0, Number(it.amount || 0)), 0);
   const effectiveApprovedBy = settlement.approved_by || actorId;
@@ -1206,7 +1356,9 @@ async function commitSettlementAccounting(client, { depositId, settlement, heldB
     );
   }
 
-  const coveredServiceDebt = Math.min(serviceDebt, remainingDepositToDeduct);
+  // CRITICAL RP-07: uses post-credit remaining_service_debt, NEVER raw serviceDebt!
+  const remainingServiceDebt = Math.max(0, serviceDebt - Math.max(0, creditAppliedToService || 0));
+  const coveredServiceDebt = Math.min(remainingServiceDebt, remainingDepositToDeduct);
   if (coveredServiceDebt > 0) {
     await client.query(
       `INSERT INTO deposit_transaction (
@@ -1225,7 +1377,10 @@ async function commitSettlementAccounting(client, { depositId, settlement, heldB
     );
   }
 
-  const uncoveredItemsShortfall = Math.max(0, sumItems - heldBefore);
+  const rawItemsShortfall = Math.max(0, sumItems - heldBefore);
+  const creditAppliedToDamages = Math.max(0, Number(settlement.credit_applied_to_damages || 0));
+  const uncoveredItemsShortfall = Math.max(0, rawItemsShortfall - creditAppliedToDamages);
+
   await client.query('SELECT fn_apply_deposit_settlement_accounting($1, $2, $3)', [
     depositId,
     Math.round(coveredServiceDebt),
@@ -1321,13 +1476,15 @@ router.post(
       const items = Array.isArray(settlement.items) ? settlement.items : [];
       const sumItems = items.reduce((s, it) => s + Math.max(0, Number(it.amount || 0)), 0);
 
-      await client.query(
-        `SELECT id FROM invoice
-         WHERE contract_id = $1
-           AND status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
-         FOR UPDATE`,
+      await client.query('SELECT * FROM fn_lock_invoices_for_authorized_viewer($1, NULL)', [dep.contract_id]);
+
+      const creditRes = await client.query(
+        `SELECT COALESCE(SUM(amount - applied_amount), 0)::bigint AS available_credit
+         FROM credit_balance
+         WHERE contract_id = $1 AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')`,
         [dep.contract_id]
       );
+      const availableCredit = Number(creditRes.rows[0]?.available_credit || 0);
 
       const liveDebts = await calculateContractOpenDebts(client, dep.contract_id);
       if (
@@ -1336,6 +1493,7 @@ router.post(
           rentDebt: liveDebts.rentDebt,
           heldAmount: heldBefore,
           openInvoices: liveDebts.openInvoices,
+          availableCredit,
         })
       ) {
         await client.query('ROLLBACK');
@@ -1349,13 +1507,16 @@ router.post(
       const serviceDebt = liveDebts.serviceDebt;
       const rentDebt = liveDebts.rentDebt;
 
-      const { refund: recomputedRefund, shortfall: recomputedShortfall } = computeRefund({
-        depositAmount: heldBefore,
-        outstandingDebt: serviceDebt,
+      const settlementCalc = computeFinalSettlementWithCredit({
+        heldBefore,
+        availableCredit,
+        serviceDebt,
+        rentDebt,
         items,
       });
-      const refundAmount = Number(recomputedRefund);
-      const shortfallAmount = Number(recomputedShortfall);
+
+      const refundAmount = settlementCalc.refund_amount;
+      const shortfallAmount = settlementCalc.shortfall;
       const nowIso = new Date().toISOString();
 
       if (refundAmount === 0) {
@@ -1364,6 +1525,7 @@ router.post(
           settlement: { ...settlement, approved_by: req.user.sub, approved_at: nowIso },
           heldBefore,
           serviceDebt,
+          creditAppliedToService: settlementCalc.credit_applied_to_service,
           actorId: req.user.sub,
         });
 
@@ -1380,7 +1542,17 @@ router.post(
           service_debt: serviceDebt,
           rent_debt: rentDebt,
           deposit_held_before_settlement: heldBefore,
+          available_credit: availableCredit,
+          credit_applied_to_rent: settlementCalc.credit_applied_to_rent,
+          credit_applied_to_service: settlementCalc.credit_applied_to_service,
+          credit_applied_to_damages: settlementCalc.credit_applied_to_damages,
+          remaining_rent_debt: settlementCalc.remaining_rent_debt,
+          remaining_service_debt: settlementCalc.remaining_service_debt,
           covered_service_debt: coveredServiceDebt,
+          uncovered_items_shortfall: settlementCalc.uncovered_items_shortfall,
+          deposit_refund_amount: settlementCalc.deposit_refund_amount,
+          credit_refund_amount: settlementCalc.credit_refund_amount,
+          total_payout_amount: settlementCalc.total_payout_amount,
           refund_amount: 0,
           shortfall: shortfallAmount,
           approved_by: req.user.sub,
@@ -1416,14 +1588,23 @@ router.post(
         });
       }
 
-      const coveredServiceDebtPreview = Math.min(serviceDebt, Math.max(0, heldBefore - sumItems));
       const approvedPendingSettlement = {
         ...settlement,
         outstanding_debt: serviceDebt,
         service_debt: serviceDebt,
         rent_debt: rentDebt,
         deposit_held_before_settlement: heldBefore,
-        covered_service_debt: Math.round(coveredServiceDebtPreview),
+        available_credit: availableCredit,
+        credit_applied_to_rent: settlementCalc.credit_applied_to_rent,
+        credit_applied_to_service: settlementCalc.credit_applied_to_service,
+        credit_applied_to_damages: settlementCalc.credit_applied_to_damages,
+        remaining_rent_debt: settlementCalc.remaining_rent_debt,
+        remaining_service_debt: settlementCalc.remaining_service_debt,
+        covered_service_debt: settlementCalc.covered_service_debt,
+        uncovered_items_shortfall: settlementCalc.uncovered_items_shortfall,
+        deposit_refund_amount: settlementCalc.deposit_refund_amount,
+        credit_refund_amount: settlementCalc.credit_refund_amount,
+        total_payout_amount: settlementCalc.total_payout_amount,
         refund_amount: refundAmount,
         shortfall: shortfallAmount,
         approved_by: req.user.sub,
@@ -1900,7 +2081,13 @@ router.post(
         });
       }
 
-      if (!['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(dep.status) || BigInt(dep.amount_held || 0) <= 0n) {
+      const settlement = dep.settlement || {};
+      const totalPayout = settlement.total_payout_amount !== undefined
+        ? Number(settlement.total_payout_amount)
+        : Number(settlement.refund_amount || 0);
+      const targetRefundAmount = totalPayout;
+
+      if (!['APPROVED_PENDING_PAYOUT', 'RETURNED'].includes(dep.status) || totalPayout <= 0) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'INVALID_STATUS_FOR_PAYOUT',
@@ -1908,7 +2095,6 @@ router.post(
         });
       }
 
-      const settlement = dep.settlement || {};
       const refundMethod = method || settlement.refund_method || 'BANK_TRANSFER';
       if (!['BANK_TRANSFER', 'CASH'].includes(refundMethod)) {
         await client.query('ROLLBACK');
@@ -1931,12 +2117,12 @@ router.post(
 
       const isAlreadyCommitted = Boolean(settlement.accounting_committed_at);
       const wasReturned = dep.status === 'RETURNED';
-      const targetRefundAmount = isAlreadyCommitted
-        ? Math.round(Number(dep.amount_held || 0))
-        : Math.round(Number(settlement.refund_amount || 0));
+      const depositRefundAmt = settlement.deposit_refund_amount !== undefined
+        ? Number(settlement.deposit_refund_amount)
+        : (isAlreadyCommitted ? Math.round(Number(dep.amount_held || 0)) : Math.round(Number(settlement.refund_amount || 0)));
 
       const vBank = validateRefundBankInfo({
-        refundAmount: targetRefundAmount,
+        refundAmount: totalPayout,
         refundMethod,
         bankInfo: settlement.bank_info || {},
       });
@@ -1945,19 +2131,26 @@ router.post(
         return res.status(422).json({ code: vBank.code, message: vBank.message });
       }
 
+      if (wasReturned) {
+        await client.query('SELECT fn_recommit_returned_settlement_credits($1)', [id]);
+      }
+
       const nowIso = new Date().toISOString();
       let coveredServiceDebt = Number(settlement.covered_service_debt || 0);
       let committedAtIso = settlement.accounting_committed_at || nowIso;
 
       if (!isAlreadyCommitted) {
         const heldBefore = Math.max(0, Number(dep.amount_held || 0));
-        await client.query(
-          `SELECT id FROM invoice
-           WHERE contract_id = $1
-             AND status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
-           FOR UPDATE`,
+        await client.query('SELECT * FROM fn_lock_invoices_for_authorized_viewer($1, NULL)', [dep.contract_id]);
+
+        const creditRes = await client.query(
+          `SELECT COALESCE(SUM(amount - applied_amount), 0)::bigint AS available_credit
+           FROM credit_balance
+           WHERE contract_id = $1 AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')`,
           [dep.contract_id]
         );
+        const availableCredit = Number(creditRes.rows[0]?.available_credit || 0);
+
         const liveDebts = await calculateContractOpenDebts(client, dep.contract_id);
         if (
           isSettlementSnapshotStale(settlement, {
@@ -1965,6 +2158,7 @@ router.post(
             rentDebt: liveDebts.rentDebt,
             heldAmount: heldBefore,
             openInvoices: liveDebts.openInvoices,
+            availableCredit,
           })
         ) {
           await client.query('ROLLBACK');
@@ -1980,6 +2174,7 @@ router.post(
           settlement,
           heldBefore,
           serviceDebt: liveDebts.serviceDebt,
+          creditAppliedToService: settlement.credit_applied_to_service,
           actorId: req.user.sub,
         });
         coveredServiceDebt = accResult.coveredServiceDebt;
@@ -2000,30 +2195,35 @@ router.post(
         ? `Phát hành lại lệnh chi hoàn tiền cọc${trimmedNote ? ` — ${trimmedNote}` : ''}`
         : `Chi hoàn tiền cọc sau tất toán${trimmedNote ? ` — ${trimmedNote}` : ''}`;
 
-      await client.query(
-        `INSERT INTO deposit_transaction (
-           deposit_id, type, amount, description, evidence, reference_code, status, method, approved_by, approved_at, created_by
-         )
-         VALUES ($1, 'refund', $2, $3, $4, $5, 'APPROVED', $6, $7, $8::timestamptz, $9)`,
-        [
-          id,
-          targetRefundAmount,
-          refundDescription,
-          normalizedEvidence,
-          trimmedRef,
-          refundMethod,
-          settlement.approved_by || req.user.sub,
-          settlement.approved_at || nowIso,
-          req.user.sub,
-        ]
-      );
+      if (depositRefundAmt > 0) {
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, evidence, reference_code, status, method, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'refund', $2, $3, $4, $5, 'APPROVED', $6, $7, $8::timestamptz, $9)`,
+          [
+            id,
+            depositRefundAmt,
+            refundDescription,
+            normalizedEvidence,
+            trimmedRef,
+            refundMethod,
+            settlement.approved_by || req.user.sub,
+            settlement.approved_at || nowIso,
+            req.user.sub,
+          ]
+        );
+      }
 
-      const finalStatus = resolvePostSettlementStatus({
-        refundAmount: targetRefundAmount,
+      let finalStatus = resolvePostSettlementStatus({
+        refundAmount: totalPayout,
         outstandingDebt: Number(settlement.outstanding_debt || 0),
         items: Array.isArray(settlement.items) ? settlement.items : [],
         shortfall: Number(settlement.shortfall || 0),
       });
+      if (depositRefundAmt === 0) {
+        finalStatus = 'DEDUCTED_FULL';
+      }
 
       const prevReissues = Array.isArray(settlement.reissue_history) ? settlement.reissue_history : [];
       const updatedSettlement = {
@@ -2163,37 +2363,48 @@ router.post(
       }
 
       const dep = depRes.rows[0];
-      const refundAmt = Math.round(Number(dep.settlement?.refund_amount || 0));
+      const totalPayout = dep.settlement?.total_payout_amount !== undefined
+        ? Number(dep.settlement.total_payout_amount)
+        : Number(dep.settlement?.refund_amount || 0);
+      const depRefundAmt = dep.settlement?.deposit_refund_amount !== undefined
+        ? Number(dep.settlement.deposit_refund_amount)
+        : Math.round(Number(dep.settlement?.refund_amount || 0));
+      const refundAmt = totalPayout;
+
       if (
-        !['REFUNDED', 'PARTIALLY_REFUNDED'].includes(dep.status) ||
+        !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL'].includes(dep.status) ||
         BigInt(dep.amount_held || 0) !== 0n ||
-        refundAmt <= 0
+        totalPayout <= 0
       ) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           code: 'INVALID_DEPOSIT_STATUS_FOR_RETURN',
           message:
-            'Chỉ có thể ghi nhận ngân hàng hoàn trả (RETURNED) đối với sổ cọc đã chi hoàn (REFUNDED / PARTIALLY_REFUNDED) có số tiền hoàn > 0.',
+            'Chỉ có thể ghi nhận ngân hàng hoàn trả (RETURNED) đối với sổ cọc đã chi hoàn có số tiền hoàn > 0.',
         });
       }
 
       const trimmedRef = reference_code ? String(reference_code).trim() : null;
       const nowIso = new Date().toISOString();
 
-      await client.query(
-        `INSERT INTO deposit_transaction (
-           deposit_id, type, amount, description, reference_code, status, method, approved_by, approved_at, created_by
-         )
-         VALUES ($1, 'refund_reversal', $2, $3, $4, 'APPROVED', $5, $6, NOW(), $6)`,
-        [
-          id,
-          refundAmt,
-          `Ngân hàng trả lại giao dịch hoàn cọc: ${trimmedReason}`,
-          trimmedRef,
-          dep.settlement?.refund_method || 'BANK_TRANSFER',
-          req.user.sub,
-        ]
-      );
+      if (depRefundAmt > 0) {
+        await client.query(
+          `INSERT INTO deposit_transaction (
+             deposit_id, type, amount, description, reference_code, status, method, approved_by, approved_at, created_by
+           )
+           VALUES ($1, 'refund_reversal', $2, $3, $4, 'APPROVED', $5, $6, NOW(), $6)`,
+          [
+            id,
+            depRefundAmt,
+            `Ngân hàng trả lại giao dịch hoàn cọc: ${trimmedReason}`,
+            trimmedRef,
+            dep.settlement?.refund_method || 'BANK_TRANSFER',
+            req.user.sub,
+          ]
+        );
+      }
+
+      await client.query('SELECT fn_restore_returned_settlement_credits($1, $2)', [id, trimmedReason]);
 
       const prevReturns = Array.isArray(dep.settlement?.return_history) ? dep.settlement.return_history : [];
       const updatedSettlement = {
@@ -2207,7 +2418,7 @@ router.post(
           {
             at: nowIso,
             by: req.user.sub,
-            amount: refundAmt,
+            amount: totalPayout,
             reason: trimmedReason,
             reference_code: trimmedRef,
           },
@@ -2216,7 +2427,7 @@ router.post(
 
       await client.query(
         `UPDATE deposit SET amount_held = $1, status = 'RETURNED', settlement = $2, updated_at = NOW() WHERE id = $3`,
-        [refundAmt, JSON.stringify(updatedSettlement), id]
+        [depRefundAmt, JSON.stringify(updatedSettlement), id]
       );
 
       await client.query(
@@ -2265,7 +2476,7 @@ router.post(
  * Cập nhật thông tin tài khoản ngân hàng nhận hoàn cọc khi ở trạng thái APPROVED_PENDING_PAYOUT hoặc RETURNED
  */
 router.patch(
-  '/:id/bank-info',
+  ['/:id/bank-info', '/:id/refund-bank-info'],
   authenticateToken,
   requireRole(['MANAGER', 'RESIDENT']),
   idempotencyGuard(),

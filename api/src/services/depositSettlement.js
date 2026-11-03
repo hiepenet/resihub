@@ -231,7 +231,7 @@ export function normalizeOpenInvoiceSnapshot(openInvoices = []) {
  */
 export function isSettlementSnapshotStale(
   savedSettlement,
-  { serviceDebt = 0, rentDebt = 0, heldAmount = 0, openInvoices = [] } = {}
+  { serviceDebt = 0, rentDebt = 0, heldAmount = 0, openInvoices = [], availableCredit } = {}
 ) {
   if (!savedSettlement || typeof savedSettlement !== 'object') return false;
 
@@ -247,6 +247,12 @@ export function isSettlementSnapshotStale(
   if (
     savedSettlement.deposit_held_before_settlement !== undefined &&
     Number(heldAmount ?? 0) !== Number(savedSettlement.deposit_held_before_settlement ?? 0)
+  ) {
+    return true;
+  }
+  if (
+    savedSettlement.available_credit !== undefined &&
+    Number(availableCredit ?? 0) !== Number(savedSettlement.available_credit ?? 0)
   ) {
     return true;
   }
@@ -327,5 +333,86 @@ export function computeSuggestedCancelSplit({
   return {
     refunded_amount: refunded,
     forfeited_amount: hold - refunded,
+  };
+}
+
+/**
+ * Tính toán kết quả tất toán cọc hai bước kết hợp số dư có (credit_balance) — RP-07 / Spec v6 M06:
+ * Thứ tự ưu tiên cấn trừ:
+ * - credit_balance: RENT -> SERVICE -> bồi thường thiếu hụt (damages shortfall) -> hoàn cọc dư
+ * - tiền cọc: bồi thường -> công nợ dịch vụ còn lại (remaining_service_debt) -> hoàn cọc dư
+ */
+export function computeFinalSettlementWithCredit({
+  heldBefore = 0,
+  availableCredit = 0,
+  serviceDebt = 0,
+  rentDebt = 0,
+  items = [],
+} = {}) {
+  const held = Math.max(0, Math.trunc(Number(heldBefore || 0)));
+  const credit = Math.max(0, Math.trunc(Number(availableCredit || 0)));
+  const service = Math.max(0, Math.trunc(Number(serviceDebt || 0)));
+  const rent = Math.max(0, Math.trunc(Number(rentDebt || 0)));
+
+  const damages = (Array.isArray(items) ? items : []).reduce(
+    (acc, it) => acc + Math.max(0, Math.trunc(Number(it?.amount || 0))),
+    0
+  );
+
+  // Pass 2: credit_balance application priority:
+  // 1. RENT debt
+  const credit_applied_to_rent = Math.min(credit, rent);
+  let remainingCredit = credit - credit_applied_to_rent;
+  const remaining_rent_debt = rent - credit_applied_to_rent;
+
+  // 2. SERVICE debt
+  const credit_applied_to_service = Math.min(remainingCredit, service);
+  remainingCredit -= credit_applied_to_service;
+  const remaining_service_debt = service - credit_applied_to_service;
+
+  // 3. Deposit covers damages first
+  const remainingDepositAfterItems = Math.max(0, held - damages);
+  const rawItemsShortfall = Math.max(0, damages - held);
+
+  // Credit covers damages shortfall if any
+  const credit_applied_to_damages = Math.min(remainingCredit, rawItemsShortfall);
+  remainingCredit -= credit_applied_to_damages;
+  const uncovered_items_shortfall = rawItemsShortfall - credit_applied_to_damages;
+
+  // Remainder credit goes to settlement payout
+  const credit_refund_amount = remainingCredit;
+
+  // Pass 3: deposit covers remaining_service_debt!
+  // CRITICAL RP-07: uses post-credit remaining_service_debt, NEVER raw serviceDebt!
+  const covered_service_debt = Math.min(remainingDepositAfterItems, remaining_service_debt);
+  const deposit_refund_amount = remainingDepositAfterItems - covered_service_debt;
+
+  // Total payout
+  const total_payout_amount = deposit_refund_amount + credit_refund_amount;
+  const refund_amount = total_payout_amount;
+
+  // Shortfall: debt or damages still unpaid
+  const shortfall =
+    Math.max(0, remaining_service_debt - covered_service_debt) +
+    uncovered_items_shortfall;
+
+  return {
+    held_before: held,
+    available_credit: credit,
+    service_debt: service,
+    rent_debt: rent,
+    total_items_amount: damages,
+    credit_applied_to_rent,
+    credit_applied_to_service,
+    credit_applied_to_damages,
+    remaining_rent_debt,
+    remaining_service_debt,
+    covered_service_debt,
+    uncovered_items_shortfall,
+    deposit_refund_amount,
+    credit_refund_amount,
+    total_payout_amount,
+    refund_amount,
+    shortfall,
   };
 }

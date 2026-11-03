@@ -930,11 +930,17 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
     assert.equal(jsonFin.status, 200);
     const allowedFinancial = new Set([
       'invoice',
+      'invoice_line',
+      'invoice_adjustment',
       'payment',
       'receivable',
+      'credit_balance',
       'deposit',
       'deposit_transaction',
       'reservation',
+      'service_subscription',
+      'service_catalog',
+      'contract_service_price',
     ]);
     for (const item of jsonFin.body.data) {
       assert.ok(
