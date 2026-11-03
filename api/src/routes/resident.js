@@ -2,10 +2,17 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { roundVND } from '../services/pricing.js';
 import { normalizeVnPhone } from '../services/residentAccount.js';
 import { validateAndNormalizeSubscriptionMeta } from '../services/serviceSubscriptionMeta.js';
+import {
+  todayVietnamYmd,
+  addDaysYmd,
+  toDateOnlyYmd,
+  resolveServiceUnitPrice,
+} from '../services/serviceBilling.js';
 
 const router = express.Router();
 
@@ -214,7 +221,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
        FROM invoice i
        JOIN tenant t ON t.id = i.tenant_id
        WHERE t.person_id = $1
-         AND i.status IN ('ISSUED', 'OVERDUE', 'PARTIALLY_PAID')`,
+         AND i.status IN ('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`,
       [personId]
     );
     const totalAmountDueAll = Number(totalDebtAllRes.rows[0]?.invoice_due || 0);
@@ -228,7 +235,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
          JOIN tenant t ON t.id = i.tenant_id
          WHERE t.person_id = $1
            AND i.contract_id = $2
-           AND i.status IN ('ISSUED', 'OVERDUE', 'PARTIALLY_PAID')`,
+           AND i.status IN ('ISSUED', 'ADJUSTED', 'PARTIALLY_PAID', 'OVERDUE')`,
         [personId, contract.contract_id]
       );
       currentAmountDue = Number(contractDebtRes.rows[0]?.invoice_due || 0);
@@ -237,7 +244,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
         `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
          FROM invoice i
          JOIN tenant t ON t.id = i.tenant_id
-         WHERE t.person_id = $1 AND i.contract_id = $2 AND i.status <> 'DRAFT'
+         WHERE t.person_id = $1 AND i.contract_id = $2 AND i.status NOT IN ('DRAFT', 'VOID')
          ORDER BY i.period DESC, i.created_at DESC
          LIMIT 1`,
         [personId, contract.contract_id]
@@ -248,12 +255,36 @@ router.get('/overview', authenticateToken, async (req, res) => {
         `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
          FROM invoice i
          JOIN tenant t ON t.id = i.tenant_id
-         WHERE t.person_id = $1 AND i.status <> 'DRAFT'
+         WHERE t.person_id = $1 AND i.status NOT IN ('DRAFT', 'VOID')
          ORDER BY i.period DESC, i.created_at DESC
          LIMIT 1`,
         [personId]
       );
       latestInvoice = latestInvRes.rows[0] || null;
+    }
+
+    let availableCreditBalance = 0;
+    if (contract) {
+      const creditRes = await pool.query(
+        `SELECT COALESCE(SUM(amount - applied_amount), 0)::bigint AS available_credit
+         FROM credit_balance
+         WHERE contract_id = $1
+           AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')
+           AND (amount - applied_amount) > 0`,
+        [contract.contract_id]
+      );
+      availableCreditBalance = Number(creditRes.rows[0]?.available_credit || 0);
+    } else if (personId) {
+      const creditRes = await pool.query(
+        `SELECT COALESCE(SUM(cb.amount - cb.applied_amount), 0)::bigint AS available_credit
+         FROM credit_balance cb
+         JOIN tenant t ON t.id = cb.tenant_id
+         WHERE t.person_id = $1
+           AND cb.status IN ('AVAILABLE', 'PARTIALLY_APPLIED')
+           AND (cb.amount - cb.applied_amount) > 0`,
+        [personId]
+      );
+      availableCreditBalance = Number(creditRes.rows[0]?.available_credit || 0);
     }
 
     // 3. Đặt cọc giữ chỗ (trả cả danh sách reservations lẫn bản ghi mới nhất reservation)
@@ -419,6 +450,7 @@ router.get('/overview', authenticateToken, async (req, res) => {
         current_amount_due: currentAmountDue,
         total_amount_due_all: totalAmountDueAll,
         latest_invoice: latestInvoice,
+        available_credit_balance: availableCreditBalance,
         reservation,
         reservations, reservation_history: reservationHistory,
         pending_application: pendingApplication,
@@ -1057,10 +1089,10 @@ router.get('/invoices', authenticateToken, async (req, res) => {
 });
 
 /**
- * POST /api/v1/resident/payments/report (FR-037, P3)
+ * POST /api/v1/resident/payments/report (FR-037, P3, FORCE RLS safe)
  * Cư dân báo đã chuyển khoản thanh toán hóa đơn + đính kèm chứng từ
  */
-router.post('/payments/report', authenticateToken, async (req, res) => {
+router.post('/payments/report', authenticateToken, idempotencyGuard(), async (req, res) => {
   const { invoice_id, amount, method = 'BANK_TRANSFER', reference_code, paid_at, note, proof_images = [] } = req.body;
   const numAmount = Number(amount);
 
@@ -1070,22 +1102,47 @@ router.post('/payments/report', authenticateToken, async (req, res) => {
 
   const { client, release } = await getUserClient(req);
   try {
-    const invRes = await client.query(
-      `SELECT i.*, t.person_id
+    await client.query('BEGIN');
+
+    // 1. Pre-check status (DRAFT hidden per AC-003.2, VOID rejected with 409 INVALID_STATUS)
+    const checkRes = await client.query(
+      `SELECT i.id, i.status, i.total_amount, i.paid_amount
        FROM invoice i
-       JOIN tenant t ON t.id = i.tenant_id
-       WHERE i.id = $1 AND t.person_id = $2`,
-      [invoice_id, req.user.person_id]
+       WHERE i.id = $1`,
+      [invoice_id]
     );
-    if (invRes.rows.length === 0) {
+    if (checkRes.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn cần thanh toán.' });
     }
-    const inv = invRes.rows[0];
-    if (inv.status === 'PAID' || inv.status === 'CANCELLED') {
-      return res.status(409).json({ code: 'INVOICE_CLOSED', message: 'Hóa đơn này đã hoàn tất hoặc đã hủy.' });
+    const preCheck = checkRes.rows[0];
+    if (preCheck.status === 'VOID' || preCheck.status === 'DRAFT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'INVALID_STATUS', message: 'Hóa đơn ở trạng thái không thể thanh toán.' });
+    }
+    if (Number(preCheck.total_amount) - Number(preCheck.paid_amount) <= 0 || preCheck.status === 'PAID') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_PAID', message: 'Hóa đơn này đã được thanh toán đầy đủ.' });
     }
 
-    await client.query('BEGIN');
+    // 2. Lock invoice row safely under FORCE RLS via fn_lock_invoices_for_authorized_viewer
+    const lockRes = await client.query(
+      `SELECT * FROM fn_lock_invoices_for_authorized_viewer(NULL, $1)`,
+      [invoice_id]
+    );
+    if (lockRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hóa đơn cần thanh toán.' });
+    }
+    const inv = lockRes.rows[0];
+    if (inv.status === 'VOID' || inv.status === 'DRAFT') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'INVALID_STATUS', message: 'Hóa đơn ở trạng thái không thể thanh toán.' });
+    }
+    if (Number(inv.total_amount) - Number(inv.paid_amount) <= 0 || inv.status === 'PAID') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ code: 'ALREADY_PAID', message: 'Hóa đơn này đã được thanh toán đầy đủ.' });
+    }
 
     const paymentId = crypto.randomUUID();
     const savedProofs = [];
@@ -1162,17 +1219,81 @@ router.post('/payments/report', authenticateToken, async (req, res) => {
 /**
  * GET /api/v1/resident/services (M07, P4)
  * Danh mục dịch vụ khả dụng & các gói dịch vụ cư dân đang đăng ký
+ * FR-065 & Spec 5.3.1: lọc (building_id IS NULL OR building_id = c.building_id),
+ * khử trùng theo UPPER(code) ưu tiên building_id = c.building_id, và phân giải đơn giá qua resolveServiceUnitPrice
  */
 router.get('/services', authenticateToken, async (req, res) => {
+  const { client, release } = await getUserClient(req);
   try {
     const orgId = req.user.org_id;
     const personId = req.user.person_id;
     const contractId = req.query.contract_id ? String(req.query.contract_id).trim() : null;
 
-    const catalogRes = await pool.query(
-      `SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE ORDER BY category, name`,
-      [orgId]
+    // Lấy hợp đồng hiệu lực của cư dân để biết building_id
+    const cParams = [personId];
+    let cFilter = '';
+    if (contractId) {
+      cParams.push(contractId);
+      cFilter = ' AND c.id = $2';
+    }
+    const cRes = await client.query(
+      `SELECT c.id as contract_id, c.building_id, c.apartment_id
+       FROM contract c
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       WHERE t.person_id = $1 AND c.status IN ('ACTIVE', 'RENEWAL_PENDING')${cFilter}
+       ORDER BY (CASE WHEN c.start_date <= CURRENT_DATE THEN 0 ELSE 1 END), c.created_at DESC
+       LIMIT 1`,
+      cParams
     );
+    const activeContract = cRes.rows[0] || null;
+    const targetBuildingId = activeContract?.building_id || null;
+
+    // Lấy danh mục dịch vụ: building_id IS NULL hoặc building_id = targetBuildingId
+    let catSql = `SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE`;
+    const catParams = [orgId];
+    if (targetBuildingId) {
+      catParams.push(targetBuildingId);
+      catSql += ` AND (building_id IS NULL OR building_id = $2)
+                 ORDER BY (CASE WHEN building_id = $2 THEN 0 ELSE 1 END) ASC, category ASC, name ASC`;
+    } else {
+      catSql += ` AND building_id IS NULL ORDER BY category ASC, name ASC`;
+    }
+
+    const catalogRaw = await client.query(catSql, catParams);
+
+    // Khử trùng theo UPPER(code) ưu tiên building_id = c.building_id
+    const seenCodes = new Set();
+    const deduplicatedCatalog = [];
+    for (const item of catalogRaw.rows) {
+      const codeKey = (item.code || '').trim().toUpperCase();
+      if (!seenCodes.has(codeKey)) {
+        seenCodes.add(codeKey);
+        deduplicatedCatalog.push(item);
+      }
+    }
+
+    // Phân giải đơn giá 3 tầng
+    let contractServicePrices = [];
+    if (activeContract) {
+      const cspRes = await client.query(
+        'SELECT * FROM contract_service_price WHERE contract_id = $1',
+        [activeContract.contract_id]
+      );
+      contractServicePrices = cspRes.rows;
+    }
+
+    const todayYmd = todayVietnamYmd();
+    for (const item of deduplicatedCatalog) {
+      const priceRes = resolveServiceUnitPrice({
+        subscription: { service_code: item.code, service_category: item.category, is_price_locked: false },
+        contractBuildingId: targetBuildingId,
+        periodEndYmd: todayYmd,
+        contractServicePrices,
+        catalogItems: deduplicatedCatalog,
+      });
+      item.resolved_unit_price = priceRes.unitPrice;
+      item.price_source = priceRes.priceSource;
+    }
 
     const subParams = [personId];
     let subFilter = '';
@@ -1181,7 +1302,7 @@ router.get('/services', authenticateToken, async (req, res) => {
       subFilter = ' AND ss.contract_id = $2';
     }
 
-    const subsRes = await pool.query(
+    const subsRes = await client.query(
       `SELECT ss.*, sc.code as service_code, sc.name as service_name, sc.unit, sc.category,
               a.code as apartment_code, b.name as building_name
        FROM service_subscription ss
@@ -1197,26 +1318,29 @@ router.get('/services', authenticateToken, async (req, res) => {
 
     res.json({
       data: {
-        catalog: catalogRes.rows,
+        catalog: deduplicatedCatalog,
         subscriptions: subsRes.rows,
       },
     });
   } catch (err) {
     console.error('[Resident Services Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải thông tin dịch vụ.' });
+  } finally {
+    await release();
   }
 });
 
 /**
- * POST /api/v1/resident/services (FR-027, FR-029)
+ * POST /api/v1/resident/services (FR-027, FR-029, FR-065)
  * Cư dân đăng ký dịch vụ mới (kèm tính phí pro-rata kỳ đầu, hỗ trợ chọn contract_id)
  */
-router.post('/services', authenticateToken, async (req, res) => {
+router.post('/services', authenticateToken, idempotencyGuard(), async (req, res) => {
   const { service_id, quantity = 1, start_date, note, vehicle_plates, contract_id } = req.body;
   if (!service_id) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng chọn dịch vụ cần đăng ký.' });
   }
 
+  const { client, release } = await getUserClient(req);
   try {
     const cParams = [req.user.person_id];
     let cFilter = '';
@@ -1225,7 +1349,7 @@ router.post('/services', authenticateToken, async (req, res) => {
       cFilter = ' AND c.id = $2';
     }
 
-    const contractRes = await pool.query(
+    const contractRes = await client.query(
       `SELECT c.id as contract_id, c.apartment_id, c.building_id, b.org_id
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
@@ -1239,9 +1363,11 @@ router.post('/services', authenticateToken, async (req, res) => {
     }
     const c = contractRes.rows[0];
 
-    const svcRes = await pool.query(
-      `SELECT * FROM service_catalog WHERE id = $1 AND org_id = $2 AND is_active = TRUE`,
-      [service_id, c.org_id]
+    const svcRes = await client.query(
+      `SELECT * FROM service_catalog
+       WHERE id = $1 AND org_id = $2 AND is_active = TRUE
+         AND (building_id IS NULL OR building_id = $3)`,
+      [service_id, c.org_id, c.building_id]
     );
     if (svcRes.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Dịch vụ không tồn tại hoặc đã ngừng cung cấp.' });
@@ -1255,15 +1381,33 @@ router.post('/services', authenticateToken, async (req, res) => {
       note,
     });
     const qty = meta.quantity;
-    const effStart = start_date || new Date().toISOString().slice(0, 10);
-    const prorata = computeProrata(svc.unit_price, qty, effStart, 'subscribe');
+    const effStart = start_date || todayVietnamYmd();
 
-    const ins = await pool.query(
+    // Resolve 3-tier unit price (standard subscription is_price_locked = false)
+    const cspRes = await client.query(
+      'SELECT * FROM contract_service_price WHERE contract_id = $1',
+      [c.contract_id]
+    );
+    const catRes = await client.query(
+      'SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE',
+      [c.org_id]
+    );
+    const priceRes = resolveServiceUnitPrice({
+      subscription: { service_code: svc.code, service_category: svc.category, is_price_locked: false },
+      contractBuildingId: c.building_id,
+      periodEndYmd: effStart,
+      contractServicePrices: cspRes.rows,
+      catalogItems: catRes.rows,
+    });
+    const unitPrice = priceRes.unitPrice;
+    const prorata = computeProrata(unitPrice, qty, effStart, 'subscribe');
+
+    const ins = await client.query(
       `INSERT INTO service_subscription (
          org_id, building_id, apartment_id, contract_id, service_id,
-         quantity, unit_price, start_date, prorata_amount, status, note, vehicle_plates, requested_by
+         quantity, unit_price, is_price_locked, start_date, prorata_amount, status, note, vehicle_plates, requested_by
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING_APPROVAL', $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8, $9, 'PENDING_APPROVAL', $10, $11, $12)
        RETURNING *`,
       [
         c.org_id,
@@ -1272,7 +1416,7 @@ router.post('/services', authenticateToken, async (req, res) => {
         c.contract_id,
         svc.id,
         qty,
-        svc.unit_price,
+        unitPrice,
         effStart,
         prorata,
         meta.note,
@@ -1280,10 +1424,17 @@ router.post('/services', authenticateToken, async (req, res) => {
         req.user.sub,
       ]
     );
+    const newSub = ins.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'REQUEST_SERVICE_SUBSCRIPTION', 'service_subscription', $2, $3)`,
+      [req.user.sub, newSub.id, JSON.stringify(newSub)]
+    );
 
     res.status(201).json({
       message: 'Đã gửi yêu cầu đăng ký dịch vụ, chờ Ban Quản Lý phê duyệt.',
-      data: ins.rows[0],
+      data: newSub,
     });
   } catch (err) {
     if (err.httpStatus) {
@@ -1291,17 +1442,20 @@ router.post('/services', authenticateToken, async (req, res) => {
     }
     console.error('[Resident Subscribe Service Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi đăng ký dịch vụ.' });
+  } finally {
+    await release();
   }
 });
 
 /**
- * PATCH /api/v1/resident/services/:id/cancel (FR-029)
- * Cư dân yêu cầu hủy dịch vụ (tính pro-rata tới ngày kết thúc)
+ * PATCH /api/v1/resident/services/:id/cancel (FR-029, Spec 5.3.1)
+ * Cư dân yêu cầu hủy dịch vụ (tính pro-rata tới ngày kết thúc, 0 ₫ nếu hủy trước start_date hoặc rút PENDING_APPROVAL)
  */
-router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
+router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const { end_date, note } = req.body;
 
+  const { client, release } = await getUserClient(req);
   try {
     const cleanCancelNote =
       note !== undefined && note !== null
@@ -1313,33 +1467,72 @@ router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
           }).note
         : null;
 
-    const subRes = await pool.query(
+    const subRes = await client.query(
       `SELECT ss.*
        FROM service_subscription ss
        JOIN contract c ON c.id = ss.contract_id
        JOIN tenant t ON t.id = c.primary_tenant_id
-       WHERE ss.id = $1 AND t.person_id = $2`,
+       WHERE ss.id = $1 AND t.person_id = $2
+       FOR UPDATE OF ss`,
       [id, req.user.person_id]
     );
     if (subRes.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đăng ký dịch vụ.' });
     }
     const sub = subRes.rows[0];
-    const effEnd = end_date || new Date().toISOString().slice(0, 10);
-    const nextStatus = sub.status === 'PENDING_APPROVAL' ? 'CANCELLED' : 'CANCELLATION_PENDING';
-    const prorata = computeProrata(sub.unit_price, sub.quantity, effEnd, 'cancel');
 
-    const upd = await pool.query(
+    // Block mutating already TERMINATED or REJECTED
+    if (sub.status === 'TERMINATED' || sub.status === 'REJECTED') {
+      return res.status(409).json({ code: 'INVALID_STATUS', message: 'Không thể hủy dịch vụ đã kết thúc hoặc bị từ chối.' });
+    }
+    if (sub.status === 'CANCELLATION_PENDING') {
+      return res.status(409).json({ code: 'INVALID_STATUS', message: 'Yêu cầu hủy dịch vụ đang chờ Ban Quản Lý xử lý.' });
+    }
+
+    const subStartYmd = toDateOnlyYmd(sub.start_date);
+    const todayVnYmd = todayVietnamYmd();
+    const reqEndYmd = end_date ? toDateOnlyYmd(end_date) : null;
+
+    let nextStatus;
+    let effEnd;
+    let prorata;
+
+    if (sub.status === 'PENDING_APPROVAL') {
+      // Withdrawing unapproved subscription -> TERMINATED with 0 VND
+      nextStatus = 'TERMINATED';
+      effEnd = addDaysYmd(subStartYmd, -1);
+      prorata = 0;
+    } else {
+      // ACTIVE subscription cancellation request
+      nextStatus = 'CANCELLATION_PENDING';
+      if ((reqEndYmd && reqEndYmd < subStartYmd) || (!reqEndYmd && todayVnYmd < subStartYmd)) {
+        // Pre-start cancellation: 0 VND
+        effEnd = addDaysYmd(subStartYmd, -1);
+        prorata = 0;
+      } else {
+        effEnd = reqEndYmd || todayVnYmd;
+        prorata = computeProrata(sub.unit_price, sub.quantity, effEnd, 'cancel');
+      }
+    }
+
+    const upd = await client.query(
       `UPDATE service_subscription
        SET status = $1, end_date = $2, prorata_amount = $3, note = COALESCE($4, note), updated_at = NOW()
        WHERE id = $5
        RETURNING *`,
       [nextStatus, effEnd, prorata, cleanCancelNote, id]
     );
+    const updatedRow = upd.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'CANCEL_SERVICE_SUBSCRIPTION', 'service_subscription', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(sub), JSON.stringify(updatedRow)]
+    );
 
     res.json({
-      message: nextStatus === 'CANCELLED' ? 'Đã hủy yêu cầu đăng ký dịch vụ.' : 'Đã gửi yêu cầu hủy dịch vụ tới Ban Quản Lý.',
-      data: upd.rows[0],
+      message: nextStatus === 'TERMINATED' ? 'Đã hủy yêu cầu đăng ký dịch vụ.' : 'Đã gửi yêu cầu hủy dịch vụ tới Ban Quản Lý.',
+      data: updatedRow,
     });
   } catch (err) {
     if (err.httpStatus) {
@@ -1347,6 +1540,68 @@ router.patch('/services/:id/cancel', authenticateToken, async (req, res) => {
     }
     console.error('[Resident Cancel Service Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi hủy dịch vụ.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * PATCH /api/v1/resident/services/:id/withdraw-cancel (Spec 5.3.1)
+ * Cư dân rút lại yêu cầu hủy dịch vụ (chuyển CANCELLATION_PENDING -> ACTIVE, xóa end_date)
+ */
+router.patch('/services/:id/withdraw-cancel', authenticateToken, idempotencyGuard(), async (req, res) => {
+  const { id } = req.params;
+
+  const { client, release } = await getUserClient(req);
+  try {
+    const subRes = await client.query(
+      `SELECT ss.*
+       FROM service_subscription ss
+       JOIN contract c ON c.id = ss.contract_id
+       JOIN tenant t ON t.id = c.primary_tenant_id
+       WHERE ss.id = $1 AND t.person_id = $2
+       FOR UPDATE OF ss`,
+      [id, req.user.person_id]
+    );
+    if (subRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đăng ký dịch vụ.' });
+    }
+    const sub = subRes.rows[0];
+
+    if (sub.status !== 'CANCELLATION_PENDING') {
+      return res.status(409).json({
+        code: 'INVALID_STATUS',
+        message: 'Chỉ có thể rút yêu cầu hủy khi đang ở trạng thái chờ hủy.',
+      });
+    }
+
+    const upd = await client.query(
+      `UPDATE service_subscription
+       SET status = 'ACTIVE', end_date = NULL, updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id]
+    );
+    const updatedRow = upd.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'WITHDRAW_CANCEL_SERVICE_SUBSCRIPTION', 'service_subscription', $2, $3, $4)`,
+      [req.user.sub, id, JSON.stringify(sub), JSON.stringify(updatedRow)]
+    );
+
+    res.json({
+      message: 'Đã rút yêu cầu hủy dịch vụ thành công.',
+      data: updatedRow,
+    });
+  } catch (err) {
+    if (err.httpStatus) {
+      return res.status(err.httpStatus).json({ code: err.code, message: err.message });
+    }
+    console.error('[Resident Withdraw Cancel Service Error]:', err);
+    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi rút yêu cầu hủy dịch vụ.' });
+  } finally {
+    await release();
   }
 });
 
