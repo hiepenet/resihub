@@ -12,6 +12,39 @@ export function roundVND(amount) {
 }
 
 /**
+ * Tính phí pro-rata chia theo số ngày thực tế trong tháng (FR-063, PRD 10.3):
+ * ROUND(monthlyPrice * quantity * activeDays / daysInMonth, -3)
+ */
+export function calcProrata({ monthlyPrice, quantity = 1, activeDays, daysInMonth } = {}) {
+  const price = Number(monthlyPrice || 0);
+  const qty = Number(quantity ?? 1);
+  const active = Number(activeDays || 0);
+  const totalDays = Number(daysInMonth || 0);
+  if (!Number.isFinite(price) || !Number.isFinite(qty) || active <= 0 || totalDays <= 0) {
+    return 0;
+  }
+  if (active >= totalDays) {
+    return roundVND(price * qty);
+  }
+  return roundVND((price * qty * active) / totalDays);
+}
+
+/**
+ * Tính tiền điện / nước theo sản lượng tiêu thụ cố định 1 bậc (FR-030, FR-063).
+ * Ném RangeError('INVALID_READING') nếu chỉ số mới nhỏ hơn chỉ số cũ.
+ */
+export function calcUtility({ previousReading, currentReading, unitPrice } = {}) {
+  const prev = Number(previousReading ?? 0);
+  const curr = Number(currentReading ?? 0);
+  const price = Number(unitPrice ?? 0);
+  if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr < prev) {
+    throw new RangeError('INVALID_READING: currentReading must be >= previousReading');
+  }
+  const consumption = Number((curr - prev).toFixed(4));
+  return roundVND(consumption * price);
+}
+
+/**
  * Kiểm tra cấu hình hệ thống có cho phép tự phê duyệt (allow_self_approval) hay không (AC-017.3 / R-23).
  * Nếu creatorId === actorId:
  *   - Khi allow_self_approval = false (mặc định): trả { allowed: false }

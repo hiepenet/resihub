@@ -103,7 +103,9 @@ export function normalizeInvoiceStatusInput(status) {
 }
 
 const CANONICAL_ALIAS_GROUPS = [
-  ['INTERNET_FIBER', 'INTERNET'],
+  ['ELECTRICITY', 'ELEC'],
+  ['WATER', 'DOMESTIC_WATER'],
+  ['INTERNET_FIBER', 'INTERNET', 'WIFI'],
   ['MANAGEMENT_FEE', 'MANAGEMENT', 'COMMON_SERVICE'],
   ['PARKING_MOTO', 'MOTORBIKE_PARKING'],
 ];
@@ -161,8 +163,8 @@ export function resolveServiceUnitPrice({
 
   if (matchedPrices.length > 0) {
     matchedPrices.sort((a, b) => {
-      const effA = toDateOnlyYmd(a.effective_from);
-      const effB = toDateOnlyYmd(b.effective_from);
+      const effA = toDateOnlyYmd(a.effective_from) || '';
+      const effB = toDateOnlyYmd(b.effective_from) || '';
       return effB.localeCompare(effA);
     });
     return {
@@ -181,7 +183,7 @@ export function resolveServiceUnitPrice({
 
   // 3. BUILDING_CATALOG -> DEFAULT_CATALOG
   const matchedCatalog = (Array.isArray(catalogItems) ? catalogItems : []).filter((item) => {
-    if (!item) return false;
+    if (!item || item.is_active === false) return false;
     const itemCode = String(item.code || item.service_code || '').trim().toUpperCase();
     return aliasSet.has(itemCode);
   });
@@ -565,5 +567,283 @@ export function computeContractRentPeriodCharge({
       raw_amount: rawAmount,
       rounded_amount: amount,
     },
+  };
+}
+
+/**
+ * Resolves utility (ELECTRICITY / WATER) unit price across tiers (FR-065):
+ * 1. CONTRACT_OVERRIDE -> 2. BUILDING_CATALOG -> 3. METER_CONFIG (meterUnitPrice > 0) -> 4. DEFAULT_CATALOG
+ */
+export function resolveUtilityUnitPrice({
+  meterType,
+  meterUnitPrice,
+  contractBuildingId,
+  periodEndYmd,
+  contractServicePrices = [],
+  catalogItems = [],
+  defaultUtilityPrice = 0,
+} = {}) {
+  const aliasSet = new Set(getCanonicalServiceAliases(meterType, meterType));
+
+  // 1. CONTRACT_OVERRIDE
+  const matchedPrices = (Array.isArray(contractServicePrices) ? contractServicePrices : []).filter((csp) => {
+    if (!csp) return false;
+    const cCode = String(csp.service_code || '').trim().toUpperCase();
+    if (!aliasSet.has(cCode)) return false;
+    if (periodEndYmd && csp.effective_from) {
+      const eff = toDateOnlyYmd(csp.effective_from);
+      if (eff > periodEndYmd) return false;
+    }
+    return true;
+  });
+
+  if (matchedPrices.length > 0) {
+    matchedPrices.sort((a, b) => {
+      const effA = toDateOnlyYmd(a.effective_from) || '';
+      const effB = toDateOnlyYmd(b.effective_from) || '';
+      return effB.localeCompare(effA);
+    });
+    return {
+      unitPrice: Number(matchedPrices[0].unit_price || 0),
+      priceSource: 'CONTRACT_OVERRIDE',
+    };
+  }
+
+  // 2. BUILDING_CATALOG & 4. DEFAULT_CATALOG candidates
+  const matchedCatalog = (Array.isArray(catalogItems) ? catalogItems : []).filter((item) => {
+    if (!item || item.is_active === false) return false;
+    const itemCode = String(item.code || item.service_code || '').trim().toUpperCase();
+    return aliasSet.has(itemCode);
+  });
+
+  if (contractBuildingId && matchedCatalog.length > 0) {
+    const bldMatch = matchedCatalog.find(
+      (item) => item.building_id && String(item.building_id) === String(contractBuildingId)
+    );
+    if (bldMatch) {
+      return {
+        unitPrice: Number(bldMatch.unit_price || 0),
+        priceSource: 'BUILDING_CATALOG',
+      };
+    }
+  }
+
+  // 3. METER_CONFIG
+  const meterPriceNum = Number(meterUnitPrice || 0);
+  if (Number.isFinite(meterPriceNum) && meterPriceNum > 0) {
+    return {
+      unitPrice: meterPriceNum,
+      priceSource: 'METER_CONFIG',
+    };
+  }
+
+  // 4. DEFAULT_CATALOG
+  const defMatch = matchedCatalog.find((item) => !item.building_id);
+  if (defMatch) {
+    return {
+      unitPrice: Number(defMatch.unit_price || 0),
+      priceSource: 'DEFAULT_CATALOG',
+    };
+  }
+
+  return {
+    unitPrice: Number(defaultUtilityPrice || 0),
+    priceSource: 'DEFAULT_CATALOG',
+  };
+}
+
+/**
+ * Resolves all contract billing_day values (1..31) that should fire on asOfDateYmd (FR-066).
+ * On the last calendar day of a short month (28/29/30), higher billing days up to 31 clamp onto that day.
+ */
+export function resolveBillingDaysForDate(asOfDateYmd) {
+  const cleanYmd = toDateOnlyYmd(asOfDateYmd);
+  if (!cleanYmd) return [];
+  const day = Number(cleanYmd.slice(8, 10));
+  if (!Number.isInteger(day) || day < 1 || day > 31) return [];
+  const { daysInMonth } = getMonthBoundsYmd(cleanYmd.slice(0, 7));
+  if (day < daysInMonth) {
+    return [day];
+  }
+  const result = [];
+  for (let d = daysInMonth; d <= 31; d += 1) {
+    result.push(d);
+  }
+  return result;
+}
+
+const VN_OFFSET_MS = 7 * 3600 * 1000;
+
+/**
+ * Computes milliseconds (>= 1000) until the next occurrence of HH:mm:00 in Asia/Ho_Chi_Minh (UTC+7).
+ */
+export function computeNextVietnamDailyRunMs(nowDate = new Date(), targetHour = 0, targetMinute = 5) {
+  const dt = nowDate instanceof Date && !Number.isNaN(nowDate.getTime()) ? nowDate : new Date(nowDate);
+  const nowMs = dt.getTime();
+  const vnShifted = new Date(nowMs + VN_OFFSET_MS);
+  const vnY = vnShifted.getUTCFullYear();
+  const vnM = vnShifted.getUTCMonth();
+  const vnD = vnShifted.getUTCDate();
+
+  let targetMs = Date.UTC(vnY, vnM, vnD, Number(targetHour || 0), Number(targetMinute || 0), 0, 0) - VN_OFFSET_MS;
+  if (targetMs - nowMs < 1000) {
+    targetMs = Date.UTC(vnY, vnM, vnD + 1, Number(targetHour || 0), Number(targetMinute || 0), 0, 0) - VN_OFFSET_MS;
+  }
+  return Math.max(1000, targetMs - nowMs);
+}
+
+/**
+ * Computes append-only late payment penalty delta (FR-064):
+ * - 100,000 VND/day after graceDays (default 5)
+ * - Stops accruing new penalties once principalAmount is fully settled by paidAmount + creditOffsetAmount
+ * - Preserves 4-eyes waivers via deltaFee = Math.max(0, expectedTotalLateFee - grossAccruedLateFee)
+ */
+export function computeLateFeeAccrual({
+  dueDateYmd,
+  asOfDateYmd,
+  totalAmount,
+  paidAmount = 0,
+  creditOffsetAmount = 0,
+  principalAmount = null,
+  grossAccruedLateFee = 0,
+  graceDays = 5,
+  lateFeePerDay = 100000,
+  maxLateFeeCap = null,
+} = {}) {
+  const dueStr = toDateOnlyYmd(dueDateYmd);
+  const asOfStr = toDateOnlyYmd(asOfDateYmd);
+  const total = Number(totalAmount || 0);
+  const paid = Number(paidAmount || 0);
+  const creditOffset = Number(creditOffsetAmount || 0);
+  const grossAccrued = Math.max(0, Number(grossAccruedLateFee || 0));
+  const grace = Math.max(0, Number(graceDays ?? 5));
+  const ratePerDay = Math.max(0, Number(lateFeePerDay ?? 100000));
+  const cap = maxLateFeeCap !== null && maxLateFeeCap !== undefined && Number(maxLateFeeCap) > 0
+    ? roundVND(Number(maxLateFeeCap))
+    : null;
+
+  const principalSettled =
+    principalAmount !== null &&
+    principalAmount !== undefined &&
+    Number(principalAmount) <= paid + creditOffset;
+
+  if (!dueStr || !asOfStr || paid >= total || total <= 0) {
+    return {
+      isOverdue: false,
+      principalSettled,
+      overdueDays: 0,
+      chargeableDays: 0,
+      expectedTotalLateFee: 0,
+      deltaFee: 0,
+      capped: false,
+    };
+  }
+
+  const overdueDays = asOfStr > dueStr ? Math.max(0, diffDaysYmd(dueStr, asOfStr)) : 0;
+  if (overdueDays <= 0) {
+    return {
+      isOverdue: false,
+      principalSettled,
+      overdueDays: 0,
+      chargeableDays: 0,
+      expectedTotalLateFee: 0,
+      deltaFee: 0,
+      capped: false,
+    };
+  }
+
+  if (principalSettled) {
+    return {
+      isOverdue: true,
+      principalSettled: true,
+      overdueDays,
+      chargeableDays: Math.max(0, overdueDays - grace),
+      expectedTotalLateFee: grossAccrued,
+      deltaFee: 0,
+      capped: false,
+    };
+  }
+
+  const chargeableDays = Math.max(0, overdueDays - grace);
+  let expectedTotalLateFee = roundVND(chargeableDays * ratePerDay);
+  let capped = false;
+  if (cap !== null && expectedTotalLateFee > cap) {
+    expectedTotalLateFee = cap;
+    capped = true;
+  }
+
+  const deltaFee = roundVND(Math.max(0, expectedTotalLateFee - grossAccrued));
+  return {
+    isOverdue: true,
+    principalSettled: false,
+    overdueDays,
+    chargeableDays,
+    expectedTotalLateFee,
+    deltaFee,
+    capped,
+  };
+}
+
+/**
+ * Evaluates meter reading consumption and > 30% variance against up to 3 prior positive CONFIRMED periods (FR-030, FR-031).
+ */
+export function evaluateMeterReadingAnomaly({
+  previousReading,
+  currentReading,
+  recentConsumptions = [],
+  thresholdRatio = 0.3,
+} = {}) {
+  const prev = Number(previousReading ?? 0);
+  const curr = Number(currentReading);
+
+  if (!Number.isFinite(prev) || !Number.isFinite(curr) || curr < prev) {
+    return {
+      valid: false,
+      code: 'INVALID_READING',
+      consumption: 0,
+      baselineAvg: null,
+      varianceRatio: null,
+      diffPct: null,
+      isAbnormal: false,
+    };
+  }
+
+  const consumption = Number((curr - prev).toFixed(2));
+  const positiveHistory = (Array.isArray(recentConsumptions) ? recentConsumptions : [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0)
+    .slice(0, 3);
+
+  if (positiveHistory.length === 0) {
+    return {
+      valid: true,
+      consumption,
+      baselineAvg: null,
+      varianceRatio: null,
+      diffPct: null,
+      isAbnormal: false,
+    };
+  }
+
+  const sum = positiveHistory.reduce((acc, v) => acc + v, 0);
+  const baselineAvg = Number((sum / positiveHistory.length).toFixed(2));
+  const rawDelta = consumption - baselineAvg;
+  const varianceRatio = Math.abs(rawDelta) / baselineAvg;
+  const diffPct = Math.round((rawDelta / baselineAvg) * 100);
+  const effThreshold = Number.isFinite(Number(thresholdRatio)) && Number(thresholdRatio) > 0
+    ? Number(thresholdRatio)
+    : 0.3;
+  // Compare against unrounded ratio (curr - prev vs sum/N) with tiny float epsilon guard
+  const exactBaseline = sum / positiveHistory.length;
+  const exactRatio = Math.abs(consumption - exactBaseline) / exactBaseline;
+  const isAbnormal = exactRatio > effThreshold + 1e-9;
+
+  return {
+    valid: true,
+    consumption,
+    baselineAvg,
+    varianceRatio: Number(exactRatio.toFixed(4)),
+    diffPct,
+    isAbnormal,
   };
 }
