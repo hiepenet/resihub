@@ -892,11 +892,15 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
   // 9. FR-068 & R-15: Cảnh báo hạn hoàn cọc cho cả TERMINATED và EXPIRED, và mọi trạng thái chưa tất toán xong
   await runOverdueDepositSettlementAlerts({ asOfDate: effectiveDateYmd, buildingId });
 
+  // 10. M15 (PRD 13.2): Chuyển các bản nháp ai_suggestion PENDING quá hạn (72h) sang EXPIRED
+  const aiExpiry = await expireStaleAiSuggestions(adminPool);
+
   return {
     autoCreatedInvoices,
     skippedMeterContracts,
     overdueMarked,
     lateFeeUpdated,
+    expiredAiSuggestions: aiExpiry.expiredCount,
   };
 }
 
@@ -1475,6 +1479,18 @@ export async function sendMonthlyOwnerDepositReports(
     console.log(`[DailyJob] sent MONTHLY_DEPOSIT_REPORT notifications: ${sentCount}`);
   }
   return sentCount;
+}
+
+export async function expireStaleAiSuggestions(dbPool = adminPool, { nowTs = new Date() } = {}) {
+  const res = await dbPool.query(
+    `UPDATE ai_suggestion
+     SET status = 'EXPIRED',
+         updated_at = NOW()
+     WHERE status = 'PENDING'
+       AND expires_at <= $1::timestamptz`,
+    [nowTs]
+  );
+  return { expiredCount: res.rowCount || 0 };
 }
 
 export function startDailyJobs(options = {}) {
