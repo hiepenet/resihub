@@ -21,6 +21,7 @@ import {
   ExternalLink,
   History,
   Lock,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -36,6 +37,7 @@ import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { serviceRequestsService } from '../../../services/serviceRequests.service';
 import { buildingsService } from '../../../services/buildings.service';
+import { aiService } from '../../../services/ai.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
@@ -49,6 +51,10 @@ import {
 import { ROLE_LABELS } from '../../../constants/roles';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import {
+  formatConfidenceBadge,
+  mapAiErrorToVietnamese,
+} from '../../../utils/aiHelpers';
 import {
   buildRoomMaintenanceZaloText,
   computeSlaBadgeMeta,
@@ -142,11 +148,32 @@ const PREFERRED_SLOT_OPTIONS = [
 const AUDIT_ACTION_LABELS = {
   CREATE_SERVICE_REQUEST: 'Tạo yêu cầu báo hỏng',
   UPDATE_SERVICE_REQUEST: 'Cập nhật xử lý kỹ thuật',
+  APPLY_SERVICE_REQUEST_TRIAGE: 'Duyệt / điều phối từ gợi ý AI',
   REOPEN_SERVICE_REQUEST: 'Cư dân yêu cầu xử lý lại',
   CANCEL_SERVICE_REQUEST: 'Hủy yêu cầu sửa chữa',
   RATE_SERVICE_REQUEST: 'Cư dân nghiệm thu & đánh giá sao',
   SLA_ESCALATION_SERVICE_REQUEST: 'Hệ thống cảnh báo quá hạn SLA',
 };
+
+function renderAiTriageBadge(triageStatus) {
+  switch (triageStatus) {
+    case 'SUGGESTED':
+      return (
+        <Badge variant="amber">
+          <Sparkles className="w-3 h-3" /> AI đề xuất
+        </Badge>
+      );
+    case 'LOW_CONFIDENCE':
+    case 'FAILED':
+      return <Badge variant="red">Cần phân loại thủ công</Badge>;
+    case 'APPLIED':
+      return <Badge variant="emerald">Đã duyệt gợi ý AI</Badge>;
+    case 'OVERRIDDEN':
+      return <Badge variant="indigo">Đã điều chỉnh từ AI</Badge>;
+    default:
+      return null;
+  }
+}
 
 function toLocalDateTimeInputValue(isoValue) {
   if (!isoValue) return '';
@@ -210,6 +237,10 @@ export function ServiceRequestsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState(null);
   const [updating, setUpdating] = useState(false);
+  const [applyingTriage, setApplyingTriage] = useState(false);
+  const [rerunningAi, setRerunningAi] = useState(false);
+  const [triageOverrideCategory, setTriageOverrideCategory] = useState('OTHER');
+  const [aiTriageError, setAiTriageError] = useState(null);
   const [copiedRoomZalo, setCopiedRoomZalo] = useState(false);
   const [editState, setEditState] = useState({
     status: '',
@@ -302,6 +333,7 @@ export function ServiceRequestsPage() {
       next_appointment_at: toLocalDateTimeInputValue(d.next_appointment_at),
       internal_note: d.internal_note || '',
     });
+    setTriageOverrideCategory(d.ai_suggested_category || d.category || 'OTHER');
   };
 
   const openCreateModal = async () => {
@@ -379,6 +411,7 @@ export function ServiceRequestsPage() {
     setDrawerOpen(true);
     setDetailLoading(true);
     setCopiedRoomZalo(false);
+    setAiTriageError(null);
     try {
       const res = await serviceRequestsService.getById(id);
       const d = res.data;
@@ -389,6 +422,71 @@ export function ServiceRequestsPage() {
       setDrawerOpen(false);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const handleApplyAiSuggestionExact = async () => {
+    if (!canHandleMaintenance || !detail) return;
+    setApplyingTriage(true);
+    setAiTriageError(null);
+    try {
+      const res = await serviceRequestsService.applyTriage(detail.id, {});
+      toast.success(res.message || 'Đã áp dụng đề xuất phân loại & điều phối của AI.');
+      const fresh = await serviceRequestsService.getById(detail.id);
+      if (fresh?.data) {
+        setDetail(fresh.data);
+        syncEditStateFromDetail(fresh.data);
+      }
+      fetchRequests();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể áp dụng đề xuất AI.'));
+    } finally {
+      setApplyingTriage(false);
+    }
+  };
+
+  const handleApplyAiWithOverride = async () => {
+    if (!canHandleMaintenance || !detail) return;
+    setApplyingTriage(true);
+    setAiTriageError(null);
+    try {
+      const payload = {
+        category: triageOverrideCategory || detail.category,
+        priority: editState.priority || detail.priority,
+        assigned_to: editState.assigned_to || detail.ai_suggested_assignee_id || null,
+      };
+      const res = await serviceRequestsService.applyTriage(detail.id, payload);
+      toast.success(res.message || 'Đã áp dụng điều phối kèm chỉnh sửa của quản lý.');
+      const fresh = await serviceRequestsService.getById(detail.id);
+      if (fresh?.data) {
+        setDetail(fresh.data);
+        syncEditStateFromDetail(fresh.data);
+      }
+      fetchRequests();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể áp dụng điều chỉnh phân loại.'));
+    } finally {
+      setApplyingTriage(false);
+    }
+  };
+
+  const handleRerunAiClassify = async () => {
+    if (!canHandleMaintenance || !detail) return;
+    setRerunningAi(true);
+    setAiTriageError(null);
+    try {
+      await aiService.classifyServiceRequest({ service_request_id: detail.id });
+      const fresh = await serviceRequestsService.getById(detail.id);
+      if (fresh?.data) {
+        setDetail(fresh.data);
+        syncEditStateFromDetail(fresh.data);
+      }
+      fetchRequests();
+      toast.success('AI đã cập nhật gợi ý phân loại & điều phối mới.');
+    } catch (err) {
+      setAiTriageError(mapAiErrorToVietnamese(err));
+    } finally {
+      setRerunningAi(false);
     }
   };
 
@@ -506,6 +604,7 @@ export function ServiceRequestsPage() {
             <div className="flex flex-col items-center gap-1">
               <StatusBadge status={row.priority} domain="priority" />
               <Badge variant={sla.variant}>{sla.label}</Badge>
+              {renderAiTriageBadge(row.ai_triage_status)}
             </div>
           );
         },
@@ -796,6 +895,7 @@ export function ServiceRequestsPage() {
 
                             <div className="flex flex-wrap items-center gap-1.5">
                               <Badge variant={slaMeta.variant}>{slaMeta.label}</Badge>
+                              {renderAiTriageBadge(sr.ai_triage_status)}
                               {Number(sr.reopen_count) > 0 ? (
                                 <Badge variant="red">Mở lại x{sr.reopen_count}</Badge>
                               ) : null}
@@ -1037,6 +1137,7 @@ export function ServiceRequestsPage() {
                 <Badge variant="slate">
                   {SERVICE_REQUEST_CATEGORY[detail.category] || detail.category}
                 </Badge>
+                {renderAiTriageBadge(detail.ai_triage_status)}
                 {Number(detail.reopen_count) > 0 ? (
                   <Badge variant="red">Đã mở lại {detail.reopen_count} lần</Badge>
                 ) : null}
@@ -1045,6 +1146,132 @@ export function ServiceRequestsPage() {
                 {detail.title}
               </h4>
             </div>
+
+            {/* Hộp Trợ lý AI Phân loại & Điều phối (AI-03 — FR-043, US-011) */}
+            {(detail.ai_triage_status && detail.ai_triage_status !== 'NONE') ||
+            (canHandleMaintenance && OPEN_STATUSES.includes(detail.status)) ? (
+              <div className="p-3.5 rounded-xl bg-amber-50/60 border-2 border-dashed border-amber-300/90 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-950">
+                      <Sparkles className="w-4 h-4 text-amber-600" />
+                      Trợ lý AI Phân loại &amp; Điều phối (AI-03)
+                    </span>
+                    {renderAiTriageBadge(detail.ai_triage_status)}
+                    {detail.ai_confidence !== null && detail.ai_confidence !== undefined ? (
+                      <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-white border border-amber-200 text-slate-700">
+                        {formatConfidenceBadge(detail.ai_confidence, 0.65).label}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {canHandleMaintenance && OPEN_STATUSES.includes(detail.status) ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      icon={RefreshCw}
+                      loading={rerunningAi}
+                      onClick={handleRerunAiClassify}
+                    >
+                      Chạy lại AI
+                    </Button>
+                  ) : null}
+                </div>
+
+                {detail.ai_summary ? (
+                  <p className="text-xs text-slate-800 bg-white/90 border border-amber-200/80 rounded-lg px-3 py-2 leading-relaxed">
+                    <strong>Tóm tắt AI:</strong> {detail.ai_summary}
+                  </p>
+                ) : null}
+
+                {detail.ai_suggested_category ||
+                detail.ai_suggested_priority ||
+                detail.ai_suggested_assignee_name ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                    <div className="rounded-lg bg-white border border-amber-200/80 px-2.5 py-2">
+                      <p className="text-[11px] text-slate-500">Hạng mục đề xuất</p>
+                      <p className="font-semibold text-slate-900 mt-0.5">
+                        {SERVICE_REQUEST_CATEGORY[detail.ai_suggested_category] ||
+                          detail.ai_suggested_category ||
+                          '—'}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-amber-200/80 px-2.5 py-2">
+                      <p className="text-[11px] text-slate-500">Mức ưu tiên đề xuất</p>
+                      <div className="mt-0.5">
+                        {detail.ai_suggested_priority ? (
+                          <StatusBadge status={detail.ai_suggested_priority} domain="priority" />
+                        ) : (
+                          <span className="font-semibold text-slate-700">—</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-white border border-amber-200/80 px-2.5 py-2">
+                      <p className="text-[11px] text-slate-500">Nhân sự gợi ý</p>
+                      <p className="font-semibold text-slate-900 mt-0.5 break-words">
+                        {detail.ai_suggested_assignee_name || 'Chưa gợi ý cụ thể'}
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {detail.ai_triage_status === 'LOW_CONFIDENCE' ||
+                detail.ai_triage_status === 'FAILED' ? (
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>
+                      AI chưa đủ độ tin cậy hoặc tạm gián đoạn (AC-011.2) — hệ thống giữ nguyên phiếu và gắn cờ <strong>Cần phân loại thủ công</strong>. Vui lòng chọn hạng mục/mức ưu tiên bên dưới để điều phối.
+                    </span>
+                  </div>
+                ) : null}
+
+                {aiTriageError ? (
+                  <div className="p-2.5 rounded-lg bg-amber-100/70 border border-amber-300 text-xs text-amber-950 space-y-0.5">
+                    <p className="font-semibold">{aiTriageError.title}</p>
+                    <p>{aiTriageError.guidance}</p>
+                  </div>
+                ) : null}
+
+                {canHandleMaintenance && OPEN_STATUSES.includes(detail.status) ? (
+                  <div className="pt-2 border-t border-amber-200/70 space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
+                      <Select
+                        label="Hạng mục áp dụng / ghi đè"
+                        value={triageOverrideCategory}
+                        onChange={(e) => setTriageOverrideCategory(e.target.value)}
+                        options={CATEGORY_OPTIONS}
+                      />
+                      <div className="flex flex-wrap items-center gap-2">
+                        {detail.ai_suggested_category &&
+                        detail.ai_suggested_priority &&
+                        !['APPLIED', 'OVERRIDDEN'].includes(detail.ai_triage_status || '') ? (
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="sm"
+                            icon={CheckCircle2}
+                            loading={applyingTriage}
+                            onClick={handleApplyAiSuggestionExact}
+                          >
+                            Áp dụng đề xuất AI
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="soft"
+                          size="sm"
+                          loading={applyingTriage}
+                          onClick={handleApplyAiWithOverride}
+                        >
+                          Áp dụng theo lựa chọn đang chỉnh
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             {/* Hộp tiện ích Đồng bộ Nhóm Zalo Phòng (FR-069) */}
             <div className="p-3.5 rounded-xl bg-sky-50/70 border border-sky-200/90 space-y-2.5">

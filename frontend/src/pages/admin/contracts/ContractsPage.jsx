@@ -19,6 +19,7 @@ import {
   ShieldCheck,
   Search,
   Bookmark,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -36,6 +37,13 @@ import { SearchBar } from '../../../components/common/SearchBar';
 import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { ServiceSubscriptionMetaFields } from '../../../components/common/ServiceSubscriptionMetaFields';
 import { FileUpload } from '../../../components/ui/FileUpload';
+import { AISuggestionField } from '../../../components/ui/AISuggestionField';
+import { aiService } from '../../../services/ai.service';
+import {
+  createAiFieldTracker,
+  markFieldConfirmedOrEdited,
+  mapAiErrorToVietnamese,
+} from '../../../utils/aiHelpers';
 import {
   MAX_PARKING_QUANTITY,
   isParkingService,
@@ -255,6 +263,17 @@ export function ContractsPage() {
     fetchData();
   }, [fetchData]);
 
+  // AI-01: Quét hợp đồng giấy/PDF & CCCD khách thuê mới ngay trong modal tạo nháp
+  const [contractScanFiles, setContractScanFiles] = useState([]);
+  const [contractScanConsent, setContractScanConsent] = useState(true);
+  const [extractingContractAi, setExtractingContractAi] = useState(false);
+  const [contractAiTracker, setContractAiTracker] = useState(null);
+  const [contractAiError, setContractAiError] = useState(null);
+  const [inlineCccdConsent, setInlineCccdConsent] = useState(true);
+  const [extractingInlineCccd, setExtractingInlineCccd] = useState(false);
+  const [inlineCccdTracker, setInlineCccdTracker] = useState(null);
+  const [inlineCccdError, setInlineCccdError] = useState(null);
+
   // Load tòa nhà + căn hộ khi mở modal tạo HĐ nháp (KHÔNG tải danh sách cư dân công khai để bảo mật PII)
   const handleOpenCreate = useCallback(async (preselectAptId = '') => {
     const cleanAptId = typeof preselectAptId === 'string' ? preselectAptId : '';
@@ -291,6 +310,13 @@ export function ContractsPage() {
     setSelectedServices({});
     setCustomMeterPrices({ ELECTRICITY: '', WATER: '' });
     setCreateErrors({});
+    setContractScanFiles([]);
+    setContractScanConsent(true);
+    setContractAiTracker(null);
+    setContractAiError(null);
+    setInlineCccdConsent(true);
+    setInlineCccdTracker(null);
+    setInlineCccdError(null);
     setCreateOpen(true);
 
     setLoadingRefData(true);
@@ -831,6 +857,171 @@ export function ContractsPage() {
     );
   }, [activeBusyIntervals, createForm.start_date, createForm.end_date]);
 
+  const handleExtractContractAi = async () => {
+    const files = Array.isArray(contractScanFiles) ? contractScanFiles.filter(Boolean) : [];
+    if (files.length === 0) {
+      toast.warning('Vui lòng chọn ảnh hoặc tệp PDF hợp đồng trước khi trích xuất AI.');
+      return;
+    }
+    setExtractingContractAi(true);
+    setContractAiError(null);
+    try {
+      const res = await aiService.extractDocument({
+        document_type: 'CONTRACT',
+        building_id: effectiveModalBuildingId || selectedBuildingId || undefined,
+        files,
+        privacy_acknowledged: Boolean(contractScanConsent),
+      });
+      const data = res?.data || res;
+      const out = data?.output || {};
+      const aptCodeNorm = String(out.apartment_code || '').trim().toLowerCase();
+      const matchedApt = aptCodeNorm
+        ? selectableApartments.find(
+            (a) => String(a.code || '').trim().toLowerCase() === aptCodeNorm
+          )
+        : null;
+
+      if (out.start_date || out.end_date) {
+        userEditedCreateDatesRef.current = true;
+      }
+
+      const mapped = {
+        start_date: out.start_date ? String(out.start_date).slice(0, 10) : '',
+        end_date: out.end_date ? String(out.end_date).slice(0, 10) : '',
+        rent_amount:
+          out.rent_amount !== null && out.rent_amount !== undefined && Number(out.rent_amount) > 0
+            ? String(Math.round(Number(out.rent_amount)))
+            : '',
+        deposit_amount:
+          out.deposit_amount !== null && out.deposit_amount !== undefined && Number(out.deposit_amount) >= 0
+            ? String(Math.round(Number(out.deposit_amount)))
+            : '',
+        billing_day:
+          out.billing_day !== null && out.billing_day !== undefined
+            ? String(out.billing_day)
+            : '',
+        payment_due_days:
+          out.payment_due_days !== null && out.payment_due_days !== undefined
+            ? String(out.payment_due_days)
+            : '',
+        note: String(out.terms_note || out.note || '').trim(),
+      };
+
+      setCreateForm((prev) => ({
+        ...prev,
+        ...(matchedApt
+          ? {
+              building_id: matchedApt.building_id || prev.building_id,
+              apartment_id: matchedApt.id,
+            }
+          : {}),
+        ...(mapped.start_date ? { start_date: mapped.start_date } : {}),
+        ...(mapped.end_date ? { end_date: mapped.end_date } : {}),
+        ...(mapped.rent_amount ? { rent_amount: mapped.rent_amount } : {}),
+        ...(mapped.deposit_amount ? { deposit_amount: mapped.deposit_amount } : {}),
+        ...(mapped.billing_day ? { billing_day: mapped.billing_day } : {}),
+        ...(mapped.payment_due_days ? { payment_due_days: mapped.payment_due_days } : {}),
+        ...(mapped.note ? { note: mapped.note } : {}),
+      }));
+
+      const lookupKey = normalizePhone(out.tenant_phone || '') || String(out.tenant_id_number || '').trim();
+      if (lookupKey) {
+        setTenantMode('existing');
+        setTenantIdentifier(lookupKey);
+        const found = await handleLookupTenant(lookupKey);
+        if (!found) {
+          setTenantLookupState(null);
+          setTenantMode('new');
+          setNewTenantForm((prev) => ({
+            ...prev,
+            full_name: out.tenant_full_name ? String(out.tenant_full_name).trim() : prev.full_name,
+            phone: normalizePhone(out.tenant_phone || '') || prev.phone,
+            id_number: out.tenant_id_number ? String(out.tenant_id_number).trim() : prev.id_number,
+          }));
+        }
+      } else if (out.tenant_full_name) {
+        setTenantMode('new');
+        setNewTenantForm((prev) => ({
+          ...prev,
+          full_name: String(out.tenant_full_name).trim(),
+        }));
+      }
+
+      const baseConf = data?.confidence ?? null;
+      const confMap = {
+        start_date: out.field_confidences?.start_date ?? baseConf,
+        end_date: out.field_confidences?.end_date ?? baseConf,
+        rent_amount: out.field_confidences?.rent_amount ?? baseConf,
+        deposit_amount: out.field_confidences?.deposit_amount ?? baseConf,
+        billing_day: out.field_confidences?.billing_day ?? baseConf,
+        payment_due_days: out.field_confidences?.payment_due_days ?? baseConf,
+        note: out.field_confidences?.terms_note ?? baseConf,
+      };
+      setContractAiTracker(createAiFieldTracker(data?.suggestion_id, mapped, confMap));
+      toast.success('AI đã trích xuất nháp hợp đồng — vui lòng kiểm tra các ô viền nét đứt trước khi lưu.');
+    } catch (err) {
+      setContractAiError(mapAiErrorToVietnamese(err));
+    } finally {
+      setExtractingContractAi(false);
+    }
+  };
+
+  const handleExtractInlineCccdAi = async () => {
+    const files = [newTenantForm.id_image_front, newTenantForm.id_image_back].filter(Boolean);
+    if (files.length === 0) {
+      toast.warning('Vui lòng chọn ít nhất 1 ảnh CCCD trước khi trích xuất AI.');
+      return;
+    }
+    setExtractingInlineCccd(true);
+    setInlineCccdError(null);
+    try {
+      const res = await aiService.extractDocument({
+        document_type: 'CCCD',
+        building_id: effectiveModalBuildingId || selectedBuildingId || undefined,
+        files,
+        privacy_acknowledged: Boolean(inlineCccdConsent),
+      });
+      const data = res?.data || res;
+      const out = data?.output || {};
+      const mapped = {
+        full_name: out.full_name ? String(out.full_name).trim() : '',
+        id_number: out.id_number ? String(out.id_number).trim() : '',
+        dob: out.dob ? String(out.dob).slice(0, 10) : '',
+        address: out.permanent_address ? String(out.permanent_address).trim() : '',
+      };
+      setNewTenantForm((prev) => ({
+        ...prev,
+        ...(mapped.full_name ? { full_name: mapped.full_name } : {}),
+        ...(mapped.id_number ? { id_number: mapped.id_number } : {}),
+        ...(mapped.dob ? { dob: mapped.dob } : {}),
+        ...(mapped.address ? { address: mapped.address } : {}),
+      }));
+      const baseConf = data?.confidence ?? null;
+      setInlineCccdTracker(
+        createAiFieldTracker(data?.suggestion_id, mapped, {
+          full_name: out.field_confidences?.full_name ?? baseConf,
+          id_number: out.field_confidences?.id_number ?? baseConf,
+          dob: out.field_confidences?.dob ?? baseConf,
+          address: out.field_confidences?.permanent_address ?? baseConf,
+        })
+      );
+      toast.success('AI đã điền nháp thông tin CCCD cư dân mới.');
+    } catch (err) {
+      setInlineCccdError(mapAiErrorToVietnamese(err));
+    } finally {
+      setExtractingInlineCccd(false);
+    }
+  };
+
+  const dismissContractAiField = (fieldKey) => {
+    setContractAiTracker((prev) => {
+      if (!prev?.fields?.[fieldKey]) return prev;
+      const nextFields = { ...prev.fields };
+      delete nextFields[fieldKey];
+      return { ...prev, fields: nextFields };
+    });
+  };
+
   const handleCreateSubmit = async (e) => {
     e?.preventDefault();
 
@@ -980,6 +1171,7 @@ export function ContractsPage() {
                 ...(newTenantForm.password ? { password: newTenantForm.password } : {}),
                 ...(newTenantForm.id_image_front ? { id_image_front: newTenantForm.id_image_front } : {}),
                 ...(newTenantForm.id_image_back ? { id_image_back: newTenantForm.id_image_back } : {}),
+                ...(inlineCccdTracker?.suggestionId ? { ai_suggestion_id: inlineCccdTracker.suggestionId } : {}),
               },
             }),
         ...(activeOccupants.length > 0
@@ -1000,6 +1192,7 @@ export function ContractsPage() {
         billing_day: Math.min(31, Math.max(1, Math.round(Number(createForm.billing_day || 1)))),
         payment_due_days: Math.min(60, Math.max(1, Math.round(Number(createForm.payment_due_days || 5)))),
         note: createForm.note.trim(),
+        ...(contractAiTracker?.suggestionId ? { ai_suggestion_id: contractAiTracker.suggestionId } : {}),
       };
 
       const servicesPayload = checkedCatalogServices.map((svc) => {
@@ -1571,6 +1764,82 @@ export function ContractsPage() {
         }
       >
         <form onSubmit={handleCreateSubmit} className="space-y-4">
+          {canCreateContracts ? (
+            <div className="p-3.5 rounded-2xl border border-indigo-200/90 bg-indigo-50/45 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-indigo-950 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                    Quét hợp đồng giấy / PDF bằng AI (AI-01)
+                  </p>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    Tải lên ảnh chụp hoặc bản PDF hợp đồng (tối đa 3 tệp, ≤ 10MB/tệp) để AI điền nháp thông tin điều khoản.
+                  </p>
+                </div>
+                {contractAiTracker?.suggestionId ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    onClick={async () => {
+                      const sid = contractAiTracker.suggestionId;
+                      setContractAiTracker(null);
+                      try {
+                        await aiService.reviewSuggestion(sid, { decision: 'REJECT' });
+                      } catch {
+                        // Bỏ qua lỗi mạng khi hủy nháp
+                      }
+                    }}
+                  >
+                    Hủy nháp AI
+                  </Button>
+                ) : null}
+              </div>
+
+              <FileUpload
+                multiple
+                maxFiles={3}
+                maxSizeMB={10}
+                accept="image/jpeg,image/png,application/pdf"
+                value={contractScanFiles}
+                onChange={(arr) => setContractScanFiles(Array.isArray(arr) ? arr : [])}
+                hint="Hỗ trợ ảnh JPG/PNG hoặc tệp PDF hợp đồng (tối đa 3 tệp)"
+              />
+
+              {contractScanFiles.length > 0 ? (
+                <div className="space-y-2 pt-1 border-t border-indigo-200/60">
+                  <label className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(contractScanConsent)}
+                      onChange={(e) => setContractScanConsent(e.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span>
+                      Xác nhận đã thông báo và được đồng ý xử lý tài liệu hợp đồng qua AI (bấm &quot;Lưu hợp đồng nháp&quot; để chốt dữ liệu).
+                    </span>
+                  </label>
+                  <Button
+                    type="button"
+                    variant="soft"
+                    size="sm"
+                    icon={Sparkles}
+                    loading={extractingContractAi}
+                    onClick={handleExtractContractAi}
+                  >
+                    Trích xuất hợp đồng bằng AI
+                  </Button>
+                </div>
+              ) : null}
+
+              {contractAiError ? (
+                <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-0.5">
+                  <p className="font-semibold">{contractAiError.title}</p>
+                  <p className="text-amber-800">{contractAiError.guidance}</p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Select
               label="Tòa nhà"
@@ -1969,14 +2238,32 @@ export function ContractsPage() {
                 ) : null}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input
-                    label="Họ và tên khách thuê mới"
-                    required
-                    placeholder="VD: Nguyễn Văn Minh"
-                    value={newTenantForm.full_name}
-                    onChange={(e) => setNewTenantForm((p) => ({ ...p, full_name: e.target.value }))}
-                    error={createErrors.new_full_name}
-                  />
+                  <AISuggestionField
+                    active={Boolean(inlineCccdTracker?.fields?.full_name?.active)}
+                    confirmed={Boolean(inlineCccdTracker?.fields?.full_name?.confirmed)}
+                    edited={Boolean(inlineCccdTracker?.fields?.full_name?.edited)}
+                    confidence={inlineCccdTracker?.fields?.full_name?.confidence}
+                    onConfirm={() =>
+                      setInlineCccdTracker((prev) =>
+                        markFieldConfirmedOrEdited(prev, 'full_name', newTenantForm.full_name)
+                      )
+                    }
+                  >
+                    <Input
+                      label="Họ và tên khách thuê mới"
+                      required
+                      placeholder="VD: Nguyễn Văn Minh"
+                      value={newTenantForm.full_name}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setNewTenantForm((p) => ({ ...p, full_name: val }));
+                        setInlineCccdTracker((prev) =>
+                          markFieldConfirmedOrEdited(prev, 'full_name', val)
+                        );
+                      }}
+                      error={createErrors.new_full_name}
+                    />
+                  </AISuggestionField>
                   <Input
                     label="Số điện thoại (nhận mã OTP)"
                     required
@@ -1989,18 +2276,36 @@ export function ContractsPage() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <Input
-                    label="Số CCCD / Hộ chiếu"
-                    placeholder="12 chữ số CCCD (khuyến nghị nhập đủ)"
-                    hint={
-                      newTenantForm.id_number.trim()
-                        ? 'Có CCCD → Hồ sơ tự động đạt trạng thái APPROVED'
-                        : 'Nếu để trống → Lưu nháp được, cần bổ sung trước khi Kích hoạt'
+                  <AISuggestionField
+                    active={Boolean(inlineCccdTracker?.fields?.id_number?.active)}
+                    confirmed={Boolean(inlineCccdTracker?.fields?.id_number?.confirmed)}
+                    edited={Boolean(inlineCccdTracker?.fields?.id_number?.edited)}
+                    confidence={inlineCccdTracker?.fields?.id_number?.confidence}
+                    onConfirm={() =>
+                      setInlineCccdTracker((prev) =>
+                        markFieldConfirmedOrEdited(prev, 'id_number', newTenantForm.id_number)
+                      )
                     }
-                    value={newTenantForm.id_number}
-                    onChange={(e) => setNewTenantForm((p) => ({ ...p, id_number: e.target.value }))}
-                    error={createErrors.new_id_number}
-                  />
+                  >
+                    <Input
+                      label="Số CCCD / Hộ chiếu"
+                      placeholder="12 chữ số CCCD (khuyến nghị nhập đủ)"
+                      hint={
+                        newTenantForm.id_number.trim()
+                          ? 'Có CCCD → Hồ sơ tự động đạt trạng thái APPROVED'
+                          : 'Nếu để trống → Lưu nháp được, cần bổ sung trước khi Kích hoạt'
+                      }
+                      value={newTenantForm.id_number}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setNewTenantForm((p) => ({ ...p, id_number: val }));
+                        setInlineCccdTracker((prev) =>
+                          markFieldConfirmedOrEdited(prev, 'id_number', val)
+                        );
+                      }}
+                      error={createErrors.new_id_number}
+                    />
+                  </AISuggestionField>
                   <Input
                     label="Email (tùy chọn)"
                     type="email"
@@ -2065,6 +2370,32 @@ export function ContractsPage() {
                     hint="Ảnh JPG/PNG tối đa 5MB"
                   />
                 </div>
+                {canCreateContracts && (newTenantForm.id_image_front || newTenantForm.id_image_back) ? (
+                  <div className="p-3 rounded-xl bg-indigo-50/50 border border-indigo-200/80 space-y-2">
+                    <label className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(inlineCccdConsent)}
+                        onChange={(e) => setInlineCccdConsent(e.target.checked)}
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span>Xác nhận cư dân đồng ý xử lý ảnh CCCD bằng AI để điền nháp thông tin định danh.</span>
+                    </label>
+                    <Button
+                      type="button"
+                      variant="soft"
+                      size="xs"
+                      icon={Sparkles}
+                      loading={extractingInlineCccd}
+                      onClick={handleExtractInlineCccdAi}
+                    >
+                      Trích xuất CCCD bằng AI
+                    </Button>
+                    {inlineCccdError ? (
+                      <p className="text-xs text-amber-800">{inlineCccdError.title}: {inlineCccdError.guidance}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
@@ -2206,34 +2537,62 @@ export function ContractsPage() {
 
           <div className="space-y-2">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input
-                label="Ngày bắt đầu thuê"
-                type="date"
-                required
-                min={minContractStartDate}
-                value={createForm.start_date}
-                onChange={(e) => {
-                  userEditedCreateDatesRef.current = true;
-                  const val = e.target.value;
-                  setCreateForm((p) => ({ ...p, start_date: val }));
-                  setCreateErrors((prev) => ({ ...prev, start_date: undefined }));
-                }}
-                error={liveStartDateError || createErrors.start_date}
-              />
-              <Input
-                label="Ngày kết thúc thuê"
-                type="date"
-                required
-                min={createForm.start_date ? addDaysStr(createForm.start_date, 1) : undefined}
-                value={createForm.end_date}
-                onChange={(e) => {
-                  userEditedCreateDatesRef.current = true;
-                  const val = e.target.value;
-                  setCreateForm((p) => ({ ...p, end_date: val }));
-                  setCreateErrors((prev) => ({ ...prev, end_date: undefined }));
-                }}
-                error={liveEndDateError || createErrors.end_date}
-              />
+              <AISuggestionField
+                active={Boolean(contractAiTracker?.fields?.start_date?.active)}
+                confirmed={Boolean(contractAiTracker?.fields?.start_date?.confirmed)}
+                edited={Boolean(contractAiTracker?.fields?.start_date?.edited)}
+                confidence={contractAiTracker?.fields?.start_date?.confidence}
+                onConfirm={() =>
+                  setContractAiTracker((prev) =>
+                    markFieldConfirmedOrEdited(prev, 'start_date', createForm.start_date)
+                  )
+                }
+                onDismiss={() => dismissContractAiField('start_date')}
+              >
+                <Input
+                  label="Ngày bắt đầu thuê"
+                  type="date"
+                  required
+                  min={minContractStartDate}
+                  value={createForm.start_date}
+                  onChange={(e) => {
+                    userEditedCreateDatesRef.current = true;
+                    const val = e.target.value;
+                    setCreateForm((p) => ({ ...p, start_date: val }));
+                    setCreateErrors((prev) => ({ ...prev, start_date: undefined }));
+                    setContractAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'start_date', val));
+                  }}
+                  error={liveStartDateError || createErrors.start_date}
+                />
+              </AISuggestionField>
+              <AISuggestionField
+                active={Boolean(contractAiTracker?.fields?.end_date?.active)}
+                confirmed={Boolean(contractAiTracker?.fields?.end_date?.confirmed)}
+                edited={Boolean(contractAiTracker?.fields?.end_date?.edited)}
+                confidence={contractAiTracker?.fields?.end_date?.confidence}
+                onConfirm={() =>
+                  setContractAiTracker((prev) =>
+                    markFieldConfirmedOrEdited(prev, 'end_date', createForm.end_date)
+                  )
+                }
+                onDismiss={() => dismissContractAiField('end_date')}
+              >
+                <Input
+                  label="Ngày kết thúc thuê"
+                  type="date"
+                  required
+                  min={createForm.start_date ? addDaysStr(createForm.start_date, 1) : undefined}
+                  value={createForm.end_date}
+                  onChange={(e) => {
+                    userEditedCreateDatesRef.current = true;
+                    const val = e.target.value;
+                    setCreateForm((p) => ({ ...p, end_date: val }));
+                    setCreateErrors((prev) => ({ ...prev, end_date: undefined }));
+                    setContractAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'end_date', val));
+                  }}
+                  error={liveEndDateError || createErrors.end_date}
+                />
+              </AISuggestionField>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-[11px] text-slate-500 flex items-center gap-1">
@@ -2260,31 +2619,65 @@ export function ContractsPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <MoneyInput
-              label="Giá thuê hàng tháng (VND)"
-              required
-              placeholder="VD: 8.500.000"
-              hint={
-                selectedApartment
-                  ? `Giá niêm yết của căn ${selectedApartment.code}: ${formatMoney(selectedApartment.base_rent)}`
-                  : undefined
+            <AISuggestionField
+              active={Boolean(contractAiTracker?.fields?.rent_amount?.active)}
+              confirmed={Boolean(contractAiTracker?.fields?.rent_amount?.confirmed)}
+              edited={Boolean(contractAiTracker?.fields?.rent_amount?.edited)}
+              confidence={contractAiTracker?.fields?.rent_amount?.confidence}
+              onConfirm={() =>
+                setContractAiTracker((prev) =>
+                  markFieldConfirmedOrEdited(prev, 'rent_amount', createForm.rent_amount)
+                )
               }
-              value={createForm.rent_amount}
-              onChange={(e) => setCreateForm((p) => ({ ...p, rent_amount: e.target.value }))}
-              error={createErrors.rent_amount}
-            />
-            <MoneyInput
-              label="Tiền đặt cọc bảo đảm (VND)"
-              placeholder="VD: 8.500.000"
-              hint={
-                selectedReservation && Number(selectedReservation.hold_amount || 0) > 0
-                  ? `Phiếu giữ chỗ đang chọn đã thu ${formatMoney(selectedReservation.hold_amount)} — nên đặt tiền cọc >= mức này để cấn trừ đủ`
-                  : 'Mặc định gợi ý bằng 1 tháng tiền thuê'
+              onDismiss={() => dismissContractAiField('rent_amount')}
+            >
+              <MoneyInput
+                label="Giá thuê hàng tháng (VND)"
+                required
+                placeholder="VD: 8.500.000"
+                hint={
+                  selectedApartment
+                    ? `Giá niêm yết của căn ${selectedApartment.code}: ${formatMoney(selectedApartment.base_rent)}`
+                    : undefined
+                }
+                value={createForm.rent_amount}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, rent_amount: val }));
+                  setContractAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'rent_amount', val));
+                }}
+                error={createErrors.rent_amount}
+              />
+            </AISuggestionField>
+            <AISuggestionField
+              active={Boolean(contractAiTracker?.fields?.deposit_amount?.active)}
+              confirmed={Boolean(contractAiTracker?.fields?.deposit_amount?.confirmed)}
+              edited={Boolean(contractAiTracker?.fields?.deposit_amount?.edited)}
+              confidence={contractAiTracker?.fields?.deposit_amount?.confidence}
+              onConfirm={() =>
+                setContractAiTracker((prev) =>
+                  markFieldConfirmedOrEdited(prev, 'deposit_amount', createForm.deposit_amount)
+                )
               }
-              value={createForm.deposit_amount}
-              onChange={(e) => setCreateForm((p) => ({ ...p, deposit_amount: e.target.value }))}
-              error={createErrors.deposit_amount}
-            />
+              onDismiss={() => dismissContractAiField('deposit_amount')}
+            >
+              <MoneyInput
+                label="Tiền đặt cọc bảo đảm (VND)"
+                placeholder="VD: 8.500.000"
+                hint={
+                  selectedReservation && Number(selectedReservation.hold_amount || 0) > 0
+                    ? `Phiếu giữ chỗ đang chọn đã thu ${formatMoney(selectedReservation.hold_amount)} — nên đặt tiền cọc >= mức này để cấn trừ đủ`
+                    : 'Mặc định gợi ý bằng 1 tháng tiền thuê'
+                }
+                value={createForm.deposit_amount}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, deposit_amount: val }));
+                  setContractAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'deposit_amount', val));
+                }}
+                error={createErrors.deposit_amount}
+              />
+            </AISuggestionField>
           </div>
 
           {isDiscountedWarning ? (
@@ -2535,14 +2928,31 @@ export function ContractsPage() {
             </div>
           </div>
 
-          <Input
-            label="Ghi chú hợp đồng"
-            multiline
-            rows={2}
-            placeholder="Thỏa thuận thêm về nội thất bàn giao, điều kiện ưu đãi..."
-            value={createForm.note}
-            onChange={(e) => setCreateForm((p) => ({ ...p, note: e.target.value }))}
-          />
+          <AISuggestionField
+            active={Boolean(contractAiTracker?.fields?.note?.active)}
+            confirmed={Boolean(contractAiTracker?.fields?.note?.confirmed)}
+            edited={Boolean(contractAiTracker?.fields?.note?.edited)}
+            confidence={contractAiTracker?.fields?.note?.confidence}
+            onConfirm={() =>
+              setContractAiTracker((prev) =>
+                markFieldConfirmedOrEdited(prev, 'note', createForm.note)
+              )
+            }
+            onDismiss={() => dismissContractAiField('note')}
+          >
+            <Input
+              label="Ghi chú hợp đồng"
+              multiline
+              rows={2}
+              placeholder="Thỏa thuận thêm về nội thất bàn giao, điều kiện ưu đãi..."
+              value={createForm.note}
+              onChange={(e) => {
+                const val = e.target.value;
+                setCreateForm((p) => ({ ...p, note: val }));
+                setContractAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'note', val));
+              }}
+            />
+          </AISuggestionField>
         </form>
       </Modal>
 

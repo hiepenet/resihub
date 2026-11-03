@@ -10,6 +10,10 @@ export const serviceRequestsService = {
     api
       .patch(`/api/v1/service-requests/${id}/status`, payload, withIdempotency(options))
       .then((r) => r.data),
+  applyTriage: (id, payload, options = {}) =>
+    api
+      .post(`/api/v1/service-requests/${id}/apply-triage`, payload, withIdempotency(options))
+      .then((r) => r.data),
   rate: (id, payload, options = {}) =>
     api
       .post(`/api/v1/service-requests/${id}/rating`, payload, withIdempotency(options))

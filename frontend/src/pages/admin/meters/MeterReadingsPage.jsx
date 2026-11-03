@@ -9,6 +9,7 @@ import {
   Camera,
   CheckCircle2,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -19,18 +20,29 @@ import { Badge } from '../../../components/ui/Badge';
 import { Card } from '../../../components/ui/Card';
 import { Table, THead, TBody, TH, TD } from '../../../components/ui/Table';
 import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
+import { AISuggestionField } from '../../../components/ui/AISuggestionField';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { metersService } from '../../../services/meters.service';
 import { buildingsService } from '../../../services/buildings.service';
+import { aiService } from '../../../services/ai.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDateTime, getCurrentPeriod } from '../../../utils/format';
-import { evaluateClientMeterAnomaly, resolveBatchConfirmFeedback } from '../../../utils/billing';
+import {
+  compressImageFileToDataUri,
+  mapAiErrorToVietnamese,
+} from '../../../utils/aiHelpers';
+import {
+  evaluateClientMeterAnomaly,
+  resolveBatchConfirmFeedback,
+  resolveAnomalyThresholdPct,
+  computeMeterEstimatedAmount,
+} from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
 function getPreviousBaseline(row) {
@@ -53,14 +65,14 @@ function resolveRowBaselineAvg(row) {
   return null;
 }
 
-function evaluateRowMetrics(row, draftValue) {
+function evaluateRowMetrics(row, draftValue, thresholdPct = 30) {
   const prevReading = getPreviousBaseline(row);
   const baselineAvg = resolveRowBaselineAvg(row);
   const anomaly = evaluateClientMeterAnomaly({
     prevReading,
     currentReading: draftValue,
     baselineAvg,
-    thresholdPct: 30,
+    thresholdPct,
   });
 
   const hasDraft = anomaly.hasInput;
@@ -92,7 +104,7 @@ function evaluateRowMetrics(row, draftValue) {
   };
 }
 
-function renderReadingStatusBadge(status) {
+function renderReadingStatusBadge(status, thresholdPct = 30) {
   if (status === 'CONFIRMED') {
     return (
       <Badge variant="emerald" dot>
@@ -103,7 +115,7 @@ function renderReadingStatusBadge(status) {
   if (status === 'FLAGGED') {
     return (
       <Badge variant="red" dot>
-        Tạm giữ &gt;30% (FLAGGED)
+        Tạm giữ &gt;{thresholdPct}% (FLAGGED)
       </Badge>
     );
   }
@@ -131,8 +143,10 @@ export function MeterReadingsPage() {
   const [search, setSearch] = useState('');
 
   const [meters, setMeters] = useState([]);
+  const [anomalyThresholdPct, setAnomalyThresholdPct] = useState(30);
   const [drafts, setDrafts] = useState({});
   const [notes, setNotes] = useState({});
+  const [aiOcrByMeter, setAiOcrByMeter] = useState({});
   const [loading, setLoading] = useState(true);
   const [savingBatch, setSavingBatch] = useState(false);
   const [confirmingBatch, setConfirmingBatch] = useState(false);
@@ -174,6 +188,7 @@ export function MeterReadingsPage() {
       });
       const list = res.data || [];
       setMeters(list);
+      setAnomalyThresholdPct(resolveAnomalyThresholdPct(res.anomaly_threshold_pct));
 
       const initDrafts = {};
       const initNotes = {};
@@ -186,6 +201,7 @@ export function MeterReadingsPage() {
       }
       setDrafts(initDrafts);
       setNotes(initNotes);
+      setAiOcrByMeter({});
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách đồng hồ điện/nước.'));
     } finally {
@@ -203,7 +219,7 @@ export function MeterReadingsPage() {
   const enrichedRows = useMemo(() => {
     let mapped = meters.map((m) => ({
       ...m,
-      metrics: evaluateRowMetrics(m, drafts[m.id]),
+      metrics: evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct),
     }));
     if (statusFilter) {
       mapped = mapped.filter((r) => r.metrics.readingStatus === statusFilter);
@@ -212,14 +228,14 @@ export function MeterReadingsPage() {
       mapped = mapped.filter((r) => r.metrics.isAbnormal || Boolean(r.period_is_abnormal));
     }
     return mapped;
-  }, [meters, drafts, statusFilter, abnormalOnly]);
+  }, [meters, drafts, statusFilter, abnormalOnly, anomalyThresholdPct]);
 
   const dirtyValidRows = useMemo(() => {
     return meters.filter((m) => {
-      const meta = evaluateRowMetrics(m, drafts[m.id]);
+      const meta = evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct);
       return meta.isDirty && !meta.isInvalid;
     });
-  }, [meters, drafts]);
+  }, [meters, drafts, anomalyThresholdPct]);
 
   const unconfirmedRows = useMemo(() => {
     return meters.filter(
@@ -230,8 +246,8 @@ export function MeterReadingsPage() {
   }, [meters]);
 
   const hasInvalidDrafts = useMemo(() => {
-    return meters.some((m) => evaluateRowMetrics(m, drafts[m.id]).isInvalid);
-  }, [meters, drafts]);
+    return meters.some((m) => evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isInvalid);
+  }, [meters, drafts, anomalyThresholdPct]);
 
   const stats = useMemo(() => {
     const total = meters.length;
@@ -247,10 +263,100 @@ export function MeterReadingsPage() {
     ).length;
     const unrecorded = Math.max(0, total - confirmed - pendingConfirm);
     const abnormalCount = meters.filter(
-      (m) => evaluateRowMetrics(m, drafts[m.id]).isAbnormal || Boolean(m.period_is_abnormal)
+      (m) =>
+        evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isAbnormal ||
+        Boolean(m.period_is_abnormal)
     ).length;
     return { total, confirmed, pendingConfirm, unrecorded, abnormalCount };
-  }, [meters, drafts]);
+  }, [meters, drafts, anomalyThresholdPct]);
+
+  const handleMeterOcrScan = async (meter, rawFileOrDataUri, { intoSingleModal = false } = {}) => {
+    if (!canWriteMeters || !meter || !rawFileOrDataUri) return;
+    setAiOcrByMeter((prev) => ({
+      ...prev,
+      [meter.id]: {
+        ...(prev[meter.id] || {}),
+        loading: true,
+        errorBanner: null,
+      },
+    }));
+    try {
+      const imageBase64 = await compressImageFileToDataUri(rawFileOrDataUri);
+      if (intoSingleModal) {
+        setSingleForm((prev) => ({ ...prev, image: imageBase64 }));
+      }
+      const res = await aiService.ocrMeterReading({
+        meter_id: meter.id,
+        period,
+        image_base64: imageBase64,
+      });
+      const data = res?.data || res;
+      const out = data?.output || {};
+      const hasValidReading = out.reading !== null && out.reading !== undefined && Number.isFinite(Number(out.reading));
+
+      if (!hasValidReading) {
+        // AC-014.1: Ảnh mờ/lóa -> giữ nguyên ô nhập trống, yêu cầu nhập tay
+        setAiOcrByMeter((prev) => ({
+          ...prev,
+          [meter.id]: {
+            suggestionId: data?.suggestion_id || null,
+            reading: null,
+            confidence: data?.confidence ?? null,
+            warnings: Array.isArray(data?.warnings) ? data.warnings : [],
+            reason:
+              out.reason ||
+              'Ảnh chụp công tơ bị mờ/lóa hoặc độ tin cậy thấp — AI không tự điền số, vui lòng nhập tay.',
+            needsHumanReview: true,
+            confirmed: false,
+            edited: false,
+            imageBase64,
+            loading: false,
+            errorBanner: null,
+          },
+        }));
+        toast.warning(
+          out.reason ||
+            `Công tơ ${meter.meter_code}: AI không chắc chắn do ảnh mờ/lóa — vui lòng nhập chỉ số thủ công.`
+        );
+        return;
+      }
+
+      const valStr = String(Number(out.reading));
+      setDrafts((prev) => ({ ...prev, [meter.id]: valStr }));
+      if (intoSingleModal) {
+        setSingleForm((prev) => ({ ...prev, current_reading: valStr, image: imageBase64 }));
+      }
+      setAiOcrByMeter((prev) => ({
+        ...prev,
+        [meter.id]: {
+          suggestionId: data?.suggestion_id || null,
+          reading: Number(out.reading),
+          confidence: data?.confidence ?? null,
+          warnings: Array.isArray(data?.warnings) ? data.warnings : [],
+          reason: out.reason || '',
+          needsHumanReview: Boolean(data?.needs_human_review),
+          confirmed: false,
+          edited: false,
+          imageBase64,
+          loading: false,
+          errorBanner: null,
+        },
+      }));
+      toast.success(
+        `AI đề xuất chỉ số ${valStr} ${meter.unit} cho công tơ ${meter.meter_code} — vui lòng kiểm tra và lưu.`
+      );
+    } catch (err) {
+      const mappedErr = mapAiErrorToVietnamese(err);
+      setAiOcrByMeter((prev) => ({
+        ...prev,
+        [meter.id]: {
+          ...(prev[meter.id] || {}),
+          loading: false,
+          errorBanner: `${mappedErr.title}: ${mappedErr.guidance}`,
+        },
+      }));
+    }
+  };
 
   const handleSaveBatch = async (targetStatus = 'CONFIRMED') => {
     if (!canWriteMeters) return;
@@ -274,11 +380,20 @@ export function MeterReadingsPage() {
           status: targetStatus,
           current_reading: Number(drafts[m.id]),
           abnormal_note: notes[m.id]?.trim() || undefined,
+          ...(aiOcrByMeter[m.id]?.suggestionId
+            ? { ai_suggestion_id: aiOcrByMeter[m.id].suggestionId }
+            : {}),
+          ...(aiOcrByMeter[m.id]?.imageBase64
+            ? { image_base64: aiOcrByMeter[m.id].imageBase64 }
+            : {}),
         })),
       };
       const res = await metersService.recordBatch(payload);
       if (res.abnormal_count > 0) {
-        toast.warning(res.message || `Đã lưu với ${res.abnormal_count} cảnh báo bất thường (>30%).`);
+        toast.warning(
+          res.message ||
+            `Đã lưu với ${res.abnormal_count} cảnh báo bất thường (>${anomalyThresholdPct}%).`
+        );
       } else {
         toast.success(res.message || `Đã lưu thành công ${dirtyValidRows.length} chỉ số.`);
       }
@@ -318,7 +433,7 @@ export function MeterReadingsPage() {
     const noteText = (notes[row.id] ?? row.period_abnormal_note ?? '').trim();
     if ((row.period_is_abnormal || row.metrics?.isAbnormal) && !noteText) {
       toast.warning(
-        `Công tơ ${row.meter_code} có biến động >30%. Vui lòng nhập ghi chú giải trình trước khi xác nhận chốt.`
+        `Công tơ ${row.meter_code} có biến động >${anomalyThresholdPct}%. Vui lòng nhập ghi chú giải trình trước khi xác nhận chốt.`
       );
       return;
     }
@@ -375,10 +490,12 @@ export function MeterReadingsPage() {
       prevReading: prev,
       currentReading: val,
       baselineAvg: resolveRowBaselineAvg(selectedMeter),
-      thresholdPct: 30,
+      thresholdPct: anomalyThresholdPct,
     });
     if (targetStatus === 'CONFIRMED' && preview.isAbnormal && !singleForm.abnormal_note.trim()) {
-      toast.warning('Sản lượng biến động >30% so với trung bình 3 kỳ trước. Vui lòng nhập ghi chú giải trình để chốt.');
+      toast.warning(
+        `Sản lượng biến động >${anomalyThresholdPct}% so với trung bình 3 kỳ trước. Vui lòng nhập ghi chú giải trình để chốt.`
+      );
       return;
     }
 
@@ -389,6 +506,9 @@ export function MeterReadingsPage() {
         status: targetStatus,
         current_reading: val,
         abnormal_note: singleForm.abnormal_note.trim() || undefined,
+        ...(aiOcrByMeter[selectedMeter.id]?.suggestionId
+          ? { ai_suggestion_id: aiOcrByMeter[selectedMeter.id].suggestionId }
+          : {}),
       };
       if (singleForm.image && singleForm.image.startsWith('data:image/')) {
         payload.image_base64 = singleForm.image;
@@ -482,7 +602,7 @@ export function MeterReadingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Ghi & Xác nhận Chỉ số Điện / Nước"
-        subtitle="Ghi nháp, đối soát biến động >30% trên trung bình 3 kỳ gần nhất và xác nhận chốt chỉ số trước khi sinh hóa đơn."
+        subtitle={`Ghi nháp, đối soát biến động >${anomalyThresholdPct}% trên trung bình 3 kỳ gần nhất và xác nhận chốt chỉ số trước khi sinh hóa đơn.`}
         actions={
           <>
             <Button variant="outline" icon={RefreshCw} onClick={fetchMeters}>
@@ -551,7 +671,7 @@ export function MeterReadingsPage() {
           color="indigo"
         />
         <StatsCard
-          title="Cảnh báo bất thường (>30%)"
+          title={`Cảnh báo bất thường (>${anomalyThresholdPct}%)`}
           value={stats.abnormalCount}
           subtext="So với TB tối đa 3 kỳ CONFIRMED gần nhất"
           icon={AlertTriangle}
@@ -589,7 +709,7 @@ export function MeterReadingsPage() {
               { value: '', label: 'Tất cả trạng thái chốt' },
               { value: 'CONFIRMED', label: 'Đã chốt (CONFIRMED)' },
               { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
-              { value: 'FLAGGED', label: 'Tạm giữ >30% (FLAGGED)' },
+              { value: 'FLAGGED', label: `Tạm giữ >${anomalyThresholdPct}% (FLAGGED)` },
             ]}
           />
 
@@ -608,7 +728,7 @@ export function MeterReadingsPage() {
               onChange={(e) => setAbnormalOnly(e.target.checked)}
               className="w-4 h-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
             />
-            <span>Chỉ hiện bất thường (&gt;30%)</span>
+            <span>Chỉ hiện bất thường (&gt;{anomalyThresholdPct}%)</span>
           </label>
         </div>
       </Card>
@@ -625,7 +745,7 @@ export function MeterReadingsPage() {
             title="Không có đồng hồ nào khớp điều kiện lọc"
             description={
               abnormalOnly
-                ? 'Không có đồng hồ nào có biến động sản lượng bất thường (>30%) trong kỳ này.'
+                ? `Không có đồng hồ nào có biến động sản lượng bất thường (>${anomalyThresholdPct}%) trong kỳ này.`
                 : 'Hãy khởi tạo đồng hồ điện/nước cho căn hộ để bắt đầu ghi nhận chỉ số hàng kỳ.'
             }
             action={
@@ -662,10 +782,8 @@ export function MeterReadingsPage() {
                   ? 'bg-sky-50/40'
                   : '';
 
-                const estMoney =
-                  metrics.consumption !== null
-                    ? Math.round(metrics.consumption * Number(row.unit_price || 0))
-                    : null;
+                const estMoney = computeMeterEstimatedAmount(metrics.consumption, row);
+                const appliedPrice = row.effective_unit_price ?? row.unit_price;
 
                 const canQuickConfirm =
                   canWriteMeters &&
@@ -700,7 +818,16 @@ export function MeterReadingsPage() {
                         )}
                       </div>
                       <p className="text-xs text-slate-500 mt-1 whitespace-nowrap">
-                        {formatMoney(row.unit_price)} / {row.unit}
+                        {formatMoney(appliedPrice)} / {row.unit}
+                        {row.effective_price_source === 'CONTRACT_OVERRIDE' ? (
+                          <span className="ml-1 text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded">
+                            Giá HĐ
+                          </span>
+                        ) : row.effective_price_source === 'BUILDING_CATALOG' ? (
+                          <span className="ml-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">
+                            Giá tòa
+                          </span>
+                        ) : null}
                       </p>
                     </TD>
 
@@ -714,27 +841,88 @@ export function MeterReadingsPage() {
                     </TD>
 
                     <TD className="text-center">
-                      <input
-                        type="number"
-                        step="0.01"
-                        min={metrics.prevReading}
-                        disabled={!canWriteMeters}
-                        value={drafts[row.id] ?? ''}
-                        onChange={(e) =>
-                          setDrafts((prev) => ({ ...prev, [row.id]: e.target.value }))
+                      <AISuggestionField
+                        active={Boolean(
+                          canWriteMeters &&
+                            aiOcrByMeter[row.id] &&
+                            aiOcrByMeter[row.id].reading !== null &&
+                            aiOcrByMeter[row.id].reading !== undefined
+                        )}
+                        confirmed={Boolean(aiOcrByMeter[row.id]?.confirmed)}
+                        edited={Boolean(aiOcrByMeter[row.id]?.edited)}
+                        confidence={aiOcrByMeter[row.id]?.confidence}
+                        threshold={0.85}
+                        warningText={
+                          aiOcrByMeter[row.id]?.warnings?.length
+                            ? aiOcrByMeter[row.id].reason ||
+                              `Cảnh báo hậu kiểm AI: ${aiOcrByMeter[row.id].warnings.join(', ')}`
+                            : ''
                         }
-                        placeholder={`>= ${metrics.prevReading}`}
-                        className={`w-36 h-9 px-3 rounded-lg border font-mono tabular-nums text-sm font-semibold text-center focus:outline-none focus:ring-2 ${
-                          metrics.isInvalid
-                            ? 'border-rose-400 bg-rose-50 text-rose-800 focus:ring-rose-500/20'
-                            : metrics.isAbnormal
-                            ? 'border-amber-400 bg-white text-amber-900 focus:ring-amber-500/20'
-                            : 'border-slate-200 bg-white text-slate-900 focus:border-primary-500 focus:ring-primary-500/20'
-                        } disabled:bg-slate-50 disabled:text-slate-500`}
-                      />
+                        onConfirm={() =>
+                          setAiOcrByMeter((prev) => ({
+                            ...prev,
+                            [row.id]: {
+                              ...prev[row.id],
+                              confirmed: true,
+                              edited:
+                                Number(drafts[row.id]) !== Number(prev[row.id]?.reading),
+                            },
+                          }))
+                        }
+                        onDismiss={() =>
+                          setAiOcrByMeter((prev) => {
+                            const next = { ...prev };
+                            delete next[row.id];
+                            return next;
+                          })
+                        }
+                        className="inline-block text-left max-w-[240px]"
+                      >
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={metrics.prevReading}
+                          disabled={!canWriteMeters}
+                          value={drafts[row.id] ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setDrafts((prev) => ({ ...prev, [row.id]: val }));
+                            setAiOcrByMeter((prev) =>
+                              prev[row.id]?.reading !== null && prev[row.id]?.reading !== undefined
+                                ? {
+                                    ...prev,
+                                    [row.id]: {
+                                      ...prev[row.id],
+                                      confirmed: true,
+                                      edited: Number(val) !== Number(prev[row.id].reading),
+                                    },
+                                  }
+                                : prev
+                            );
+                          }}
+                          placeholder={`>= ${metrics.prevReading}`}
+                          className={`w-36 h-9 px-3 rounded-lg border font-mono tabular-nums text-sm font-semibold text-center focus:outline-none focus:ring-2 ${
+                            metrics.isInvalid
+                              ? 'border-rose-400 bg-rose-50 text-rose-800 focus:ring-rose-500/20'
+                              : metrics.isAbnormal
+                              ? 'border-amber-400 bg-white text-amber-900 focus:ring-amber-500/20'
+                              : 'border-slate-200 bg-white text-slate-900 focus:border-primary-500 focus:ring-primary-500/20'
+                          } disabled:bg-slate-50 disabled:text-slate-500`}
+                        />
+                      </AISuggestionField>
                       {metrics.isInvalid ? (
                         <p className="text-[11px] text-rose-600 font-medium mt-1 whitespace-nowrap">
                           Nhỏ hơn chỉ số cũ ({metrics.prevReading})
+                        </p>
+                      ) : null}
+                      {aiOcrByMeter[row.id]?.reading === null && aiOcrByMeter[row.id]?.reason ? (
+                        <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
+                          {aiOcrByMeter[row.id].reason}
+                        </p>
+                      ) : null}
+                      {aiOcrByMeter[row.id]?.errorBanner ? (
+                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
+                          {aiOcrByMeter[row.id].errorBanner}
                         </p>
                       ) : null}
                     </TD>
@@ -752,7 +940,7 @@ export function MeterReadingsPage() {
                           {metrics.diffPct !== null ? (
                             <p
                               className={`text-[11px] font-medium ${
-                                Math.abs(metrics.diffPct) > 30
+                                Math.abs(metrics.diffPct) > anomalyThresholdPct
                                   ? 'text-rose-600'
                                   : 'text-slate-400'
                               }`}
@@ -773,17 +961,21 @@ export function MeterReadingsPage() {
 
                     <TD className="text-center">
                       <div className="space-y-1 max-w-[220px] mx-auto">
-                        <div>{renderReadingStatusBadge(metrics.readingStatus)}</div>
+                        <div>
+                          {renderReadingStatusBadge(metrics.readingStatus, anomalyThresholdPct)}
+                        </div>
                         {metrics.isAbnormal ? (
                           <div>
                             <Badge
                               variant={
-                                metrics.diffPct !== null && Math.abs(metrics.diffPct) >= 60
+                                metrics.diffPct !== null &&
+                                Math.abs(metrics.diffPct) >= anomalyThresholdPct * 2
                                   ? 'red'
                                   : 'amber'
                               }
                             >
-                              <AlertTriangle className="w-3 h-3" /> Biến động &gt;30%
+                              <AlertTriangle className="w-3 h-3" /> Biến động &gt;
+                              {anomalyThresholdPct}%
                             </Badge>
                           </div>
                         ) : null}
@@ -807,6 +999,35 @@ export function MeterReadingsPage() {
 
                     <TD className="w-px whitespace-nowrap text-center">
                       <div className="inline-flex items-center gap-1.5">
+                        {canWriteMeters ? (
+                          <label
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                              aiOcrByMeter[row.id]?.loading
+                                ? 'bg-indigo-50 text-indigo-400 border-indigo-200 pointer-events-none'
+                                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
+                            }`}
+                            title="Chụp hoặc chọn ảnh mặt đồng hồ để AI đọc chỉ số nháp (AI-02)"
+                          >
+                            {aiOcrByMeter[row.id]?.loading ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-3.5 h-3.5" />
+                            )}
+                            <span>{aiOcrByMeter[row.id]?.loading ? 'Đang đọc...' : 'Ảnh AI'}</span>
+                            <input
+                              type="file"
+                              accept="image/jpeg,image/png,image/webp"
+                              capture="environment"
+                              className="hidden"
+                              disabled={Boolean(aiOcrByMeter[row.id]?.loading)}
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                e.target.value = '';
+                                if (f) handleMeterOcrScan(row, f);
+                              }}
+                            />
+                          </label>
+                        ) : null}
                         {canQuickConfirm ? (
                           <Button
                             size="xs"
@@ -906,17 +1127,78 @@ export function MeterReadingsPage() {
                     disabled
                     value={getPreviousBaseline(selectedMeter)}
                   />
-                  <Input
-                    label={`Chỉ số mới kỳ ${period} (${selectedMeter.unit})`}
-                    type="number"
-                    step="0.01"
-                    required
-                    value={singleForm.current_reading}
-                    onChange={(e) =>
-                      setSingleForm((s) => ({ ...s, current_reading: e.target.value }))
+                  <AISuggestionField
+                    active={Boolean(
+                      aiOcrByMeter[selectedMeter.id] &&
+                        aiOcrByMeter[selectedMeter.id].reading !== null &&
+                        aiOcrByMeter[selectedMeter.id].reading !== undefined
+                    )}
+                    confirmed={Boolean(aiOcrByMeter[selectedMeter.id]?.confirmed)}
+                    edited={Boolean(aiOcrByMeter[selectedMeter.id]?.edited)}
+                    confidence={aiOcrByMeter[selectedMeter.id]?.confidence}
+                    threshold={0.85}
+                    warningText={aiOcrByMeter[selectedMeter.id]?.reason || ''}
+                    onConfirm={() =>
+                      setAiOcrByMeter((prev) => ({
+                        ...prev,
+                        [selectedMeter.id]: {
+                          ...prev[selectedMeter.id],
+                          confirmed: true,
+                          edited:
+                            Number(singleForm.current_reading) !==
+                            Number(prev[selectedMeter.id]?.reading),
+                        },
+                      }))
                     }
-                  />
+                    onDismiss={() =>
+                      setAiOcrByMeter((prev) => {
+                        const next = { ...prev };
+                        delete next[selectedMeter.id];
+                        return next;
+                      })
+                    }
+                  >
+                    <Input
+                      label={`Chỉ số mới kỳ ${period} (${selectedMeter.unit})`}
+                      type="number"
+                      step="0.01"
+                      required
+                      value={singleForm.current_reading}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSingleForm((s) => ({ ...s, current_reading: val }));
+                        setAiOcrByMeter((prev) =>
+                          prev[selectedMeter.id]?.reading !== null &&
+                          prev[selectedMeter.id]?.reading !== undefined
+                            ? {
+                                ...prev,
+                                [selectedMeter.id]: {
+                                  ...prev[selectedMeter.id],
+                                  confirmed: true,
+                                  edited:
+                                    Number(val) !== Number(prev[selectedMeter.id].reading),
+                                },
+                              }
+                            : prev
+                        );
+                      }}
+                    />
+                  </AISuggestionField>
                 </div>
+
+                {aiOcrByMeter[selectedMeter.id]?.reading === null &&
+                aiOcrByMeter[selectedMeter.id]?.reason ? (
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>{aiOcrByMeter[selectedMeter.id].reason}</span>
+                  </div>
+                ) : null}
+
+                {aiOcrByMeter[selectedMeter.id]?.errorBanner ? (
+                  <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    {aiOcrByMeter[selectedMeter.id].errorBanner}
+                  </div>
+                ) : null}
 
                 <Input
                   label="Ghi chú kiểm tra / Giải trình bất thường"
@@ -927,12 +1209,30 @@ export function MeterReadingsPage() {
                   }
                 />
 
-                <FileUpload
-                  label="Ảnh chụp mặt đồng hồ đối chứng"
-                  multiple={false}
-                  value={singleForm.image}
-                  onChange={(img) => setSingleForm((s) => ({ ...s, image: img }))}
-                />
+                <div className="space-y-2">
+                  <FileUpload
+                    label="Ảnh chụp mặt đồng hồ đối chứng"
+                    multiple={false}
+                    value={singleForm.image}
+                    onChange={(img) => setSingleForm((s) => ({ ...s, image: img }))}
+                  />
+                  {singleForm.image && singleForm.image.startsWith('data:image/') ? (
+                    <Button
+                      type="button"
+                      variant="soft"
+                      size="sm"
+                      icon={Sparkles}
+                      loading={Boolean(aiOcrByMeter[selectedMeter.id]?.loading)}
+                      onClick={() =>
+                        handleMeterOcrScan(selectedMeter, singleForm.image, {
+                          intoSingleModal: true,
+                        })
+                      }
+                    >
+                      Đọc chỉ số từ ảnh bằng AI (AI-02)
+                    </Button>
+                  ) : null}
+                </div>
               </form>
             ) : selectedMeter.period_image_url ? (
               <div className="space-y-2">
@@ -1000,7 +1300,7 @@ export function MeterReadingsPage() {
                             ) : null}
                           </TD>
                           <TD className="text-center">
-                            {renderReadingStatusBadge(h.status || 'CONFIRMED')}
+                            {renderReadingStatusBadge(h.status || 'CONFIRMED', anomalyThresholdPct)}
                           </TD>
                           <TD className="text-center">
                             {h.image_url ? (

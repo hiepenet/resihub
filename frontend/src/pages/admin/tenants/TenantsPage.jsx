@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -25,16 +26,23 @@ import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card } from '../../../components/ui/Card';
 import { FileUpload } from '../../../components/ui/FileUpload';
+import { AISuggestionField } from '../../../components/ui/AISuggestionField';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { tenantsService } from '../../../services/tenants.service';
+import { aiService } from '../../../services/ai.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { toInputDate, maskIdNumber } from '../../../utils/format';
+import {
+  createAiFieldTracker,
+  markFieldConfirmedOrEdited,
+  mapAiErrorToVietnamese,
+} from '../../../utils/aiHelpers';
 import {
   isValidPhone,
   normalizePhone,
@@ -114,6 +122,10 @@ export function TenantsPage() {
   const [submittingCreate, setSubmittingCreate] = useState(false);
   const [dupChecking, setDupChecking] = useState(false);
   const [dupInfo, setDupInfo] = useState({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+  const [extractingCccd, setExtractingCccd] = useState(false);
+  const [cccdAiTracker, setCccdAiTracker] = useState(null);
+  const [cccdAiConsent, setCccdAiConsent] = useState(true);
+  const [cccdAiError, setCccdAiError] = useState(null);
 
   // Edit Modal state
   const [editOpen, setEditOpen] = useState(false);
@@ -284,7 +296,77 @@ export function TenantsPage() {
     setCreateIdImages({ front: '', back: '' });
     setCreateErrors({});
     setDupInfo({ isDuplicate: false, inScope: true, duplicates: [], message: '' });
+    setCccdAiTracker(null);
+    setCccdAiConsent(true);
+    setCccdAiError(null);
     setCreateOpen(true);
+  };
+
+  const handleExtractCreateCccd = async () => {
+    const files = [createIdImages.front, createIdImages.back].filter(Boolean);
+    if (files.length === 0) {
+      toast.warning('Vui lòng chọn ít nhất 1 ảnh CCCD/Hộ chiếu trước khi trích xuất AI.');
+      return;
+    }
+    setExtractingCccd(true);
+    setCccdAiError(null);
+    try {
+      const res = await aiService.extractDocument({
+        document_type: 'CCCD',
+        building_id: selectedBuildingId || undefined,
+        files,
+        privacy_acknowledged: Boolean(cccdAiConsent),
+      });
+      const data = res?.data || res;
+      const out = data?.output || {};
+      const mapped = {
+        full_name: out.full_name ? String(out.full_name).trim() : '',
+        id_number: out.id_number ? String(out.id_number).trim() : '',
+        dob: out.dob ? toInputDate(out.dob) : '',
+        address: out.permanent_address ? String(out.permanent_address).trim() : '',
+      };
+      setCreateForm((prev) => ({
+        ...prev,
+        full_name: mapped.full_name || prev.full_name,
+        id_number: mapped.id_number || prev.id_number,
+        dob: mapped.dob || prev.dob,
+        address: mapped.address || prev.address,
+      }));
+      const baseConf = data?.confidence ?? null;
+      const confMap = {
+        full_name: out.field_confidences?.full_name ?? baseConf,
+        id_number: out.field_confidences?.id_number ?? baseConf,
+        dob: out.field_confidences?.dob ?? baseConf,
+        address: out.field_confidences?.permanent_address ?? baseConf,
+      };
+      setCccdAiTracker(createAiFieldTracker(data?.suggestion_id, mapped, confMap));
+      toast.success('AI đã trích xuất thông tin từ CCCD — vui lòng kiểm tra trước khi lưu.');
+    } catch (err) {
+      setCccdAiError(mapAiErrorToVietnamese(err));
+    } finally {
+      setExtractingCccd(false);
+    }
+  };
+
+  const handleRejectCreateCccdAi = async () => {
+    const suggId = cccdAiTracker?.suggestionId;
+    setCccdAiTracker(null);
+    if (suggId) {
+      try {
+        await aiService.reviewSuggestion(suggId, { decision: 'REJECT' });
+      } catch {
+        // Bỏ qua lỗi mạng khi đóng nháp AI
+      }
+    }
+  };
+
+  const dismissCreateAiField = (fieldKey) => {
+    setCccdAiTracker((prev) => {
+      if (!prev?.fields?.[fieldKey]) return prev;
+      const nextFields = { ...prev.fields };
+      delete nextFields[fieldKey];
+      return { ...prev, fields: nextFields };
+    });
   };
 
   const handleCreateSubmit = async (e) => {
@@ -312,6 +394,7 @@ export function TenantsPage() {
         type: createForm.type === 'occupant' ? 'occupant' : 'primary',
         privacy_consent: Boolean(createForm.privacy_consent),
         ...(createForm.password ? { password: createForm.password } : {}),
+        ...(cccdAiTracker?.suggestionId ? { ai_suggestion_id: cccdAiTracker.suggestionId } : {}),
       };
       const res = await tenantsService.create(payload);
       const createdId = res?.data?.id;
@@ -844,15 +927,103 @@ export function TenantsPage() {
             </div>
           ) : null}
 
+          <div className="space-y-3 p-3.5 rounded-xl bg-indigo-50/45 border border-indigo-200/80">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                  Đính kèm & Trích xuất nhanh ảnh CCCD / Hộ chiếu (AI-01)
+                </p>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  Tải ảnh mặt trước/mặt sau rồi bấm trích xuất để AI điền sẵn nháp thông tin (người dùng kiểm tra & quyết định).
+                </p>
+              </div>
+              {cccdAiTracker?.suggestionId ? (
+                <Button variant="ghost" size="xs" onClick={handleRejectCreateCccdAi}>
+                  Hủy bản nháp AI
+                </Button>
+              ) : null}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-slate-700">Mặt trước CCCD</span>
+                <FileUpload
+                  value={createIdImages.front}
+                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, front: b64 || '' }))}
+                  hint="Chọn ảnh mặt trước (JPG/PNG ≤ 5MB)"
+                />
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-slate-700">Mặt sau CCCD</span>
+                <FileUpload
+                  value={createIdImages.back}
+                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, back: b64 || '' }))}
+                  hint="Chọn ảnh mặt sau (JPG/PNG ≤ 5MB)"
+                />
+              </div>
+            </div>
+
+            {canManageTenants && (createIdImages.front || createIdImages.back) ? (
+              <div className="pt-2 border-t border-indigo-200/60 space-y-2">
+                <label className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(cccdAiConsent)}
+                    onChange={(e) => setCccdAiConsent(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span>
+                    Tôi xác nhận cư dân đã đồng ý cho phép gửi ảnh giấy tờ định danh qua dịch vụ AI để trích xuất nháp (không lưu ảnh thô trong bảng AI).
+                  </span>
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="soft"
+                    size="sm"
+                    icon={Sparkles}
+                    loading={extractingCccd}
+                    onClick={handleExtractCreateCccd}
+                  >
+                    Trích xuất từ ảnh CCCD (AI)
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {cccdAiError ? (
+              <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-0.5">
+                <p className="font-semibold">{cccdAiError.title}</p>
+                <p className="text-amber-800">{cccdAiError.guidance}</p>
+              </div>
+            ) : null}
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Input
-              label="Họ và tên"
-              required
-              placeholder="VD: Nguyễn Văn Minh"
-              value={createForm.full_name}
-              onChange={(e) => setCreateForm((p) => ({ ...p, full_name: e.target.value }))}
-              error={createErrors.full_name}
-            />
+            <AISuggestionField
+              active={Boolean(cccdAiTracker?.fields?.full_name?.active)}
+              confirmed={Boolean(cccdAiTracker?.fields?.full_name?.confirmed)}
+              edited={Boolean(cccdAiTracker?.fields?.full_name?.edited)}
+              confidence={cccdAiTracker?.fields?.full_name?.confidence}
+              onConfirm={() =>
+                setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'full_name', createForm.full_name))
+              }
+              onDismiss={() => dismissCreateAiField('full_name')}
+            >
+              <Input
+                label="Họ và tên"
+                required
+                placeholder="VD: Nguyễn Văn Minh"
+                value={createForm.full_name}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, full_name: val }));
+                  setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'full_name', val));
+                }}
+                error={createErrors.full_name}
+              />
+            </AISuggestionField>
             <Input
               label="Số điện thoại"
               required
@@ -862,15 +1033,30 @@ export function TenantsPage() {
               onChange={(e) => setCreateForm((p) => ({ ...p, phone: e.target.value }))}
               error={createErrors.phone}
             />
-            <Input
-              label="Số CCCD / Hộ chiếu"
-              icon={CreditCard}
-              placeholder="12 số CCCD hoặc mã Hộ chiếu"
-              hint="Nếu để trống, hồ sơ sẽ ở trạng thái PENDING chờ bổ sung trước khi kích hoạt HĐ"
-              value={createForm.id_number}
-              onChange={(e) => setCreateForm((p) => ({ ...p, id_number: e.target.value }))}
-              error={createErrors.id_number}
-            />
+            <AISuggestionField
+              active={Boolean(cccdAiTracker?.fields?.id_number?.active)}
+              confirmed={Boolean(cccdAiTracker?.fields?.id_number?.confirmed)}
+              edited={Boolean(cccdAiTracker?.fields?.id_number?.edited)}
+              confidence={cccdAiTracker?.fields?.id_number?.confidence}
+              onConfirm={() =>
+                setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'id_number', createForm.id_number))
+              }
+              onDismiss={() => dismissCreateAiField('id_number')}
+            >
+              <Input
+                label="Số CCCD / Hộ chiếu"
+                icon={CreditCard}
+                placeholder="12 số CCCD hoặc mã Hộ chiếu"
+                hint="Nếu để trống, hồ sơ sẽ ở trạng thái PENDING chờ bổ sung trước khi kích hoạt HĐ"
+                value={createForm.id_number}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, id_number: val }));
+                  setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'id_number', val));
+                }}
+                error={createErrors.id_number}
+              />
+            </AISuggestionField>
             <Input
               label="Email liên hệ"
               type="email"
@@ -880,12 +1066,27 @@ export function TenantsPage() {
               onChange={(e) => setCreateForm((p) => ({ ...p, email: e.target.value }))}
               error={createErrors.email}
             />
-            <Input
-              label="Ngày sinh"
-              type="date"
-              value={createForm.dob}
-              onChange={(e) => setCreateForm((p) => ({ ...p, dob: e.target.value }))}
-            />
+            <AISuggestionField
+              active={Boolean(cccdAiTracker?.fields?.dob?.active)}
+              confirmed={Boolean(cccdAiTracker?.fields?.dob?.confirmed)}
+              edited={Boolean(cccdAiTracker?.fields?.dob?.edited)}
+              confidence={cccdAiTracker?.fields?.dob?.confidence}
+              onConfirm={() =>
+                setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'dob', createForm.dob))
+              }
+              onDismiss={() => dismissCreateAiField('dob')}
+            >
+              <Input
+                label="Ngày sinh"
+                type="date"
+                value={createForm.dob}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCreateForm((p) => ({ ...p, dob: val }));
+                  setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'dob', val));
+                }}
+              />
+            </AISuggestionField>
             <Input
               label="Quốc tịch"
               icon={Globe}
@@ -910,38 +1111,29 @@ export function TenantsPage() {
             />
           </div>
 
-          <Input
-            label="Địa chỉ thường trú / Quê quán"
-            multiline
-            rows={2}
-            placeholder="Số nhà, đường, phường/xã, tỉnh/thành phố..."
-            value={createForm.address}
-            onChange={(e) => setCreateForm((p) => ({ ...p, address: e.target.value }))}
-          />
-
-          <div className="space-y-2.5 pt-2 border-t border-slate-100">
-            <p className="text-xs font-semibold text-slate-800">
-              Đính kèm ảnh CCCD / Hộ chiếu (Tùy chọn ngay khi tạo hồ sơ)
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-slate-600">Mặt trước CCCD</span>
-                <FileUpload
-                  value={createIdImages.front}
-                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, front: b64 || '' }))}
-                  hint="Chọn ảnh mặt trước (JPG/PNG ≤ 5MB)"
-                />
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-slate-600">Mặt sau CCCD</span>
-                <FileUpload
-                  value={createIdImages.back}
-                  onChange={(b64) => setCreateIdImages((prev) => ({ ...prev, back: b64 || '' }))}
-                  hint="Chọn ảnh mặt sau (JPG/PNG ≤ 5MB)"
-                />
-              </div>
-            </div>
-          </div>
+          <AISuggestionField
+            active={Boolean(cccdAiTracker?.fields?.address?.active)}
+            confirmed={Boolean(cccdAiTracker?.fields?.address?.confirmed)}
+            edited={Boolean(cccdAiTracker?.fields?.address?.edited)}
+            confidence={cccdAiTracker?.fields?.address?.confidence}
+            onConfirm={() =>
+              setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'address', createForm.address))
+            }
+            onDismiss={() => dismissCreateAiField('address')}
+          >
+            <Input
+              label="Địa chỉ thường trú / Quê quán"
+              multiline
+              rows={2}
+              placeholder="Số nhà, đường, phường/xã, tỉnh/thành phố..."
+              value={createForm.address}
+              onChange={(e) => {
+                const val = e.target.value;
+                setCreateForm((p) => ({ ...p, address: val }));
+                setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'address', val));
+              }}
+            />
+          </AISuggestionField>
 
           <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200/80 cursor-pointer text-xs text-slate-700 leading-relaxed">
             <input

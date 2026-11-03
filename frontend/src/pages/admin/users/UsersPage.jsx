@@ -39,6 +39,8 @@ import { useAuthStore } from '../../../stores/authStore';
 import { ROLES, ROLE_LABELS, ROLE_BADGE_VARIANTS } from '../../../constants/roles';
 import { formatDateTime } from '../../../utils/format';
 import { extractErrorMessage, isValidEmail, isValidPhone } from '../../../utils/validation';
+import { DEFAULT_AI_CONFIG, mergeAiConfigState } from '../../../utils/aiHelpers';
+import { AiGatewayConfigCard } from '../../../components/settings/AiGatewayConfigCard';
 
 const ALL_ROLE_OPTIONS = [
   ROLES.SYS_ADMIN,
@@ -116,6 +118,8 @@ export function UsersPage() {
   const [slaConfig, setSlaConfig] = useState(DEFAULT_SLA_CONFIG);
   const [contactConfig, setContactConfig] = useState(DEFAULT_CONTACT_CONFIG);
   const [approvalConfig, setApprovalConfig] = useState({ allow_self_approval: false });
+  const [aiConfig, setAiConfig] = useState(DEFAULT_AI_CONFIG);
+  const [aiKeyConfigured, setAiKeyConfigured] = useState(false);
 
   const fetchUsersData = useCallback(async () => {
     setLoadingUsers(true);
@@ -173,6 +177,10 @@ export function UsersPage() {
           allow_self_approval: Boolean(data.approval_config.allow_self_approval),
         });
       }
+      if (data.ai_config) {
+        setAiConfig(mergeAiConfigState(data.ai_config));
+      }
+      setAiKeyConfigured(Boolean(res?.ai_runtime?.api_key_configured));
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải cấu hình hệ thống.'));
     } finally {
@@ -389,6 +397,14 @@ export function UsersPage() {
         },
         approval_config: {
           allow_self_approval: Boolean(approvalConfig.allow_self_approval),
+        },
+        ai_config: {
+          ...aiConfig,
+          monthly_budget_vnd: Math.max(0, Math.round(Number(aiConfig.monthly_budget_vnd) || 0)),
+          monthly_token_limit: Math.max(10000, Math.round(Number(aiConfig.monthly_token_limit) || 5000000)),
+          ocr_threshold: Number(aiConfig.ocr_threshold) || 0.85,
+          extract_threshold: Number(aiConfig.extract_threshold) || 0.75,
+          triage_threshold: Number(aiConfig.triage_threshold) || 0.65,
         },
       });
       toast.success(res.message || 'Đã lưu cấu hình hệ thống thành công.');
@@ -635,6 +651,13 @@ export function UsersPage() {
           </div>
         ) : (
           <form onSubmit={handleSaveSettings} className="space-y-6">
+            <AiGatewayConfigCard
+              aiConfig={aiConfig}
+              onChange={setAiConfig}
+              apiKeyConfigured={aiKeyConfigured}
+              canEdit={canManageUsers}
+            />
+
             {/* Quy tắc Phê duyệt Nội bộ (Four-eyes) — R-23 */}
             <Card className="space-y-4">
               <CardHeader

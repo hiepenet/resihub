@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   AlertTriangle,
   Building2,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -29,6 +30,7 @@ import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Tabs } from '../../../components/ui/Tabs';
 import { FileUpload, AuthImage } from '../../../components/ui/FileUpload';
+import { AISuggestionField } from '../../../components/ui/AISuggestionField';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
@@ -36,9 +38,15 @@ import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { tenantsService } from '../../../services/tenants.service';
+import { aiService } from '../../../services/ai.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
+import {
+  createAiFieldTracker,
+  markFieldConfirmedOrEdited,
+  mapAiErrorToVietnamese,
+} from '../../../utils/aiHelpers';
 import {
   isValidPhone,
   normalizePhone,
@@ -94,6 +102,11 @@ export function TenantDetailPage() {
   const [uploadingSide, setUploadingSide] = useState(null);
   const [previewSrc, setPreviewSrc] = useState(null);
   const [previewTitle, setPreviewTitle] = useState('');
+  const [aiScanFiles, setAiScanFiles] = useState([]);
+  const [aiScanConsent, setAiScanConsent] = useState(true);
+  const [extractingCccd, setExtractingCccd] = useState(false);
+  const [cccdAiTracker, setCccdAiTracker] = useState(null);
+  const [cccdAiError, setCccdAiError] = useState(null);
 
   // Approve / Reject pending tenant profile
   const [approvalDialog, setApprovalDialog] = useState({ open: false, action: 'approve', reason: '', error: '' });
@@ -201,9 +214,11 @@ export function TenantDetailPage() {
         dob: form.dob || null,
         nationality: form.nationality.trim() || 'Việt Nam',
         address: form.address.trim() || null,
+        ...(cccdAiTracker?.suggestionId ? { ai_suggestion_id: cccdAiTracker.suggestionId } : {}),
       };
       const res = await tenantsService.update(id, payload);
       toast.success(res?.message || 'Cập nhật thông tin cá nhân thành công.');
+      setCccdAiTracker(null);
       setIsEditing(false);
       await loadData();
     } catch (err) {
@@ -213,8 +228,76 @@ export function TenantDetailPage() {
     }
   };
 
+  const handleExtractDetailCccd = async () => {
+    const files = Array.isArray(aiScanFiles) ? aiScanFiles.filter(Boolean) : [];
+    if (files.length === 0) {
+      toast.warning('Vui lòng chọn hoặc tải lên ít nhất 1 ảnh CCCD để AI trích xuất.');
+      return;
+    }
+    setExtractingCccd(true);
+    setCccdAiError(null);
+    try {
+      const res = await aiService.extractDocument({
+        document_type: 'CCCD',
+        building_id: activeContract?.building_id || tenant?.desired_building_id || undefined,
+        files,
+        privacy_acknowledged: Boolean(aiScanConsent),
+      });
+      const data = res?.data || res;
+      const out = data?.output || {};
+      const sharedLocked = Boolean(tenant?.is_shared_profile && !isSysAdmin);
+
+      const nextMapped = {};
+      if (out.full_name && !(sharedLocked && tenant?.full_name)) {
+        nextMapped.full_name = String(out.full_name).trim();
+      }
+      if (out.id_number && !(sharedLocked && tenant?.id_number)) {
+        nextMapped.id_number = String(out.id_number).trim();
+      }
+      if (out.dob && !(sharedLocked && tenant?.dob)) {
+        nextMapped.dob = toInputDate(out.dob);
+      }
+      if (out.permanent_address) {
+        nextMapped.address = String(out.permanent_address).trim();
+      }
+
+      setForm((prev) => ({
+        ...prev,
+        ...(nextMapped.full_name ? { full_name: nextMapped.full_name } : {}),
+        ...(nextMapped.id_number ? { id_number: nextMapped.id_number } : {}),
+        ...(nextMapped.dob ? { dob: nextMapped.dob } : {}),
+        ...(nextMapped.address ? { address: nextMapped.address } : {}),
+      }));
+
+      const baseConf = data?.confidence ?? null;
+      const confMap = {
+        full_name: out.field_confidences?.full_name ?? baseConf,
+        id_number: out.field_confidences?.id_number ?? baseConf,
+        dob: out.field_confidences?.dob ?? baseConf,
+        address: out.field_confidences?.permanent_address ?? baseConf,
+      };
+      setCccdAiTracker(createAiFieldTracker(data?.suggestion_id, nextMapped, confMap));
+      setIsEditing(true);
+      toast.success('AI đã điền nháp thông tin từ CCCD — vui lòng kiểm tra và bấm "Lưu thông tin".');
+    } catch (err) {
+      setCccdAiError(mapAiErrorToVietnamese(err));
+    } finally {
+      setExtractingCccd(false);
+    }
+  };
+
+  const dismissDetailAiField = (fieldKey) => {
+    setCccdAiTracker((prev) => {
+      if (!prev?.fields?.[fieldKey]) return prev;
+      const nextFields = { ...prev.fields };
+      delete nextFields[fieldKey];
+      return { ...prev, fields: nextFields };
+    });
+  };
+
   const handleUploadIdCard = async (side, base64Value) => {
     if (!base64Value) return;
+    setAiScanFiles((prev) => [base64Value, ...prev.filter((item) => item !== base64Value)].slice(0, 2));
     setUploadingSide(side);
     try {
       const res = await tenantsService.uploadIdImage(id, {
@@ -664,14 +747,29 @@ export function TenantDetailPage() {
                 </div>
               ) : null}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input
-                  label="Họ và tên"
-                  required
-                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.full_name)}
-                  value={form.full_name}
-                  onChange={(e) => setForm((p) => ({ ...p, full_name: e.target.value }))}
-                  error={errors.full_name}
-                />
+                <AISuggestionField
+                  active={Boolean(isEditing && cccdAiTracker?.fields?.full_name?.active)}
+                  confirmed={Boolean(cccdAiTracker?.fields?.full_name?.confirmed)}
+                  edited={Boolean(cccdAiTracker?.fields?.full_name?.edited)}
+                  confidence={cccdAiTracker?.fields?.full_name?.confidence}
+                  onConfirm={() =>
+                    setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'full_name', form.full_name))
+                  }
+                  onDismiss={() => dismissDetailAiField('full_name')}
+                >
+                  <Input
+                    label="Họ và tên"
+                    required
+                    disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.full_name)}
+                    value={form.full_name}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setForm((p) => ({ ...p, full_name: val }));
+                      setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'full_name', val));
+                    }}
+                    error={errors.full_name}
+                  />
+                </AISuggestionField>
                 <Input
                   label="Số điện thoại"
                   required
@@ -681,15 +779,30 @@ export function TenantDetailPage() {
                   onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))}
                   error={errors.phone}
                 />
-                <Input
-                  label="Số CCCD / Hộ chiếu"
-                  icon={CreditCard}
-                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.id_number)}
-                  value={form.id_number}
-                  onChange={(e) => setForm((p) => ({ ...p, id_number: e.target.value }))}
-                  error={errors.id_number}
-                  placeholder="Nhập 12 số CCCD hoặc Hộ chiếu"
-                />
+                <AISuggestionField
+                  active={Boolean(isEditing && cccdAiTracker?.fields?.id_number?.active)}
+                  confirmed={Boolean(cccdAiTracker?.fields?.id_number?.confirmed)}
+                  edited={Boolean(cccdAiTracker?.fields?.id_number?.edited)}
+                  confidence={cccdAiTracker?.fields?.id_number?.confidence}
+                  onConfirm={() =>
+                    setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'id_number', form.id_number))
+                  }
+                  onDismiss={() => dismissDetailAiField('id_number')}
+                >
+                  <Input
+                    label="Số CCCD / Hộ chiếu"
+                    icon={CreditCard}
+                    disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.id_number)}
+                    value={form.id_number}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setForm((p) => ({ ...p, id_number: val }));
+                      setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'id_number', val));
+                    }}
+                    error={errors.id_number}
+                    placeholder="Nhập 12 số CCCD hoặc Hộ chiếu"
+                  />
+                </AISuggestionField>
                 <Input
                   label="Email"
                   type="email"
@@ -700,13 +813,28 @@ export function TenantDetailPage() {
                   error={errors.email}
                   placeholder="name@example.com"
                 />
-                <Input
-                  label="Ngày sinh"
-                  type="date"
-                  disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.dob)}
-                  value={form.dob}
-                  onChange={(e) => setForm((p) => ({ ...p, dob: e.target.value }))}
-                />
+                <AISuggestionField
+                  active={Boolean(isEditing && cccdAiTracker?.fields?.dob?.active)}
+                  confirmed={Boolean(cccdAiTracker?.fields?.dob?.confirmed)}
+                  edited={Boolean(cccdAiTracker?.fields?.dob?.edited)}
+                  confidence={cccdAiTracker?.fields?.dob?.confidence}
+                  onConfirm={() =>
+                    setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'dob', form.dob))
+                  }
+                  onDismiss={() => dismissDetailAiField('dob')}
+                >
+                  <Input
+                    label="Ngày sinh"
+                    type="date"
+                    disabled={!isEditing || Boolean(tenant.is_shared_profile && !isSysAdmin && tenant.dob)}
+                    value={form.dob}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setForm((p) => ({ ...p, dob: val }));
+                      setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'dob', val));
+                    }}
+                  />
+                </AISuggestionField>
                 <Input
                   label="Quốc tịch"
                   icon={Globe}
@@ -717,16 +845,31 @@ export function TenantDetailPage() {
                 />
               </div>
 
-              <Input
-                label="Địa chỉ thường trú"
-                multiline
-                rows={3}
-                icon={MapPin}
-                disabled={!isEditing}
-                value={form.address}
-                onChange={(e) => setForm((p) => ({ ...p, address: e.target.value }))}
-                placeholder="Số nhà, đường, phường/xã, quận/huyện, tỉnh/thành phố..."
-              />
+              <AISuggestionField
+                active={Boolean(isEditing && cccdAiTracker?.fields?.address?.active)}
+                confirmed={Boolean(cccdAiTracker?.fields?.address?.confirmed)}
+                edited={Boolean(cccdAiTracker?.fields?.address?.edited)}
+                confidence={cccdAiTracker?.fields?.address?.confidence}
+                onConfirm={() =>
+                  setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'address', form.address))
+                }
+                onDismiss={() => dismissDetailAiField('address')}
+              >
+                <Input
+                  label="Địa chỉ thường trú"
+                  multiline
+                  rows={3}
+                  icon={MapPin}
+                  disabled={!isEditing}
+                  value={form.address}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setForm((p) => ({ ...p, address: val }));
+                    setCccdAiTracker((prev) => markFieldConfirmedOrEdited(prev, 'address', val));
+                  }}
+                  placeholder="Số nhà, đường, phường/xã, quận/huyện, tỉnh/thành phố..."
+                />
+              </AISuggestionField>
             </form>
           </Card>
 
@@ -773,6 +916,72 @@ export function TenantDetailPage() {
 
             {!idImagesMeta.maskedForOwner ? (
             <div className="space-y-5">
+              {canManageTenants && tenant.status !== 'MERGED' ? (
+                <div className="p-3.5 rounded-xl bg-indigo-50/50 border border-indigo-200/80 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-indigo-950 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                      Quét nhanh CCCD bằng AI (AI-01)
+                    </span>
+                    {cccdAiTracker?.suggestionId ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const sid = cccdAiTracker.suggestionId;
+                          setCccdAiTracker(null);
+                          try {
+                            await aiService.reviewSuggestion(sid, { decision: 'REJECT' });
+                          } catch {
+                            // Bỏ qua lỗi mạng khi hủy nháp
+                          }
+                        }}
+                        className="text-[11px] font-medium text-rose-700 hover:underline"
+                      >
+                        Hủy nháp AI
+                      </button>
+                    ) : null}
+                  </div>
+                  <FileUpload
+                    multiple
+                    maxFiles={2}
+                    value={aiScanFiles}
+                    onChange={(arr) => setAiScanFiles(Array.isArray(arr) ? arr : [])}
+                    hint="Chọn ảnh CCCD để AI điền nháp vào biểu mẫu bên trái (tối đa 2 ảnh)"
+                  />
+                  {aiScanFiles.length > 0 ? (
+                    <div className="space-y-2 pt-1">
+                      <label className="flex items-start gap-2 text-[11px] text-slate-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(aiScanConsent)}
+                          onChange={(e) => setAiScanConsent(e.target.checked)}
+                          className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span>
+                          Xác nhận cư dân đã đồng ý xử lý ảnh giấy tờ bằng AI (bấm &quot;Lưu thông tin&quot; để chốt dữ liệu).
+                        </span>
+                      </label>
+                      <Button
+                        type="button"
+                        variant="soft"
+                        size="sm"
+                        icon={Sparkles}
+                        loading={extractingCccd}
+                        onClick={handleExtractDetailCccd}
+                      >
+                        Trích xuất sang biểu mẫu (AI)
+                      </Button>
+                    </div>
+                  ) : null}
+                  {cccdAiError ? (
+                    <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-0.5">
+                      <p className="font-semibold">{cccdAiError.title}</p>
+                      <p className="text-amber-800">{cccdAiError.guidance}</p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               {/* Mặt trước */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
