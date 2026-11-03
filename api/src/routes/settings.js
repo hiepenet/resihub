@@ -148,14 +148,7 @@ router.put('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) 
           : key === 'sla_config'
           ? normalizeSlaConfig(val, existingMap.sla_config)
           : key === 'ai_config'
-          ? normalizeAiConfig({
-              ...(existingMap.ai_config || {}),
-              ...val,
-              tasks: {
-                ...(existingMap.ai_config?.tasks || {}),
-                ...(val.tasks || {}),
-              },
-            })
+          ? normalizeAiConfig(val, existingMap.ai_config)
           : { ...(existingMap[key] || {}), ...val };
 
       await pool.query(

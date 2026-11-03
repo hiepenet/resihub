@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_AI_CONFIG,
+  mergeAiConfigState,
+  getAiTriageBadgeMeta,
+  canOneClickApplyAiTriage,
   formatConfidenceBadge,
   mapAiErrorToVietnamese,
   createAiFieldTracker,
@@ -95,5 +99,55 @@ test('Task 5.4: compressImageFileToDataUri passes PDF data URI / buffer through 
   };
   const dataUri = await compressImageFileToDataUri(fakePdfFile);
   assert.ok(dataUri.startsWith('data:application/pdf;base64,'));
+});
+
+test('Final Review Fix #1 & #2 & Important #2: AI triage enum helpers and DEFAULT_AI_CONFIG / mergeAiConfigState match backend schema', () => {
+  // Important #2: exact parity with migration 051 & backend DEFAULT_AI_CONFIG
+  assert.equal(DEFAULT_AI_CONFIG.monthly_budget_vnd, 500000);
+  assert.equal(DEFAULT_AI_CONFIG.monthly_token_limit, 2000000);
+  assert.equal(DEFAULT_AI_CONFIG.ocr_threshold, 0.8);
+  assert.equal(DEFAULT_AI_CONFIG.triage_threshold, 0.7);
+  assert.equal(DEFAULT_AI_CONFIG.extract_threshold, 0.75);
+
+  // Critical #2: mergeAiConfigState hydrates flat DB columns into UI state
+  const hydrated = mergeAiConfigState({
+    enabled: true,
+    cccd_extract_enabled: false,
+    contract_extract_enabled: true,
+    meter_ocr_enabled: false,
+    ticket_triage_enabled: true,
+    meter_ocr_threshold: 0.92,
+    confidence_threshold: 0.81,
+    triage_threshold: 0.73,
+  });
+  assert.equal(hydrated.tasks.cccd_extract, false);
+  assert.equal(hydrated.tasks.meter_ocr, false);
+  assert.equal(hydrated.ocr_threshold, 0.92);
+  assert.equal(hydrated.extract_threshold, 0.81);
+  assert.equal(hydrated.triage_threshold, 0.73);
+
+  // Critical #1: getAiTriageBadgeMeta & canOneClickApplyAiTriage recognize DB enums NEEDS_MANUAL_REVIEW and ACCEPTED
+  const manualMeta = getAiTriageBadgeMeta('NEEDS_MANUAL_REVIEW');
+  assert.equal(manualMeta?.variant, 'red');
+  assert.equal(manualMeta?.needsManualWarning, true);
+
+  const acceptedMeta = getAiTriageBadgeMeta('ACCEPTED');
+  assert.equal(acceptedMeta?.variant, 'emerald');
+  assert.equal(
+    canOneClickApplyAiTriage({
+      ai_suggested_category: 'PLUMBING',
+      ai_suggested_priority: 'HIGH',
+      ai_triage_status: 'ACCEPTED',
+    }),
+    false
+  );
+  assert.equal(
+    canOneClickApplyAiTriage({
+      ai_suggested_category: 'PLUMBING',
+      ai_suggested_priority: 'HIGH',
+      ai_triage_status: 'SUGGESTED',
+    }),
+    true
+  );
 });
 

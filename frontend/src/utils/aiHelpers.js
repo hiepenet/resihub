@@ -7,25 +7,86 @@ export const DEFAULT_AI_CONFIG = {
     meter_ocr: true,
     ticket_triage: true,
   },
-  ocr_threshold: 0.85,
-  triage_threshold: 0.65,
+  ocr_threshold: 0.8,
+  triage_threshold: 0.7,
   extract_threshold: 0.75,
-  monthly_token_limit: 5000000,
-  monthly_budget_vnd: 2000000,
+  monthly_token_limit: 2000000,
+  monthly_budget_vnd: 500000,
   warn_percent: 80,
   suggestion_ttl_hours: 72,
 };
 
 export function mergeAiConfigState(raw = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
+  const srcTasks = src.tasks && typeof src.tasks === 'object' ? src.tasks : {};
   return {
     ...DEFAULT_AI_CONFIG,
     ...src,
+    ocr_threshold:
+      src.ocr_threshold ?? src.meter_ocr_threshold ?? DEFAULT_AI_CONFIG.ocr_threshold,
+    extract_threshold:
+      src.extract_threshold ?? src.confidence_threshold ?? DEFAULT_AI_CONFIG.extract_threshold,
+    triage_threshold:
+      src.triage_threshold ?? DEFAULT_AI_CONFIG.triage_threshold,
     tasks: {
-      ...DEFAULT_AI_CONFIG.tasks,
-      ...(src.tasks && typeof src.tasks === 'object' ? src.tasks : {}),
+      cccd_extract:
+        srcTasks.cccd_extract ?? src.cccd_extract_enabled ?? DEFAULT_AI_CONFIG.tasks.cccd_extract,
+      contract_extract:
+        srcTasks.contract_extract ??
+        src.contract_extract_enabled ??
+        DEFAULT_AI_CONFIG.tasks.contract_extract,
+      meter_ocr:
+        srcTasks.meter_ocr ?? src.meter_ocr_enabled ?? DEFAULT_AI_CONFIG.tasks.meter_ocr,
+      ticket_triage:
+        srcTasks.ticket_triage ??
+        src.ticket_triage_enabled ??
+        DEFAULT_AI_CONFIG.tasks.ticket_triage,
     },
   };
+}
+
+export function getAiTriageBadgeMeta(triageStatus) {
+  switch (triageStatus) {
+    case 'SUGGESTED':
+      return {
+        variant: 'amber',
+        label: 'AI đề xuất',
+        sparkles: true,
+        needsManualWarning: false,
+      };
+    case 'NEEDS_MANUAL_REVIEW':
+    case 'LOW_CONFIDENCE':
+    case 'FAILED':
+      return {
+        variant: 'red',
+        label: 'Cần phân loại thủ công',
+        sparkles: false,
+        needsManualWarning: true,
+      };
+    case 'ACCEPTED':
+    case 'APPLIED':
+      return {
+        variant: 'emerald',
+        label: 'Đã duyệt gợi ý AI',
+        sparkles: false,
+        needsManualWarning: false,
+      };
+    case 'OVERRIDDEN':
+      return {
+        variant: 'indigo',
+        label: 'Đã điều chỉnh từ AI',
+        sparkles: false,
+        needsManualWarning: false,
+      };
+    default:
+      return null;
+  }
+}
+
+export function canOneClickApplyAiTriage(detail) {
+  if (!detail) return false;
+  if (!detail.ai_suggested_category || !detail.ai_suggested_priority) return false;
+  return !['ACCEPTED', 'APPLIED', 'OVERRIDDEN'].includes(detail.ai_triage_status || '');
 }
 
 export function formatConfidenceBadge(confidence, threshold = 0.75) {

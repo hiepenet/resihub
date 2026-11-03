@@ -72,11 +72,65 @@ function validationError(message) {
   });
 }
 
+function resolveTaskToggle(inc, ex, flatKey, taskKey, fallback) {
+  if (inc[flatKey] !== undefined) return inc[flatKey];
+  if (inc.tasks && typeof inc.tasks === 'object' && inc.tasks[taskKey] !== undefined) {
+    return inc.tasks[taskKey];
+  }
+  if (ex[flatKey] !== undefined) return ex[flatKey];
+  if (ex.tasks && typeof ex.tasks === 'object' && ex.tasks[taskKey] !== undefined) {
+    return ex.tasks[taskKey];
+  }
+  return fallback;
+}
+
 export function normalizeAiConfig(incoming = {}, existing = {}) {
+  const ex = existing && typeof existing === 'object' ? existing : {};
+  const inc = incoming && typeof incoming === 'object' ? incoming : {};
   const merged = {
     ...DEFAULT_AI_CONFIG,
-    ...(existing && typeof existing === 'object' ? existing : {}),
-    ...(incoming && typeof incoming === 'object' ? incoming : {}),
+    ...ex,
+    ...inc,
+    cccd_extract_enabled: resolveTaskToggle(
+      inc,
+      ex,
+      'cccd_extract_enabled',
+      'cccd_extract',
+      DEFAULT_AI_CONFIG.cccd_extract_enabled
+    ),
+    contract_extract_enabled: resolveTaskToggle(
+      inc,
+      ex,
+      'contract_extract_enabled',
+      'contract_extract',
+      DEFAULT_AI_CONFIG.contract_extract_enabled
+    ),
+    meter_ocr_enabled: resolveTaskToggle(
+      inc,
+      ex,
+      'meter_ocr_enabled',
+      'meter_ocr',
+      DEFAULT_AI_CONFIG.meter_ocr_enabled
+    ),
+    ticket_triage_enabled: resolveTaskToggle(
+      inc,
+      ex,
+      'ticket_triage_enabled',
+      'ticket_triage',
+      DEFAULT_AI_CONFIG.ticket_triage_enabled
+    ),
+    confidence_threshold:
+      inc.confidence_threshold ??
+      inc.extract_threshold ??
+      ex.confidence_threshold ??
+      ex.extract_threshold ??
+      DEFAULT_AI_CONFIG.confidence_threshold,
+    meter_ocr_threshold:
+      inc.meter_ocr_threshold ??
+      inc.ocr_threshold ??
+      ex.meter_ocr_threshold ??
+      ex.ocr_threshold ??
+      DEFAULT_AI_CONFIG.meter_ocr_threshold,
   };
 
   for (const boolKey of [
@@ -122,6 +176,15 @@ export function normalizeAiConfig(incoming = {}, existing = {}) {
     throw validationError('Thời hạn giữ nháp đề xuất (suggestion_ttl_hours) phải từ 1 đến 720 giờ.');
   }
   merged.suggestion_ttl_hours = ttlHours;
+
+  merged.ocr_threshold = merged.meter_ocr_threshold;
+  merged.extract_threshold = merged.confidence_threshold;
+  merged.tasks = {
+    cccd_extract: merged.cccd_extract_enabled,
+    contract_extract: merged.contract_extract_enabled,
+    meter_ocr: merged.meter_ocr_enabled,
+    ticket_triage: merged.ticket_triage_enabled,
+  };
 
   return merged;
 }
@@ -641,3 +704,4 @@ export function buildGeminiPromptAndSchema(taskType, context = {}) {
       throw validationError(`Không hỗ trợ loại tác vụ AI: ${taskType}`);
   }
 }
+

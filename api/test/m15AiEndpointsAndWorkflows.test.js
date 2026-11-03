@@ -955,4 +955,72 @@ test('M15 AI Gateway Endpoints, Human-Confirmation Hooks, Async Triage, RBAC & C
     false,
     'GET /api/v1/settings must never leak GEMINI_API_KEY'
   );
+
+  // =========================================================================
+  // 5. Final Review Fixes: RLS 0-row review guard, target_entity_id scope & UI tasks kill-switch
+  // =========================================================================
+  // Important #1: SYS_ADMIN can SELECT org-wide METER_OCR suggestion, but cannot UPDATE it -> must be 403, not silent 200
+  const sysReviewMeter = await apiFetch(
+    `/api/v1/ai/suggestions/${blurryOcrRes.body.data.suggestion_id}/review`,
+    sysAdmin.token,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision: 'REJECT' }),
+    }
+  );
+  assert.equal(sysReviewMeter.status, 403, 'SYS_ADMIN reviewing METER_OCR must fail with 403 ACCESS_DENIED');
+  assert.equal(sysReviewMeter.body.code, 'ACCESS_DENIED');
+
+  // Important #3: MANAGER of VOP-A cannot link a VOP-A suggestion to a VOP-B target_entity_id
+  const crossTargetReview = await apiFetch(
+    `/api/v1/ai/suggestions/${manualClassifyRes.body.data.suggestion_id}/review`,
+    managerA.token,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        decision: 'ACCEPT',
+        final_values: { category: 'ELECTRICAL', priority: 'NORMAL' },
+        target_entity_id: srBId,
+      }),
+    }
+  );
+  assert.equal(crossTargetReview.status, 403, 'Cross-building target_entity_id on suggestion review must return 403');
+  assert.equal(crossTargetReview.body.code, 'ACCESS_DENIED');
+
+  // Critical #2: Saving Frontend nested tasks.{meter_ocr: false} via PUT /api/v1/settings disables METER_OCR
+  const origAiCfgRow = settingsGet.body.data?.ai_config || {};
+  try {
+    const putUiCfg = await apiFetch('/api/v1/settings', sysAdmin.token, {
+      method: 'PUT',
+      body: JSON.stringify({
+        ai_config: {
+          enabled: true,
+          tasks: {
+            cccd_extract: true,
+            contract_extract: true,
+            meter_ocr: false,
+            ticket_triage: true,
+          },
+          ocr_threshold: 0.88,
+          extract_threshold: 0.78,
+        },
+      }),
+    });
+    assert.equal(putUiCfg.status, 200);
+
+    const disabledOcrRes = await apiFetch('/api/v1/ai/meter-ocr', managerA.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        meter_id: meterAId,
+        period: ocrPeriod,
+        image_base64: TINY_PNG_B64,
+      }),
+    });
+    assert.equal(disabledOcrRes.body.code, 'AI_TASK_DISABLED');
+  } finally {
+    await apiFetch('/api/v1/settings', sysAdmin.token, {
+      method: 'PUT',
+      body: JSON.stringify({ ai_config: origAiCfgRow }),
+    });
+  }
 });

@@ -54,6 +54,8 @@ import { extractErrorMessage } from '../../../utils/validation';
 import {
   formatConfidenceBadge,
   mapAiErrorToVietnamese,
+  getAiTriageBadgeMeta,
+  canOneClickApplyAiTriage,
 } from '../../../utils/aiHelpers';
 import {
   buildRoomMaintenanceZaloText,
@@ -156,23 +158,13 @@ const AUDIT_ACTION_LABELS = {
 };
 
 function renderAiTriageBadge(triageStatus) {
-  switch (triageStatus) {
-    case 'SUGGESTED':
-      return (
-        <Badge variant="amber">
-          <Sparkles className="w-3 h-3" /> AI đề xuất
-        </Badge>
-      );
-    case 'LOW_CONFIDENCE':
-    case 'FAILED':
-      return <Badge variant="red">Cần phân loại thủ công</Badge>;
-    case 'APPLIED':
-      return <Badge variant="emerald">Đã duyệt gợi ý AI</Badge>;
-    case 'OVERRIDDEN':
-      return <Badge variant="indigo">Đã điều chỉnh từ AI</Badge>;
-    default:
-      return null;
-  }
+  const meta = getAiTriageBadgeMeta(triageStatus);
+  if (!meta) return null;
+  return (
+    <Badge variant={meta.variant}>
+      {meta.sparkles ? <Sparkles className="w-3 h-3" /> : null} {meta.label}
+    </Badge>
+  );
 }
 
 function toLocalDateTimeInputValue(isoValue) {
@@ -1216,8 +1208,7 @@ export function ServiceRequestsPage() {
                   </div>
                 ) : null}
 
-                {detail.ai_triage_status === 'LOW_CONFIDENCE' ||
-                detail.ai_triage_status === 'FAILED' ? (
+                {getAiTriageBadgeMeta(detail.ai_triage_status)?.needsManualWarning ? (
                   <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <span>
@@ -1243,9 +1234,7 @@ export function ServiceRequestsPage() {
                         options={CATEGORY_OPTIONS}
                       />
                       <div className="flex flex-wrap items-center gap-2">
-                        {detail.ai_suggested_category &&
-                        detail.ai_suggested_priority &&
-                        !['APPLIED', 'OVERRIDDEN'].includes(detail.ai_triage_status || '') ? (
+                        {canOneClickApplyAiTriage(detail) ? (
                           <Button
                             type="button"
                             variant="primary"

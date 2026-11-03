@@ -310,6 +310,14 @@ router.post(
       });
     } catch (err) {
       if (inTx) await client.query('ROLLBACK').catch(() => {});
+      if ((err.status || err.httpStatus) === 403 && err.code === 'ACCESS_DENIED') {
+        await logAccessDenied(
+          req,
+          'ai_suggestion',
+          id,
+          err.message || 'Unauthorized AI suggestion review attempt'
+        );
+      }
       return sendAiRouteError(res, err, 'Lỗi khi cập nhật trạng thái gợi ý AI.');
     } finally {
       await release();
@@ -370,3 +378,4 @@ router.get(
 );
 
 export default router;
+

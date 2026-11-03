@@ -868,17 +868,84 @@ export async function reviewAiSuggestion(
     });
   }
 
-  const rowRes = await dbClient.query(
-    `SELECT * FROM ai_suggestion WHERE id = $1 FOR UPDATE`,
-    [suggestionId]
-  );
+  let rowRes;
+  try {
+    rowRes = await dbClient.query(
+      `SELECT * FROM ai_suggestion WHERE id = $1 FOR UPDATE`,
+      [suggestionId]
+    );
+  } catch (err) {
+    if (err?.code === '42501') {
+      throw Object.assign(
+        new Error('Bạn không có quyền duyệt hoặc cập nhật bản nháp gợi ý AI này.'),
+        { status: 403, code: 'ACCESS_DENIED' }
+      );
+    }
+    throw err;
+  }
   if (rowRes.rows.length === 0) {
+    const scopeCheck = await dbClient.query(
+      `SELECT resource_id FROM fn_get_ops_resource_scope('ai_suggestion', $1::uuid)`,
+      [suggestionId]
+    );
+    if (scopeCheck.rows.length > 0) {
+      throw Object.assign(
+        new Error('Bạn không có quyền duyệt hoặc cập nhật bản nháp gợi ý AI này.'),
+        { status: 403, code: 'ACCESS_DENIED' }
+      );
+    }
     throw Object.assign(new Error('Không tìm thấy bản nháp gợi ý AI.'), {
       status: 404,
       code: 'NOT_FOUND',
     });
   }
   const row = rowRes.rows[0];
+
+  if (targetEntityId !== null && targetEntityId !== undefined && String(targetEntityId).trim() !== '') {
+    const rawTargetId = String(targetEntityId).trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawTargetId)) {
+      throw Object.assign(new Error('Mã bản ghi đích (target_entity_id) không hợp lệ.'), {
+        status: 400,
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    let targetScopeSql = null;
+    if (row.target_entity === 'tenant') {
+      targetScopeSql = `SELECT t.id, p.org_id, NULL::uuid AS building_id
+                        FROM tenant t JOIN person p ON p.id = t.person_id
+                        WHERE t.id = $1`;
+    } else if (row.target_entity === 'contract') {
+      targetScopeSql = `SELECT c.id, b.org_id, a.building_id
+                        FROM contract c
+                        JOIN apartment a ON a.id = c.apartment_id
+                        JOIN building b ON b.id = a.building_id
+                        WHERE c.id = $1`;
+    } else if (row.target_entity === 'meter_reading') {
+      targetScopeSql = `SELECT mr.id, m.org_id, m.building_id
+                        FROM meter_reading mr
+                        JOIN meter m ON m.id = mr.meter_id
+                        WHERE mr.id = $1`;
+    } else if (row.target_entity === 'service_request') {
+      targetScopeSql = `SELECT sr.id, sr.org_id, sr.building_id
+                        FROM service_request sr
+                        WHERE sr.id = $1`;
+    }
+
+    if (targetScopeSql) {
+      const targetScopeRes = await dbClient.query(targetScopeSql, [rawTargetId]);
+      const targetScope = targetScopeRes.rows[0];
+      if (
+        !targetScope ||
+        targetScope.org_id !== row.org_id ||
+        (row.building_id && targetScope.building_id && targetScope.building_id !== row.building_id)
+      ) {
+        throw Object.assign(
+          new Error('Bản ghi đích không tồn tại hoặc nằm ngoài phạm vi tòa nhà của gợi ý AI.'),
+          { status: 403, code: 'ACCESS_DENIED' }
+        );
+      }
+    }
+  }
 
   if (row.status !== 'PENDING') {
     throw Object.assign(
@@ -939,7 +1006,7 @@ export async function reviewAiSuggestion(
     }
   }
 
-  await dbClient.query(
+  const updateRes = await dbClient.query(
     `UPDATE ai_suggestion
      SET status = $1,
          edited_output = COALESCE($2::jsonb, edited_output),
@@ -960,6 +1027,12 @@ export async function reviewAiSuggestion(
       suggestionId,
     ]
   );
+  if (updateRes.rowCount === 0) {
+    throw Object.assign(
+      new Error('Bạn không có quyền cập nhật bản nháp gợi ý AI này.'),
+      { status: 403, code: 'ACCESS_DENIED' }
+    );
+  }
 
   await dbClient.query(
     `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
@@ -1070,3 +1143,4 @@ export async function getOrgAiUsageSummary(dbClient, { orgId, buildingId = null 
     },
   };
 }
+

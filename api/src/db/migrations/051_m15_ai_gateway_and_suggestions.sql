@@ -487,3 +487,4 @@ FROM organization o
 ON CONFLICT (org_id, key) DO NOTHING;
 
 COMMIT;
+

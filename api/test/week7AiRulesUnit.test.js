@@ -283,3 +283,47 @@ test('estimateGeminiCostVnd and buildGeminiPromptAndSchema cover all 4 task type
     assert.equal(built.responseSchema.type, 'OBJECT');
   }
 });
+
+test('Final Review Fix #2: normalizeAiConfig maps Frontend tasks & threshold aliases bidirectionally', () => {
+  const savedFromUi = normalizeAiConfig({
+    enabled: true,
+    model: 'gemini-2.5-pro',
+    tasks: {
+      cccd_extract: false,
+      contract_extract: true,
+      meter_ocr: false,
+      ticket_triage: true,
+    },
+    ocr_threshold: 0.91,
+    extract_threshold: 0.82,
+    triage_threshold: 0.74,
+    monthly_budget_vnd: 900000,
+    monthly_token_limit: 3000000,
+  });
+
+  assert.equal(savedFromUi.cccd_extract_enabled, false);
+  assert.equal(savedFromUi.meter_ocr_enabled, false);
+  assert.equal(savedFromUi.contract_extract_enabled, true);
+  assert.equal(savedFromUi.ticket_triage_enabled, true);
+  assert.equal(savedFromUi.meter_ocr_threshold, 0.91);
+  assert.equal(savedFromUi.confidence_threshold, 0.82);
+  assert.equal(savedFromUi.ocr_threshold, 0.91);
+  assert.equal(savedFromUi.extract_threshold, 0.82);
+  assert.deepEqual(savedFromUi.tasks, {
+    cccd_extract: false,
+    contract_extract: true,
+    meter_ocr: false,
+    ticket_triage: true,
+  });
+
+  // Budget gate honors the UI-saved per-task kill switch!
+  const gateCccd = evaluateBudgetGate({
+    aiConfig: savedFromUi,
+    taskType: 'CCCD_EXTRACT',
+    monthlyTokensUsed: 0,
+    monthlyCostVnd: 0,
+  });
+  assert.equal(gateCccd.allowed, false);
+  assert.equal(gateCccd.code, 'AI_TASK_DISABLED');
+});
+
