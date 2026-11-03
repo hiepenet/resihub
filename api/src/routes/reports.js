@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import {
@@ -203,27 +203,25 @@ router.get(
         srParams.push(building_id);
         srFilter = ` AND sr.building_id = $${srParams.length}`;
       }
-      const [srCountRes, srRecentRes] = await Promise.all([
-        client.query(
-          `SELECT COUNT(*)::int AS pending_count
-           FROM service_request sr
-           WHERE sr.org_id = $1
-             AND sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS')
-             ${srScope} ${srFilter}`,
-          srParams
-        ),
-        client.query(
-          `SELECT sr.id, sr.tracking_code, sr.title, sr.category, sr.priority, sr.status, sr.created_at,
-                  a.code AS apartment_code, b.name AS building_name, b.code AS building_code
-           FROM service_request sr
-           JOIN apartment a ON a.id = sr.apartment_id
-           JOIN building b ON b.id = sr.building_id
-           WHERE sr.org_id = $1 ${srScope} ${srFilter}
-           ORDER BY sr.created_at DESC
-           LIMIT 5`,
-          srParams
-        ),
-      ]);
+      const srCountRes = await client.query(
+        `SELECT COUNT(*)::int AS pending_count
+         FROM service_request sr
+         WHERE sr.org_id = $1
+           AND sr.status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS')
+           ${srScope} ${srFilter}`,
+        srParams
+      );
+      const srRecentRes = await client.query(
+        `SELECT sr.id, sr.tracking_code, sr.title, sr.category, sr.priority, sr.status, sr.created_at,
+                a.code AS apartment_code, b.name AS building_name, b.code AS building_code
+         FROM service_request sr
+         JOIN apartment a ON a.id = sr.apartment_id
+         JOIN building b ON b.id = sr.building_id
+         WHERE sr.org_id = $1 ${srScope} ${srFilter}
+         ORDER BY sr.created_at DESC
+         LIMIT 5`,
+        srParams
+      );
 
       // 5. Hợp đồng sắp hết hạn trong 30-45 ngày tới
       const expParams = [orgId];
@@ -287,51 +285,49 @@ router.get(
         cbKpiFilter = ` AND cb.building_id = $${cbKpiParams.length}`;
       }
 
-      const [depKpiRes, rsvKpiRes, adjKpiRes, cbKpiRes] = await Promise.all([
-        client.query(
-          `SELECT
-             COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_deposit_approvals,
-             COUNT(*) FILTER (WHERE d.status IN ('APPROVED_PENDING_PAYOUT', 'RETURNED'))::int AS pending_deposit_payouts,
-             COUNT(*) FILTER (
-               WHERE d.refund_due_date IS NOT NULL
-                 AND d.refund_due_date < $2::date
-                 AND d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
-             )::int AS overdue_deposit_refunds,
-             COUNT(*) FILTER (WHERE d.status = 'DISPUTED')::int AS disputed_deposits
-           FROM deposit d
-           JOIN contract c ON c.id = d.contract_id
-           JOIN building b ON b.id = c.building_id
-           WHERE b.org_id = $1 ${depKpiScope} ${depKpiFilter}`,
-          depKpiParams
-        ),
-        client.query(
-          `SELECT
-             COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_reservation_confirms,
-             COUNT(*) FILTER (WHERE r.status = 'CANCEL_PENDING_APPROVAL')::int AS pending_reservation_approvals,
-             COUNT(*) FILTER (WHERE r.status = 'APPROVED_PENDING_PAYOUT')::int AS pending_reservation_payouts
-           FROM reservation r
-           JOIN building b ON b.id = r.building_id
-           WHERE b.org_id = $1
-             AND r.status IN ('PENDING_CONFIRM', 'CANCEL_PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT')
-             ${rsvKpiScope} ${rsvKpiFilter}`,
-          rsvKpiParams
-        ),
-        client.query(
-          `SELECT COUNT(*)::int AS pending_adjustments
-           FROM invoice_adjustment ia
-           JOIN invoice i ON i.id = ia.invoice_id
-           WHERE i.org_id = $1 AND ia.status IN ('PENDING', 'PENDING_APPROVAL')
-           ${adjKpiScope} ${adjKpiFilter}`,
-          adjKpiParams
-        ),
-        client.query(
-          `SELECT COUNT(*)::int AS pending_credit_refunds
-           FROM credit_balance cb
-           WHERE cb.org_id = $1 AND cb.status = 'PENDING_DIRECT_REFUND'
-           ${cbKpiScope} ${cbKpiFilter}`,
-          cbKpiParams
-        ),
-      ]);
+      const depKpiRes = await client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE d.status = 'PENDING_APPROVAL')::int AS pending_deposit_approvals,
+           COUNT(*) FILTER (WHERE d.status IN ('APPROVED_PENDING_PAYOUT', 'RETURNED'))::int AS pending_deposit_payouts,
+           COUNT(*) FILTER (
+             WHERE d.refund_due_date IS NOT NULL
+               AND d.refund_due_date < $2::date
+               AND d.status NOT IN ('REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED')
+           )::int AS overdue_deposit_refunds,
+           COUNT(*) FILTER (WHERE d.status = 'DISPUTED')::int AS disputed_deposits
+         FROM deposit d
+         JOIN contract c ON c.id = d.contract_id
+         JOIN building b ON b.id = c.building_id
+         WHERE b.org_id = $1 ${depKpiScope} ${depKpiFilter}`,
+        depKpiParams
+      );
+      const rsvKpiRes = await client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE r.status = 'PENDING_CONFIRM')::int AS pending_reservation_confirms,
+           COUNT(*) FILTER (WHERE r.status = 'CANCEL_PENDING_APPROVAL')::int AS pending_reservation_approvals,
+           COUNT(*) FILTER (WHERE r.status = 'APPROVED_PENDING_PAYOUT')::int AS pending_reservation_payouts
+         FROM reservation r
+         JOIN building b ON b.id = r.building_id
+         WHERE b.org_id = $1
+           AND r.status IN ('PENDING_CONFIRM', 'CANCEL_PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT')
+           ${rsvKpiScope} ${rsvKpiFilter}`,
+        rsvKpiParams
+      );
+      const adjKpiRes = await client.query(
+        `SELECT COUNT(*)::int AS pending_adjustments
+         FROM invoice_adjustment ia
+         JOIN invoice i ON i.id = ia.invoice_id
+         WHERE i.org_id = $1 AND ia.status IN ('PENDING', 'PENDING_APPROVAL')
+         ${adjKpiScope} ${adjKpiFilter}`,
+        adjKpiParams
+      );
+      const cbKpiRes = await client.query(
+        `SELECT COUNT(*)::int AS pending_credit_refunds
+         FROM credit_balance cb
+         WHERE cb.org_id = $1 AND cb.status = 'PENDING_DIRECT_REFUND'
+         ${cbKpiScope} ${cbKpiFilter}`,
+        cbKpiParams
+      );
 
       const depKpiRow = depKpiRes.rows[0] || {};
       const rsvKpiRow = rsvKpiRes.rows[0] || {};
@@ -556,10 +552,8 @@ router.get(
         WHERE b.org_id = $1 ${rsvScope} ${rsvFilter}
       `;
 
-      const [ledgerRes, rsvRes] = await Promise.all([
-        client.query(ledgerSql, ledgerParams),
-        client.query(rsvSql, rsvParams),
-      ]);
+      const ledgerRes = await client.query(ledgerSql, ledgerParams);
+      const rsvRes = await client.query(rsvSql, rsvParams);
 
       const summary = {
         opening_held: 0,
@@ -946,7 +940,24 @@ router.get(
       }));
 
       const exportFormat = String(req.query.format || '').toLowerCase();
+      const section = String(req.query.section || 'all').toLowerCase();
       if (exportFormat === 'csv') {
+        if (section === 'revenue') {
+          const revHeaders = ['Kỳ', 'Số HĐ', 'Tổng phát hành', 'Thực thu', 'Đã tất toán', 'Còn nợ'];
+          const revRows = revenue12m.map((r) => [
+            r.period,
+            r.invoice_count,
+            r.billed,
+            r.collected,
+            r.invoice_settled ?? r.collected,
+            r.outstanding,
+          ]);
+          const csvContent = toUtf8BomCsv(revHeaders, revRows);
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+          res.setHeader('Content-Disposition', 'attachment; filename="bao-cao-doanh-thu-rp01.csv"');
+          return res.status(200).send(csvContent);
+        }
+
         const headers = [
           'Mã tòa',
           'Tên tòa',
@@ -968,8 +979,9 @@ router.get(
           r.total_debt,
         ]);
         const csvContent = toUtf8BomCsv(headers, rows);
+        const filename = section === 'aging' ? 'bao-cao-tuoi-no-rp02.csv' : 'bao-cao-tong-hop.csv';
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-        res.setHeader('Content-Disposition', 'attachment; filename="bao-cao-tong-hop.csv"');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         return res.status(200).send(csvContent);
       }
 

@@ -178,6 +178,7 @@ test('Task 7: M06 Two-Step Deposit Settlement & KPI / RP-08 XLSX Reports', async
     tenantIds: [],
     userIds: [],
     personIds: [],
+    ownerIds: [],
     depositIds: [],
     invoiceIds: [],
   };
@@ -186,51 +187,169 @@ test('Task 7: M06 Two-Step Deposit Settlement & KPI / RP-08 XLSX Reports', async
     await new Promise((resolve) => server.close(resolve));
     const cleanClient = await adminPool.connect();
     try {
-      await cleanClient.query('BEGIN');
-      await cleanClient.query("SET LOCAL app.allow_test_cleanup = 'true'");
+      await cleanClient.query("SET app.allow_test_cleanup = 'true'");
 
+      // 1. Attachments
+      for (const dId of cleanup.depositIds) {
+        await cleanClient.query("DELETE FROM attachment WHERE owner_entity = 'deposit' AND owner_id = $1", [dId]).catch(() => {});
+      }
+      for (const uId of cleanup.userIds) {
+        await cleanClient.query('DELETE FROM attachment WHERE uploaded_by = $1', [uId]).catch(() => {});
+      }
+
+      // 2. Deposit transactions & Deposits
       for (const dId of cleanup.depositIds) {
         await cleanClient.query('DELETE FROM deposit_transaction WHERE deposit_id = $1', [dId]).catch(() => {});
-        await cleanClient.query("DELETE FROM attachment WHERE owner_entity = 'deposit' AND owner_id = $1", [dId]).catch(() => {});
         await cleanClient.query('DELETE FROM deposit WHERE id = $1', [dId]).catch(() => {});
       }
       for (const cId of cleanup.contractIds) {
+        await cleanClient.query('DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = $1)', [cId]).catch(() => {});
+        await cleanClient.query('DELETE FROM deposit WHERE contract_id = $1', [cId]).catch(() => {});
+      }
+
+      // 3. Invoice lines (MUST be deleted before credit_balance!)
+      for (const invId of cleanup.invoiceIds) {
+        await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id = $1', [invId]).catch(() => {});
+      }
+      for (const cId of cleanup.contractIds) {
+        await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
+      }
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE building_id = $1)', [bId]).catch(() => {});
+      }
+      for (const oId of cleanup.orgIds) {
+        await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE org_id = $1)', [oId]).catch(() => {});
+      }
+
+      // 4. Credit balances (nullify parent_credit_id first)
+      for (const cId of cleanup.contractIds) {
+        await cleanClient.query('UPDATE credit_balance SET parent_credit_id = NULL WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM credit_balance WHERE contract_id = $1', [cId]).catch(() => {});
+      }
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('UPDATE credit_balance SET parent_credit_id = NULL WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM credit_balance WHERE building_id = $1', [bId]).catch(() => {});
+      }
+      for (const oId of cleanup.orgIds) {
+        await cleanClient.query('UPDATE credit_balance SET parent_credit_id = NULL WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM credit_balance WHERE org_id = $1', [oId]).catch(() => {});
+      }
+
+      // 5. Payments, Receivables, Invoice adjustments, Invoices
+      for (const cId of cleanup.contractIds) {
+        await cleanClient.query('DELETE FROM payment WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM receivable WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM invoice_adjustment WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
-        await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
-        await cleanClient.query('DELETE FROM payment WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM invoice WHERE contract_id = $1', [cId]).catch(() => {});
+      }
+      for (const invId of cleanup.invoiceIds) {
+        await cleanClient.query('DELETE FROM payment WHERE invoice_id = $1', [invId]).catch(() => {});
+        await cleanClient.query('DELETE FROM receivable WHERE invoice_id = $1', [invId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice_adjustment WHERE invoice_id = $1', [invId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice WHERE id = $1', [invId]).catch(() => {});
+      }
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('DELETE FROM payment WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM receivable WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice_adjustment WHERE invoice_id IN (SELECT id FROM invoice WHERE building_id = $1)', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice WHERE building_id = $1', [bId]).catch(() => {});
+      }
+      for (const oId of cleanup.orgIds) {
+        await cleanClient.query('DELETE FROM payment WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM receivable WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice_adjustment WHERE invoice_id IN (SELECT id FROM invoice WHERE org_id = $1)', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice WHERE org_id = $1', [oId]).catch(() => {});
+      }
+
+      // 6. Service subscriptions, Contract occupants/prices/versions, Contracts
+      for (const cId of cleanup.contractIds) {
+        await cleanClient.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
+        await cleanClient.query('DELETE FROM contract_service_price WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM contract_occupant WHERE contract_id = $1', [cId]).catch(() => {});
-        await cleanClient.query('DELETE FROM deposit WHERE contract_id = $1', [cId]).catch(() => {});
+        await cleanClient.query('DELETE FROM contract_version WHERE contract_id = $1', [cId]).catch(() => {});
         await cleanClient.query('DELETE FROM contract WHERE id = $1', [cId]).catch(() => {});
       }
       for (const aId of cleanup.apartmentIds) {
-        await cleanClient.query('DELETE FROM meter_reading WHERE meter_id IN (SELECT id FROM meter WHERE apartment_id = $1)', [aId]).catch(() => {});
+        await cleanClient.query('DELETE FROM service_subscription WHERE apartment_id = $1', [aId]).catch(() => {});
+        await cleanClient.query('DELETE FROM contract WHERE apartment_id = $1', [aId]).catch(() => {});
+      }
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('DELETE FROM contract WHERE building_id = $1', [bId]).catch(() => {});
+      }
+
+      // 7. Meter readings, Meters, Reservations, Apartments, Floors, Zones
+      for (const aId of cleanup.apartmentIds) {
+        await cleanClient.query('DELETE FROM meter_reading WHERE apartment_id = $1 OR meter_id IN (SELECT id FROM meter WHERE apartment_id = $1)', [aId]).catch(() => {});
         await cleanClient.query('DELETE FROM meter WHERE apartment_id = $1', [aId]).catch(() => {});
+        await cleanClient.query('DELETE FROM reservation WHERE apartment_id = $1', [aId]).catch(() => {});
         await cleanClient.query('DELETE FROM apartment WHERE id = $1', [aId]).catch(() => {});
       }
       for (const bId of cleanup.buildingIds) {
-        await cleanClient.query('DELETE FROM building WHERE id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM meter WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM reservation WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM apartment WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM floor WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM zone WHERE building_id = $1', [bId]).catch(() => {});
       }
+
+      // 8. Notifications, Idempotency, Audit log
       for (const uId of cleanup.userIds) {
+        await cleanClient.query('DELETE FROM notification WHERE user_id = $1', [uId]).catch(() => {});
         await cleanClient.query('DELETE FROM idempotency_key WHERE actor_id = $1', [uId]).catch(() => {});
+        await cleanClient.query('DELETE FROM audit_log WHERE actor_id = $1', [uId]).catch(() => {});
+      }
+      for (const oId of cleanup.orgIds) {
+        await cleanClient.query('DELETE FROM notification WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM idempotency_key WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM audit_log WHERE org_id = $1', [oId]).catch(() => {});
+      }
+
+      // 9. User roles, Owners, Tenants, Users, Persons
+      for (const uId of cleanup.userIds) {
         await cleanClient.query('DELETE FROM user_role WHERE user_id = $1', [uId]).catch(() => {});
-        await cleanClient.query('DELETE FROM app_user WHERE id = $1', [uId]).catch(() => {});
+      }
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('UPDATE building SET owner_id = NULL WHERE id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM user_role WHERE building_id = $1', [bId]).catch(() => {});
+      }
+      for (const oId of cleanup.ownerIds) {
+        await cleanClient.query('DELETE FROM owner WHERE id = $1', [oId]).catch(() => {});
+      }
+      for (const pId of cleanup.personIds) {
+        await cleanClient.query('DELETE FROM owner WHERE person_id = $1', [pId]).catch(() => {});
+      }
+      for (const oId of cleanup.orgIds) {
+        await cleanClient.query('DELETE FROM owner WHERE org_id = $1', [oId]).catch(() => {});
+      }
+      for (const tId of cleanup.tenantIds) {
+        await cleanClient.query('DELETE FROM tenant WHERE id = $1', [tId]).catch(() => {});
       }
       for (const pId of cleanup.personIds) {
         await cleanClient.query('DELETE FROM tenant WHERE person_id = $1', [pId]).catch(() => {});
+      }
+      for (const uId of cleanup.userIds) {
+        await cleanClient.query('DELETE FROM app_user WHERE id = $1', [uId]).catch(() => {});
+      }
+      for (const pId of cleanup.personIds) {
         await cleanClient.query('DELETE FROM person WHERE id = $1', [pId]).catch(() => {});
       }
+
+      // 10. Service catalogs, Buildings, System settings, Organizations
+      for (const bId of cleanup.buildingIds) {
+        await cleanClient.query('DELETE FROM service_catalog WHERE building_id = $1', [bId]).catch(() => {});
+        await cleanClient.query('DELETE FROM building WHERE id = $1', [bId]).catch(() => {});
+      }
       for (const oId of cleanup.orgIds) {
+        await cleanClient.query('DELETE FROM service_catalog WHERE org_id = $1', [oId]).catch(() => {});
         await cleanClient.query('DELETE FROM system_setting WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM building WHERE org_id = $1', [oId]).catch(() => {});
         await cleanClient.query('DELETE FROM organization WHERE id = $1', [oId]).catch(() => {});
       }
-      await cleanClient.query('COMMIT');
-    } catch (e) {
-      await cleanClient.query('ROLLBACK').catch(() => {});
     } finally {
+      await cleanClient.query("RESET app.allow_test_cleanup").catch(() => {});
       cleanClient.release();
+      await adminPool.end().catch(() => {});
+      await appPool.end().catch(() => {});
     }
   });
 
@@ -313,6 +432,7 @@ test('Task 7: M06 Two-Step Deposit Settlement & KPI / RP-08 XLSX Reports', async
      RETURNING id`,
     [orgId, ownerUser.personId, `owner_${suffix}@test.com`]
   );
+  cleanup.ownerIds.push(ownerTableRes.rows[0].id);
   await adminPool.query('UPDATE building SET owner_id = $1 WHERE id = $2', [ownerTableRes.rows[0].id, buildingId]);
 
   // Create Apartment
@@ -938,13 +1058,25 @@ test('Task 7: M06 Two-Step Deposit Settlement & KPI / RP-08 XLSX Reports', async
     assert.equal(agingXlsx.buffer[0], 0x50); // 'P'
     assert.equal(agingXlsx.buffer[1], 0x4b); // 'K'
 
-    // GET /api/v1/reports/summary?section=revenue&format=csv
+    // GET /api/v1/reports/summary?section=revenue&format=csv (Brief Item 3)
     const revCsv = await apiFetch(
       `/api/v1/reports/summary?building_id=${buildingId}&section=revenue&format=csv`,
       managerUser.token
     );
     assert.equal(revCsv.status, 200);
     assert.ok(revCsv.contentType.includes('text/csv'));
+    assert.ok(revCsv.headers.get('content-disposition')?.includes('bao-cao-doanh-thu-rp01.csv'));
+    assert.ok(revCsv.body.raw.includes('Kỳ,Số HĐ,Tổng phát hành,Thực thu,Đã tất toán,Còn nợ'));
+
+    // GET /api/v1/reports/summary?section=aging&format=csv (Brief Item 3)
+    const ageCsv = await apiFetch(
+      `/api/v1/reports/summary?building_id=${buildingId}&section=aging&format=csv`,
+      managerUser.token
+    );
+    assert.equal(ageCsv.status, 200);
+    assert.ok(ageCsv.contentType.includes('text/csv'));
+    assert.ok(ageCsv.headers.get('content-disposition')?.includes('bao-cao-tuoi-no-rp02.csv'));
+    assert.ok(ageCsv.body.raw.includes('Mã tòa,Tên tòa,Chưa đến hạn,Quá hạn 1-15 ngày'));
   });
 
   // Test 5: RP-08 12-Entity Audit Logs & format=xlsx

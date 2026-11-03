@@ -93,7 +93,7 @@ test('Sprint 1 & 2 Integration — Anti-enumeration OTP, ServiceRequest table, M
 
   try {
     // 1. Bug 2: OTP cho SĐT lạ trả thông điệp trung lập, KHÔNG tự động tạo person/app_user, KHÔNG rò rỉ devOtp
-    const unknownPhone = '0987654399';
+    const unknownPhone = '09' + Math.floor(10000000 + Math.random() * 90000000);
     await adminPool.query('DELETE FROM person WHERE phone = $1', [unknownPhone]);
 
     const otpUnknownRes = await apiFetch('/api/v1/auth/otp/request', null, {

@@ -924,6 +924,20 @@ CREATE POLICY rls_audit_log_select ON audit_log FOR SELECT
     )
   );
 
+-- Cho phép dọn dẹp test trong môi trường test (tương tự 037_deposit_txn_immutable.sql)
+CREATE OR REPLACE FUNCTION prevent_audit_log_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_user <> 'resihub_app' AND current_setting('app.allow_test_cleanup', true) = 'true' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'Audit log is append-only and cannot be updated or deleted';
+END;
+$$ LANGUAGE plpgsql;
+
 -- ============================================================================
 -- 11. BỘ 9 HÀM RPC SECURITY DEFINER HẸP (SET row_security = off)
 -- ============================================================================
@@ -1346,6 +1360,21 @@ BEGIN
       jsonb_build_object('status', v_inv.status),
       jsonb_build_object('status', 'VOID')
     );
+
+    IF v_inv.tenant_id IS NOT NULL THEN
+      INSERT INTO notification (org_id, user_id, title, content, type, payload)
+      SELECT DISTINCT
+        v_inv.org_id,
+        au.id,
+        format('Hủy hóa đơn kỳ %s', v_inv.period),
+        format('Hóa đơn %s đã được phê duyệt hủy bỏ', v_inv.invoice_code),
+        'INVOICE_VOIDED',
+        jsonb_build_object('invoice_id', v_inv.id, 'adjustment_id', v_adj.id)
+      FROM tenant t
+      JOIN person p ON p.id = t.person_id
+      JOIN app_user au ON au.person_id = p.id
+      WHERE t.id = v_inv.tenant_id AND au.status = 'ACTIVE';
+    END IF;
 
     RETURN jsonb_build_object(
       'status', 'APPROVED',

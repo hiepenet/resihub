@@ -122,7 +122,7 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
   await adminPool.query(`
     DELETE FROM invoice_adjustment WHERE reason LIKE '%test%' OR reason LIKE '%Test%' OR reason LIKE '%Second downward adj%' OR reason LIKE '%Upward correction%' OR reason LIKE '%Downward with excess credit offset%' OR reason LIKE '%Miễn 200k phạt%' OR reason LIKE '%Hủy tiền thuê gốc%';
     DELETE FROM credit_balance WHERE description LIKE '%test%' OR description LIKE '%Test%' OR description LIKE '%1M credit for 4-pass test%' OR description LIKE '%Backfill%';
-    DELETE FROM invoice WHERE invoice_code LIKE 'INV_%';
+    DELETE FROM invoice WHERE invoice_code LIKE 'INV!_%' ESCAPE '!';
   `);
 
   // Cleanup helper
@@ -143,17 +143,22 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
 
   t.after(async () => {
     try {
+      await adminPool.query("SET app.allow_test_cleanup = 'true'").catch(() => {});
       if (cleanups.audit_logs.length > 0) {
         await adminPool.query('DELETE FROM audit_log WHERE id = ANY($1)', [cleanups.audit_logs]).catch(() => {});
       }
+      if (cleanups.notifications.length > 0) {
+        await adminPool.query('DELETE FROM notification WHERE id = ANY($1)', [cleanups.notifications]).catch(() => {});
+      }
       if (cleanups.attachments.length > 0) {
-        await adminPool.query('DELETE FROM attachment WHERE id = ANY($1)', [cleanups.attachments]);
+        await adminPool.query('DELETE FROM attachment WHERE id = ANY($1)', [cleanups.attachments]).catch(() => {});
       }
       if (cleanups.adjustments.length > 0) {
-        await adminPool.query('DELETE FROM invoice_adjustment WHERE id = ANY($1)', [cleanups.adjustments]);
+        await adminPool.query('DELETE FROM invoice_adjustment WHERE id = ANY($1)', [cleanups.adjustments]).catch(() => {});
       }
       if (cleanups.credits.length > 0) {
-        await adminPool.query('DELETE FROM credit_balance WHERE id = ANY($1)', [cleanups.credits]);
+        await adminPool.query('UPDATE credit_balance SET parent_credit_id = NULL WHERE id = ANY($1)', [cleanups.credits]).catch(() => {});
+        await adminPool.query('DELETE FROM credit_balance WHERE id = ANY($1)', [cleanups.credits]).catch(() => {});
       }
       if (cleanups.payments.length > 0) {
         await adminPool.query('DELETE FROM payment WHERE id = ANY($1)', [cleanups.payments]).catch(() => {});
@@ -162,24 +167,27 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
         await adminPool.query('DELETE FROM receivable WHERE id = ANY($1)', [cleanups.receivables]).catch(() => {});
       }
       if (cleanups.invoices.length > 0) {
-        await adminPool.query('DELETE FROM invoice WHERE id = ANY($1)', [cleanups.invoices]);
+        await adminPool.query('DELETE FROM invoice_line WHERE invoice_id = ANY($1)', [cleanups.invoices]).catch(() => {});
+        await adminPool.query('DELETE FROM invoice WHERE id = ANY($1)', [cleanups.invoices]).catch(() => {});
       }
       if (cleanups.reservations.length > 0) {
         await adminPool.query('DELETE FROM reservation WHERE id = ANY($1)', [cleanups.reservations]).catch(() => {});
       }
       if (cleanups.subscriptions.length > 0) {
-        await adminPool.query('DELETE FROM service_subscription WHERE id = ANY($1)', [cleanups.subscriptions]);
+        await adminPool.query('DELETE FROM service_subscription WHERE id = ANY($1)', [cleanups.subscriptions]).catch(() => {});
       }
       if (cleanups.catalog.length > 0) {
-        await adminPool.query('DELETE FROM service_catalog WHERE id = ANY($1)', [cleanups.catalog]);
+        await adminPool.query('DELETE FROM service_catalog WHERE id = ANY($1)', [cleanups.catalog]).catch(() => {});
       }
       if (cleanups.deposits.length > 0) {
-        await adminPool.query('DELETE FROM deposit WHERE id = ANY($1)', [cleanups.deposits]);
+        await adminPool.query('DELETE FROM deposit_transaction WHERE deposit_id = ANY($1)', [cleanups.deposits]).catch(() => {});
+        await adminPool.query('DELETE FROM deposit WHERE id = ANY($1)', [cleanups.deposits]).catch(() => {});
       }
       await adminPool.query(`
         UPDATE system_setting SET value = '{"allow_self_approval": false}'::jsonb
         WHERE org_id = $1 AND key = 'approval_config'
       `, [orgId]).catch(() => {});
+      await adminPool.query("RESET app.allow_test_cleanup").catch(() => {});
     } finally {
       await adminPool.end();
       await appPool.end();
@@ -844,7 +852,45 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     assert.strictEqual(autoNeutLine.rows.length, 1, 'Must auto-neutralize remaining late fee');
     assert.strictEqual(Number(autoNeutLine.rows[0].amount), -100000, 'Auto-neutralized amount must be -100,000');
 
-    // 3e. fn_resolve_credit_refund: split, reject merge-back, and approve
+    // 3e. VOID adjustment resolution emits INVOICE_VOIDED resident notification (Brief Item 5)
+    const invVoidTest = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2029-12', CURRENT_DATE, CURRENT_DATE + 5, 2000000, 2000000, 0, 'ISSUED')
+      RETURNING id, invoice_code
+    `, [orgId, buildingId, apartmentId, contractId, tenantId, `INV_VOID_${Date.now()}`]);
+    cleanups.invoices.push(invVoidTest.rows[0].id);
+
+    const adjVoid = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'SERVICE', 'VOID', 0, 'Hủy hóa đơn sai kỳ', $4)
+      RETURNING id
+    `, [orgId, buildingId, invVoidTest.rows[0].id, mgrId]);
+    cleanups.adjustments.push(adjVoid.rows[0].id);
+
+    const resVoid = await asUserTx(ownerId, async (client) => {
+      const r = await client.query('SELECT fn_resolve_invoice_adjustment($1, \'APPROVED\') AS out', [adjVoid.rows[0].id]);
+      return r.rows[0].out;
+    });
+    assert.strictEqual(resVoid.status, 'APPROVED');
+    assert.strictEqual(resVoid.action_type, 'VOID');
+
+    const invAfterVoid = await adminPool.query('SELECT status FROM invoice WHERE id = $1', [invVoidTest.rows[0].id]);
+    assert.strictEqual(invAfterVoid.rows[0].status, 'VOID');
+
+    const notifVoid = await adminPool.query(`
+      SELECT id, type, title, content, payload FROM notification
+      WHERE user_id = $1 AND type = 'INVOICE_VOIDED' AND (payload->>'adjustment_id')::uuid = $2
+    `, [residentId, adjVoid.rows[0].id]);
+    assert.strictEqual(notifVoid.rows.length, 1, 'Approving VOID adjustment must insert INVOICE_VOIDED notification for resident');
+    assert.ok(notifVoid.rows[0].title.includes('2029-12'));
+    cleanups.notifications.push(notifVoid.rows[0].id);
+
+    // 3f. fn_resolve_credit_refund: split, reject merge-back, and approve
     const cbParent = await adminPool.query(`
       INSERT INTO credit_balance (
         org_id, building_id, contract_id, tenant_id, reason_type, amount, applied_amount, status, description

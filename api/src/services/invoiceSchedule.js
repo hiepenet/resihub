@@ -109,6 +109,7 @@ export function buildExpectedInvoiceSchedule({
           contractBuildingId: contract.building_id,
           contractServicePrices: servicePrices,
           catalogItems,
+          includePendingApproval: true,
         });
         expectedFixedServices += charge.amount;
       }

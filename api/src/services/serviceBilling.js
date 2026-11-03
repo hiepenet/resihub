@@ -35,10 +35,7 @@ export function toDateOnlyYmd(val) {
   if (!val) return '';
   if (typeof val === 'string') return val.slice(0, 10);
   if (val instanceof Date && !Number.isNaN(val.getTime())) {
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const d = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return todayVietnamYmd(val);
   }
   return String(val).slice(0, 10);
 }
@@ -272,6 +269,7 @@ export function computeSubscriptionPeriodCharge({
   catalogItems,
   lockedUnitPrice,
   lockedQuantity,
+  includePendingApproval = false,
 } = {}) {
   const { monthStart, monthEnd, daysInMonth } = getMonthBoundsYmd(periodYm);
   const bStart = boundStartYmd || monthStart;
@@ -295,7 +293,7 @@ export function computeSubscriptionPeriodCharge({
       ? Number(lockedQuantity)
       : Math.max(1, Number(subscription?.quantity || 1));
 
-  const win = resolveSubscriptionEffectiveWindow(subscription, { includePendingApproval: true });
+  const win = resolveSubscriptionEffectiveWindow(subscription, { includePendingApproval });
   const subName = subscription?.service_name || subscription?.service_code || 'Dịch vụ';
 
   if (!win.billable) {

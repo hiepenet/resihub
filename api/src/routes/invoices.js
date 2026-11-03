@@ -366,7 +366,7 @@ export async function generateInvoicesCore(
        JOIN service_catalog sc ON sc.id = ss.service_id
        WHERE ss.contract_id = $1
          AND sc.billing_type != 'METERED'
-         AND ss.status IN ('ACTIVE', 'PENDING_APPROVAL', 'CANCELLATION_PENDING', 'CANCELLED', 'TERMINATED')`,
+         AND ss.status IN ('ACTIVE', 'CANCELLATION_PENDING', 'CANCELLED', 'TERMINATED')`,
       [c.id]
     );
     for (const sub of subRes.rows) {

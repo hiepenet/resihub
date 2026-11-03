@@ -102,7 +102,10 @@ export function PaymentsPage() {
   // Tab 3: Sổ tín dụng & Hoàn tiền (4 mắt) (FR-040 & Ruling 2)
   const [credits, setCredits] = useState([]);
   const [creditsLoading, setCreditsLoading] = useState(false);
-  const [creditStatusFilter, setCreditStatusFilter] = useState('');
+  const [creditStatusFilter, setCreditStatusFilter] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('status') || '';
+  });
   const [creditSearch, setCreditSearch] = useState('');
 
   // Modal yêu cầu hoàn tiền tín dụng
@@ -219,12 +222,17 @@ export function PaymentsPage() {
   // Hỗ trợ drill-down từ Dashboard: ?tab=credits hoặc ?status=PENDING_DIRECT_REFUND (Ruling 2)
   useEffect(() => {
     const params = new URLSearchParams(location.search);
+    const tabParam = params.get('tab');
+    const statusParam = params.get('status');
     if (
-      params.get('tab') === 'credits' ||
-      params.get('tab') === 'refunds' ||
-      params.get('status') === 'PENDING_DIRECT_REFUND'
+      tabParam === 'credits' ||
+      tabParam === 'refunds' ||
+      statusParam === 'PENDING_DIRECT_REFUND'
     ) {
       setActiveTab('credits');
+    }
+    if (statusParam) {
+      setCreditStatusFilter(statusParam);
     }
   }, [location.search]);
 

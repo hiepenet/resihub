@@ -512,3 +512,57 @@ test('9. Invoice schedule actual_invoice filtering: excludes VOID and CANCELLED,
   assert.equal(schedule[2].billing_period, '2027-01');
   assert.equal(schedule[2].actual_invoice, null);
 });
+
+test('11. PENDING_APPROVAL subscription is excluded by default in computeSubscriptionPeriodCharge, but included when includePendingApproval: true (projected schedule)', () => {
+  const pendingSub = {
+    id: 'sub-pending',
+    service_code: 'PARKING_CAR',
+    service_name: 'Gửi xe ô tô',
+    billing_type: 'FIXED',
+    start_date: '2026-11-01',
+    status: 'PENDING_APPROVAL',
+    unit_price: 1200000,
+    quantity: 1,
+    is_price_locked: true,
+  };
+
+  // Default call: includePendingApproval is false
+  const defaultCharge = computeSubscriptionPeriodCharge({
+    subscription: pendingSub,
+    periodYm: '2026-11',
+  });
+  assert.equal(defaultCharge.amount, 0, 'PENDING_APPROVAL must not be billed on actual invoice by default');
+  assert.equal(defaultCharge.activeDays, 0);
+
+  // Projected schedule call: includePendingApproval is true
+  const projectedCharge = computeSubscriptionPeriodCharge({
+    subscription: pendingSub,
+    periodYm: '2026-11',
+    includePendingApproval: true,
+  });
+  assert.equal(projectedCharge.amount, 1200000, 'PENDING_APPROVAL must be included in projected invoice schedule');
+  assert.equal(projectedCharge.activeDays, 30);
+
+  // Verify in buildExpectedInvoiceSchedule
+  const contract = {
+    id: 'contract-pending-sub',
+    status: 'ACTIVE',
+    start_date: '2026-11-01',
+    end_date: '2026-12-01',
+    rent_amount: 5000000,
+    billing_cycle: 'monthly',
+    billing_day: 1,
+    payment_due_days: 5,
+  };
+
+  const schedule = buildExpectedInvoiceSchedule({
+    contract,
+    subscriptions: [pendingSub],
+    servicePrices: [],
+    existingInvoices: [],
+  });
+
+  assert.equal(schedule.length, 1);
+  assert.equal(schedule[0].expected_fixed_services, 1200000);
+  assert.equal(schedule[0].expected_total, 6200000);
+});

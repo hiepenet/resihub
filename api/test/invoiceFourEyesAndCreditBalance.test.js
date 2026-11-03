@@ -121,35 +121,121 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
     contracts: [],
     apartments: [],
     tenants: [],
+    users: [],
+    persons: [],
   };
 
+  cleanups.persons.push(p2Res.rows[0].id);
+  cleanups.users.push(u2Res.rows[0].id);
+
   t.after(async () => {
-    if (cleanups.credits.length > 0) {
-      await adminPool.query(`DELETE FROM credit_balance WHERE id = ANY($1)`, [cleanups.credits]).catch(() => {});
+    const cleanClient = await adminPool.connect();
+    try {
+      await cleanClient.query("SET app.allow_test_cleanup = 'true'");
+
+      // 1. Attachments uploaded by test users
+      if (cleanups.users.length > 0) {
+        await cleanClient.query(`DELETE FROM attachment WHERE uploaded_by = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+      }
+
+      // 2. Deposits & deposit transactions for test contracts
+      if (cleanups.contracts.length > 0) {
+        await cleanClient.query(`DELETE FROM deposit_transaction WHERE deposit_id IN (SELECT id FROM deposit WHERE contract_id = ANY($1::uuid[]))`, [cleanups.contracts]).catch(() => {});
+        await cleanClient.query(`DELETE FROM deposit WHERE contract_id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+      }
+
+      // 3. Invoice lines MUST be deleted before credit_balance
+      if (cleanups.invoices.length > 0 || cleanups.contracts.length > 0) {
+        await cleanClient.query(
+          `DELETE FROM invoice_line WHERE invoice_id = ANY($1::uuid[]) OR invoice_id IN (SELECT id FROM invoice WHERE contract_id = ANY($2::uuid[]))`,
+          [cleanups.invoices, cleanups.contracts]
+        ).catch(() => {});
+      }
+
+      // 4. Credit balances: nullify parent_credit_id first, then delete
+      if (cleanups.credits.length > 0 || cleanups.contracts.length > 0 || cleanups.tenants.length > 0) {
+        await cleanClient.query(
+          `UPDATE credit_balance SET parent_credit_id = NULL
+           WHERE id = ANY($1::uuid[]) OR parent_credit_id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[]) OR tenant_id = ANY($3::uuid[])`,
+          [cleanups.credits, cleanups.contracts, cleanups.tenants]
+        ).catch(() => {});
+        await cleanClient.query(
+          `DELETE FROM credit_balance
+           WHERE id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[]) OR tenant_id = ANY($3::uuid[])`,
+          [cleanups.credits, cleanups.contracts, cleanups.tenants]
+        ).catch(() => {});
+      }
+
+      // 5. Receivables
+      if (cleanups.receivables.length > 0 || cleanups.contracts.length > 0) {
+        await cleanClient.query(`DELETE FROM receivable WHERE id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])`, [cleanups.receivables, cleanups.contracts]).catch(() => {});
+      }
+
+      // 6. Payments
+      if (cleanups.payments.length > 0 || cleanups.contracts.length > 0) {
+        await cleanClient.query(`DELETE FROM payment WHERE id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])`, [cleanups.payments, cleanups.contracts]).catch(() => {});
+      }
+
+      // 7. Invoice adjustments
+      if (cleanups.adjustments.length > 0 || cleanups.invoices.length > 0 || cleanups.contracts.length > 0) {
+        await cleanClient.query(
+          `DELETE FROM invoice_adjustment WHERE id = ANY($1::uuid[]) OR invoice_id = ANY($2::uuid[]) OR invoice_id IN (SELECT id FROM invoice WHERE contract_id = ANY($3::uuid[]))`,
+          [cleanups.adjustments, cleanups.invoices, cleanups.contracts]
+        ).catch(() => {});
+      }
+
+      // 8. Invoices
+      if (cleanups.invoices.length > 0 || cleanups.contracts.length > 0) {
+        await cleanClient.query(`DELETE FROM invoice WHERE id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])`, [cleanups.invoices, cleanups.contracts]).catch(() => {});
+      }
+
+      // 9. Subscriptions, Contract service prices, Occupants, Versions, Contracts
+      if (cleanups.contracts.length > 0) {
+        await cleanClient.query(`DELETE FROM service_subscription WHERE contract_id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+        await cleanClient.query(`DELETE FROM contract_service_price WHERE contract_id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+        await cleanClient.query(`DELETE FROM contract_occupant WHERE contract_id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+        await cleanClient.query(`DELETE FROM contract_version WHERE contract_id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+        await cleanClient.query(`DELETE FROM contract WHERE id = ANY($1::uuid[])`, [cleanups.contracts]).catch(() => {});
+      }
+      if (cleanups.apartments.length > 0) {
+        await cleanClient.query(`DELETE FROM service_subscription WHERE apartment_id = ANY($1::uuid[])`, [cleanups.apartments]).catch(() => {});
+        await cleanClient.query(`DELETE FROM contract WHERE apartment_id = ANY($1::uuid[])`, [cleanups.apartments]).catch(() => {});
+      }
+
+      // 10. Meter readings, Meters, Reservations, Apartments
+      if (cleanups.apartments.length > 0) {
+        await cleanClient.query(`DELETE FROM meter_reading WHERE apartment_id = ANY($1::uuid[]) OR meter_id IN (SELECT id FROM meter WHERE apartment_id = ANY($1::uuid[]))`, [cleanups.apartments]).catch(() => {});
+        await cleanClient.query(`DELETE FROM meter WHERE apartment_id = ANY($1::uuid[])`, [cleanups.apartments]).catch(() => {});
+        await cleanClient.query(`DELETE FROM reservation WHERE apartment_id = ANY($1::uuid[])`, [cleanups.apartments]).catch(() => {});
+        await cleanClient.query(`DELETE FROM apartment WHERE id = ANY($1::uuid[])`, [cleanups.apartments]).catch(() => {});
+      }
+
+      // 11. Notifications, Idempotency, Audit log for test users
+      if (cleanups.users.length > 0) {
+        await cleanClient.query(`DELETE FROM notification WHERE user_id = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+        await cleanClient.query(`DELETE FROM idempotency_key WHERE actor_id = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+        await cleanClient.query(`DELETE FROM audit_log WHERE actor_id = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+        await cleanClient.query(`DELETE FROM user_role WHERE user_id = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+        await cleanClient.query(`DELETE FROM app_user WHERE id = ANY($1::uuid[])`, [cleanups.users]).catch(() => {});
+      }
+
+      // 12. Tenants & Persons
+      if (cleanups.tenants.length > 0) {
+        await cleanClient.query(`DELETE FROM tenant WHERE id = ANY($1::uuid[])`, [cleanups.tenants]).catch(() => {});
+      }
+      if (cleanups.persons.length > 0) {
+        await cleanClient.query(`DELETE FROM tenant WHERE person_id = ANY($1::uuid[])`, [cleanups.persons]).catch(() => {});
+        await cleanClient.query(`DELETE FROM person WHERE id = ANY($1::uuid[])`, [cleanups.persons]).catch(() => {});
+      }
+    } finally {
+      await cleanClient.query("RESET app.allow_test_cleanup").catch(() => {});
+      cleanClient.release();
+      await new Promise((resolve) => server.close(resolve));
+      const { appPool, adminPool: sharedAdminPool } = await import('../src/db/client.js');
+      await appPool.end().catch(() => {});
+      await sharedAdminPool.end().catch(() => {});
+      await adminPool.end().catch(() => {});
     }
-    if (cleanups.receivables.length > 0) {
-      await adminPool.query(`DELETE FROM receivable WHERE id = ANY($1)`, [cleanups.receivables]).catch(() => {});
-    }
-    if (cleanups.payments.length > 0) {
-      await adminPool.query(`DELETE FROM payment WHERE id = ANY($1)`, [cleanups.payments]).catch(() => {});
-    }
-    if (cleanups.adjustments.length > 0) {
-      await adminPool.query(`DELETE FROM invoice_adjustment WHERE id = ANY($1)`, [cleanups.adjustments]).catch(() => {});
-    }
-    if (cleanups.invoices.length > 0) {
-      await adminPool.query(`DELETE FROM invoice_line WHERE invoice_id = ANY($1)`, [cleanups.invoices]).catch(() => {});
-      await adminPool.query(`DELETE FROM invoice WHERE id = ANY($1)`, [cleanups.invoices]).catch(() => {});
-    }
-    if (cleanups.contracts.length > 0) {
-      await adminPool.query(`DELETE FROM contract_service_price WHERE contract_id = ANY($1)`, [cleanups.contracts]).catch(() => {});
-      await adminPool.query(`DELETE FROM contract WHERE id = ANY($1)`, [cleanups.contracts]).catch(() => {});
-    }
-    if (cleanups.apartments.length > 0) {
-      await adminPool.query(`DELETE FROM meter_reading WHERE apartment_id = ANY($1)`, [cleanups.apartments]).catch(() => {});
-      await adminPool.query(`DELETE FROM apartment WHERE id = ANY($1)`, [cleanups.apartments]).catch(() => {});
-    }
-    await new Promise((resolve) => server.close(resolve));
-    await adminPool.end().catch(() => {});
   });
 
   // =========================================================================
@@ -798,6 +884,9 @@ test('Task 5 — Invoices DRAFT Line CRUD, Four-Eyes Approvals, Credit Balance &
       `INSERT INTO tenant (org_id, person_id, type, status, desired_building_id) VALUES ($1, $2, 'primary', 'APPROVED', $3) RETURNING id`,
       [orgId, pTgt.rows[0].id, vopAId]
     );
+
+    cleanups.persons.push(pSrc.rows[0].id, pTgt.rows[0].id);
+    cleanups.tenants.push(tSrc.rows[0].id, tTgt.rows[0].id);
 
     const cbMergeSeed = await adminPool.query(
       `INSERT INTO credit_balance (
