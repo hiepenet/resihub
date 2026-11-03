@@ -14,6 +14,7 @@ import {
   resolveSettlementPayoutSummary,
   evaluateClientMeterAnomaly,
   summarizeSkippedContracts,
+  resolveBatchConfirmFeedback,
 } from '../../frontend/src/utils/billing.js';
 import { getCurrentPeriod } from '../../frontend/src/utils/format.js';
 
@@ -476,6 +477,37 @@ test('9. summarizeSkippedContracts separates MISSING_CONFIRMED_METER_READING vs 
   assert.deepEqual(summary.zeroBillableApartments, ['B-205']);
   assert.match(summary.message, /A-101, A-102/);
   assert.match(summary.message, /B-205/);
+});
+
+test('10. resolveBatchConfirmFeedback warns when skipped_abnormal_without_note is integer > 0 or non-empty array (Review Important #2)', () => {
+  // Integer skipped count from POST /api/v1/meters/readings/confirm-batch
+  const intWarn = resolveBatchConfirmFeedback({
+    confirmed_count: 4,
+    skipped_abnormal_without_note: 3,
+    message: 'Đã xác nhận chốt 4 chỉ số.',
+  });
+  assert.equal(intWarn.level, 'warning');
+  assert.equal(intWarn.skippedCount, 3);
+  assert.equal(intWarn.confirmedCount, 4);
+  assert.match(intWarn.message, /Còn 3 đồng hồ bất thường/);
+
+  // Array fallback
+  const arrWarn = resolveBatchConfirmFeedback({
+    confirmed_count: 2,
+    skipped_abnormal_without_note: ['r1', 'r2'],
+  });
+  assert.equal(arrWarn.level, 'warning');
+  assert.equal(arrWarn.skippedCount, 2);
+
+  // Zero skipped -> success
+  const ok = resolveBatchConfirmFeedback({
+    confirmed_count: 5,
+    skipped_abnormal_without_note: 0,
+  });
+  assert.equal(ok.level, 'success');
+  assert.equal(ok.skippedCount, 0);
+  assert.equal(ok.confirmedCount, 5);
+  assert.match(ok.message, /5 chỉ số/);
 });
 
 

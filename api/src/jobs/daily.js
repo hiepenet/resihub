@@ -552,6 +552,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
         `SELECT
            COUNT(*) FILTER (
              WHERE il.item_type <> 'LATE_FEE'
+               AND il.credit_id IS NULL
                AND NOT (
                  il.item_type = 'ADJUSTMENT'
                  AND (
@@ -562,6 +563,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
            )::int AS non_lf_line_count,
            COALESCE(SUM(il.amount) FILTER (
              WHERE il.item_type <> 'LATE_FEE'
+               AND il.credit_id IS NULL
                AND NOT (
                  il.item_type = 'ADJUSTMENT'
                  AND (
@@ -598,8 +600,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
           0,
           Number(lockedInv.subtotal_amount || 0) -
             grossAccruedFee +
-            nonLateFeeAdj -
-            Number(lockedInv.credit_offset_amount || 0)
+            nonLateFeeAdj
         );
       }
 
@@ -608,7 +609,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
         asOfDateYmd: effectiveDateYmd,
         totalAmount: Number(lockedInv.total_amount || 0),
         paidAmount: Number(lockedInv.paid_amount || 0),
-        creditOffsetAmount: 0,
+        creditOffsetAmount: Number(lockedInv.credit_offset_amount || 0),
         principalAmount,
         grossAccruedLateFee: grossAccruedFee,
         graceDays: cfg.graceDays,

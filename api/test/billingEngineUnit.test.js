@@ -450,3 +450,4 @@ test('Task 1.7 — evaluateMeterReadingAnomaly 3-period rolling baseline & cold-
   assert.equal(drop.isAbnormal, true);
   assert.equal(drop.diffPct, -31);
 });
+

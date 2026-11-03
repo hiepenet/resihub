@@ -471,3 +471,4 @@ UPDATE system_setting
 SET value = '{"due_date_offset_days": 5, "late_fee_grace_days": 5, "late_fee_per_day": 100000, "late_fee_cap": null, "meter_anomaly_threshold_pct": 30}'::jsonb
             || COALESCE(value, '{}'::jsonb)
 WHERE key = 'billing_config';
+

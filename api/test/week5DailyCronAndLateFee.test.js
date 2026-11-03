@@ -475,4 +475,97 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
     assert.equal(Number(cur.total_amount), 10300000, 'Must stop accruing late fees once principal is 100% settled (no penalty-on-penalty)');
   });
+
+  await t.test('5. Credit-offset principal stop condition without double counting (Review Important #1, FR-064)', async () => {
+    // Subcase A: Header credit_offset_amount = 2.000.000 ₫ + RENT line 10.000.000 ₫ (net receivable 8.000.000 ₫)
+    const invARes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, credit_offset_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-06', '2028-05-26', '2028-06-01', 10000000, 0, 2000000, 8000000, 0, 'ISSUED')
+       RETURNING id`,
+      [orgId, testBuildingId, c31.aptId, c31.contractId, c31.tenantId, `INV-LF-CRA-${suffix}`]
+    );
+    const invAId = invARes.rows[0].id;
+    cleanup.invoiceIds.push(invAId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê phòng kỳ 2028-06', 1, 'tháng', 10000000, 10000000)`,
+      [invAId]
+    );
+    await adminPool.query(
+      `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
+       VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', 8000000, 0, '2028-06-01', 'OPEN', 'Công nợ kỳ 2028-06')`,
+      [orgId, testBuildingId, c31.contractId, c31.tenantId, invAId]
+    );
+
+    // 2028-06-08 (overdueDays = 7 -> 200.000 ₫ late fee -> total = 8.200.000 ₫)
+    await runDailyJobs({ asOfDate: '2028-06-08', buildingId: testBuildingId });
+    let curA = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invAId])).rows[0];
+    assert.equal(Number(curA.total_amount), 8200000);
+
+    // Tenant pays 8.000.000 ₫ cash -> paid_amount (8M) + credit_offset_amount (2M) = 10M >= principal (10M)
+    await adminPool.query(
+      `UPDATE invoice SET paid_amount = 8000000, status = 'PARTIALLY_PAID' WHERE id = $1`,
+      [invAId]
+    );
+    await runDailyJobs({ asOfDate: '2028-06-12', buildingId: testBuildingId });
+    curA = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invAId])).rows[0];
+    assert.equal(
+      Number(curA.total_amount),
+      8200000,
+      'Must recognize paid_amount + credit_offset_amount >= principalAmount and stop accruing late fees'
+    );
+
+    // Subcase B: Credit applied via credit_balance + negative ADJUSTMENT line (credit_id IS NOT NULL) must NOT double-count credit
+    const cbRes = await adminPool.query(
+      `INSERT INTO credit_balance (org_id, building_id, contract_id, tenant_id, amount, applied_amount, status, reason_type, description)
+       VALUES ($1, $2, $3, $4, 2000000, 2000000, 'APPLIED', 'OVERPAYMENT', 'Credit test')
+       RETURNING id`,
+      [orgId, testBuildingId, c15.contractId, c15.tenantId]
+    );
+    const cbId = cbRes.rows[0].id;
+
+    const invBRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, credit_offset_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-06', '2028-05-26', '2028-06-01', 10000000, 0, 2000000, 8000000, 6000000, 'PARTIALLY_PAID')
+       RETURNING id`,
+      [orgId, testBuildingId, c15.aptId, c15.contractId, c15.tenantId, `INV-LF-CRB-${suffix}`]
+    );
+    const invBId = invBRes.rows[0].id;
+    cleanup.invoiceIds.push(invBId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê phòng kỳ 2028-06', 1, 'tháng', 10000000, 10000000)`,
+      [invBId]
+    );
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, credit_id)
+       VALUES ($1, 'ADJUSTMENT', 'Bù trừ số dư tín dụng hợp đồng', 1, 'lần', -2000000, -2000000, $2)`,
+      [invBId, cbId]
+    );
+
+    // Tenant paid only 6M cash + 2M credit = 8M < 10M gross principal -> still owes 2M principal, MUST accrue on 2028-06-08 (200k)
+    await runDailyJobs({ asOfDate: '2028-06-08', buildingId: testBuildingId });
+    let curB = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invBId])).rows[0];
+    assert.equal(Number(curB.total_amount), 8200000, 'Must not double-count credit_id line and credit_offset_amount when 2M principal remains unpaid');
+
+    // Now tenant pays remaining 2M principal (paid_amount = 8M) -> 8M + 2M = 10M -> stops accruing on 2028-06-12
+    await adminPool.query(`UPDATE invoice SET paid_amount = 8000000 WHERE id = $1`, [invBId]);
+    await runDailyJobs({ asOfDate: '2028-06-12', buildingId: testBuildingId });
+    curB = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invBId])).rows[0];
+    assert.equal(Number(curB.total_amount), 8200000, 'Once 8M cash + 2M credit = 10M gross principal, accrual stops');
+
+    await adminPool.query(`DELETE FROM invoice_line WHERE credit_id = $1`, [cbId]);
+    await adminPool.query(`DELETE FROM credit_balance WHERE id = $1`, [cbId]);
+  });
 });
+

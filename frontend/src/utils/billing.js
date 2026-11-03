@@ -435,4 +435,32 @@ export function summarizeSkippedContracts(skippedContracts = []) {
   };
 }
 
+/**
+ * Chuẩn hóa thông báo kết quả xác nhận chỉ số đồng hồ hàng loạt (`POST /api/v1/meters/readings/confirm-batch`).
+ * Hỗ trợ `skipped_abnormal_without_note` dạng số nguyên (chuẩn backend) hoặc mảng dự phòng.
+ */
+export function resolveBatchConfirmFeedback(res = {}) {
+  const confirmedCount = Math.max(0, Number(res?.confirmed_count || 0));
+  const rawSkipped = res?.skipped_abnormal_without_note;
+  const skippedCount = Array.isArray(rawSkipped)
+    ? rawSkipped.length
+    : Math.max(0, Number(rawSkipped || 0));
+
+  if (skippedCount > 0) {
+    return {
+      level: 'warning',
+      confirmedCount,
+      skippedCount,
+      message: `${res?.message || 'Đã xác nhận hàng loạt.'} (Còn ${skippedCount} đồng hồ bất thường cần nhập ghi chú giải trình).`,
+    };
+  }
+
+  return {
+    level: 'success',
+    confirmedCount,
+    skippedCount: 0,
+    message: res?.message || `Đã xác nhận chốt ${confirmedCount} chỉ số.`,
+  };
+}
+
 

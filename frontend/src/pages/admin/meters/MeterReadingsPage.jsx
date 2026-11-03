@@ -30,7 +30,7 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { APARTMENT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatDateTime, getCurrentPeriod } from '../../../utils/format';
-import { evaluateClientMeterAnomaly } from '../../../utils/billing';
+import { evaluateClientMeterAnomaly, resolveBatchConfirmFeedback } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
 function getPreviousBaseline(row) {
@@ -299,12 +299,11 @@ export function MeterReadingsPage() {
         building_id: selectedBuildingId || undefined,
         reading_ids: unconfirmedRows.map((r) => r.period_reading_id),
       });
-      if ((res.skipped_abnormal_without_note || []).length > 0) {
-        toast.warning(
-          `${res.message || 'Đã xác nhận hàng loạt.'} (Còn ${res.skipped_abnormal_without_note.length} đồng hồ bất thường cần nhập ghi chú giải trình).`
-        );
+      const feedback = resolveBatchConfirmFeedback(res);
+      if (feedback.level === 'warning') {
+        toast.warning(feedback.message);
       } else {
-        toast.success(res.message || `Đã xác nhận chốt ${res.confirmed_count || 0} chỉ số.`);
+        toast.success(feedback.message);
       }
       fetchMeters();
     } catch (err) {
