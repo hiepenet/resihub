@@ -10,6 +10,7 @@ import {
   Layers,
   XCircle,
   Clock,
+  CopyPlus,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -49,6 +50,7 @@ import {
   DEFAULT_RESERVATION_CANCEL_POLICY,
   canManagerConfirmReservationPayment,
 } from '../../../utils/depositUiHelpers';
+import { BulkApartmentModal } from './BulkApartmentModal';
 
 function computeSuggestedHoldUntil(startStr, busyIntervals = [], maxHoldDays = 30) {
   if (!startStr) return '';
@@ -91,6 +93,7 @@ export function FloorPlanView({
   const [floorForm, setFloorForm] = useState({ level: '', name: '' });
 
   const [aptModalOpen, setAptModalOpen] = useState(false);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [aptForm, setAptForm] = useState({
     floor_id: '',
     zone_id: '',
@@ -439,6 +442,9 @@ export function FloorPlanView({
               {buildingSelector}
               {canEditRealEstate ? (
                 <>
+                  <Button variant="outline" size="sm" icon={CopyPlus} onClick={() => setBulkModalOpen(true)}>
+                    Tạo hàng loạt
+                  </Button>
                   <Button variant="outline" size="sm" icon={Layers} onClick={() => setFloorModalOpen(true)}>
                     Thêm tầng
                   </Button>
@@ -607,6 +613,9 @@ export function FloorPlanView({
 
           {embedded && canEditRealEstate ? (
             <div className="flex items-center gap-2">
+              <Button variant="outline" size="xs" icon={CopyPlus} onClick={() => setBulkModalOpen(true)}>
+                Tạo hàng loạt
+              </Button>
               <Button variant="outline" size="xs" icon={Layers} onClick={() => setFloorModalOpen(true)}>
                 Thêm tầng
               </Button>
@@ -1157,6 +1166,20 @@ export function FloorPlanView({
           </div>
         </form>
       </Modal>
+
+      <BulkApartmentModal
+        open={bulkModalOpen}
+        onClose={() => setBulkModalOpen(false)}
+        buildingId={buildingId}
+        floors={(floorMap || []).map((f) => ({
+          id: f.id,
+          level: f.level,
+          name: f.name,
+          apartment_count: (f.apartments || []).length,
+        }))}
+        zones={zones}
+        onCreated={() => loadFloorPlan()}
+      />
 
       {/* Create Reservation Modal */}
       <Modal

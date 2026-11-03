@@ -27,6 +27,10 @@ export const buildingsService = {
   listApartments: (params) => api.get('/api/v1/apartments', { params }).then((r) => r.data),
   getApartment: (id) => api.get(`/api/v1/apartments/${id}`).then((r) => r.data),
   createApartment: (payload) => api.post('/api/v1/apartments', payload).then((r) => r.data),
+  previewApartmentsBulk: (payload) =>
+    api.post('/api/v1/apartments/bulk', { ...payload, dry_run: true }).then((r) => r.data),
+  createApartmentsBulk: (payload) =>
+    api.post('/api/v1/apartments/bulk', { ...payload, dry_run: false }).then((r) => r.data),
   updateApartment: (id, payload) => api.patch(`/api/v1/apartments/${id}`, payload).then((r) => r.data),
   deleteApartment: (id) => api.delete(`/api/v1/apartments/${id}`).then((r) => r.data),
   handoverApartment: (id, payload = {}) =>
