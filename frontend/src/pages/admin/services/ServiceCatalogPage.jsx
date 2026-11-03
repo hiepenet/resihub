@@ -160,10 +160,6 @@ export function ServiceCatalogPage() {
   };
 
   const openEditModal = (item) => {
-    if (!item.building_id) {
-      toast.warning('Không thể chỉnh sửa danh mục mặc định dùng chung liên tòa.');
-      return;
-    }
     setEditingItem(item);
     setForm({
       code: item.code || '',
@@ -219,17 +215,20 @@ export function ServiceCatalogPage() {
       setModalOpen(false);
       fetchData();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể lưu thông tin dịch vụ.'));
+      if (err?.response?.data?.code === 'ORG_DEFAULT_SHARED_ACROSS_BUILDINGS') {
+        toast.error(
+          err.response.data.message ||
+            'Không thể sửa dịch vụ mặc định tổ chức khi đang được áp dụng tại tòa nhà khác ngoài phạm vi quản lý. Vui lòng tạo cấu hình riêng cho tòa nhà của bạn.'
+        );
+      } else {
+        toast.error(extractErrorMessage(err, 'Không thể lưu thông tin dịch vụ.'));
+      }
     } finally {
       setSaving(false);
     }
   };
 
   const handleToggleActive = async (item) => {
-    if (!item.building_id) {
-      toast.warning('Không thể thay đổi trạng thái danh mục mặc định dùng chung liên tòa.');
-      return;
-    }
     try {
       await servicesService.updateCatalog(item.id, { is_active: !item.is_active });
       toast.success(
@@ -239,7 +238,14 @@ export function ServiceCatalogPage() {
       );
       fetchData();
     } catch (err) {
-      toast.error(extractErrorMessage(err, 'Không thể cập nhật trạng thái dịch vụ.'));
+      if (err?.response?.data?.code === 'ORG_DEFAULT_SHARED_ACROSS_BUILDINGS') {
+        toast.error(
+          err.response.data.message ||
+            'Không thể thay đổi trạng thái dịch vụ mặc định tổ chức khi đang được áp dụng tại tòa nhà khác ngoài phạm vi quản lý. Vui lòng tạo cấu hình riêng cho tòa nhà của bạn.'
+        );
+      } else {
+        toast.error(extractErrorMessage(err, 'Không thể cập nhật trạng thái dịch vụ.'));
+      }
     }
   };
 
@@ -376,6 +382,9 @@ export function ServiceCatalogPage() {
                             {svc.code}
                           </span>
                           <Badge variant={catMeta.badge}>{catMeta.label}</Badge>
+                          <Badge variant={svc.building_id ? 'sky' : 'slate'} size="xs">
+                            {bldg ? `Tòa ${bldg.code}` : 'Mặc định tổ chức'}
+                          </Badge>
                         </div>
                       </div>
                     </div>
@@ -412,34 +421,28 @@ export function ServiceCatalogPage() {
                       </strong>
                     </span>
                     <span className="mx-1.5">•</span>
-                    <span>{bldg ? `Tòa ${bldg.code}` : 'Toàn hệ thống'}</span>
+                    <span>{bldg ? `Tòa ${bldg.code}` : 'Mặc định tổ chức'}</span>
                   </div>
 
                   {canManageServiceCatalog ? (
-                    svc.building_id ? (
-                      <div className="flex items-center gap-1.5">
-                        <Button
-                          variant="ghost"
-                          size="xs"
-                          icon={Edit3}
-                          onClick={() => openEditModal(svc)}
-                        >
-                          Sửa
-                        </Button>
-                        <Button
-                          variant={svc.is_active ? 'outline' : 'soft'}
-                          size="xs"
-                          icon={Power}
-                          onClick={() => handleToggleActive(svc)}
-                        >
-                          {svc.is_active ? 'Ngưng' : 'Mở lại'}
-                        </Button>
-                      </div>
-                    ) : (
-                      <Badge variant="slate" size="xs">
-                        Mặc định (Chỉ đọc)
-                      </Badge>
-                    )
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        icon={Edit3}
+                        onClick={() => openEditModal(svc)}
+                      >
+                        Sửa
+                      </Button>
+                      <Button
+                        variant={svc.is_active ? 'outline' : 'soft'}
+                        size="xs"
+                        icon={Power}
+                        onClick={() => handleToggleActive(svc)}
+                      >
+                        {svc.is_active ? 'Ngưng' : 'Mở lại'}
+                      </Button>
+                    </div>
                   ) : null}
                 </div>
               </Card>
@@ -525,7 +528,7 @@ export function ServiceCatalogPage() {
               label="Phạm vi áp dụng"
               value={form.building_id}
               onChange={(e) => setForm((s) => ({ ...s, building_id: e.target.value }))}
-              placeholder="Áp dụng chung toàn bộ tổ chức"
+              placeholder="Mặc định tổ chức (Áp dụng chung)"
               options={buildings.map((b) => ({
                 value: b.id,
                 label: `Riêng tòa ${b.code} — ${b.name}`,
@@ -541,7 +544,7 @@ export function ServiceCatalogPage() {
                       const b = buildings.find((x) => x.id === editingItem.building_id);
                       return b ? `Riêng tòa ${b.code} — ${b.name}` : 'Riêng theo tòa nhà';
                     })()
-                  : 'Áp dụng chung toàn bộ tổ chức'
+                  : 'Mặc định tổ chức (Áp dụng chung)'
               }
             />
           )}
