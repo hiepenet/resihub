@@ -19,6 +19,8 @@ import {
   AlertCircle,
   Wrench,
   CalendarClock,
+  FileText,
+  Receipt,
   ArrowRight,
   RefreshCw,
   Wallet,
@@ -180,7 +182,37 @@ export function DashboardPage() {
       </div>
 
       {/* Dải KPI Cảnh báo Sổ cọc & Giữ chỗ có Drill-down (GAP-05 / FR-024) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* Four-Eyes Pending Queue Cards (PRD 15.1-15.3) */}
+        <button
+          type="button"
+          onClick={() => navigate('/admin/invoices?status=PENDING_APPROVAL')}
+          className="text-left p-3.5 rounded-xl border border-purple-200/80 bg-purple-50/50 hover:bg-purple-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-purple-800">Chờ duyệt điều chỉnh HĐ</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.pending_invoice_adjustments || 0}
+            </p>
+            <p className="text-[11px] text-purple-700 mt-0.5">Duyệt 4 mắt HĐ →</p>
+          </div>
+          <FileText className="w-6 h-6 text-purple-600 shrink-0" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate('/admin/payments?tab=credits&status=PENDING_DIRECT_REFUND')}
+          className="text-left p-3.5 rounded-xl border border-indigo-200/80 bg-indigo-50/50 hover:bg-indigo-50 transition-colors flex items-center justify-between gap-3"
+        >
+          <div>
+            <p className="text-xs font-medium text-indigo-800">Chờ duyệt hoàn tín dụng</p>
+            <p className="text-xl font-bold text-slate-900 mt-0.5">
+              {kpis.pending_credit_refunds || 0}
+            </p>
+            <p className="text-[11px] text-indigo-700 mt-0.5">Duyệt 4 mắt hoàn tiền →</p>
+          </div>
+          <Receipt className="w-6 h-6 text-indigo-600 shrink-0" />
+        </button>
         <button
           type="button"
           onClick={() => navigate('/admin/deposits?tab=pending')}

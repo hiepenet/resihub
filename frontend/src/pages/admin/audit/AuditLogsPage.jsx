@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   ScrollText,
   RefreshCw,
@@ -9,6 +10,7 @@ import {
   ShieldAlert,
   RotateCcw,
   Download,
+  FileSpreadsheet,
   Wallet,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
@@ -27,15 +29,23 @@ import { syncFilterDateRange } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 
 const ENTITY_OPTIONS = [
-  { value: 'contract', label: 'Hợp đồng (contract)' },
+  // 12 Thực thể Tài chính chuẩn Spec RP-08 & PRD
+  { value: 'invoice', label: 'Hóa đơn (invoice)' },
+  { value: 'invoice_line', label: 'Dòng hóa đơn (invoice_line)' },
+  { value: 'invoice_adjustment', label: 'Điều chỉnh hóa đơn (invoice_adjustment)' },
+  { value: 'payment', label: 'Thanh toán (payment)' },
+  { value: 'credit_balance', label: 'Số dư tín dụng (credit_balance)' },
+  { value: 'receivable', label: 'Công nợ phải thu (receivable)' },
   { value: 'deposit', label: 'Tiền đặt cọc (deposit)' },
   { value: 'deposit_transaction', label: 'Giao dịch cọc (deposit_transaction)' },
-  { value: 'invoice', label: 'Hóa đơn (invoice)' },
-  { value: 'payment', label: 'Thanh toán (payment)' },
-  { value: 'receivable', label: 'Công nợ phải thu (receivable)' },
+  { value: 'reservation', label: 'Giữ chỗ (reservation)' },
+  { value: 'service_subscription', label: 'Đăng ký dịch vụ (service_subscription)' },
+  { value: 'service_catalog', label: 'Danh mục dịch vụ (service_catalog)' },
+  { value: 'contract_service_price', label: 'Biểu giá dịch vụ hợp đồng (contract_service_price)' },
+  // Các thực thể vận hành khác
+  { value: 'contract', label: 'Hợp đồng (contract)' },
   { value: 'apartment', label: 'Căn hộ (apartment)' },
   { value: 'building', label: 'Tòa nhà (building)' },
-  { value: 'reservation', label: 'Giữ chỗ (reservation)' },
   { value: 'tenant', label: 'Cư dân (tenant)' },
   { value: 'user_account', label: 'Tài khoản (user_account)' },
   { value: 'system_setting', label: 'Cấu hình hệ thống (system_setting)' },
@@ -94,7 +104,9 @@ function formatJsonBlock(val) {
   }
 }
 
-export function AuditLogsView() {
+export function AuditLogsView({ lockedScope = '' } = {}) {
+  const [searchParams] = useSearchParams();
+  const initialScope = lockedScope || searchParams?.get('scope') || '';
   const toast = useToast();
 
   const [logs, setLogs] = useState([]);
@@ -105,7 +117,9 @@ export function AuditLogsView() {
   const [totalPages, setTotalPages] = useState(1);
 
   const [search, setSearch] = useState('');
-  const [scope, setScope] = useState('');
+  const [scope, setScope] = useState(initialScope);
+  const effectiveScope = lockedScope || scope;
+  const [exportingXlsx, setExportingXlsx] = useState(false);
   const [entity, setEntity] = useState('');
   const [action, setAction] = useState('');
   const [fromDate, setFromDate] = useState('');
@@ -120,7 +134,7 @@ export function AuditLogsView() {
       const params = {
         page,
         limit,
-        ...(scope ? { scope } : {}),
+        ...(effectiveScope ? { scope: effectiveScope } : {}),
         ...(entity ? { entity } : {}),
         ...(action ? { action } : {}),
         ...(fromDate ? { from: fromDate } : {}),
@@ -150,7 +164,7 @@ export function AuditLogsView() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, scope, entity, action, fromDate, toDate, search, toast]);
+  }, [page, limit, effectiveScope, entity, action, fromDate, toDate, search, toast]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -173,7 +187,7 @@ export function AuditLogsView() {
     setExportingCsv(true);
     try {
       const blob = await auditService.exportCsv({
-        scope: 'financial',
+        ...(effectiveScope ? { scope: effectiveScope } : { scope: 'financial' }),
         ...(entity ? { entity } : {}),
         ...(action ? { action } : {}),
         ...(fromDate ? { from: fromDate } : {}),
@@ -193,6 +207,33 @@ export function AuditLogsView() {
       toast.error(extractErrorMessage(err, 'Không thể xuất CSV Nhật ký tài chính (RP-08).'));
     } finally {
       setExportingCsv(false);
+    }
+  };
+
+  const handleExportFinancialXlsx = async () => {
+    setExportingXlsx(true);
+    try {
+      const blob = await auditService.exportXlsx({
+        ...(effectiveScope ? { scope: effectiveScope } : { scope: 'financial' }),
+        ...(entity ? { entity } : {}),
+        ...(action ? { action } : {}),
+        ...(fromDate ? { from: fromDate } : {}),
+        ...(toDate ? { to: toDate } : {}),
+        ...(search.trim() ? { search: search.trim() } : {}),
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nhat-ky-tai-chinh-rp08-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Đã xuất Excel (.xlsx) Nhật ký thao tác tài chính (RP-08).');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xuất Excel Nhật ký tài chính (RP-08).'));
+    } finally {
+      setExportingXlsx(false);
     }
   };
 
@@ -396,11 +437,21 @@ export function AuditLogsView() {
             <Button
               variant="outline"
               size="xs"
+              icon={FileSpreadsheet}
+              loading={exportingXlsx}
+              onClick={handleExportFinancialXlsx}
+              className="text-emerald-700 hover:bg-emerald-50 border-emerald-300"
+            >
+              Xuất Excel (.xlsx)
+            </Button>
+            <Button
+              variant="outline"
+              size="xs"
               icon={Download}
               loading={exportingCsv}
               onClick={handleExportFinancialCsv}
             >
-              Xuất CSV Tài chính (RP-08)
+              Xuất CSV (RP-08)
             </Button>
             <Button variant="outline" size="xs" icon={RefreshCw} onClick={fetchLogs}>
               Làm mới

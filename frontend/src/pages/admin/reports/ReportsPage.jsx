@@ -43,6 +43,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { SERVICE_REQUEST_CATEGORY, DEPOSIT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatCompactMoney, formatDate, exportToCsv } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import { AuditLogsView } from '../audit/AuditLogsPage';
 
 ChartJS.register(
   CategoryScale,
@@ -56,7 +57,7 @@ ChartJS.register(
   Filler
 );
 
-const VALID_REPORT_TABS = ['revenue', 'occupancy', 'aging', 'sla', 'deposit-ledger'];
+const VALID_REPORT_TABS = ['revenue', 'occupancy', 'aging', 'deposit-ledger', 'financial-audit', 'sla'];
 
 function getDefaultPeriodRange() {
   const now = new Date();
@@ -556,9 +557,27 @@ export function ReportsPage() {
                       Biểu đồ Cột
                     </button>
                   </div>
-                  <Button variant="outline" size="sm" icon={Download} onClick={exportRevenueCsv}>
-                    Xuất CSV
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      icon={FileSpreadsheet}
+                      loading={exportingSummarySection === 'revenue-xlsx'}
+                      onClick={() => handleExportRevenue('xlsx')}
+                      className="text-emerald-700 hover:bg-emerald-50 border-emerald-300"
+                    >
+                      Xuất Excel (.xlsx)
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      icon={Download}
+                      loading={exportingSummarySection === 'revenue-csv'}
+                      onClick={() => handleExportRevenue('csv')}
+                    >
+                      Xuất CSV
+                    </Button>
+                  </div>
                 </>
               }
             />
@@ -601,12 +620,28 @@ export function ReportsPage() {
                 render: (r) => formatMoney(r.billed),
               },
               {
-                key: 'collected',
-                label: 'Thực thu',
-                align: 'right',
+                key: 'invoice_settled',
+                label: 'Tất toán HĐ',
                 sortable: true,
-                className: 'font-mono tabular-nums font-semibold text-emerald-700 whitespace-nowrap',
-                render: (r) => formatMoney(r.collected),
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-emerald-700 font-medium',
+                headerClassName: 'text-right whitespace-nowrap',
+                render: (r) => formatMoney(r.invoice_settled || 0),
+              },
+              {
+                key: 'collected',
+                label: 'Thực thu ròng',
+                sortable: true,
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-sky-700 font-semibold',
+                headerClassName: 'text-right whitespace-nowrap',
+                render: (r) => formatMoney(r.collected || 0),
+              },
+              {
+                key: 'credit_refunded',
+                label: 'Hoàn tín dụng',
+                sortable: true,
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-pink-700',
+                headerClassName: 'text-right whitespace-nowrap',
+                render: (r) => formatMoney(r.credit_refunded || 0),
               },
               {
                 key: 'rate',
@@ -730,9 +765,27 @@ export function ReportsPage() {
               title="Phân bổ tuổi nợ (Aging) theo từng tòa nhà"
               subtitle="Phân tầng công nợ quá hạn theo 4 ngưỡng rủi ro: 0–30, 31–60, 61–90 và trên 90 ngày."
               action={
-                <Button variant="outline" size="sm" icon={Download} onClick={exportAgingCsv}>
-                  Xuất CSV
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={FileSpreadsheet}
+                    loading={exportingSummarySection === 'aging-xlsx'}
+                    onClick={() => handleExportAging('xlsx')}
+                    className="text-emerald-700 hover:bg-emerald-50 border-emerald-300"
+                  >
+                    Xuất Excel (.xlsx)
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={Download}
+                    loading={exportingSummarySection === 'aging-csv'}
+                    onClick={() => handleExportAging('csv')}
+                  >
+                    Xuất CSV
+                  </Button>
+                </div>
               }
             />
             {(reportData.aging_by_building || []).length === 0 ? (
@@ -779,32 +832,39 @@ export function ReportsPage() {
                 ),
               },
               {
-                key: 'bucket_0_30',
-                label: '0 – 30 ngày',
-                className: 'text-right font-mono tabular-nums whitespace-nowrap text-sky-700',
+                key: 'current_not_due',
+                label: 'Chưa đến hạn',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-slate-600',
                 headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_0_30),
+                render: (r) => formatMoney(r.current_not_due || 0),
+              },
+              {
+                key: 'bucket_0_15',
+                label: '0 – 15 ngày',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-emerald-700',
+                headerClassName: 'text-right whitespace-nowrap',
+                render: (r) => formatMoney(r.bucket_0_15 ?? r.bucket_0_30 ?? 0),
+              },
+              {
+                key: 'bucket_16_30',
+                label: '16 – 30 ngày',
+                className: 'text-right font-mono tabular-nums whitespace-nowrap text-amber-700',
+                headerClassName: 'text-right whitespace-nowrap',
+                render: (r) => formatMoney(r.bucket_16_30 || 0),
               },
               {
                 key: 'bucket_31_60',
                 label: '31 – 60 ngày',
-                className: 'text-right font-mono tabular-nums whitespace-nowrap text-amber-700',
-                headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_31_60),
-              },
-              {
-                key: 'bucket_61_90',
-                label: '61 – 90 ngày',
                 className: 'text-right font-mono tabular-nums whitespace-nowrap text-orange-700',
                 headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_61_90),
+                render: (r) => formatMoney(r.bucket_31_60 || 0),
               },
               {
-                key: 'bucket_over_90',
-                label: '> 90 ngày',
+                key: 'bucket_over_60',
+                label: '> 60 ngày',
                 className: 'text-right font-mono tabular-nums whitespace-nowrap text-rose-700 font-semibold',
                 headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_over_90),
+                render: (r) => formatMoney(r.bucket_over_60 ?? r.bucket_over_90 ?? 0),
               },
               {
                 key: 'total_debt',
@@ -1126,6 +1186,13 @@ export function ReportsPage() {
               },
             ]}
           />
+        </div>
+      ) : null}
+
+      {/* TAB: NHẬT KÝ KIỂM TOÁN TÀI CHÍNH RP-08 */}
+      {activeTab === 'financial-audit' ? (
+        <div className="space-y-5">
+          <AuditLogsView lockedScope="financial" />
         </div>
       ) : null}
 

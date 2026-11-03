@@ -9,4 +9,11 @@ export const auditService = {
         responseType: 'blob',
       })
       .then((r) => r.data),
+  exportXlsx: (params = {}) =>
+    api
+      .get('/api/v1/audit-logs', {
+        params: { ...params, format: 'xlsx' },
+        responseType: 'blob',
+      })
+      .then((r) => r.data),
 };

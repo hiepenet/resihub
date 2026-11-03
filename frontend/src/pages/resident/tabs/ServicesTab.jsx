@@ -41,6 +41,7 @@ import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
+import { previewSubscriptionProrata } from '../../../utils/billing';
 
 const CATEGORY_META = {
   PARKING: { label: 'Gửi xe & Bãi đỗ', icon: Car, color: 'bg-sky-50 text-sky-600' },
@@ -56,38 +57,35 @@ const CATEGORY_META = {
 };
 
 /**
- * Tính ước tính phí Pro-rata khớp công thức backend (resident.js computeProrata)
+ * Tính ước tính phí Pro-rata khớp công thức hệ thống (previewSubscriptionProrata)
  */
-function calculateProrataDetails(unitPrice, quantity, targetDateStr, mode = 'subscribe') {
-  const todayStr = toInputDate(new Date());
-  const dateStr = targetDateStr || todayStr;
-  const parts = String(dateStr).split('-').map(Number);
-
-  let year;
-  let monthIndex;
-  let day;
-
-  if (parts.length === 3 && parts[0] > 1900) {
-    year = parts[0];
-    monthIndex = parts[1] - 1;
-    day = parts[2];
-  } else {
-    const now = new Date();
-    year = now.getFullYear();
-    monthIndex = now.getMonth();
-    day = now.getDate();
+function calculateProrataDetails(unitPrice, quantity, targetDateStr, mode = 'subscribe', startDate = null) {
+  if (mode === 'cancel') {
+    const preview = previewSubscriptionProrata({
+      unitPrice,
+      quantity,
+      startDate: startDate || undefined,
+      endDate: targetDateStr,
+    });
+    return {
+      daysInMonth: preview.daysInMonth,
+      activeDays: preview.activeDays,
+      fullMonthAmount: Math.round(Number(unitPrice || 0) * Math.max(1, Number(quantity || 1))),
+      prorataAmount: preview.amount,
+      amount: preview.amount,
+    };
   }
-
-  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-  const activeDays = mode === 'cancel' ? day : Math.max(1, daysInMonth - day + 1);
-  const fullMonthAmount = Math.round(Number(unitPrice || 0) * Math.max(1, Number(quantity || 1)));
-  const prorataAmount = Math.round((fullMonthAmount * activeDays) / daysInMonth);
-
+  const preview = previewSubscriptionProrata({
+    unitPrice,
+    quantity,
+    startDate: targetDateStr,
+  });
   return {
-    daysInMonth,
-    activeDays,
-    fullMonthAmount,
-    prorataAmount,
+    daysInMonth: preview.daysInMonth,
+    activeDays: preview.activeDays,
+    fullMonthAmount: Math.round(Number(unitPrice || 0) * Math.max(1, Number(quantity || 1))),
+    prorataAmount: preview.amount,
+    amount: preview.amount,
   };
 }
 
@@ -120,6 +118,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   // Cancel Service Modal
   const [cancelTarget, setCancelTarget] = useState(null);
   const [cancelling, setCancelling] = useState(false);
+  const [withdrawingId, setWithdrawingId] = useState(null);
   const [cancelForm, setCancelForm] = useState({
     end_date: toInputDate(new Date()),
     note: '',
@@ -187,7 +186,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
 
   const historySubscriptions = useMemo(
     () =>
-      subscriptions.filter((s) => ['CANCELLED', 'REJECTED'].includes(s.status)),
+      subscriptions.filter((s) => ['CANCELLED', 'REJECTED', 'TERMINATED'].includes(s.status)),
     [subscriptions]
   );
 
@@ -218,17 +217,18 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     );
   }, [selectedCatalogItem, subForm.quantity, subForm.start_date, subscribeDateError]);
 
-  const minCancelEndDate = maxDateStr(
-    toInputDate(new Date()),
-    toDateOnlyStr(cancelTarget?.start_date)
-  );
-  const cancelDateError = cancelTarget
-    ? getDateOrderError(minCancelEndDate, cancelForm.end_date, {
-        strictAfter: false,
-        startLabel: `Mốc tối thiểu (${formatDateVi(minCancelEndDate)})`,
-        endLabel: 'Ngày kết thúc sử dụng',
-      })
-    : '';
+  const contractEffectiveEndStr = toDateOnlyStr(contract?.end_date);
+  const minCancelEndDate = toInputDate(new Date());
+  const cancelDateError = useMemo(() => {
+    if (!cancelTarget || !cancelForm.end_date) return '';
+    if (minCancelEndDate && cancelForm.end_date < minCancelEndDate) {
+      return `Ngày kết thúc sử dụng không được nhỏ hơn hôm nay (${formatDateVi(minCancelEndDate)}).`;
+    }
+    if (contractEffectiveEndStr && cancelForm.end_date > contractEffectiveEndStr) {
+      return `Ngày kết thúc sử dụng không được vượt quá ngày kết thúc hợp đồng (${formatDateVi(contractEffectiveEndStr)}).`;
+    }
+    return '';
+  }, [cancelTarget, cancelForm.end_date, minCancelEndDate, contractEffectiveEndStr]);
 
   const cancelProrata = useMemo(() => {
     if (!cancelTarget || cancelDateError) return null;
@@ -236,7 +236,8 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
       cancelTarget.unit_price,
       cancelTarget.quantity,
       cancelForm.end_date,
-      'cancel'
+      'cancel',
+      cancelTarget.start_date
     );
   }, [cancelTarget, cancelForm.end_date, cancelDateError]);
 
@@ -291,9 +292,22 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const openCancelModal = (sub) => {
     setCancelTarget(sub);
     setCancelForm({
-      end_date: maxDateStr(toInputDate(new Date()), toDateOnlyStr(sub?.start_date)),
+      end_date: toInputDate(new Date()),
       note: '',
     });
+  };
+
+  const handleWithdrawCancel = async (sub) => {
+    setWithdrawingId(sub.id);
+    try {
+      const res = await residentService.withdrawCancelService(sub.id);
+      toast.success(res?.message || 'Đã rút yêu cầu hủy dịch vụ thành công.');
+      await loadServices();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể rút yêu cầu hủy dịch vụ.'));
+    } finally {
+      setWithdrawingId(null);
+    }
   };
 
   const handleConfirmCancel = async (e) => {
@@ -408,7 +422,17 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
                       </p>
                     </div>
 
-                    {canCancel ? (
+                    {sub.status === 'CANCELLATION_PENDING' ? (
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        loading={withdrawingId === sub.id}
+                        onClick={() => handleWithdrawCancel(sub)}
+                        className="text-amber-600 hover:bg-amber-50 border-amber-200"
+                      >
+                        Rút yêu cầu hủy
+                      </Button>
+                    ) : canCancel ? (
                       <Button
                         variant="outline"
                         size="xs"
@@ -749,6 +773,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
               type="date"
               label="Ngày kết thúc sử dụng"
               min={minCancelEndDate || undefined}
+              max={contractEffectiveEndStr || undefined}
               error={cancelDateError}
               value={cancelForm.end_date}
               icon={Calendar}

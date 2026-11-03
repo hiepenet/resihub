@@ -23,6 +23,7 @@ export const residentService = {
     api.get('/api/v1/resident/services', withContractParam(contractId)).then((r) => r.data),
   subscribeService: (payload) => api.post('/api/v1/resident/services', payload).then((r) => r.data),
   cancelService: (id, payload = {}) => api.patch(`/api/v1/resident/services/${id}/cancel`, payload).then((r) => r.data),
+  withdrawCancelService: (id) => api.patch(`/api/v1/resident/services/${id}/withdraw-cancel`).then((r) => r.data),
 
   updateProfile: (payload) => api.patch('/api/v1/resident/profile', payload).then((r) => r.data),
 

@@ -23,6 +23,38 @@ import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 
 function getNotificationMeta(type = '') {
   const upper = String(type).toUpperCase();
+  if (upper.includes('CREDIT')) {
+    let label = 'Tín dụng & Hoàn tiền';
+    if (upper === 'CREDIT_APPLIED') label = 'Đã cấn trừ tín dụng';
+    else if (upper === 'CREDIT_REFUND_PENDING') label = 'Chờ duyệt hoàn tiền tín dụng';
+    else if (upper === 'CREDIT_REFUNDED') label = 'Đã hoàn tiền tín dụng';
+    else if (upper === 'CREDIT_REFUND_REJECTED') label = 'Từ chối hoàn tiền tín dụng';
+    return {
+      icon: Receipt,
+      color: 'bg-emerald-50 text-emerald-600 border-emerald-100',
+      label,
+      targetTab: 'invoices',
+      actionLabel: 'Xem số dư tín dụng',
+    };
+  }
+  if (upper === 'PAYMENT_REMINDER') {
+    return {
+      icon: Receipt,
+      color: 'bg-rose-50 text-rose-600 border-rose-100',
+      label: 'Nhắc nợ hóa đơn',
+      targetTab: 'invoices',
+      actionLabel: 'Thanh toán ngay',
+    };
+  }
+  if (upper === 'INVOICE_ADJUSTED' || upper === 'INVOICE_ADJUSTMENT_PENDING') {
+    return {
+      icon: Receipt,
+      color: 'bg-purple-50 text-purple-600 border-purple-100',
+      label: upper === 'INVOICE_ADJUSTED' ? 'Hóa đơn đã điều chỉnh' : 'Đang duyệt điều chỉnh hóa đơn',
+      targetTab: 'invoices',
+      actionLabel: 'Xem chi tiết',
+    };
+  }
   if (upper.includes('INVOICE') || upper.includes('PAYMENT')) {
     return {
       icon: Receipt,
@@ -50,11 +82,11 @@ function getNotificationMeta(type = '') {
       actionLabel: 'Xem báo hỏng',
     };
   }
-  if (upper.includes('SERVICE_UPDATE') || upper.includes('SUBSCRIPTION')) {
+  if (upper.includes('SERVICE_UPDATE') || upper.includes('SUBSCRIPTION') || upper === 'SERVICE_TERMINATED') {
     return {
       icon: Sparkles,
       color: 'bg-emerald-50 text-emerald-600 border-emerald-100',
-      label: 'Dịch vụ tiện ích',
+      label: upper === 'SERVICE_TERMINATED' ? 'Dịch vụ đã chấm dứt' : 'Dịch vụ tiện ích',
       targetTab: 'services',
       actionLabel: 'Xem dịch vụ',
     };

@@ -1029,6 +1029,31 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           </div>
         ) : null}
 
+        {/* Available Credit Balance Banner */}
+        {Number(overview?.available_credit_balance || contract?.available_credit_balance || 0) > 0 ? (
+          <div className="p-4 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-between gap-3 text-sky-900">
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5 text-sky-600 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold">
+                  Số dư tín dụng khả dụng: {formatMoney(overview?.available_credit_balance || contract?.available_credit_balance)}
+                </p>
+                <p className="text-xs text-sky-700">
+                  Số dư này sẽ tự động được bù trừ vào các hóa đơn tiếp theo hoặc có thể đề nghị hoàn trả khi kết thúc hợp đồng.
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => onNavigateTab?.('invoices')}
+              className="text-sky-700 border-sky-300 hover:bg-sky-100 shrink-0"
+            >
+              Xem hóa đơn
+            </Button>
+          </div>
+        ) : null}
+
         {/* 4 KPI Cards Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {/* KPI 1: Current Amount Due (AC-002.1) */}
@@ -1072,7 +1097,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
 
             <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
               <span className="text-xs text-slate-500 leading-snug break-words">
-                {currentAmountDue > 0 && latestInvoice
+                {currentAmountDue > 0 && latestInvoice && !['DRAFT', 'VOID'].includes(latestInvoice.status)
                   ? `Kỳ ${latestInvoice.period} • Hạn ${formatDate(latestInvoice.due_date)}`
                   : 'Không có dư nợ quá hạn'}
               </span>
@@ -1282,7 +1307,8 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                       {formatMoney(latestInvoice.total_amount)}
                     </p>
                   </div>
-                  {['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(latestInvoice.status) ? (
+                  {['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(latestInvoice.status) &&
+                  Number(latestInvoice.total_amount || 0) - Number(latestInvoice.paid_amount || 0) > 0 ? (
                     <Button
                       size="sm"
                       onClick={() => onNavigateTab?.('invoices', { action: 'pay' })}

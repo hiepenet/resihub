@@ -202,8 +202,10 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
 
   const unpaidInvoices = useMemo(
     () =>
-      invoices.filter((inv) =>
-        ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status)
+      invoices.filter(
+        (inv) =>
+          ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(inv.status) &&
+          Number(inv.total_amount || 0) - Number(inv.paid_amount || 0) > 0
       ),
     [invoices]
   );
@@ -244,10 +246,10 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
   const summary = useMemo(() => {
     return invoices.reduce(
       (acc, inv) => {
-        if (inv.status !== 'CANCELLED') {
+        if (!['CANCELLED', 'DRAFT', 'VOID'].includes(inv.status)) {
           acc.totalBilled += Number(inv.total_amount || 0);
           acc.totalPaid += Number(inv.paid_amount || 0);
-          if (['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status)) {
+          if (['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(inv.status)) {
             acc.totalUnpaid += Math.max(
               0,
               Number(inv.total_amount || 0) - Number(inv.paid_amount || 0)
@@ -328,6 +330,23 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
 
   return (
     <div className="space-y-6">
+      {/* Available Credit Balance Banner */}
+      {Number(overview?.available_credit_balance || contract?.available_credit_balance || 0) > 0 ? (
+        <div className="p-4 rounded-xl bg-sky-50 border border-sky-200 flex items-center justify-between gap-3 text-sky-900">
+          <div className="flex items-center gap-3">
+            <Sparkles className="w-5 h-5 text-sky-600 shrink-0" />
+            <div>
+              <p className="text-sm font-semibold">
+                Số dư tín dụng khả dụng: {formatMoney(overview?.available_credit_balance || contract?.available_credit_balance)}
+              </p>
+              <p className="text-xs text-sky-700">
+                Số dư này sẽ tự động được cấn trừ vào hóa đơn kỳ tới hoặc hoàn trả khi thanh lý hợp đồng.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* Top Grid: Summary + Bank Payment Account Card */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Financial Summary */}
@@ -503,7 +522,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                   0,
                   Number(inv.total_amount || 0) - Number(inv.paid_amount || 0)
                 );
-                const canPay = ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(inv.status);
+                const canPay = ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(inv.status) && remaining > 0;
                 const lines = Array.isArray(inv.lines) ? inv.lines : [];
                 const payments = Array.isArray(inv.payments) ? inv.payments : [];
                 const hasPendingPayment = payments.some(
@@ -647,6 +666,11 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                           SL: {line.quantity} {line.unit || ''} ×{' '}
                                           {formatMoney(line.unit_price)}
                                         </p>
+                                        {line.formula_meta?.description || line.formula_meta?.formula ? (
+                                          <p className="text-[11px] text-indigo-700 bg-indigo-50/80 rounded px-1.5 py-0.5 mt-1 inline-block font-mono">
+                                            {line.formula_meta.description || line.formula_meta.formula}
+                                          </p>
+                                        ) : null}
                                       </div>
                                     </div>
                                     <span className="font-bold text-slate-900 shrink-0">

@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   Clock,
   Calendar,
+  Sparkles,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -54,6 +55,8 @@ import { buildingsService } from '../../../services/buildings.service';
 import { tenantsService } from '../../../services/tenants.service';
 import { servicesService } from '../../../services/services.service';
 import { usersService } from '../../../services/users.service';
+import { paymentsService } from '../../../services/payments.service';
+import { canActorApproveCreditRefund } from '../../../utils/billing';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
@@ -261,6 +264,23 @@ export function ContractDetailPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
 
+  // Direct Credit Refund State (FR-040)
+  const [creditRefundModalOpen, setCreditRefundModalOpen] = useState(false);
+  const [selectedCredit, setSelectedCredit] = useState(null);
+  const [creditRefundForm, setCreditRefundForm] = useState({
+    amount: '',
+    reason: '',
+    bank_name: '',
+    account_number: '',
+    account_holder: '',
+    proof_image: '',
+  });
+  const [submittingCreditRefund, setSubmittingCreditRefund] = useState(false);
+  const [creditRejectModalOpen, setCreditRejectModalOpen] = useState(false);
+  const [creditRejectionReason, setCreditRejectionReason] = useState('');
+  const [submittingCreditReject, setSubmittingCreditReject] = useState(false);
+  const [approvingCreditId, setApprovingCreditId] = useState(null);
+
   // Action loading states
   const [printing, setPrinting] = useState(false);
   const [uploadingScan, setUploadingScan] = useState(false);
@@ -440,6 +460,97 @@ export function ContractDetailPage() {
     effective_from: '',
   });
   const [submittingSp, setSubmittingSp] = useState(false);
+
+  const handleOpenCreditRefundModal = (credit) => {
+    const remaining = Math.max(
+      0,
+      Number(credit.amount || 0) - Number(credit.applied_amount || 0) - Number(credit.settlement_refund_amount || 0)
+    );
+    setSelectedCredit(credit);
+    setCreditRefundForm({
+      amount: String(remaining),
+      reason: '',
+      bank_name: contract?.tenant?.bank_name || '',
+      account_number: contract?.tenant?.bank_account_no || '',
+      account_holder: contract?.tenant?.bank_account_name || contract?.tenant?.full_name || '',
+      proof_image: '',
+    });
+    setCreditRefundModalOpen(true);
+  };
+
+  const handleSubmitCreditRefund = async (e) => {
+    e?.preventDefault?.();
+    if (!selectedCredit) return;
+    const numAmount = Number(creditRefundForm.amount);
+    if (!numAmount || numAmount <= 0) {
+      toast.warning('Vui lòng nhập số tiền hoàn trả hợp lệ (> 0).');
+      return;
+    }
+    if (!creditRefundForm.reason.trim()) {
+      toast.warning('Vui lòng nhập lý do hoàn tiền.');
+      return;
+    }
+    setSubmittingCreditRefund(true);
+    try {
+      await paymentsService.requestCreditRefund(selectedCredit.id, {
+        amount: numAmount,
+        reason: creditRefundForm.reason.trim(),
+        bank_info: {
+          bank_name: creditRefundForm.bank_name.trim(),
+          account_number: creditRefundForm.account_number.trim(),
+          account_holder: creditRefundForm.account_holder.trim(),
+        },
+        proof_image: creditRefundForm.proof_image || undefined,
+      });
+      toast.success('Đã gửi đề nghị hoàn tiền tín dụng (chờ duyệt 4 mắt).');
+      setCreditRefundModalOpen(false);
+      await loadAll();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể tạo đề nghị hoàn tiền tín dụng.'));
+    } finally {
+      setSubmittingCreditRefund(false);
+    }
+  };
+
+  const handleApproveCreditRefund = async (credit) => {
+    setApprovingCreditId(credit.id);
+    try {
+      await paymentsService.approveCreditRefund(credit.id);
+      toast.success('Đã phê duyệt hoàn tiền tín dụng thành công.');
+      await loadAll();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể phê duyệt hoàn tiền.'));
+    } finally {
+      setApprovingCreditId(null);
+    }
+  };
+
+  const handleOpenCreditRejectModal = (credit) => {
+    setSelectedCredit(credit);
+    setCreditRejectionReason('');
+    setCreditRejectModalOpen(true);
+  };
+
+  const handleSubmitCreditReject = async () => {
+    if (!selectedCredit) return;
+    if (!creditRejectionReason.trim()) {
+      toast.warning('Vui lòng nhập lý do từ chối.');
+      return;
+    }
+    setSubmittingCreditReject(true);
+    try {
+      await paymentsService.rejectCreditRefund(selectedCredit.id, {
+        rejection_reason: creditRejectionReason.trim(),
+      });
+      toast.success('Đã từ chối đề nghị hoàn tiền tín dụng.');
+      setCreditRejectModalOpen(false);
+      await loadAll();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể từ chối đề nghị hoàn tiền.'));
+    } finally {
+      setSubmittingCreditReject(false);
+    }
+  };
 
   const loadAll = useCallback(async () => {
     if (!id) return;
@@ -1500,6 +1611,12 @@ export function ContractDetailPage() {
       icon: FilePlus2,
       count: pendingAmendmentsCount > 0 ? pendingAmendmentsCount : amendments.length,
     },
+    {
+      id: 'credits',
+      label: 'Sổ tín dụng & Hoàn tiền',
+      icon: Sparkles,
+      count: (contract?.credit_balances || []).length,
+    },
     { id: 'history', label: 'Lịch sử gia hạn & Giá dịch vụ', icon: History, count: relatedContracts.length },
   ];
 
@@ -1918,21 +2035,7 @@ export function ContractDetailPage() {
                     label: 'Trạng thái',
                     align: 'center',
                     render: (row) => (
-                      <Badge
-                        variant={
-                          row.status === 'ACTIVE'
-                            ? 'emerald'
-                            : row.status === 'PENDING_APPROVAL'
-                            ? 'amber'
-                            : 'slate'
-                        }
-                      >
-                        {row.status === 'ACTIVE'
-                          ? 'Đang hiệu lực'
-                          : row.status === 'PENDING_APPROVAL'
-                          ? 'Chờ kích hoạt HĐ'
-                          : row.status}
-                      </Badge>
+                      <StatusBadge status={row.status} domain="subscription" />
                     ),
                   },
                 ]}
@@ -2023,7 +2126,7 @@ export function ContractDetailPage() {
                   render: (row) =>
                     row.actual_invoice ? (
                       <Link
-                        to="/admin/invoices"
+                        to={`/admin/invoices/${row.actual_invoice.id}`}
                         className="inline-flex flex-col items-center gap-0.5 hover:underline"
                       >
                         <StatusBadge status={row.actual_invoice.status} domain="invoice" />
@@ -2291,6 +2394,165 @@ export function ContractDetailPage() {
       ) : null}
 
       {/* TAB 4: Chuỗi lịch sử gia hạn / chuyển phòng & Biểu phí dịch vụ */}
+      {activeTab === 'credits' ? (
+        <div className="space-y-6">
+          <Card>
+            <CardHeader
+              title="Sổ số dư tín dụng & Hoàn tiền trực tiếp (Credit Ledger)"
+              subtitle="Theo dõi các khoản tiền nộp thừa, hoàn tiền dịch vụ và thực hiện quy trình hoàn tiền trực tiếp 4 mắt (FR-040)"
+              action={
+                Number(contract?.available_credit_balance || 0) > 0 ? (
+                  <Badge variant="emerald">
+                    Khả dụng: {formatMoney(contract.available_credit_balance)}
+                  </Badge>
+                ) : (
+                  <Badge variant="slate">Số dư: 0 ₫</Badge>
+                )
+              }
+            />
+
+            {(contract?.credit_balances || []).length === 0 ? (
+              <EmptyState
+                icon={Sparkles}
+                title="Chưa có bản ghi số dư tín dụng"
+                subtitle="Hợp đồng này hiện chưa phát sinh khoản tiền nộp thừa hoặc hoàn tiền dịch vụ nào."
+              />
+            ) : (
+              <DataTable
+                rowKey="id"
+                data={contract.credit_balances}
+                columns={[
+                  {
+                    key: 'created_at',
+                    label: 'Thời gian',
+                    render: (row) => (
+                      <span className="text-xs font-mono text-slate-700">
+                        {formatDateTime(row.created_at)}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: 'amount',
+                    label: 'Số tiền gốc',
+                    align: 'right',
+                    render: (row) => (
+                      <span className="font-semibold text-slate-900">{formatMoney(row.amount)}</span>
+                    ),
+                  },
+                  {
+                    key: 'applied_amount',
+                    label: 'Đã cấn trừ',
+                    align: 'right',
+                    render: (row) => (
+                      <span className="text-slate-600">{formatMoney(row.applied_amount || 0)}</span>
+                    ),
+                  },
+                  {
+                    key: 'settlement_refund_amount',
+                    label: 'Hoàn quyết toán',
+                    align: 'right',
+                    render: (row) => (
+                      <span className="text-slate-600">{formatMoney(row.settlement_refund_amount || 0)}</span>
+                    ),
+                  },
+                  {
+                    key: 'remaining',
+                    label: 'Còn lại khả dụng',
+                    align: 'right',
+                    render: (row) => {
+                      const rem = Math.max(
+                        0,
+                        Number(row.amount || 0) - Number(row.applied_amount || 0) - Number(row.settlement_refund_amount || 0)
+                      );
+                      return (
+                        <span className="font-bold text-emerald-700">{formatMoney(rem)}</span>
+                      );
+                    },
+                  },
+                  {
+                    key: 'reason_type',
+                    label: 'Lý do / Mô tả',
+                    render: (row) => (
+                      <div className="text-xs">
+                        <p className="font-medium text-slate-800">{row.description || row.reason_type}</p>
+                        <p className="text-[11px] text-slate-400 font-mono">{row.reason_type}</p>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'status',
+                    label: 'Trạng thái',
+                    align: 'center',
+                    render: (row) => (
+                      <StatusBadge status={row.status} domain="credit_balance" />
+                    ),
+                  },
+                  {
+                    key: 'actions',
+                    label: 'Thao tác 4 mắt',
+                    align: 'right',
+                    render: (row) => {
+                      const rem = Math.max(
+                        0,
+                        Number(row.amount || 0) - Number(row.applied_amount || 0) - Number(row.settlement_refund_amount || 0)
+                      );
+                      const canApprove = canActorApproveCreditRefund({
+                        actor: user,
+                        record: row,
+                        buildingHasActiveOwner: true,
+                        allowSelfApproval,
+                      });
+
+                      if (['AVAILABLE', 'PARTIALLY_APPLIED'].includes(row.status) && rem > 0) {
+                        return (
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => handleOpenCreditRefundModal(row)}
+                          >
+                            Đề nghị hoàn tiền
+                          </Button>
+                        );
+                      }
+
+                      if (row.status === 'PENDING_DIRECT_REFUND') {
+                        return (
+                          <div className="flex items-center justify-end gap-1.5">
+                            {canApprove ? (
+                              <>
+                                <Button
+                                  size="xs"
+                                  variant="primary"
+                                  loading={approvingCreditId === row.id}
+                                  onClick={() => handleApproveCreditRefund(row)}
+                                >
+                                  Duyệt hoàn
+                                </Button>
+                                <Button
+                                  size="xs"
+                                  variant="danger"
+                                  onClick={() => handleOpenCreditRejectModal(row)}
+                                >
+                                  Từ chối
+                                </Button>
+                              </>
+                            ) : (
+                              <Badge variant="amber">Chờ quản lý khác duyệt</Badge>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      return <span className="text-xs text-slate-400">—</span>;
+                    },
+                  },
+                ]}
+              />
+            )}
+          </Card>
+        </div>
+      ) : null}
+
       {activeTab === 'history' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <Card className="lg:col-span-7">
@@ -3448,6 +3710,98 @@ export function ContractDetailPage() {
             : ''
         }
       />
+    {/* Modal Đề nghị hoàn tiền tín dụng (FR-040) */}
+      <Modal
+        open={creditRefundModalOpen}
+        onClose={() => setCreditRefundModalOpen(false)}
+        title="Đề nghị hoàn tiền tín dụng trực tiếp (Four-Eyes Refund)"
+        subtitle="Khoản tiền hoàn sẽ được chuyển đến người có thẩm quyền phê duyệt 4 mắt trước khi giải ngân"
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCreditRefundModalOpen(false)} disabled={submittingCreditRefund}>
+              Hủy
+            </Button>
+            <Button variant="primary" onClick={handleSubmitCreditRefund} loading={submittingCreditRefund}>
+              Gửi đề nghị hoàn tiền
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={handleSubmitCreditRefund} className="space-y-4">
+          <MoneyInput
+            label="Số tiền đề nghị hoàn (VNĐ)"
+            value={creditRefundForm.amount}
+            onChange={(val) => setCreditRefundForm((s) => ({ ...s, amount: String(val) }))}
+            required
+          />
+          <Input
+            label="Lý do hoàn trả"
+            value={creditRefundForm.reason}
+            onChange={(e) => setCreditRefundForm((s) => ({ ...s, reason: e.target.value }))}
+            placeholder="Ví dụ: Khách nộp thừa tiền phòng kỳ 11/2026, yêu cầu hoàn về TK..."
+            required
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+            <Input
+              label="Ngân hàng nhận"
+              value={creditRefundForm.bank_name}
+              onChange={(e) => setCreditRefundForm((s) => ({ ...s, bank_name: e.target.value }))}
+              placeholder="VD: Vietcombank, Techcombank..."
+            />
+            <Input
+              label="Số tài khoản"
+              value={creditRefundForm.account_number}
+              onChange={(e) => setCreditRefundForm((s) => ({ ...s, account_number: e.target.value }))}
+              placeholder="Số tài khoản thụ hưởng"
+            />
+          </div>
+          <Input
+            label="Chủ tài khoản thụ hưởng"
+            value={creditRefundForm.account_holder}
+            onChange={(e) => setCreditRefundForm((s) => ({ ...s, account_holder: e.target.value }))}
+            placeholder="Họ và tên chủ tài khoản"
+          />
+          <FileUpload
+            label="Ảnh chứng từ UNC / Đề nghị (Tùy chọn)"
+            value={creditRefundForm.proof_image ? [creditRefundForm.proof_image] : []}
+            onChange={(files) => setCreditRefundForm((s) => ({ ...s, proof_image: files[0] || '' }))}
+            maxFiles={1}
+            accept="image/*,application/pdf"
+          />
+        </form>
+      </Modal>
+
+      {/* Modal Từ chối hoàn tiền tín dụng */}
+      <Modal
+        open={creditRejectModalOpen}
+        onClose={() => setCreditRejectModalOpen(false)}
+        title="Từ chối đề nghị hoàn tiền tín dụng"
+        subtitle="Hồ sơ sẽ quay về trạng thái AVAILABLE để người lập điều chỉnh thông tin"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCreditRejectModalOpen(false)} disabled={submittingCreditReject}>
+              Quay lại
+            </Button>
+            <Button variant="danger" onClick={handleSubmitCreditReject} loading={submittingCreditReject}>
+              Xác nhận từ chối
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Input
+            multiline
+            rows={3}
+            label="Lý do từ chối"
+            value={creditRejectionReason}
+            onChange={(e) => setCreditRejectionReason(e.target.value)}
+            placeholder="Nhập lý do cụ thể để người tạo được biết..."
+            required
+          />
+        </div>
+      </Modal>
     </div>
   );
 }

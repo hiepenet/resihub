@@ -11,6 +11,7 @@ import {
   resolvePrdAgingBucket,
   createIdempotencyKey,
   withIdempotency,
+  resolveSettlementPayoutSummary,
 } from '../../frontend/src/utils/billing.js';
 
 import {
@@ -316,3 +317,73 @@ test('4. canConfirmInvoiceVoid, canActorApproveInvoiceAdjustment, and canActorAp
     true
   );
 });
+
+test('6. resolveSettlementPayoutSummary separates deposit vs credit refunds and flags requiresUncPayout', () => {
+  // Case 1: Both deposit and credit refunds > 0
+  const both = resolveSettlementPayoutSummary({
+    deposit_refund_amount: 1500000,
+    credit_refund_amount: 500000,
+    total_payout_amount: 2000000,
+  });
+  assert.deepEqual(both, {
+    depositRefund: 1500000,
+    creditRefund: 500000,
+    totalPayout: 2000000,
+    requiresUncPayout: true,
+  });
+
+  // Case 2: Zero deposit refund but positive credit refund (critical M06 invariant)
+  const creditOnly = resolveSettlementPayoutSummary({
+    deposit_refund_amount: 0,
+    credit_refund_amount: 800000,
+    total_payout_amount: 800000,
+  });
+  assert.deepEqual(creditOnly, {
+    depositRefund: 0,
+    creditRefund: 800000,
+    totalPayout: 800000,
+    requiresUncPayout: true,
+  });
+
+  // Case 3: Positive deposit refund but zero credit refund
+  const depositOnly = resolveSettlementPayoutSummary({
+    deposit_refund_amount: 2000000,
+    credit_refund_amount: 0,
+  });
+  assert.deepEqual(depositOnly, {
+    depositRefund: 2000000,
+    creditRefund: 0,
+    totalPayout: 2000000,
+    requiresUncPayout: true,
+  });
+
+  // Case 4: Neither refund (both 0 or empty object) -> requiresUncPayout: false
+  const zeroPayout = resolveSettlementPayoutSummary({
+    deposit_refund_amount: 0,
+    credit_refund_amount: 0,
+    total_payout_amount: 0,
+  });
+  assert.deepEqual(zeroPayout, {
+    depositRefund: 0,
+    creditRefund: 0,
+    totalPayout: 0,
+    requiresUncPayout: false,
+  });
+
+  const emptyPayout = resolveSettlementPayoutSummary({});
+  assert.deepEqual(emptyPayout, {
+    depositRefund: 0,
+    creditRefund: 0,
+    totalPayout: 0,
+    requiresUncPayout: false,
+  });
+
+  const nullPayout = resolveSettlementPayoutSummary(null);
+  assert.deepEqual(nullPayout, {
+    depositRefund: 0,
+    creditRefund: 0,
+    totalPayout: 0,
+    requiresUncPayout: false,
+  });
+});
+

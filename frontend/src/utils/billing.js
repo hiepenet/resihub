@@ -277,3 +277,33 @@ export function canActorApproveInvoiceAdjustment(options = {}) {
 export function canActorApproveCreditRefund(options = {}) {
   return canActorApproveInvoiceAdjustment(options);
 }
+
+/**
+ * Tách bạch số tiền hoàn cọc và hoàn tín dụng trong quyết toán cuối kỳ (M06 / FR-024 / FR-040):
+ * - depositRefund: hoàn từ số dư tiền cọc sau cấn trừ.
+ * - creditRefund: hoàn từ số dư tín dụng còn dư sau bù trừ nợ và thiệt hại.
+ * - totalPayout = depositRefund + creditRefund.
+ * - requiresUncPayout: true khi totalPayout > 0 (kể cả khi depositRefund === 0 && creditRefund > 0).
+ */
+export function resolveSettlementPayoutSummary(settlement = {}) {
+  const s = settlement || {};
+  const depositRefund = Math.max(
+    0,
+    Number(s.deposit_refund_amount ?? s.depositRefund ?? s.refund_amount ?? s.calculated_refund_amount ?? 0) || 0
+  );
+  const creditRefund = Math.max(
+    0,
+    Number(s.credit_refund_amount ?? s.creditRefund ?? s.credit_refund ?? 0) || 0
+  );
+  const totalPayout = Math.max(
+    0,
+    Number(s.total_payout_amount ?? s.totalPayout ?? s.total_payout ?? (depositRefund + creditRefund)) || 0
+  );
+  return {
+    depositRefund,
+    creditRefund,
+    totalPayout,
+    requiresUncPayout: totalPayout > 0,
+  };
+}
+

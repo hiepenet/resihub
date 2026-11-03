@@ -45,6 +45,8 @@ import { LoadingSpinner } from '../../../components/common/LoadingSpinner';
 import { depositsService } from '../../../services/deposits.service';
 import { reportsService } from '../../../services/reports.service';
 import { usersService } from '../../../services/users.service';
+import { invoicesService } from '../../../services/invoices.service';
+import { resolveSettlementPayoutSummary } from '../../../utils/billing';
 import { usePermission } from '../../../hooks/usePermission';
 import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { useToast } from '../../../hooks/useToast';
@@ -78,6 +80,7 @@ const AUDIT_ENTITY_META = {
   deposit_transaction: { label: 'Bút toán giao dịch cọc', variant: 'emerald' },
   receivable: { label: 'Công nợ cấn trừ / phát sinh', variant: 'amber' },
   reservation: { label: 'Phiếu đặt giữ chỗ gốc', variant: 'purple' },
+  credit_balance: { label: 'Số dư tín dụng / Hoàn tiền', variant: 'indigo' },
 };
 
 const TXN_TYPE_META = {
@@ -187,6 +190,28 @@ export function DepositsPage() {
     account_holder: '',
   });
   const [submittingSettlement, setSubmittingSettlement] = useState(false);
+  const [generatingFinalInvoice, setGeneratingFinalInvoice] = useState(false);
+
+  const handleGenerateFinalInvoice = async () => {
+    if (!settlementDeposit?.contract_id || !settlementPreconditions?.unbilled_final_period?.period) return;
+    setGeneratingFinalInvoice(true);
+    try {
+      await invoicesService.generateBatch({
+        contract_id: settlementDeposit.contract_id,
+        period: settlementPreconditions.unbilled_final_period.period,
+      });
+      toast.success(`Đã sinh hóa đơn Pro-rata kỳ cuối ${settlementPreconditions.unbilled_final_period.period} thành công.`);
+      if (settlementDeposit?.id) {
+        const detail = await depositsService.getSettlementDetail(settlementDeposit.id);
+        setSettlementDetail(detail?.data || null);
+      }
+      await loadDeposits();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể sinh hóa đơn kỳ cuối.'));
+    } finally {
+      setGeneratingFinalInvoice(false);
+    }
+  };
 
   // Owner Approve / Reject & Manager Dispute states
   const [approveConfirmOpen, setApproveConfirmOpen] = useState(false);
@@ -1506,6 +1531,8 @@ export function DepositsPage() {
           settlementPreconditions.final_meters_recorded !== false &&
           settlementPreconditions.no_draft_invoices !== false &&
           settlementPreconditions.final_invoice_issued !== false &&
+          settlementPreconditions.no_pending_invoice_adjustments !== false &&
+          settlementPreconditions.no_pending_credit_refunds !== false &&
           isInspectionSatisfied
       )
     : isContractReadyForSettlement;
@@ -2162,6 +2189,18 @@ export function DepositsPage() {
                             ? ` (${settlementPreconditions.unbilled_meter_types.join(', ')})`
                             : ''}{' '}
                           nhưng chưa phát hành hóa đơn kỳ cuối. Vui lòng sinh và phát hành hóa đơn kỳ cuối trước khi tất toán (FR-024).
+                        </li>
+                      ) : null}
+                      {settlementPreconditions &&
+                      settlementPreconditions.no_pending_invoice_adjustments === false ? (
+                        <li>
+                          Còn đề nghị điều chỉnh hóa đơn đang chờ duyệt 4 mắt (<strong>PENDING_APPROVAL</strong>). Vui lòng duyệt hoặc từ chối trước khi tất toán.
+                        </li>
+                      ) : null}
+                      {settlementPreconditions &&
+                      settlementPreconditions.no_pending_credit_refunds === false ? (
+                        <li>
+                          Còn đề nghị hoàn tiền tín dụng đang chờ duyệt 4 mắt (<strong>PENDING_DIRECT_REFUND</strong>). Vui lòng hoàn tất trước khi tất toán.
                         </li>
                       ) : null}
                       {!isInspectionSatisfied ? (
@@ -2844,14 +2883,55 @@ export function DepositsPage() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="border-t border-sky-200 pt-2.5 flex justify-between items-center text-sm">
-                        <span className="font-bold text-slate-900">
-                          {isFinalized ? 'Số tiền hoàn trả thực tế:' : 'Số tiền hoàn trả dự kiến:'}
-                        </span>
-                        <span className="text-lg font-bold text-emerald-700">
-                          {formatMoney(readonlySettlementData.refund_amount || 0)}
-                        </span>
-                      </div>
+                      {(() => {
+                        const payoutSummary = resolveSettlementPayoutSummary(readonlySettlementData);
+                        return (
+                          <div className="space-y-1.5 pt-2 border-t border-sky-200 text-xs">
+                            {Number(readonlySettlementData?.credit_applied_to_rent || 0) > 0 ? (
+                              <div className="flex justify-between items-center text-slate-600">
+                                <span>Tín dụng cấn trừ tiền thuê:</span>
+                                <span className="font-semibold text-slate-800">
+                                  {formatMoney(readonlySettlementData.credit_applied_to_rent)}
+                                </span>
+                              </div>
+                            ) : null}
+                            {Number(readonlySettlementData?.credit_applied_to_service || 0) > 0 ? (
+                              <div className="flex justify-between items-center text-slate-600">
+                                <span>Tín dụng cấn trừ dịch vụ tồn:</span>
+                                <span className="font-semibold text-slate-800">
+                                  {formatMoney(readonlySettlementData.credit_applied_to_service)}
+                                </span>
+                              </div>
+                            ) : null}
+                            {Number(readonlySettlementData?.credit_applied_to_damages || 0) > 0 ? (
+                              <div className="flex justify-between items-center text-slate-600">
+                                <span>Tín dụng cấn trừ thiệt hại:</span>
+                                <span className="font-semibold text-slate-800">
+                                  {formatMoney(readonlySettlementData.credit_applied_to_damages)}
+                                </span>
+                              </div>
+                            ) : null}
+                            <div className="flex justify-between items-center text-slate-600 pt-1">
+                              <span>Hoàn trả tiền cọc (Deposit Refund):</span>
+                              <span className="font-semibold text-emerald-700">
+                                {formatMoney(payoutSummary.depositRefund)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center text-slate-600">
+                              <span>Hoàn trả tín dụng dư (Credit Refund):</span>
+                              <span className="font-semibold text-indigo-700">
+                                {formatMoney(payoutSummary.creditRefund)}
+                              </span>
+                            </div>
+                            <div className="border-t border-sky-200 pt-2 flex justify-between items-center text-sm font-bold text-slate-900">
+                              <span>{isFinalized ? 'Tổng chi hoàn trả thực tế (Total Payout):' : 'Tổng chi hoàn trả dự kiến (Total Payout):'}</span>
+                              <span className="text-lg font-bold text-emerald-700">
+                                {formatMoney(payoutSummary.totalPayout)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
                       {Number(readonlySettlementData.shortfall || 0) > 0 ? (
                         <div className="flex justify-between items-center text-rose-700 font-semibold pt-1">
                           <span>Khoản phải thu thêm sau trả phòng (Shortfall):</span>
@@ -3160,32 +3240,45 @@ export function DepositsPage() {
               </div>
             ) : null}
 
-            <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-1.5 text-xs">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-700 font-medium">Số tiền thực chi hoàn cho cư dân:</span>
-                <strong className="text-base font-bold text-emerald-700">
-                  {formatMoney(payoutSettlementData?.refund_amount || 0)}
-                </strong>
-              </div>
-              <div className="flex justify-between items-center text-slate-600">
-                <span>Phương thức hoàn trả:</span>
-                <strong>
-                  {payoutSettlementData?.refund_method === 'CASH'
-                    ? 'Tiền mặt (CASH)'
-                    : 'Chuyển khoản ngân hàng (BANK_TRANSFER)'}
-                </strong>
-              </div>
-              {payoutSettlementData?.bank_info?.account_number ? (
-                <div className="pt-1 border-t border-emerald-200/80 flex items-center justify-between gap-2 text-slate-700">
-                  <span>Tài khoản thụ hưởng:</span>
-                  <strong className="text-right">
-                    {payoutSettlementData.bank_info.bank_name} •{' '}
-                    {payoutSettlementData.bank_info.account_number} (
-                    {payoutSettlementData.bank_info.account_holder})
-                  </strong>
+            {(() => {
+              const payoutSummary = resolveSettlementPayoutSummary(payoutSettlementData);
+              return (
+                <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-1.5 text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-700 font-medium">Hoàn trả tiền cọc:</span>
+                    <strong className="text-slate-800">{formatMoney(payoutSummary.depositRefund)}</strong>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-700 font-medium">Hoàn trả số dư tín dụng:</span>
+                    <strong className="text-indigo-700">{formatMoney(payoutSummary.creditRefund)}</strong>
+                  </div>
+                  <div className="flex justify-between items-center border-t border-emerald-200/80 pt-1.5">
+                    <span className="text-slate-900 font-bold">Tổng tiền chi trả cư dân (UNC):</span>
+                    <strong className="text-base font-bold text-emerald-700">
+                      {formatMoney(payoutSummary.totalPayout)}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-600 pt-1">
+                    <span>Phương thức hoàn trả:</span>
+                    <strong>
+                      {payoutSettlementData?.refund_method === 'CASH'
+                        ? 'Tiền mặt (CASH)'
+                        : 'Chuyển khoản ngân hàng (BANK_TRANSFER)'}
+                    </strong>
+                  </div>
+                  {payoutSettlementData?.bank_info?.account_number ? (
+                    <div className="pt-1 border-t border-emerald-200/80 flex items-center justify-between gap-2 text-slate-700">
+                      <span>Tài khoản thụ hưởng:</span>
+                      <strong className="text-right">
+                        {payoutSettlementData.bank_info.bank_name} •{' '}
+                        {payoutSettlementData.bank_info.account_number} (
+                        {payoutSettlementData.bank_info.account_holder})
+                      </strong>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </div>
+              );
+            })()}
 
             <FileUpload
               label={
