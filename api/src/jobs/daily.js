@@ -22,6 +22,7 @@ import {
   computeNextVietnamDailyRunMs,
   computeLateFeeAccrual,
 } from '../services/serviceBilling.js';
+import { fanOutAnnouncementInTx } from '../routes/announcements.js';
 
 export const DAILY_JOB_ADVISORY_LOCK_KEY = 73918205;
 
@@ -1186,6 +1187,73 @@ export async function runOverdueDepositSettlementAlerts(options = {}) {
   } catch (slaErr) {
     console.error('[DailyJob] SLA escalation error:', slaErr.message);
   }
+
+  // 11. Phát hành thông báo hẹn giờ đến hạn (M13 FR-054)
+  try {
+    await dispatchDueScheduledAnnouncements(adminPool, {
+      nowTs: new Date(),
+      buildingId,
+    });
+  } catch (schedAnnErr) {
+    console.error('[DailyJob] scheduled announcements dispatch error:', schedAnnErr.message);
+  }
+}
+
+export async function dispatchDueScheduledAnnouncements(
+  dbPool = adminPool,
+  { nowTs = new Date(), buildingId = null } = {}
+) {
+  const effectiveNow = nowTs instanceof Date && !Number.isNaN(nowTs.getTime()) ? nowTs : new Date(nowTs);
+  let dispatchedCount = 0;
+  let notificationsSent = 0;
+
+  const client = await dbPool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const dueRes = await client.query(
+      `SELECT *
+       FROM announcement
+       WHERE status = 'SCHEDULED'
+         AND scheduled_at IS NOT NULL
+         AND scheduled_at <= $1::timestamptz
+         AND ($2::uuid IS NULL OR building_id = $2::uuid)
+       ORDER BY scheduled_at ASC
+       FOR UPDATE SKIP LOCKED`,
+      [effectiveNow.toISOString(), buildingId]
+    );
+
+    const queryFn = (sql, params) => client.query(sql, params);
+    for (const ann of dueRes.rows) {
+      const { announcement: sentAnn, notificationsInserted } = await fanOutAnnouncementInTx(
+        queryFn,
+        {
+          announcementRow: ann,
+          senderUserId: ann.created_by,
+          senderName: 'Ban Quản Lý',
+          sentAt: effectiveNow,
+        }
+      );
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES ($1, 'DISPATCH_SCHEDULED_ANNOUNCEMENT', 'announcement', $2, $3, $4)`,
+        [ann.created_by || null, ann.id, JSON.stringify(ann), JSON.stringify(sentAnn)]
+      );
+
+      dispatchedCount += 1;
+      notificationsSent += notificationsInserted;
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { dispatchedCount, notificationsSent };
 }
 
 export async function escalateOverdueServiceRequests(

@@ -1,21 +1,39 @@
 import express from 'express';
-import { pool, adminPool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
-import { getUserRoleCodes, getManagerBuildingIds, getOwnerBuildingIds, logAccessDenied } from '../services/ownerScope.js';
+import { idempotencyGuard } from '../middleware/idempotency.js';
+import {
+  getUserRoleCodes,
+  getManagerBuildingIds,
+  scopedBuildingFilter,
+  checkBuildingAccess,
+  logAccessDenied,
+} from '../services/ownerScope.js';
+import { formatAnnouncementForZalo } from '../services/zaloFormatter.js';
+import {
+  ANNOUNCEMENT_SCOPES,
+  normalizeAnnouncementType,
+  resolveOpsScope,
+  loadOrgContactConfig,
+  loadScopeLabels,
+  resolveTargetZaloGroups,
+  fanOutAnnouncementInTx,
+} from './announcements.js';
 
 const router = express.Router();
 
 /**
  * GET /api/v1/notifications
- * Lấy danh sách thông báo và số lượng chưa đọc (FR-053 / M13)
+ * Lấy danh sách thông báo cá nhân, số lượng chưa đọc và lịch sử thông báo đã phát hành (FR-053 / M13)
  */
 router.get('/', authenticateToken, async (req, res) => {
+  const { client, release } = await getUserClient(req);
   try {
     const orgId = req.user.org_id;
     const userId = req.user.sub;
 
-    const listResult = await pool.query(
+    const listResult = await client.query(
       `SELECT * FROM notification
        WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2)
        ORDER BY created_at DESC
@@ -23,51 +41,58 @@ router.get('/', authenticateToken, async (req, res) => {
       [orgId, userId]
     );
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*)::int as unread_count FROM notification
+    const countResult = await client.query(
+      `SELECT COUNT(*)::int AS unread_count FROM notification
        WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL`,
       [orgId, userId]
     );
 
-    // Nếu là SYS_ADMIN / MANAGER, trả thêm lịch sử thông báo đã phát hành (gom theo đợt broadcast)
     const roles = getUserRoleCodes(req);
     let sentHistory = [];
-    if (roles.some((r) => ['SYS_ADMIN', 'MANAGER'].includes(r))) {
-      const sentRes = await adminPool.query(
-        `SELECT (ARRAY_AGG(n.id ORDER BY n.created_at DESC))[1] AS id,
-                n.title,
-                n.content,
-                n.type,
-                (ARRAY_AGG(n.payload ORDER BY n.created_at DESC))[1] AS payload,
-                MAX(n.created_at) AS created_at,
-                COUNT(*)::int AS recipient_count,
+    if (roles.some((r) => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(r))) {
+      const params = [orgId];
+      let bldgClause = '';
+      if (!roles.includes('SYS_ADMIN')) {
+        const { sql: scopeSql } = await scopedBuildingFilter(req, 'ann.building_id', params);
+        bldgClause = scopeSql || '';
+      }
+      const sentRes = await client.query(
+        `SELECT ann.id,
+                ann.id AS announcement_id,
+                ann.title,
+                ann.body AS content,
+                ann.type,
+                jsonb_build_object(
+                  'announcement_id', ann.id,
+                  'target_scope', ann.target_scope,
+                  'building_id', ann.building_id,
+                  'floor_id', ann.floor_id,
+                  'apartment_id', ann.apartment_id,
+                  'sent_by', ann.created_by
+                ) AS payload,
+                COALESCE(ann.sent_at, ann.created_at) AS created_at,
+                ann.recipient_count,
+                (
+                  SELECT COUNT(*)::int
+                  FROM notification n
+                  WHERE n.announcement_id = ann.id AND n.read_at IS NOT NULL
+                ) AS read_count,
+                ann.zalo_content,
+                ann.manual_sent_at,
                 b.code AS building_code,
                 b.name AS building_name,
                 f.name AS floor_name,
                 a.code AS apartment_code
-         FROM notification n
-         LEFT JOIN building b ON b.id = NULLIF(n.payload->>'building_id', '')::uuid
-         LEFT JOIN floor f ON f.id = NULLIF(n.payload->>'floor_id', '')::uuid
-         LEFT JOIN apartment a ON a.id = NULLIF(n.payload->>'apartment_id', '')::uuid
-         WHERE n.org_id = $1
-           AND n.payload ? 'target_scope'
-           AND (n.payload->>'sent_by' = $2 OR $3 = TRUE)
-         GROUP BY n.title,
-                  n.content,
-                  n.type,
-                  n.payload->>'target_scope',
-                  n.payload->>'building_id',
-                  n.payload->>'floor_id',
-                  n.payload->>'apartment_id',
-                  n.payload->>'sender_name',
-                  date_trunc('minute', n.created_at),
-                  b.code,
-                  b.name,
-                  f.name,
-                  a.code
-         ORDER BY MAX(n.created_at) DESC
+         FROM announcement ann
+         JOIN building b ON b.id = ann.building_id
+         LEFT JOIN floor f ON f.id = ann.floor_id
+         LEFT JOIN apartment a ON a.id = ann.apartment_id
+         WHERE ann.org_id = $1
+           AND ann.status = 'SENT'
+           ${bldgClause}
+         ORDER BY COALESCE(ann.sent_at, ann.created_at) DESC
          LIMIT 40`,
-        [orgId, userId, roles.includes('SYS_ADMIN')]
+        params
       );
       sentHistory = sentRes.rows;
     }
@@ -80,125 +105,209 @@ router.get('/', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('[Notifications Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lấy danh sách thông báo.' });
+  } finally {
+    await release();
   }
 });
 
 /**
- * POST /api/v1/notifications (M13, FR-051)
- * Gửi thông báo theo nhóm nhận: toàn tổ chức (ALL), theo tòa (BUILDING), tầng (FLOOR), hoặc căn hộ (APARTMENT)
- * OWNER 100% Read-Only (PRD 6.1 & 6.2), chỉ SYS_ADMIN và MANAGER được phát thông báo vận hành.
+ * POST /api/v1/notifications (M13, PRD 6.2)
+ * Gửi thông báo vận hành ngay theo tòa (BUILDING), tầng (FLOOR) hoặc căn hộ (APARTMENT).
+ * Chỉ MANAGER của tòa được phép phát thông báo (SYS_ADMIN và OWNER 100% Read-Only -> 403).
  */
-router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
-  const { title, content, type = 'ANNOUNCEMENT', target_scope = 'BUILDING', building_id, floor_id, apartment_id } = req.body;
-  const orgId = req.user.org_id;
-  const roles = getUserRoleCodes(req);
-  const isSysAdmin = roles.includes('SYS_ADMIN');
-  const isManager = roles.includes('MANAGER');
+router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
+  const {
+    title,
+    content,
+    body,
+    type = 'ANNOUNCEMENT',
+    target_scope = 'BUILDING',
+    building_id,
+    floor_id = null,
+    apartment_id = null,
+    zalo_content,
+  } = req.body || {};
 
-  if (!title?.trim() || !content?.trim()) {
-    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Tiêu đề và nội dung thông báo là bắt buộc.' });
+  const bodyText = String(content ?? body ?? '').trim();
+  const orgId = req.user.org_id;
+
+  if (!title?.trim() || !bodyText) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Tiêu đề và nội dung thông báo là bắt buộc.',
+    });
   }
 
+  let normScope = String(target_scope || 'BUILDING').trim().toUpperCase();
+  if (normScope === 'ALL') {
+    return res.status(403).json({
+      code: 'FORBIDDEN_SCOPE',
+      message: 'Quản lý tòa nhà chỉ được gửi thông báo trong phạm vi tòa nhà được phân công.',
+    });
+  }
+  if (apartment_id) normScope = 'APARTMENT';
+  else if (floor_id && normScope !== 'APARTMENT') normScope = 'FLOOR';
+
+  if (!ANNOUNCEMENT_SCOPES.includes(normScope)) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Phạm vi nhận thông báo phải là BUILDING, FLOOR hoặc APARTMENT.',
+    });
+  }
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+
   try {
-    if (target_scope === 'ALL' && !isSysAdmin) {
-      return res.status(403).json({
-        code: 'FORBIDDEN_SCOPE',
-        message: 'Chỉ Quản trị hệ thống (SYS_ADMIN) được gửi thông báo toàn tổ chức.',
-      });
-    }
+    const queryFn = (sql, params) => client.query(sql, params);
+    let targetBuildingId = building_id || null;
 
-    if (building_id && !isSysAdmin && isManager) {
-      const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
-      if (!mgrIds.includes(building_id)) {
-        await logAccessDenied(req, 'building', building_id, 'MANAGER attempted notification on unassigned building');
-        return res.status(403).json({ code: 'ACCESS_DENIED', message: 'Bạn không quản lý tòa nhà này.' });
+    if (targetBuildingId) {
+      const bScope = await resolveOpsScope(queryFn, 'building', targetBuildingId);
+      if (!bScope) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
       }
-    }
-
-    const payloadMeta = {
-      sent_by: req.user.sub,
-      sender_name: req.user.full_name || 'Ban Quản Lý',
-      target_scope,
-      building_id: building_id || null,
-      floor_id: floor_id || null,
-      apartment_id: apartment_id || null,
-    };
-
-    if (target_scope === 'ALL') {
-      const ins = await pool.query(
-        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-         VALUES ($1, NULL, $2, $3, $4, $5)
-         RETURNING *`,
-        [orgId, title.trim(), content.trim(), type, JSON.stringify(payloadMeta)]
-      );
-      return res.status(201).json({
-        message: 'Đã phát hành thông báo tới toàn bộ hệ thống.',
-        data: ins.rows[0],
-        recipient_count: 'ALL',
-      });
-    }
-
-    // Tìm danh sách user_id của cư dân đang thuê thuộc phạm vi tòa / tầng / căn
-    let userSql = `
-      SELECT DISTINCT au.id AS user_id
-      FROM contract c
-      JOIN apartment a ON a.id = c.apartment_id
-      JOIN tenant t ON t.id = c.primary_tenant_id
-      JOIN app_user au ON au.person_id = t.person_id
-      JOIN building b ON b.id = c.building_id
-      WHERE b.org_id = $1
-        AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-    `;
-    const params = [orgId];
-
-    if (apartment_id) {
-      params.push(apartment_id);
-      userSql += ` AND c.apartment_id = $${params.length}`;
+    } else if (apartment_id) {
+      const aScope = await resolveOpsScope(queryFn, 'apartment', apartment_id);
+      if (!aScope) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+      }
+      targetBuildingId = aScope.building_id;
     } else if (floor_id) {
-      params.push(floor_id);
-      userSql += ` AND a.floor_id = $${params.length}`;
-    } else if (building_id) {
-      params.push(building_id);
-      userSql += ` AND c.building_id = $${params.length}`;
-    } else if (isManager) {
+      const fScope = await resolveOpsScope(queryFn, 'floor', floor_id);
+      if (!fScope) {
+        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tầng.' });
+      }
+      targetBuildingId = fScope.building_id;
+    } else {
       const mgrIds = await getManagerBuildingIds(req.user.sub, orgId);
-      params.push(mgrIds);
-      userSql += ` AND c.building_id = ANY($${params.length}::uuid[])`;
+      if (mgrIds.length === 0) {
+        return res.status(403).json({
+          code: 'ACCESS_DENIED',
+          message: 'Bạn chưa được phân công quản lý tòa nhà nào.',
+        });
+      }
+      targetBuildingId = mgrIds[0];
     }
 
-    const recipientsRes = await adminPool.query(userSql, params);
-    const recipientIds = recipientsRes.rows.map((r) => r.user_id);
+    const allowed = await checkBuildingAccess(req, targetBuildingId);
+    if (!allowed) {
+      await logAccessDenied(req, 'notification', targetBuildingId, 'MANAGER attempted POST /notifications on unassigned building');
+      return res.status(403).json({
+        code: 'ACCESS_DENIED',
+        message: 'Bạn không quản lý tòa nhà này.',
+      });
+    }
 
-    const inserted = [];
-    if (recipientIds.length === 0) {
-      // Vẫn lưu 1 bản ghi cho chính người gửi để theo dõi lịch sử
-      const selfIns = await pool.query(
-        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING *`,
-        [orgId, req.user.sub, title.trim(), content.trim(), type, JSON.stringify({ ...payloadMeta, note: 'Không có cư dân đang thuê trong nhóm chọn' })]
-      );
-      inserted.push(selfIns.rows[0]);
-    } else {
-      for (const uid of recipientIds) {
-        const rIns = await pool.query(
-          `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING *`,
-          [orgId, uid, title.trim(), content.trim(), type, JSON.stringify(payloadMeta)]
-        );
-        inserted.push(rIns.rows[0]);
+    const effFloorId = normScope === 'FLOOR' ? floor_id : null;
+    const effApartmentId = normScope === 'APARTMENT' ? apartment_id : null;
+
+    if (effFloorId) {
+      const fScope = await resolveOpsScope(queryFn, 'floor', effFloorId);
+      if (!fScope || fScope.building_id !== targetBuildingId) {
+        return res.status(422).json({
+          code: 'FLOOR_BUILDING_MISMATCH',
+          message: 'Tầng đã chọn không thuộc tòa nhà này.',
+        });
       }
     }
+    if (effApartmentId) {
+      const aScope = await resolveOpsScope(queryFn, 'apartment', effApartmentId);
+      if (!aScope || aScope.building_id !== targetBuildingId) {
+        return res.status(422).json({
+          code: 'APARTMENT_BUILDING_MISMATCH',
+          message: 'Căn hộ đã chọn không thuộc tòa nhà này.',
+        });
+      }
+    }
+
+    const normType = normalizeAnnouncementType(type);
+    const labels = await loadScopeLabels(queryFn, {
+      building_id: targetBuildingId,
+      floor_id: effFloorId,
+      apartment_id: effApartmentId,
+    });
+    const contactConfig = await loadOrgContactConfig(queryFn, orgId);
+    const nowDt = new Date();
+    const formattedZalo =
+      zalo_content?.trim() ||
+      formatAnnouncementForZalo({
+        type: normType,
+        title: title.trim(),
+        body: bodyText,
+        targetScope: normScope,
+        buildingCode: labels.buildingCode,
+        buildingName: labels.buildingName,
+        floorName: labels.floorName,
+        apartmentCode: labels.apartmentCode,
+        contactConfig,
+        scheduledOrSentAt: nowDt,
+      });
+
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const annIns = await client.query(
+      `INSERT INTO announcement (
+         org_id, building_id, target_scope, floor_id, apartment_id,
+         type, title, body, zalo_content, status, created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'DRAFT', $10)
+       RETURNING *`,
+      [
+        orgId,
+        targetBuildingId,
+        normScope,
+        effFloorId,
+        effApartmentId,
+        normType,
+        title.trim(),
+        bodyText,
+        formattedZalo,
+        req.user.sub,
+      ]
+    );
+
+    const { announcement: sentAnnouncement, recipientIds, firstNotification } =
+      await fanOutAnnouncementInTx(queryFn, {
+        announcementRow: annIns.rows[0],
+        senderUserId: req.user.sub,
+        senderName: req.user.full_name || 'Ban Quản Lý',
+        sentAt: nowDt,
+      });
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+       VALUES ($1, 'SEND_ANNOUNCEMENT', 'announcement', $2, $3)`,
+      [req.user.sub, sentAnnouncement.id, JSON.stringify(sentAnnouncement)]
+    );
+
+    const targetZaloGroups = await resolveTargetZaloGroups(queryFn, {
+      building_id: targetBuildingId,
+      target_scope: normScope,
+      floor_id: effFloorId,
+      apartment_id: effApartmentId,
+    });
+
+    await client.query('COMMIT');
+    txStarted = false;
 
     res.status(201).json({
       message: `Đã gửi thông báo thành công tới ${recipientIds.length} cư dân.`,
-      data: inserted[0],
+      data: firstNotification || sentAnnouncement,
       recipient_count: recipientIds.length,
+      announcement_id: sentAnnouncement.id,
+      zalo_content: sentAnnouncement.zalo_content,
+      target_zalo_groups: targetZaloGroups,
     });
   } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
     console.error('[Create Notification Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tạo và gửi thông báo.' });
+  } finally {
+    await release();
   }
 });
 
