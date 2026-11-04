@@ -12,6 +12,10 @@ import {
 } from '../services/ownerScope.js';
 import { formatAnnouncementForZalo } from '../services/zaloFormatter.js';
 import {
+  enrichNotificationsContext,
+  filterNotificationsSqlClause,
+} from '../services/notificationService.js';
+import {
   ANNOUNCEMENT_SCOPES,
   normalizeAnnouncementType,
   resolveOpsScope,
@@ -32,10 +36,12 @@ router.get('/', authenticateToken, async (req, res) => {
   try {
     const orgId = req.user.org_id;
     const userId = req.user.sub;
+    const roles = getUserRoleCodes(req);
+    const roleFilterSql = filterNotificationsSqlClause(roles);
 
     const listResult = await client.query(
       `SELECT * FROM notification
-       WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2)
+       WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2)${roleFilterSql}
        ORDER BY created_at DESC
        LIMIT 80`,
       [orgId, userId]
@@ -43,11 +49,12 @@ router.get('/', authenticateToken, async (req, res) => {
 
     const countResult = await client.query(
       `SELECT COUNT(*)::int AS unread_count FROM notification
-       WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL`,
+       WHERE org_id = $1 AND (user_id IS NULL OR user_id = $2)${roleFilterSql} AND read_at IS NULL`,
       [orgId, userId]
     );
 
-    const roles = getUserRoleCodes(req);
+    const enrichedRows = await enrichNotificationsContext(listResult.rows, orgId);
+
     let sentHistory = [];
     if (roles.some((r) => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(r))) {
       const params = [orgId];
@@ -98,7 +105,7 @@ router.get('/', authenticateToken, async (req, res) => {
     }
 
     res.json({
-      data: listResult.rows,
+      data: enrichedRows,
       sent_history: sentHistory,
       unread_count: countResult.rows[0]?.unread_count || 0,
     });
