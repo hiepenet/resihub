@@ -26,6 +26,7 @@ import {
   syncDraftInvoiceMeterLineInTx,
 } from '../services/meterTurnoverContext.js';
 import { reviewAiSuggestion } from '../services/aiGateway.js';
+import { ACTIVE_CONTRACT_STATUSES } from '../services/meterProvisioning.js';
 
 const router = express.Router();
 
@@ -87,12 +88,16 @@ router.get(
   authenticateToken,
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
-    const { building_id, meter_type, period, search, status, contract_id } = req.query;
+    const { building_id, meter_type, period, search, status, contract_id, active_contract } = req.query;
     const orgId = req.user.org_id;
     const targetPeriod = period && PERIOD_RE.test(period) ? period : currentVietnamPeriod();
     const normalizedStatusFilter =
       status && VALID_READING_STATUSES.includes(String(status).trim().toUpperCase())
         ? String(status).trim().toUpperCase()
+        : null;
+    const normalizedActiveContract =
+      active_contract === 'true' || active_contract === 'false'
+        ? active_contract === 'true'
         : null;
 
     try {
@@ -103,7 +108,7 @@ router.get(
         }
       }
 
-      const params = [orgId, targetPeriod];
+      const params = [orgId, targetPeriod, ACTIVE_CONTRACT_STATUSES];
       const { sql: scopeSql } = await scopedBuildingFilter(req, 'm.building_id', params);
 
       let sql = `
@@ -113,6 +118,11 @@ router.get(
                b.name AS building_name,
                b.code AS building_code,
                f.name AS floor_name,
+               EXISTS (
+                 SELECT 1 FROM contract c_act
+                 WHERE c_act.apartment_id = m.apartment_id
+                   AND c_act.status = ANY($3::text[])
+               ) AS has_active_contract,
                mr_base.avg_consumption AS prior_baseline_avg_consumption,
                mr_prev.current_reading AS prior_period_reading,
                mr_prev.consumption AS prior_period_consumption,
@@ -157,6 +167,19 @@ router.get(
         params.push(`%${search.trim()}%`);
         const idx = params.length;
         sql += ` AND (m.meter_code ILIKE $${idx} OR a.code ILIKE $${idx})`;
+      }
+      if (normalizedActiveContract === true) {
+        sql += ` AND EXISTS (
+          SELECT 1 FROM contract c_act
+          WHERE c_act.apartment_id = m.apartment_id
+            AND c_act.status = ANY($3::text[])
+        )`;
+      } else if (normalizedActiveContract === false) {
+        sql += ` AND NOT EXISTS (
+          SELECT 1 FROM contract c_act
+          WHERE c_act.apartment_id = m.apartment_id
+            AND c_act.status = ANY($3::text[])
+        )`;
       }
 
       sql += ` ORDER BY b.code ASC, a.code ASC, m.meter_type ASC`;
@@ -438,6 +461,54 @@ router.post(
         meter_type === 'ELECTRICITY'
           ? billingCfg.electricityDefaultPrice
           : billingCfg.waterDefaultPrice;
+
+      const existingMeterRes = await client.query(
+        `SELECT * FROM meter WHERE apartment_id = $1 AND meter_type = $2 FOR UPDATE`,
+        [apartment_id, meter_type]
+      );
+      if (existingMeterRes.rows.length > 0) {
+        const existingMeter = existingMeterRes.rows[0];
+        const readingCountRes = await client.query(
+          `SELECT COUNT(*)::int AS cnt FROM meter_reading WHERE meter_id = $1`,
+          [existingMeter.id]
+        );
+        if ((readingCountRes.rows[0]?.cnt || 0) > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            code: 'DUPLICATE_METER',
+            message: 'Căn hộ đã có đồng hồ loại này và đã phát sinh chỉ số ghi nhận.',
+          });
+        }
+
+        const nextCode = meter_code?.trim() || existingMeter.meter_code || defaultCode;
+        const nextPrice = unit_price !== undefined ? Number(unit_price) : defaultPrice;
+        const nextInitial = Number(initial_reading) || 0;
+
+        const upd = await client.query(
+          `UPDATE meter
+           SET meter_code = $1,
+               unit_price = $2,
+               initial_reading = $3,
+               status = 'ACTIVE',
+               updated_at = NOW()
+           WHERE id = $4
+           RETURNING *`,
+          [nextCode, nextPrice, nextInitial, existingMeter.id]
+        );
+        const updated = upd.rows[0];
+
+        await client.query(
+          `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+           VALUES ($1, 'UPDATE_INITIAL_METER', 'meter', $2, $3, $4)`,
+          [req.user.sub, updated.id, JSON.stringify(existingMeter), JSON.stringify(updated)]
+        );
+
+        await client.query('COMMIT');
+        return res.status(201).json({
+          message: 'Cập nhật cấu hình đồng hồ đầu kỳ thành công.',
+          data: updated,
+        });
+      }
 
       const ins = await client.query(
         `INSERT INTO meter (org_id, building_id, apartment_id, meter_type, meter_code, unit, unit_price, initial_reading)
