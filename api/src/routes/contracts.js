@@ -11,6 +11,7 @@ import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.j
 import { splitDepositOpening, getTodayVnDateStr } from '../services/depositSettlement.js';
 import { buildDiff, nextStatusOnAmend } from '../services/amendment.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
+import { ensureApartmentMetersInTx } from '../services/meterProvisioning.js';
 import { checkFourEyesOrWarn, roundVND } from '../services/pricing.js';
 import { buildExpectedInvoiceSchedule } from '../services/invoiceSchedule.js';
 import {
@@ -2880,6 +2881,10 @@ router.post('/:id/terminate/reject', authenticateToken, requireRole(['MANAGER'])
        WHERE id = $2 RETURNING *`,
       [rejectNote, id]
     );
+    await ensureApartmentMetersInTx(client, {
+      apartmentId: updatedRes.rows[0]?.apartment_id,
+      actorId: req.user.sub,
+    });
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -3306,6 +3311,10 @@ async function runActivationSideEffects(dbClient, contract, req, sDateStr, optio
 
   // Đồng bộ trạng thái căn hộ thông minh
   await syncApartmentStatus(dbClient, contract.apartment_id);
+  await ensureApartmentMetersInTx(dbClient, {
+    apartmentId: contract.apartment_id,
+    actorId: req?.user?.sub || null,
+  });
 
   // Kích hoạt các gói dịch vụ đi kèm hợp đồng từ PENDING_APPROVAL -> ACTIVE (FR-014, FR-027)
   await dbClient.query(
@@ -4472,10 +4481,11 @@ router.post('/:id/amendments/:versionId/approve', authenticateToken, requireRole
     updateClauses.push(`status = 'ACTIVE'`);
     updateClauses.push(`updated_at = NOW()`);
 
-    await client.query(
-      `UPDATE contract SET ${updateClauses.join(', ')} WHERE id = $1`,
+    const amendContractRes = await client.query(
+      `UPDATE contract SET ${updateClauses.join(', ')} WHERE id = $1 RETURNING apartment_id`,
       updateParams
     );
+    await ensureApartmentMetersInTx(client, { apartmentId: amendContractRes.rows[0]?.apartment_id, actorId: req.user.sub });
 
     // Cập nhật approved_by trong contract_version
     const updatedDiff = { ...diff, status: 'APPROVED', approved_at: new Date().toISOString() };
@@ -4556,10 +4566,13 @@ router.post('/:id/amendments/:versionId/reject', authenticateToken, requireRole(
     );
 
     // Nếu contract đang ở RENEWAL_PENDING, đưa về ACTIVE
-    await client.query(
-      `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 AND status = 'RENEWAL_PENDING'`,
+    const rejContractRes = await client.query(
+      `UPDATE contract SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1 AND status = 'RENEWAL_PENDING' RETURNING apartment_id`,
       [id]
     );
+    if (rejContractRes.rows[0]?.apartment_id) {
+      await ensureApartmentMetersInTx(client, { apartmentId: rejContractRes.rows[0].apartment_id, actorId: req.user.sub });
+    }
 
     await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
