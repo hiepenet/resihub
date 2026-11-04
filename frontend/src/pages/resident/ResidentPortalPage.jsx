@@ -35,6 +35,7 @@ export function ResidentPortalPage() {
   const activeTab = VALID_TABS.includes(rawTab) ? rawTab : 'overview';
   const actionParam = searchParams.get('action') || '';
   const contractIdParam = searchParams.get('contract_id') || '';
+  const targetContractId = searchParams.get('target_contract_id') || '';
 
   const [overview, setOverview] = useState(null);
   const [openRequestsCount, setOpenRequestsCount] = useState(0);
@@ -88,6 +89,24 @@ export function ResidentPortalPage() {
   useEffect(() => {
     fetchOverviewData(false);
   }, [fetchOverviewData]);
+
+  // Đồng bộ contract_id nếu target_contract_id thuộc danh sách hợp đồng đang hiệu lực (active_contracts)
+  useEffect(() => {
+    if (!targetContractId || !Array.isArray(overview?.active_contracts)) return;
+    const isActiveTarget = overview.active_contracts.some(
+      (c) => String(c.contract_id) === String(targetContractId)
+    );
+    if (isActiveTarget && String(contractIdParam) !== String(targetContractId)) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set('contract_id', String(targetContractId));
+          return next;
+        },
+        { replace: true }
+      );
+    }
+  }, [targetContractId, overview?.active_contracts, contractIdParam, setSearchParams]);
 
   const handleNavigateTab = useCallback(
     (nextTab, extra = {}) => {
@@ -191,6 +210,7 @@ export function ResidentPortalPage() {
       onNavigateTab: handleNavigateTab,
       actionParam,
       onClearActionParam: handleClearActionParam,
+      targetContractId,
     };
 
     switch (activeTab) {

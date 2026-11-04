@@ -1518,7 +1518,28 @@ router.get('/invoices', authenticateToken, async (req, res) => {
       payments: paymentsByInv[inv.id] || [],
     }));
 
-    res.json({ data });
+    const creditParams = [personId];
+    let creditFilter = '';
+    if (contractId) {
+      creditParams.push(contractId);
+      creditFilter = ' AND cb.contract_id = $2';
+    }
+    const creditRes = await pool.query(
+      `SELECT cb.id, cb.contract_id, cb.building_id, cb.reason_type, cb.amount, cb.applied_amount,
+              (cb.amount - cb.applied_amount) AS available_amount,
+              cb.status, cb.description, cb.refund_method, cb.refund_meta, cb.created_at, cb.updated_at,
+              a.code AS apartment_code, b.name AS building_name
+       FROM credit_balance cb
+       JOIN tenant t ON t.id = cb.tenant_id
+       LEFT JOIN contract c ON c.id = cb.contract_id
+       LEFT JOIN apartment a ON a.id = c.apartment_id
+       LEFT JOIN building b ON b.id = cb.building_id
+       WHERE t.person_id = $1${creditFilter}
+       ORDER BY cb.created_at DESC`,
+      creditParams
+    );
+
+    res.json({ data, credit_balances: creditRes.rows });
   } catch (err) {
     console.error('[Resident Invoices Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải danh sách hóa đơn.' });

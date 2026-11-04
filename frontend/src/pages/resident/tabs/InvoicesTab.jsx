@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Receipt,
   CreditCard,
@@ -42,6 +43,7 @@ import {
 } from '../../../utils/billing';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const LINE_TYPE_META = {
   RENT: { label: 'Tiền thuê căn hộ', icon: Home, badgeVariant: 'sky' },
@@ -100,12 +102,38 @@ function normalizePaymentAccount(raw) {
   };
 }
 
-export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearActionParam }) {
+export function InvoicesTab({
+  overview,
+  onRefreshOverview,
+  actionParam,
+  onClearActionParam,
+  targetContractId = '',
+}) {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { banks } = useVietQrBanks();
   const contract = overview?.active_contract || overview?.contract || null;
+  const [pinnedContractId, setPinnedContractId] = useState(() => targetContractId || '');
+
+  useEffect(() => {
+    if (targetContractId) {
+      setPinnedContractId(targetContractId);
+    }
+  }, [targetContractId]);
+
+  useEffect(() => {
+    if (!targetContractId) {
+      setPinnedContractId('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract?.contract_id]);
+
+  const effectiveContractId = pinnedContractId || targetContractId || contract?.contract_id || '';
 
   const [invoices, setInvoices] = useState([]);
+  const [creditBalances, setCreditBalances] = useState([]);
+  const [detailInvoice, setDetailInvoice] = useState(null);
+  const [detailCredit, setDetailCredit] = useState(null);
   const [paymentAccount, setPaymentAccount] = useState(DEFAULT_CORPORATE_ACCOUNT);
 
   const resolvedBankMeta = useMemo(
@@ -148,7 +176,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
     setLoading(true);
     try {
       const [invRes, bldgRes, settingsRes] = await Promise.allSettled([
-        residentService.listInvoices(contract?.contract_id),
+        residentService.listInvoices(effectiveContractId || undefined),
         buildingsService.list(),
         usersService.getSettings(),
       ]);
@@ -157,6 +185,9 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
       if (invRes.status === 'fulfilled') {
         loadedInvoices = invRes.value?.data || [];
         setInvoices(loadedInvoices);
+        setCreditBalances(
+          Array.isArray(invRes.value?.credit_balances) ? invRes.value.credit_balances : []
+        );
         if (loadedInvoices.length > 0 && !hasAutoExpandedRef.current) {
           hasAutoExpandedRef.current = true;
           setExpandedId(loadedInvoices[0].id);
@@ -201,11 +232,11 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
     } finally {
       setLoading(false);
     }
-  }, [contract?.contract_id, contract?.building_id, contract?.payment_account, overview?.payment_account]);
+  }, [effectiveContractId, contract?.building_id, contract?.payment_account, overview?.payment_account]);
 
   useEffect(() => {
     hasAutoExpandedRef.current = false;
-  }, [contract?.contract_id]);
+  }, [effectiveContractId]);
 
   useEffect(() => {
     loadInvoicesAndAccount();
@@ -249,6 +280,80 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
       onClearActionParam?.();
     }
   }, [loading, actionParam, unpaidInvoices, openReportPaymentModal, onClearActionParam]);
+
+  // Deep-link auto-modal từ thông báo: ?invoice_id=...&modal=pay|detail hoặc ?credit_id=...&modal=credit
+  useEffect(() => {
+    if (loading) return;
+    const modal = searchParams.get('modal');
+    const invoiceId = searchParams.get('invoice_id');
+    const creditId = searchParams.get('credit_id');
+    if (!modal && !invoiceId && !creditId) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+    if (modal === 'credit' || (creditId && !invoiceId)) {
+      const matchedCredit =
+        (creditId && creditBalances.find((c) => String(c.id) === String(creditId))) ||
+        creditBalances[0] ||
+        null;
+      if (matchedCredit) {
+        setDetailCredit(matchedCredit);
+      } else if (Number(overview?.available_credit_balance || contract?.available_credit_balance || 0) > 0) {
+        setDetailCredit({
+          id: creditId || 'available',
+          amount: overview?.available_credit_balance || contract?.available_credit_balance || 0,
+          applied_amount: 0,
+          available_amount:
+            overview?.available_credit_balance || contract?.available_credit_balance || 0,
+          status: 'AVAILABLE',
+          description: 'Số dư tín dụng khả dụng của hợp đồng',
+        });
+      } else {
+        toast.info('Bản ghi tín dụng liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      }
+      return;
+    }
+
+    const matchedInv =
+      (invoiceId && invoices.find((i) => String(i.id) === String(invoiceId))) ||
+      (modal === 'pay' ? unpaidInvoices[0] : invoices[0]) ||
+      null;
+
+    if (!matchedInv) {
+      toast.info('Bản ghi hóa đơn liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
+
+    setFilterTab('all');
+    setExpandedId(matchedInv.id);
+    const rem = Math.max(
+      0,
+      Number(matchedInv.total_amount || 0) - Number(matchedInv.paid_amount || 0)
+    );
+    const isUnpaid =
+      ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(matchedInv.status) && rem > 0;
+
+    if (modal === 'pay') {
+      if (isUnpaid) {
+        openReportPaymentModal(matchedInv);
+      } else {
+        setDetailInvoice(matchedInv);
+      }
+    } else {
+      setDetailInvoice(matchedInv);
+    }
+  }, [
+    loading,
+    searchParams,
+    setSearchParams,
+    invoices,
+    unpaidInvoices,
+    creditBalances,
+    overview?.available_credit_balance,
+    contract?.available_credit_balance,
+    openReportPaymentModal,
+    toast,
+  ]);
 
   const filteredInvoices = useMemo(() => {
     if (filterTab === 'unpaid') return unpaidInvoices;
@@ -992,6 +1097,189 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
             onChange={(e) => setPayForm((s) => ({ ...s, note: e.target.value }))}
           />
         </form>
+      </Modal>
+
+      {/* Modal Chi tiết Hóa đơn (Read-only / Quick Pay từ thông báo) */}
+      <Modal
+        open={Boolean(detailInvoice)}
+        onClose={() => setDetailInvoice(null)}
+        title={
+          detailInvoice
+            ? `Chi tiết hóa đơn #${detailInvoice.invoice_code || ''} — Kỳ ${detailInvoice.period || ''}`
+            : 'Chi tiết hóa đơn'
+        }
+        subtitle={
+          detailInvoice
+            ? `Căn ${detailInvoice.apartment_code || contract?.apartment_code || '—'}${
+                detailInvoice.building_name ? ` — ${detailInvoice.building_name}` : ''
+              }`
+            : ''
+        }
+        size="lg"
+        footer={
+          detailInvoice ? (
+            <div className="flex flex-wrap items-center justify-end gap-2 w-full">
+              <Button variant="outline" onClick={() => setDetailInvoice(null)}>
+                Đóng
+              </Button>
+              {['ISSUED', 'PARTIALLY_PAID', 'OVERDUE', 'ADJUSTED'].includes(detailInvoice.status) &&
+              Math.max(
+                0,
+                Number(detailInvoice.total_amount || 0) - Number(detailInvoice.paid_amount || 0)
+              ) > 0 ? (
+                <Button
+                  icon={CreditCard}
+                  onClick={() => {
+                    const inv = detailInvoice;
+                    setDetailInvoice(null);
+                    openReportPaymentModal(inv);
+                  }}
+                >
+                  Báo đã thanh toán
+                </Button>
+              ) : null}
+            </div>
+          ) : null
+        }
+      >
+        {detailInvoice ? (
+          <div className="space-y-4 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-mono font-bold text-slate-900 text-sm">
+                    #{detailInvoice.invoice_code}
+                  </span>
+                  <StatusBadge status={detailInvoice.status} domain="invoice" />
+                </div>
+                <p className="text-slate-600">
+                  Hạn thanh toán: <strong>{formatDate(detailInvoice.due_date)}</strong>
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-slate-500">Tổng hóa đơn / Còn lại</p>
+                <p className="text-base font-bold text-slate-900 tabular-nums">
+                  {formatMoney(detailInvoice.total_amount)} •{' '}
+                  <span className="text-rose-600">
+                    {formatMoney(
+                      Math.max(
+                        0,
+                        Number(detailInvoice.total_amount || 0) -
+                          Number(detailInvoice.paid_amount || 0)
+                      )
+                    )}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            {Array.isArray(detailInvoice.lines) && detailInvoice.lines.length > 0 ? (
+              <div className="rounded-xl border border-slate-200 divide-y divide-slate-100 overflow-hidden">
+                {detailInvoice.lines.map((line) => (
+                  <div
+                    key={line.id}
+                    className="px-3.5 py-2.5 flex items-center justify-between gap-2 bg-white"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-800 break-words">{line.description}</p>
+                      <p className="text-slate-500">
+                        {line.quantity} {line.unit || ''} × {formatMoney(line.unit_price)}
+                      </p>
+                    </div>
+                    <span className="font-bold text-slate-900 shrink-0">
+                      {formatMoney(line.amount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {Array.isArray(detailInvoice.payments) && detailInvoice.payments.length > 0 ? (
+              <div className="space-y-2">
+                <p className="font-semibold text-slate-700 uppercase tracking-wider">
+                  Giao dịch thanh toán ({detailInvoice.payments.length})
+                </p>
+                {detailInvoice.payments.map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-2"
+                  >
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-semibold text-slate-800">
+                          {p.payment_code}
+                        </span>
+                        <StatusBadge status={p.status} domain="payment" />
+                      </div>
+                      {p.note ? (
+                        <p className="text-slate-600 break-words">{p.note}</p>
+                      ) : null}
+                    </div>
+                    <span className="font-bold text-slate-900 shrink-0">
+                      {formatMoney(p.amount)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Modal Chi tiết Sổ Tín Dụng (Credit Balance) */}
+      <Modal
+        open={Boolean(detailCredit)}
+        onClose={() => setDetailCredit(null)}
+        title="Chi tiết Số dư Tín dụng & Hoàn tiền"
+        subtitle="Theo dõi biến động tiền nộp dư, cấn trừ hóa đơn và đề nghị hoàn trả"
+        size="md"
+        footer={
+          <Button variant="outline" onClick={() => setDetailCredit(null)}>
+            Đóng
+          </Button>
+        }
+      >
+        {detailCredit ? (
+          <div className="space-y-3.5 text-xs">
+            <div className="p-3.5 rounded-xl bg-sky-50/70 border border-sky-200 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-slate-500">Trạng thái khoản tín dụng</p>
+                <div className="mt-1">
+                  <StatusBadge status={detailCredit.status || 'AVAILABLE'} domain="credit_balance" />
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-slate-500">Số dư khả dụng / Giá trị gốc</p>
+                <p className="text-base font-bold text-sky-700 tabular-nums">
+                  {formatMoney(
+                    detailCredit.available_amount ??
+                      Math.max(
+                        0,
+                        Number(detailCredit.amount || 0) - Number(detailCredit.applied_amount || 0)
+                      )
+                  )}{' '}
+                  <span className="text-xs font-normal text-slate-500">
+                    / {formatMoney(detailCredit.amount || 0)}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            {detailCredit.description ? (
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-slate-700 whitespace-pre-line break-words">
+                <span className="font-semibold text-slate-900">Diễn giải: </span>
+                {detailCredit.description}
+              </div>
+            ) : null}
+
+            {detailCredit.refund_meta?.rejection_reason ? (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 whitespace-pre-line break-words">
+                <span className="font-semibold">Lý do từ chối hoàn tiền: </span>
+                {detailCredit.refund_meta.rejection_reason}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Modal>
 
       {/* Lightbox xem ảnh biên lai / ảnh mặt đồng hồ */}

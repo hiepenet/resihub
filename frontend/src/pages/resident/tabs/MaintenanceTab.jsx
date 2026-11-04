@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Wrench,
   Plus,
@@ -35,6 +36,7 @@ import { useToast } from '../../../hooks/useToast';
 import { formatDateTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 import { computeSlaBadgeMeta, copyTextToClipboard } from '../../../utils/zaloFormat';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const OPEN_STATUSES = ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'];
 
@@ -77,12 +79,31 @@ export function MaintenanceTab({
   onRequestsChanged,
   actionParam,
   onClearActionParam,
+  targetContractId = '',
 }) {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const contract = overview?.active_contract || overview?.contract || null;
+  const [pinnedContractId, setPinnedContractId] = useState(() => targetContractId || '');
+
+  useEffect(() => {
+    if (targetContractId) {
+      setPinnedContractId(targetContractId);
+    }
+  }, [targetContractId]);
+
+  useEffect(() => {
+    if (!targetContractId) {
+      setPinnedContractId('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract?.contract_id]);
+
+  const effectiveContractId = pinnedContractId || targetContractId || contract?.contract_id || '';
   const reopenWindowDays = Number(overview?.sla_config?.reopen_window_days || 3);
 
   const [requests, setRequests] = useState([]);
+  const [detailRequest, setDetailRequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [filterTab, setFilterTab] = useState('all');
   const [copiedCode, setCopiedCode] = useState('');
@@ -127,7 +148,7 @@ export function MaintenanceTab({
   const loadRequests = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await residentService.listServiceRequests(contract?.contract_id);
+      const res = await residentService.listServiceRequests(effectiveContractId || undefined);
       const rows = res?.data || [];
       setRequests(rows);
       onRequestsChanged?.(rows);
@@ -136,7 +157,7 @@ export function MaintenanceTab({
     } finally {
       setLoading(false);
     }
-  }, [contract?.contract_id, onRequestsChanged, toast]);
+  }, [effectiveContractId, onRequestsChanged, toast]);
 
   useEffect(() => {
     loadRequests();
@@ -168,6 +189,31 @@ export function MaintenanceTab({
       onClearActionParam?.();
     }
   }, [loading, actionParam, contract, openCreateModal, onClearActionParam]);
+
+  // Deep-link auto-modal từ thông báo: ?request_id=...&modal=detail
+  useEffect(() => {
+    if (loading) return;
+    const modal = searchParams.get('modal');
+    const requestId = searchParams.get('request_id');
+    if (!modal && !requestId) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+    const matched =
+      (requestId && requests.find((r) => String(r.id) === String(requestId))) || null;
+    if (!matched) {
+      toast.info('Bản ghi yêu cầu sửa chữa liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
+
+    setFilterTab('all');
+    setHighlightedId(matched.id);
+    if (matched.status === 'RESOLVED' && !Number(matched.rating)) {
+      openRatingModal(matched);
+    } else {
+      setDetailRequest(matched);
+    }
+  }, [loading, searchParams, setSearchParams, requests, toast]);
 
   const openCount = useMemo(
     () => requests.filter((r) => OPEN_STATUSES.includes(r.status)).length,
@@ -1041,6 +1087,107 @@ export function MaintenanceTab({
             onChange={(e) => setRatingNote(e.target.value)}
           />
         </form>
+      </Modal>
+
+      {/* Modal Chi tiết Tiến độ Yêu cầu Sửa chữa (mở từ thông báo) */}
+      <Modal
+        open={Boolean(detailRequest)}
+        onClose={() => setDetailRequest(null)}
+        title={
+          detailRequest
+            ? `Phiếu sửa chữa #${detailRequest.tracking_code || detailRequest.id?.slice(0, 8)}`
+            : 'Chi tiết yêu cầu sửa chữa'
+        }
+        subtitle={detailRequest?.title || ''}
+        size="md"
+        footer={
+          detailRequest ? (
+            <div className="flex flex-wrap items-center justify-end gap-2 w-full">
+              <Button variant="outline" onClick={() => setDetailRequest(null)}>
+                Đóng
+              </Button>
+              {detailRequest.status === 'NEW' ? (
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    const r = detailRequest;
+                    setDetailRequest(null);
+                    openCancelModal(r);
+                  }}
+                >
+                  Hủy yêu cầu
+                </Button>
+              ) : null}
+              {detailRequest.status === 'RESOLVED' ? (
+                <>
+                  {!isReopenExpired(detailRequest.resolved_at) ? (
+                    <Button
+                      variant="outline"
+                      icon={RefreshCw}
+                      onClick={() => {
+                        const r = detailRequest;
+                        setDetailRequest(null);
+                        openReopenModal(r);
+                      }}
+                    >
+                      Yêu cầu xử lý lại
+                    </Button>
+                  ) : null}
+                  {!Number(detailRequest.rating) ? (
+                    <Button
+                      variant="warning"
+                      icon={Star}
+                      onClick={() => {
+                        const r = detailRequest;
+                        setDetailRequest(null);
+                        openRatingModal(r);
+                      }}
+                    >
+                      Nghiệm thu & Đánh giá
+                    </Button>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          ) : null
+        }
+      >
+        {detailRequest ? (
+          <div className="space-y-3.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="indigo">
+                {SERVICE_REQUEST_CATEGORY[detailRequest.category] || detailRequest.category}
+              </Badge>
+              <StatusBadge status={detailRequest.priority} domain="priority" dot={false} />
+              <StatusBadge status={detailRequest.status} domain="service_request" />
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80 space-y-1.5">
+              <p className="text-slate-700 whitespace-pre-line break-words">
+                {detailRequest.description}
+              </p>
+              <p className="text-slate-500">
+                Kỹ thuật phụ trách:{' '}
+                <strong className="text-slate-800">
+                  {detailRequest.assigned_to_name || 'Đang điều phối nhân sự'}
+                </strong>
+              </p>
+            </div>
+
+            {detailRequest.resolution_note ? (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 whitespace-pre-line break-words">
+                <strong>Kết quả xử lý kỹ thuật:</strong> {detailRequest.resolution_note}
+              </div>
+            ) : null}
+
+            {detailRequest.hold_reason ? (
+              <div className="p-3 rounded-xl bg-purple-50 border border-purple-200 text-purple-900 whitespace-pre-line break-words">
+                <strong>Lý do tạm hoãn / hẹn lại:</strong> {detailRequest.hold_reason}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Modal>
 
       {/* Lightbox xem ảnh đính kèm / ảnh nghiệm thu */}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Building2,
   Maximize2,
@@ -38,6 +39,7 @@ import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../u
 import { isValidIdNumber, extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
 import { canResidentUpdateReservationBankInfo } from '../../../utils/depositUiHelpers';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const AMENITY_LABELS = {
   wifi: 'Wi-Fi tốc độ cao',
@@ -114,7 +116,9 @@ function getDaysRemaining(endDate) {
 
 export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview, onNavigateTab }) {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const unreadCount = useNotificationStore((s) => s.unreadCount);
+  const [detailReservation, setDetailReservation] = useState(null);
 
   const contract = overview?.active_contract || overview?.contract || null;
   const user = overview?.user || {};
@@ -643,6 +647,181 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
       setRsvBankSaving(false);
     }
   };
+
+  // Deep-link auto-modal từ thông báo: ?modal=apply hoặc ?reservation_id=...&modal=reservation
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    const rsvId = searchParams.get('reservation_id');
+    if (!modal && !rsvId) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+    if (modal === 'apply') {
+      openApplyModal(
+        onboardingApplication?.desired_apartment_id || reservation?.apartment_id || ''
+      );
+      return;
+    }
+
+    if (modal === 'reservation' || rsvId) {
+      const allRsv = [
+        ...reservations,
+        ...(Array.isArray(overview?.reservation_history) ? overview.reservation_history : []),
+      ];
+      const matched =
+        (rsvId &&
+          allRsv.find((r) => String(r.reservation_id || r.id) === String(rsvId))) ||
+        reservations[0] ||
+        null;
+
+      if (matched) {
+        const st = matched.reservation_status || 'HELD';
+        if (st === 'HELD' && !onboardingApplication) {
+          openApplyModal(matched.apartment_id || '');
+        } else if (canResidentUpdateReservationBankInfo(matched)) {
+          openRsvBankModal(matched);
+        } else {
+          setDetailReservation(matched);
+        }
+      } else if (onboardingApplication) {
+        setDetailReservation({
+          isApplicationOnly: true,
+          application: onboardingApplication,
+        });
+      } else {
+        toast.info('Phiếu giữ chỗ / hồ sơ liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const renderReservationDetailModal = () => (
+    <Modal
+      open={Boolean(detailReservation)}
+      onClose={() => setDetailReservation(null)}
+      title={
+        detailReservation?.isApplicationOnly
+          ? 'Chi tiết Hồ sơ Đăng ký Thuê'
+          : `Chi tiết Phiếu Giữ chỗ — Căn ${detailReservation?.apartment_code || ''}`
+      }
+      subtitle={
+        detailReservation?.isApplicationOnly
+          ? detailReservation.application?.desired_building_name || 'Trạng thái xét duyệt hồ sơ cư dân'
+          : detailReservation?.building_name || ''
+      }
+      size="md"
+      footer={
+        detailReservation ? (
+          <div className="flex flex-wrap items-center justify-end gap-2 w-full">
+            <Button variant="outline" onClick={() => setDetailReservation(null)}>
+              Đóng
+            </Button>
+            {!detailReservation.isApplicationOnly &&
+            (detailReservation.reservation_status || 'HELD') === 'HELD' ? (
+              <Button
+                icon={Send}
+                onClick={() => {
+                  const aptId = detailReservation.apartment_id || '';
+                  setDetailReservation(null);
+                  openApplyModal(aptId);
+                }}
+              >
+                Đăng ký thông tin nhận nhà
+              </Button>
+            ) : null}
+            {!detailReservation.isApplicationOnly &&
+            canResidentUpdateReservationBankInfo(detailReservation) ? (
+              <Button
+                icon={Edit3}
+                onClick={() => {
+                  const r = detailReservation;
+                  setDetailReservation(null);
+                  openRsvBankModal(r);
+                }}
+              >
+                Cập nhật STK nhận hoàn
+              </Button>
+            ) : null}
+          </div>
+        ) : null
+      }
+    >
+      {detailReservation ? (
+        detailReservation.isApplicationOnly ? (
+          <div className="space-y-3 text-xs">
+            <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 flex items-center justify-between gap-2">
+              <span className="font-semibold text-slate-800">Trạng thái hồ sơ</span>
+              <Badge
+                variant={
+                  detailReservation.application?.status === 'APPROVED'
+                    ? 'emerald'
+                    : detailReservation.application?.status === 'REJECTED'
+                    ? 'red'
+                    : 'amber'
+                }
+                dot
+              >
+                {detailReservation.application?.status || 'PENDING'}
+              </Badge>
+            </div>
+            {detailReservation.application?.desired_apartment_code ? (
+              <p className="text-slate-700">
+                Căn hộ đăng ký:{' '}
+                <strong>
+                  Căn {detailReservation.application.desired_apartment_code}
+                  {detailReservation.application.desired_building_name
+                    ? ` (${detailReservation.application.desired_building_name})`
+                    : ''}
+                </strong>
+              </p>
+            ) : null}
+            <p className="text-slate-600 leading-relaxed">
+              Ban Quản Lý đã tiếp nhận hồ sơ định danh và sẽ liên hệ để hoàn tất hợp đồng thuê.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3.5 text-xs">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-slate-500">Trạng thái giữ chỗ</p>
+                <div className="mt-1">
+                  <StatusBadge
+                    status={detailReservation.reservation_status || 'HELD'}
+                    domain="reservation"
+                  />
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-slate-500">Tiền cọc giữ chỗ</p>
+                <p className="text-base font-bold text-primary-700 tabular-nums">
+                  {formatMoney(detailReservation.hold_amount || 0)}
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-white border border-slate-200/80">
+              <div>
+                <p className="text-slate-500">Hạn giữ chỗ</p>
+                <p className="font-semibold text-slate-900 mt-0.5">
+                  {formatDate(detailReservation.hold_until)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Hoàn trả / Khấu trừ</p>
+                <p className="font-semibold text-emerald-700 mt-0.5">
+                  {formatMoney(detailReservation.refunded_amount || 0)}
+                </p>
+              </div>
+            </div>
+            {detailReservation.settlement_reason ? (
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-slate-700 whitespace-pre-line break-words">
+                <strong>Ghi chú thanh lý:</strong> {detailReservation.settlement_reason}
+              </div>
+            ) : null}
+          </div>
+        )
+      ) : null}
+    </Modal>
+  );
 
   const renderReservationBankModal = () => (
     <Modal
@@ -1386,6 +1565,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
 
         {renderApplicationModal()}
         {renderReservationBankModal()}
+        {renderReservationDetailModal()}
       </div>
     );
   }
@@ -1639,6 +1819,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
 
       {renderApplicationModal()}
       {renderReservationBankModal()}
+      {renderReservationDetailModal()}
     </div>
   );
 }

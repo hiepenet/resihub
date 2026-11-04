@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Sparkles,
   Plus,
@@ -42,6 +43,7 @@ import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { previewSubscriptionProrata } from '../../../utils/billing';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const CATEGORY_META = {
   PARKING: { label: 'Gửi xe & Bãi đỗ', icon: Car, color: 'bg-sky-50 text-sky-600' },
@@ -89,13 +91,36 @@ function calculateProrataDetails(unitPrice, quantity, targetDateStr, mode = 'sub
   };
 }
 
-export function ServicesTab({ overview, actionParam, onClearActionParam }) {
+export function ServicesTab({
+  overview,
+  actionParam,
+  onClearActionParam,
+  targetContractId = '',
+}) {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const contract = overview?.active_contract || overview?.contract || null;
+  const [pinnedContractId, setPinnedContractId] = useState(() => targetContractId || '');
+
+  useEffect(() => {
+    if (targetContractId) {
+      setPinnedContractId(targetContractId);
+    }
+  }, [targetContractId]);
+
+  useEffect(() => {
+    if (!targetContractId) {
+      setPinnedContractId('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract?.contract_id]);
+
+  const effectiveContractId = pinnedContractId || targetContractId || contract?.contract_id || '';
   const hasActiveContract = ['ACTIVE', 'RENEWAL_PENDING'].includes(contract?.contract_status);
 
   const [catalog, setCatalog] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
+  const [detailSubscription, setDetailSubscription] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showCancelledHistory, setShowCancelledHistory] = useState(false);
 
@@ -127,7 +152,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
   const loadServices = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await residentService.listServices(contract?.contract_id);
+      const res = await residentService.listServices(effectiveContractId || undefined);
       setCatalog(res?.data?.catalog || []);
       setSubscriptions(res?.data?.subscriptions || []);
     } catch (err) {
@@ -135,7 +160,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
     } finally {
       setLoading(false);
     }
-  }, [contract?.contract_id, toast]);
+  }, [effectiveContractId, toast]);
 
   useEffect(() => {
     loadServices();
@@ -175,6 +200,30 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
       onClearActionParam?.();
     }
   }, [loading, actionParam, hasActiveContract, catalog.length, openSubscribeModal, onClearActionParam]);
+
+  // Deep-link auto-modal từ thông báo: ?subscription_id=...&modal=detail
+  useEffect(() => {
+    if (loading) return;
+    const modal = searchParams.get('modal');
+    const subId = searchParams.get('subscription_id');
+    if (!modal && !subId) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+    const matched =
+      (subId && subscriptions.find((s) => String(s.id) === String(subId))) ||
+      subscriptions[0] ||
+      null;
+    if (!matched) {
+      toast.info('Gói dịch vụ liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
+
+    if (['CANCELLED', 'REJECTED', 'TERMINATED'].includes(matched.status)) {
+      setShowCancelledHistory(true);
+    }
+    setDetailSubscription(matched);
+  }, [loading, searchParams, setSearchParams, subscriptions, toast]);
 
   const activeSubscriptions = useMemo(
     () =>
@@ -741,6 +790,110 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
             }}
           />
         </form>
+      </Modal>
+
+      {/* Modal Chi tiết Gói dịch vụ đăng ký (mở từ thông báo) */}
+      <Modal
+        open={Boolean(detailSubscription)}
+        onClose={() => setDetailSubscription(null)}
+        title={
+          detailSubscription
+            ? `Gói dịch vụ: ${detailSubscription.service_name || ''}`
+            : 'Chi tiết gói dịch vụ'
+        }
+        subtitle={
+          detailSubscription?.apartment_code
+            ? `Căn ${detailSubscription.apartment_code}`
+            : 'Thông tin đăng ký dịch vụ căn hộ'
+        }
+        size="md"
+        footer={
+          detailSubscription ? (
+            <div className="flex flex-wrap items-center justify-end gap-2 w-full">
+              <Button variant="outline" onClick={() => setDetailSubscription(null)}>
+                Đóng
+              </Button>
+              {detailSubscription.status === 'CANCELLATION_PENDING' ? (
+                <Button
+                  variant="outline"
+                  loading={withdrawingId === detailSubscription.id}
+                  onClick={async () => {
+                    const target = detailSubscription;
+                    setDetailSubscription(null);
+                    await handleWithdrawCancel(target);
+                  }}
+                >
+                  Rút yêu cầu hủy
+                </Button>
+              ) : ['ACTIVE', 'PENDING_APPROVAL'].includes(detailSubscription.status) ? (
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    const target = detailSubscription;
+                    setDetailSubscription(null);
+                    openCancelModal(target);
+                  }}
+                >
+                  {detailSubscription.status === 'PENDING_APPROVAL' ? 'Hủy yêu cầu' : 'Hủy dịch vụ'}
+                </Button>
+              ) : hasActiveContract && detailSubscription.service_id ? (
+                <Button
+                  icon={Plus}
+                  onClick={() => {
+                    const svcId = detailSubscription.service_id;
+                    setDetailSubscription(null);
+                    openSubscribeModal(svcId);
+                  }}
+                >
+                  Đăng ký lại
+                </Button>
+              ) : null}
+            </div>
+          ) : null
+        }
+      >
+        {detailSubscription ? (
+          <div className="space-y-3.5 text-xs">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-slate-500">Trạng thái</p>
+                <div className="mt-1">
+                  <StatusBadge status={detailSubscription.status} domain="subscription" />
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-slate-500">Đơn giá × Số lượng</p>
+                <p className="text-base font-bold text-primary-700 tabular-nums">
+                  {formatMoney(detailSubscription.unit_price)} × {detailSubscription.quantity}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-white border border-slate-200/80">
+              <div>
+                <p className="text-slate-500">Ngày bắt đầu</p>
+                <p className="font-semibold text-slate-900 mt-0.5">
+                  {formatDate(detailSubscription.start_date)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Ngày kết thúc</p>
+                <p className="font-semibold text-slate-900 mt-0.5">
+                  {detailSubscription.end_date ? formatDate(detailSubscription.end_date) : 'Đang duy trì'}
+                </p>
+              </div>
+            </div>
+
+            <VehiclePlatesBadges plates={detailSubscription.vehicle_plates} />
+
+            {detailSubscription.note ? (
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-slate-700 whitespace-pre-line break-words">
+                <strong>Ghi chú:</strong> {detailSubscription.note}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Modal>
 
       {/* Modal Hủy dịch vụ */}

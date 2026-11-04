@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   FileText,
   Printer,
@@ -50,6 +51,7 @@ import {
   getResidentDisputeWindowState,
   canResidentUpdateRefundBankInfo,
 } from '../../../utils/depositUiHelpers';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const DIFF_FIELD_LABELS = {
   rent_amount: 'Giá thuê hàng tháng',
@@ -131,12 +133,29 @@ function formatDiffValue(key, val) {
   return String(val);
 }
 
-export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
+export function ContractTab({ overview, onRefreshOverview, onNavigateTab, targetContractId = '' }) {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { banks } = useVietQrBanks();
   const iframeRef = useRef(null);
 
   const contract = overview?.active_contract || overview?.contract || null;
+  const [pinnedContractId, setPinnedContractId] = useState(() => targetContractId || '');
+
+  useEffect(() => {
+    if (targetContractId) {
+      setPinnedContractId(targetContractId);
+    }
+  }, [targetContractId]);
+
+  useEffect(() => {
+    if (!targetContractId) {
+      setPinnedContractId('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contract?.contract_id]);
+
+  const effectiveContractId = pinnedContractId || targetContractId || contract?.contract_id || '';
   const contractHistory = Array.isArray(overview?.contract_history) ? overview.contract_history : [];
   const amendments = Array.isArray(overview?.amendments) ? overview.amendments : [];
 
@@ -179,16 +198,18 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     account_holder: '',
   });
   const [submittingBankInfo, setSubmittingBankInfo] = useState(false);
+  const [settlementDetailModalTarget, setSettlementDetailModalTarget] = useState(null);
+  const [depositViewModalOpen, setDepositViewModalOpen] = useState(false);
 
   const loadContractDetails = useCallback(async () => {
     setLoadingExtra(true);
     try {
       const promises = [
-        residentService.listDepositTransactions(contract?.contract_id),
-        residentService.listContractRequests(contract?.contract_id),
+        residentService.listDepositTransactions(effectiveContractId || undefined),
+        residentService.listContractRequests(effectiveContractId || undefined),
       ];
-      if (contract?.contract_id) {
-        promises.push(contractsService.listOccupants(contract.contract_id));
+      if (effectiveContractId) {
+        promises.push(contractsService.listOccupants(effectiveContractId));
       }
       const [depRes, reqRes, occRes] = await Promise.allSettled(promises);
 
@@ -204,7 +225,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     } finally {
       setLoadingExtra(false);
     }
-  }, [contract?.contract_id]);
+  }, [effectiveContractId]);
 
   useEffect(() => {
     loadContractDetails();
@@ -539,22 +560,86 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
     return Array.from(map.values()).filter((item) => item.settlement);
   }, [overview?.deposit_settlements, contract, contractHistory, depositData?.deposit]);
 
-  if (!contract && contractHistory.length === 0 && settlementDeposits.length === 0) {
-    return (
-      <Card>
-        <EmptyState
-          icon={FileText}
-          title="Chưa có hợp đồng thuê"
-          description="Bạn hiện chưa có hợp đồng thuê căn hộ nào. Hãy chọn căn hộ trống tại mục Tổng quan để gửi hồ sơ đăng ký thuê."
-          action={
-            <Button onClick={() => onNavigateTab?.('overview')}>
-              Xem căn hộ trống
-            </Button>
-          }
-        />
-      </Card>
-    );
-  }
+  const isEmptyContractView =
+    !contract && contractHistory.length === 0 && settlementDeposits.length === 0;
+
+  // Deep-link auto-modal từ thông báo: settlement | bank | renew | contract_view | deposit_view
+  useEffect(() => {
+    if (loadingExtra) return;
+    const modal = searchParams.get('modal');
+    const depositId = searchParams.get('deposit_id');
+    if (!modal && !depositId) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+    const targetSd =
+      (depositId && settlementDeposits.find((d) => String(d.deposit_id) === String(depositId))) ||
+      settlementDeposits[0] ||
+      null;
+
+    if (modal === 'settlement') {
+      if (targetSd) {
+        const dw = getResidentDisputeWindowState(targetSd);
+        if (dw.canDispute) {
+          handleOpenDisputeModal(targetSd);
+        } else {
+          setSettlementDetailModalTarget(targetSd);
+        }
+      } else if (depositData?.deposit) {
+        setDepositViewModalOpen(true);
+      } else {
+        toast.info('Bản ghi tất toán cọc liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      }
+      return;
+    }
+
+    if (modal === 'bank') {
+      if (targetSd) {
+        if (canResidentUpdateRefundBankInfo(targetSd)) {
+          handleOpenBankModal(targetSd);
+        } else {
+          setSettlementDetailModalTarget(targetSd);
+        }
+      } else {
+        toast.info('Bản ghi hoàn cọc liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      }
+      return;
+    }
+
+    if (modal === 'renew') {
+      const matchedActive =
+        contract &&
+        (!effectiveContractId || String(contract.contract_id) === String(effectiveContractId))
+          ? contract
+          : null;
+      if (matchedActive && matchedActive.contract_status === 'ACTIVE') {
+        openRequestModal('RENEWAL');
+      } else if (effectiveContractId) {
+        handleOpenTemplate(effectiveContractId);
+      } else {
+        toast.info('Hợp đồng liên quan không còn ở trạng thái cho phép gia hạn.');
+      }
+      return;
+    }
+
+    if (modal === 'contract_view') {
+      if (effectiveContractId) {
+        handleOpenTemplate(effectiveContractId);
+      } else {
+        toast.info('Không tìm thấy hợp đồng liên quan.');
+      }
+      return;
+    }
+
+    if (modal === 'deposit_view' || depositId) {
+      if (depositData?.deposit || (depositData?.transactions || []).length > 0 || targetSd) {
+        setDepositViewModalOpen(true);
+      } else {
+        toast.info('Sổ cọc liên quan không còn tồn tại hoặc chưa phát sinh giao dịch.');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingExtra, searchParams]);
 
   const timelineSteps = contract
     ? [
@@ -594,6 +679,21 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
 
   return (
     <div className="space-y-6">
+      {isEmptyContractView ? (
+        <Card>
+          <EmptyState
+            icon={FileText}
+            title="Chưa có hợp đồng thuê"
+            description="Bạn hiện chưa có hợp đồng thuê căn hộ nào. Hãy chọn căn hộ trống tại mục Tổng quan để gửi hồ sơ đăng ký thuê."
+            action={
+              <Button onClick={() => onNavigateTab?.('overview')}>
+                Xem căn hộ trống
+              </Button>
+            }
+          />
+        </Card>
+      ) : (
+        <>
       {/* Current Active Contract Details */}
       {contract ? (
         <Card>
@@ -1464,6 +1564,158 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
           )}
         </Card>
       </div>
+        </>
+      )}
+
+      {/* Modal Xem Chi tiết Bảng kê Tất toán Cọc (Read-only / Print khi hết hạn khiếu nại) */}
+      <Modal
+        open={Boolean(settlementDetailModalTarget)}
+        onClose={() => setSettlementDetailModalTarget(null)}
+        title="Chi tiết Bảng kê Tất toán Tiền cọc"
+        subtitle={
+          settlementDetailModalTarget
+            ? `Căn ${settlementDetailModalTarget.apartment_code || '—'}${
+                settlementDetailModalTarget.building_name
+                  ? ` — ${settlementDetailModalTarget.building_name}`
+                  : ''
+              }`
+            : ''
+        }
+        size="md"
+        footer={
+          settlementDetailModalTarget ? (
+            <div className="flex flex-wrap items-center justify-end gap-2 w-full">
+              <Button variant="outline" onClick={() => setSettlementDetailModalTarget(null)}>
+                Đóng
+              </Button>
+              <Button
+                variant="soft"
+                icon={Printer}
+                loading={printingSettlementId === settlementDetailModalTarget.deposit_id}
+                onClick={() => handlePrintSettlementPdf(settlementDetailModalTarget.deposit_id)}
+              >
+                Xem / In bảng kê PDF
+              </Button>
+              {canResidentUpdateRefundBankInfo(settlementDetailModalTarget) ? (
+                <Button
+                  icon={Landmark}
+                  onClick={() => {
+                    const sd = settlementDetailModalTarget;
+                    setSettlementDetailModalTarget(null);
+                    handleOpenBankModal(sd);
+                  }}
+                >
+                  Cập nhật TK nhận cọc
+                </Button>
+              ) : null}
+            </div>
+          ) : null
+        }
+      >
+        {settlementDetailModalTarget ? (
+          <div className="space-y-3.5 text-xs">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-slate-500">Trạng thái tất toán</p>
+                <div className="mt-1">
+                  <StatusBadge
+                    status={settlementDetailModalTarget.deposit_status}
+                    domain="deposit"
+                  />
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-slate-500">Số tiền hoàn trả</p>
+                <p className="text-base font-bold text-emerald-600 tabular-nums">
+                  {formatMoney(settlementDetailModalTarget.settlement?.refund_amount ?? 0)}
+                </p>
+              </div>
+            </div>
+            {settlementDetailModalTarget.settlement?.rejection_reason ? (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 whitespace-pre-line break-words">
+                <strong>Ghi chú rà soát:</strong>{' '}
+                {settlementDetailModalTarget.settlement.rejection_reason}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Modal Chi tiết Sổ cọc & Lịch sử Giao dịch cọc */}
+      <Modal
+        open={depositViewModalOpen}
+        onClose={() => setDepositViewModalOpen(false)}
+        title="Chi tiết Sổ cọc & Biến động Giao dịch"
+        subtitle={
+          contract?.apartment_code
+            ? `Căn ${contract.apartment_code} — ${contract.building_name || ''}`
+            : 'Thông tin tiền đặt cọc bảo lưu hợp đồng'
+        }
+        size="lg"
+        footer={
+          <Button variant="outline" onClick={() => setDepositViewModalOpen(false)}>
+            Đóng
+          </Button>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-100">
+            <div>
+              <p className="text-slate-500">Số dư cọc thực giữ</p>
+              <p className="text-base font-bold text-indigo-700 mt-0.5 tabular-nums">
+                {formatMoney(depositInfo?.amount_held ?? contract?.deposit_held_amount ?? 0)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Trạng thái sổ cọc</p>
+              <div className="mt-1">
+                {depositInfo?.status || contract?.deposit_status ? (
+                  <StatusBadge
+                    status={depositInfo?.status || contract?.deposit_status}
+                    domain="deposit"
+                  />
+                ) : (
+                  <span className="font-semibold text-slate-700">—</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {depositTransactions.length === 0 ? (
+            <p className="text-slate-500 text-center py-4">
+              Chưa có giao dịch sổ cọc nào được ghi nhận.
+            </p>
+          ) : (
+            <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto">
+              {depositTransactions.map((tx) => {
+                const meta = resolveResidentDepositTxMeta(tx);
+                return (
+                  <div
+                    key={tx.id}
+                    className="p-3 bg-white flex items-center justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={meta.variant}>{meta.label}</Badge>
+                        <span className="text-slate-400">
+                          {formatDateTime(tx.created_at || tx.occurred_at)}
+                        </span>
+                      </div>
+                      {tx.description ? (
+                        <p className="text-slate-600 mt-1 break-words">{tx.description}</p>
+                      ) : null}
+                    </div>
+                    <span className="font-bold text-slate-900 shrink-0 tabular-nums">
+                      {meta.sign}
+                      {formatMoney(tx.amount)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Modal>
 
       {/* Modal Xem / In Hợp đồng A4 */}
       <Modal
