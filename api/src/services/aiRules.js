@@ -49,7 +49,7 @@ export const DEFAULT_AI_CONFIG = Object.freeze({
   contract_extract_enabled: true,
   meter_ocr_enabled: true,
   ticket_triage_enabled: true,
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3.8-flash',
   confidence_threshold: 0.75,
   meter_ocr_threshold: 0.8,
   triage_threshold: 0.7,
@@ -58,6 +58,24 @@ export const DEFAULT_AI_CONFIG = Object.freeze({
   warn_percent: 80,
   suggestion_ttl_hours: 72,
 });
+
+export function resolveSupportedGeminiModel(rawModel) {
+  const slug = String(rawModel || DEFAULT_AI_CONFIG.model).trim();
+  const lower = slug.toLowerCase();
+  if (!lower) return DEFAULT_AI_CONFIG.model;
+  if (lower === 'gemini-2.5-flash-lite' || lower === 'gemini-2.0-flash-lite') {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (
+    lower.startsWith('gemini-2.5-') ||
+    lower.startsWith('gemini-2.0-') ||
+    lower.startsWith('gemini-1.5-') ||
+    lower === 'gemini-3.1-pro-preview'
+  ) {
+    return 'gemini-3.8-flash';
+  }
+  return slug;
+}
 
 const MODEL_SLUG_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/i;
 const DATA_URI_RE = /^data:([a-z0-9.+\-/]+);base64,\s*([A-Za-z0-9+/=\r\n]+)$/i;
@@ -143,11 +161,11 @@ export function normalizeAiConfig(incoming = {}, existing = {}) {
     merged[boolKey] = Boolean(merged[boolKey]);
   }
 
-  const modelStr = String(merged.model ?? DEFAULT_AI_CONFIG.model).trim();
-  if (!MODEL_SLUG_RE.test(modelStr) || modelStr.includes('..') || modelStr.includes('/')) {
+  const rawModelStr = String(merged.model ?? DEFAULT_AI_CONFIG.model).trim();
+  if (!MODEL_SLUG_RE.test(rawModelStr) || rawModelStr.includes('..') || rawModelStr.includes('/')) {
     throw validationError('Tên model AI không hợp lệ.');
   }
-  merged.model = modelStr;
+  merged.model = resolveSupportedGeminiModel(rawModelStr);
 
   for (const threshKey of ['confidence_threshold', 'meter_ocr_threshold', 'triage_threshold']) {
     const val = Number(merged[threshKey]);
@@ -545,11 +563,12 @@ export function postValidateTicketTriage({
 export function estimateGeminiCostVnd({
   inputTokens = 0,
   outputTokens = 0,
-  model = 'gemini-2.5-flash',
+  model = 'gemini-3.8-flash',
 } = {}) {
   const inTok = Math.max(0, Number(inputTokens) || 0);
   const outTok = Math.max(0, Number(outputTokens) || 0);
-  const isPro = String(model || '').toLowerCase().includes('pro');
+  const modelLower = String(model || '').toLowerCase();
+  const isPro = modelLower.includes('pro') || modelLower.includes('argon');
 
   // Ước tính quy đổi VND bảo thủ (tỷ giá ~25.500 VND/USD, làm tròn lên tối thiểu 1 VND khi có gọi token)
   const inRatePerMillionVnd = isPro ? 32000 : 8000;

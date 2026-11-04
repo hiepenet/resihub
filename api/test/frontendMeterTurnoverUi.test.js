@@ -123,3 +123,4 @@ test('Task 4: Frontend Meter Turnover UI Helpers & MeterReadingsPage Wiring', as
     assert.match(src, /h\.contract_code/, 'History table must display h.contract_code');
   });
 });
+

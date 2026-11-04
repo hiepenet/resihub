@@ -196,11 +196,29 @@ export function AiGatewayConfigCard({
         <Select
           label="Mô hình Gemini mặc định"
           disabled={!canEdit}
-          value={aiConfig.model || 'gemini-2.5-flash'}
+          value={aiConfig.model || 'gemini-3.8-flash'}
           onChange={(e) => setField('model', e.target.value)}
           options={[
-            { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Nhanh & Tối ưu chi phí — Khuyến nghị)' },
-            { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Độ chính xác sâu cho tài liệu phức tạp)' },
+            {
+              value: 'gemini-3.8-flash',
+              label: 'Gemini 3.8 Flash (Cân bằng tốc độ & đa phương thức — Khuyến nghị)',
+            },
+            {
+              value: 'gemini-3.6-flash',
+              label: 'Gemini 3.6 Flash (Phản hồi nhanh ~2s & rất ổn định trên Free Tier)',
+            },
+            {
+              value: 'gemini-3.1-flash-lite',
+              label: 'Gemini 3.1 Flash-Lite (Tối ưu chi phí tác vụ nhẹ)',
+            },
+            {
+              value: 'gemini-3.5-flash-lite',
+              label: 'Gemini 3.5 Flash-Lite (Tiết kiệm chi phí, ngữ cảnh 1M token)',
+            },
+            {
+              value: 'gemini-4-argon',
+              label: 'Gemini 4 Argon (Suy luận sâu tài liệu phức tạp — Yêu cầu Paid Tier)',
+            },
           ]}
         />
 

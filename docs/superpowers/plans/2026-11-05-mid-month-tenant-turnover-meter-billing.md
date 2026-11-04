@@ -245,3 +245,4 @@ Expected: All unit/integration suites PASS (0 failures) and `vite build` exits `
 git add frontend/src/utils/billing.js frontend/src/pages/admin/meters/MeterReadingsPage.jsx api/test/frontendMeterTurnoverUi.test.js
 git commit -m "feat(m08-ui): display turnover contract slots and lock billed readings on MeterReadingsPage"
 ```
+

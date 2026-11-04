@@ -103,11 +103,17 @@ test('Task 5.4: compressImageFileToDataUri passes PDF data URI / buffer through 
 
 test('Final Review Fix #1 & #2 & Important #2: AI triage enum helpers and DEFAULT_AI_CONFIG / mergeAiConfigState match backend schema', () => {
   // Important #2: exact parity with migration 051 & backend DEFAULT_AI_CONFIG
+  assert.equal(DEFAULT_AI_CONFIG.model, 'gemini-3.8-flash');
   assert.equal(DEFAULT_AI_CONFIG.monthly_budget_vnd, 500000);
   assert.equal(DEFAULT_AI_CONFIG.monthly_token_limit, 2000000);
   assert.equal(DEFAULT_AI_CONFIG.ocr_threshold, 0.8);
   assert.equal(DEFAULT_AI_CONFIG.triage_threshold, 0.7);
   assert.equal(DEFAULT_AI_CONFIG.extract_threshold, 0.75);
+
+  // Deprecated legacy model slugs auto-upgrade in UI state hydration
+  assert.equal(mergeAiConfigState({ model: 'gemini-2.5-pro' }).model, 'gemini-3.8-flash');
+  assert.equal(mergeAiConfigState({ model: 'gemini-2.5-flash' }).model, 'gemini-3.8-flash');
+  assert.equal(mergeAiConfigState({ model: 'gemini-3.1-flash-lite' }).model, 'gemini-3.1-flash-lite');
 
   // Critical #2: mergeAiConfigState hydrates flat DB columns into UI state
   const hydrated = mergeAiConfigState({

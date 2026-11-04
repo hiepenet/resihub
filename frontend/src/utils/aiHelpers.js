@@ -1,6 +1,6 @@
 export const DEFAULT_AI_CONFIG = {
   enabled: true,
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3.8-flash',
   tasks: {
     cccd_extract: true,
     contract_extract: true,
@@ -16,12 +16,31 @@ export const DEFAULT_AI_CONFIG = {
   suggestion_ttl_hours: 72,
 };
 
+function normalizeFrontendAiModel(rawModel) {
+  const slug = String(rawModel || DEFAULT_AI_CONFIG.model).trim();
+  const lower = slug.toLowerCase();
+  if (!lower) return DEFAULT_AI_CONFIG.model;
+  if (lower === 'gemini-2.5-flash-lite' || lower === 'gemini-2.0-flash-lite') {
+    return 'gemini-3.5-flash-lite';
+  }
+  if (
+    lower.startsWith('gemini-2.5-') ||
+    lower.startsWith('gemini-2.0-') ||
+    lower.startsWith('gemini-1.5-') ||
+    lower === 'gemini-3.1-pro-preview'
+  ) {
+    return 'gemini-3.8-flash';
+  }
+  return slug;
+}
+
 export function mergeAiConfigState(raw = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
   const srcTasks = src.tasks && typeof src.tasks === 'object' ? src.tasks : {};
   return {
     ...DEFAULT_AI_CONFIG,
     ...src,
+    model: normalizeFrontendAiModel(src.model),
     ocr_threshold:
       src.ocr_threshold ?? src.meter_ocr_threshold ?? DEFAULT_AI_CONFIG.ocr_threshold,
     extract_threshold:
@@ -269,7 +288,7 @@ function arrayBufferToBase64(buffer) {
 
 export async function compressImageFileToDataUri(
   file,
-  { maxDimension = 1600, quality = 0.82 } = {}
+  { maxDimension = 1280, quality = 0.78 } = {}
 ) {
   if (!file) throw new Error('Chưa chọn tệp tài liệu.');
   if (typeof file === 'string' && file.startsWith('data:')) {
@@ -299,7 +318,12 @@ export async function compressImageFileToDataUri(
       img.onload = () => {
         try {
           const { width, height } = img;
-          if (width <= maxDimension && height <= maxDimension && rawDataUrl.length < 1_800_000) {
+          if (
+            mime === 'image/jpeg' &&
+            width <= maxDimension &&
+            height <= maxDimension &&
+            rawDataUrl.length < 350_000
+          ) {
             resolve(rawDataUrl);
             return;
           }

@@ -1,5 +1,9 @@
 // config/env.js — JWT secrets bắt buộc (fail fast khi thiếu — audit D5) + cấu hình Gemini server-only (M15)
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'node:url';
+
+dotenv.config();
+dotenv.config({ path: fileURLToPath(new URL('../../.env', import.meta.url)) });
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
@@ -15,7 +19,7 @@ const GEMINI_BASE_URL =
   process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta';
 const GEMINI_TIMEOUT_MS = Math.max(
   1000,
-  Number(process.env.GEMINI_TIMEOUT_MS || 20000) || 20000
+  Number(process.env.GEMINI_TIMEOUT_MS || 45000) || 45000
 );
 
 export const env = {

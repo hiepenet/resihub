@@ -17,6 +17,12 @@ import {
   estimateGeminiCostVnd,
   buildGeminiPromptAndSchema,
 } from '../src/services/aiRules.js';
+import {
+  callGeminiStructured,
+  toInteractionsJsonSchema,
+  setGeminiTransportForTest,
+  setGeminiApiKeyOverrideForTest,
+} from '../src/services/geminiClient.js';
 
 const VALID_PNG_BASE64 =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -305,6 +311,7 @@ test('Final Review Fix #2: normalizeAiConfig maps Frontend tasks & threshold ali
   assert.equal(savedFromUi.meter_ocr_enabled, false);
   assert.equal(savedFromUi.contract_extract_enabled, true);
   assert.equal(savedFromUi.ticket_triage_enabled, true);
+  assert.equal(savedFromUi.model, 'gemini-3.8-flash', 'Deprecated gemini-2.5-pro must auto-upgrade to gemini-3.8-flash');
   assert.equal(savedFromUi.meter_ocr_threshold, 0.91);
   assert.equal(savedFromUi.confidence_threshold, 0.82);
   assert.equal(savedFromUi.ocr_threshold, 0.91);
@@ -326,4 +333,145 @@ test('Final Review Fix #2: normalizeAiConfig maps Frontend tasks & threshold ali
   assert.equal(gateCccd.allowed, false);
   assert.equal(gateCccd.code, 'AI_TASK_DISABLED');
 });
+
+test('Interactions API migration: default model is gemini-3.8-flash, schema converts to JSON Schema, and 503/404 falls back cleanly', async (t) => {
+  t.after(() => {
+    setGeminiTransportForTest(null);
+    setGeminiApiKeyOverrideForTest(null);
+  });
+
+  assert.equal(DEFAULT_AI_CONFIG.model, 'gemini-3.8-flash');
+  assert.equal(normalizeAiConfig({ model: 'gemini-2.5-flash' }).model, 'gemini-3.8-flash');
+  assert.equal(normalizeAiConfig({ model: 'gemini-3.1-flash-lite' }).model, 'gemini-3.1-flash-lite');
+
+  const meterBuilt = buildGeminiPromptAndSchema('METER_OCR', {
+    meterType: 'ELECTRICITY',
+    previousValue: 1375,
+  });
+  const jsonSchema = toInteractionsJsonSchema(meterBuilt.responseSchema);
+  assert.equal(jsonSchema.type, 'object');
+  assert.deepEqual(jsonSchema.properties.reading.type, ['number', 'null']);
+  assert.equal('nullable' in jsonSchema.properties.reading, false);
+
+  setGeminiApiKeyOverrideForTest('AIzaSy_UNIT_TEST_INTERACTIONS_KEY');
+  const seenCalls = [];
+  setGeminiTransportForTest(async (url, init) => {
+    const body = JSON.parse(init.body);
+    seenCalls.push({ url, headers: init.headers, body });
+    if (body.model === 'gemini-3.8-flash') {
+      return {
+        ok: false,
+        status: 503,
+        async json() {
+          return {
+            error: {
+              message: 'gemini-3.8-flash is currently experiencing high demand',
+              code: 'service_unavailable',
+            },
+          };
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          status: 'completed',
+          model: body.model,
+          steps: [
+            { type: 'thought', signature: 'sig_123' },
+            {
+              type: 'model_output',
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({ reading: 1565, confidence: 0.99, reason: 'Rõ nét' }),
+                },
+              ],
+            },
+          ],
+          usage: {
+            total_input_tokens: 584,
+            total_output_tokens: 24,
+            total_tokens: 608,
+          },
+        };
+      },
+    };
+  });
+
+  const res = await callGeminiStructured({
+    model: 'gemini-2.5-pro',
+    systemInstruction: meterBuilt.systemInstruction,
+    userPrompt: meterBuilt.userPrompt,
+    inlineFiles: [{ mimeType: 'image/jpeg', base64Data: 'ffd8ffe0' }],
+    responseSchema: meterBuilt.responseSchema,
+  });
+
+  assert.equal(seenCalls.length, 2, 'Should try upgraded gemini-3.8-flash then fall back to gemini-3.6-flash');
+  assert.ok(seenCalls[0].url.endsWith('/interactions'));
+  assert.equal(seenCalls[0].headers['Api-Revision'], '2026-05-20');
+  assert.equal(seenCalls[0].body.model, 'gemini-3.8-flash');
+  assert.equal(seenCalls[0].body.store, false);
+  assert.equal(seenCalls[0].body.response_format.type, 'text');
+  assert.equal(seenCalls[0].body.response_format.mime_type, 'application/json');
+  assert.equal(seenCalls[0].body.input[0].type, 'image');
+  assert.equal(seenCalls[0].body.input[0].resolution, 'medium');
+  assert.equal(seenCalls[1].body.model, 'gemini-3.6-flash');
+
+  assert.equal(res.parsedJson.reading, 1565);
+  assert.equal(res.inputTokens, 584);
+  assert.equal(res.outputTokens, 24);
+  assert.equal(res.modelVersion, 'gemini-3.6-flash');
+
+  // Per-attempt stall budget: if primary model hangs in Free-Tier queue, abort primary early and succeed on fast fallback
+  const stallModels = [];
+  setGeminiTransportForTest(async (_url, init) => {
+    const body = JSON.parse(init.body);
+    stallModels.push(body.model);
+    if (body.model === 'gemini-3.8-flash') {
+      await new Promise((_resolve, reject) => {
+        init.signal.addEventListener(
+          'abort',
+          () => {
+            const abortErr = new Error('Attempt aborted');
+            abortErr.name = 'AbortError';
+            reject(abortErr);
+          },
+          { once: true }
+        );
+      });
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          status: 'completed',
+          model: body.model,
+          steps: [
+            {
+              type: 'model_output',
+              content: [{ type: 'text', text: JSON.stringify({ reading: 1565, confidence: 0.98, reason: 'Nhanh' }) }],
+            },
+          ],
+          usage: { total_input_tokens: 300, total_output_tokens: 20 },
+        };
+      },
+    };
+  });
+
+  const stallRes = await callGeminiStructured({
+    model: 'gemini-3.8-flash',
+    userPrompt: 'Read meter',
+    timeoutMs: 2500,
+    perAttemptTimeoutMs: 120,
+  });
+  assert.equal(stallModels[0], 'gemini-3.8-flash');
+  assert.equal(stallModels[1], 'gemini-3.6-flash');
+  assert.equal(stallRes.parsedJson.reading, 1565);
+  assert.equal(stallRes.modelVersion, 'gemini-3.6-flash');
+});
+
 

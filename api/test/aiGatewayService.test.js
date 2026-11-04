@@ -94,6 +94,26 @@ test('Task 3: geminiClient & aiGateway enforce header-only key, PII redaction, b
   );
   savedAiConfig = cfgRes.rows[0]?.value || null;
 
+  await adminPool.query(
+    `INSERT INTO system_setting (org_id, key, value)
+     VALUES ($1, 'ai_config', $2::jsonb)
+     ON CONFLICT (org_id, key) DO UPDATE SET value = EXCLUDED.value`,
+    [
+      orgId,
+      JSON.stringify({
+        enabled: true,
+        model: 'gemini-3.8-flash',
+        ocr_threshold: 0.8,
+        extract_threshold: 0.75,
+        triage_threshold: 0.7,
+        monthly_budget_vnd: 500000,
+        monthly_token_limit: 2000000,
+        warn_percent: 80,
+        suggestion_ttl_hours: 72,
+      }),
+    ]
+  );
+
   const mgrRes = await adminPool.query(`
     SELECT au.id FROM app_user au
     JOIN person p ON p.id = au.person_id
