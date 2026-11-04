@@ -12,8 +12,19 @@ import {
   currentVietnamPeriod,
   evaluateMeterReadingAnomaly,
   getMonthBoundsYmd,
+  resolveChainedReadingBounds,
   resolveUtilityUnitPrice,
+  roundReadingValue,
+  selectTargetPeriodContract,
+  validateChainedReadingInput,
 } from '../services/serviceBilling.js';
+import {
+  formatContractCode,
+  loadApartmentPeriodContractsMap,
+  loadMeterPeriodReadingsWithLocks,
+  loadPriorAndNextMeterReadings,
+  syncDraftInvoiceMeterLineInTx,
+} from '../services/meterTurnoverContext.js';
 import { reviewAiSuggestion } from '../services/aiGateway.js';
 
 const router = express.Router();
@@ -50,23 +61,39 @@ async function loadBillingConfigValues(queryable, orgId) {
   };
 }
 
-async function loadAnomalyThresholdRatio(queryable, orgId) {
-  const cfg = await loadBillingConfigValues(queryable, orgId);
-  return cfg.anomalyThresholdRatio;
+function findMatchingReadingForSlot(samePeriodReadings = [], targetContractId = null, slotIndex = 0) {
+  if (targetContractId) {
+    const exact = samePeriodReadings.find(
+      (r) => r.contract_id && String(r.contract_id) === String(targetContractId)
+    );
+    if (exact) return exact;
+    if (slotIndex <= 1) {
+      const orphan = samePeriodReadings.find((r) => !r.contract_id && !r.is_billed);
+      if (orphan) return orphan;
+    }
+    return null;
+  }
+  const nullRow = samePeriodReadings.find((r) => !r.contract_id);
+  if (nullRow) return nullRow;
+  return samePeriodReadings.length > 0 ? samePeriodReadings[samePeriodReadings.length - 1] : null;
 }
 
 /**
  * GET /api/v1/meters
- * Danh sách đồng hồ điện / nước theo tòa nhà & căn hộ, kèm chỉ số kỳ đang chọn (M08)
+ * Danh sách đồng hồ điện / nước theo tòa nhà & căn hộ, kèm chỉ số đợt hợp đồng đang chọn trong kỳ (M08)
  */
 router.get(
   '/',
   authenticateToken,
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
-    const { building_id, meter_type, period, search, status } = req.query;
+    const { building_id, meter_type, period, search, status, contract_id } = req.query;
     const orgId = req.user.org_id;
     const targetPeriod = period && PERIOD_RE.test(period) ? period : currentVietnamPeriod();
+    const normalizedStatusFilter =
+      status && VALID_READING_STATUSES.includes(String(status).trim().toUpperCase())
+        ? String(status).trim().toUpperCase()
+        : null;
 
     try {
       if (building_id) {
@@ -86,32 +113,19 @@ router.get(
                b.name AS building_name,
                b.code AS building_code,
                f.name AS floor_name,
-               mr_cur.id AS period_reading_id,
-               mr_cur.period AS current_period,
-               mr_cur.previous_reading AS period_previous_reading,
-               mr_cur.current_reading AS period_current_reading,
-               mr_cur.consumption AS period_consumption,
-               mr_cur.is_abnormal AS period_is_abnormal,
-               mr_cur.abnormal_note AS period_abnormal_note,
-               mr_cur.image_url AS period_image_url,
-               mr_cur.status AS period_reading_status,
-               mr_cur.confirmed_at AS period_confirmed_at,
-               mr_cur.confirmed_by AS period_confirmed_by,
-               COALESCE(mr_cur.baseline_avg_consumption, mr_base.avg_consumption) AS baseline_avg_consumption,
-               mr_prev.current_reading AS last_known_reading,
-               mr_prev.consumption AS last_known_consumption,
-               mr_prev.period AS last_known_period
+               mr_base.avg_consumption AS prior_baseline_avg_consumption,
+               mr_prev.current_reading AS prior_period_reading,
+               mr_prev.consumption AS prior_period_consumption,
+               mr_prev.period AS prior_period_ym
         FROM meter m
         JOIN apartment a ON a.id = m.apartment_id
         JOIN building b ON b.id = m.building_id
         LEFT JOIN floor f ON f.id = a.floor_id
-        LEFT JOIN meter_reading mr_cur
-          ON mr_cur.meter_id = m.id AND mr_cur.period = $2
         LEFT JOIN LATERAL (
           SELECT current_reading, consumption, period
           FROM meter_reading
           WHERE meter_id = m.id AND period < $2
-          ORDER BY period DESC
+          ORDER BY period DESC, current_reading DESC, recorded_at DESC
           LIMIT 1
         ) mr_prev ON TRUE
         LEFT JOIN LATERAL (
@@ -123,7 +137,7 @@ router.get(
               AND period < $2
               AND status = 'CONFIRMED'
               AND consumption > 0
-            ORDER BY period DESC
+            ORDER BY period DESC, current_reading DESC, recorded_at DESC
             LIMIT 3
           ) sub
         ) mr_base ON TRUE
@@ -138,10 +152,6 @@ router.get(
       if (meter_type) {
         params.push(meter_type);
         sql += ` AND m.meter_type = $${params.length}`;
-      }
-      if (status && VALID_READING_STATUSES.includes(String(status).trim().toUpperCase())) {
-        params.push(String(status).trim().toUpperCase());
-        sql += ` AND mr_cur.status = $${params.length}`;
       }
       if (search && search.trim()) {
         params.push(`%${search.trim()}%`);
@@ -158,75 +168,195 @@ router.get(
 
       let enrichedRows = result.rows;
       if (enrichedRows.length > 0) {
-        const { monthStart: periodStartYmd, monthEnd: periodEndYmd } = getMonthBoundsYmd(targetPeriod);
+        const { monthEnd: periodEndYmd } = getMonthBoundsYmd(targetPeriod);
         const aptIds = [...new Set(enrichedRows.map((r) => r.apartment_id).filter(Boolean))];
+        const meterIds = enrichedRows.map((r) => r.id);
 
-        const [contractsRes, catalogRes] = await Promise.all([
-          pool.query(
-            `SELECT c.id, c.apartment_id, c.building_id
-             FROM contract c
-             WHERE c.apartment_id = ANY($1::uuid[])
-               AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-               AND c.start_date <= $2::date
-               AND COALESCE(c.terminated_at, c.end_date) >= $3::date
-             ORDER BY (CASE WHEN c.status = 'ACTIVE' THEN 0 ELSE 1 END) ASC, c.start_date DESC`,
-            [aptIds, periodEndYmd, periodStartYmd]
+        const contractsByApt = await loadApartmentPeriodContractsMap(pool, aptIds, targetPeriod);
+        const catalogRes = await pool.query(
+          `SELECT id, code, building_id, unit_price, is_active
+           FROM service_catalog
+           WHERE org_id = $1 AND is_active = TRUE`,
+          [orgId]
+        );
+
+        const periodReadingsByMeter = await loadMeterPeriodReadingsWithLocks(
+          pool,
+          meterIds,
+          targetPeriod,
+          contractsByApt
+        );
+
+        const allContractIds = [
+          ...new Set(
+            [...contractsByApt.values()].flatMap((list) => list.map((c) => c.contract_id))
           ),
-          pool.query(
-            `SELECT id, code, building_id, unit_price, is_active
-             FROM service_catalog
-             WHERE org_id = $1 AND is_active = TRUE`,
-            [orgId]
-          ),
-        ]);
-
-        const activeContractByApt = new Map();
-        for (const c of contractsRes.rows) {
-          if (!activeContractByApt.has(c.apartment_id)) {
-            activeContractByApt.set(c.apartment_id, c);
-          }
-        }
-
-        const contractIds = [...new Set([...activeContractByApt.values()].map((c) => c.id))];
+        ];
         const cspByContract = new Map();
-        if (contractIds.length > 0) {
+        if (allContractIds.length > 0) {
           const cspRes = await pool.query(
             `SELECT contract_id, service_code, unit_price, effective_from
              FROM contract_service_price
              WHERE contract_id = ANY($1::uuid[])
                AND effective_from <= $2::date
              ORDER BY effective_from DESC`,
-            [contractIds, periodEndYmd]
+            [allContractIds, periodEndYmd]
           );
           for (const csp of cspRes.rows) {
-            if (!cspByContract.has(csp.contract_id)) {
-              cspByContract.set(csp.contract_id, []);
-            }
-            cspByContract.get(csp.contract_id).push(csp);
+            const cid = String(csp.contract_id);
+            if (!cspByContract.has(cid)) cspByContract.set(cid, []);
+            cspByContract.get(cid).push(csp);
           }
         }
 
+        const reqContractId =
+          contract_id && UUID_RE.test(String(contract_id)) ? String(contract_id) : null;
+
         enrichedRows = enrichedRows.map((m) => {
-          const matchedContract = activeContractByApt.get(m.apartment_id);
+          const overlappingContracts = contractsByApt.get(String(m.apartment_id)) || [];
+          const samePeriodReadings = periodReadingsByMeter.get(String(m.id)) || [];
+          const priorObj =
+            m.prior_period_reading !== null && m.prior_period_reading !== undefined
+              ? {
+                  current_reading: m.prior_period_reading,
+                  consumption: m.prior_period_consumption,
+                  period: m.prior_period_ym,
+                }
+              : null;
+
+          const explicitValid =
+            reqContractId &&
+            overlappingContracts.some((c) => String(c.contract_id) === reqContractId)
+              ? reqContractId
+              : null;
+          const { targetContract, slotIndex, totalSlots } = selectTargetPeriodContract(
+            overlappingContracts,
+            explicitValid
+          );
+          const targetContractId = targetContract ? targetContract.contract_id : null;
+          const curReading = findMatchingReadingForSlot(
+            samePeriodReadings,
+            targetContractId,
+            slotIndex
+          );
+
+          const bounds = resolveChainedReadingBounds({
+            priorPeriodReading: priorObj,
+            samePeriodReadings,
+            nextPeriodReading: null,
+            overlappingContracts,
+            targetContractId,
+            existingReadingId: curReading?.id || null,
+            initialReading: m.initial_reading,
+          });
+
+          const slotSummaries = overlappingContracts.map((c, idx) => {
+            const sIdx = idx + 1;
+            const matchedRow = findMatchingReadingForSlot(samePeriodReadings, c.contract_id, sIdx);
+            const slotBounds = resolveChainedReadingBounds({
+              priorPeriodReading: priorObj,
+              samePeriodReadings,
+              nextPeriodReading: null,
+              overlappingContracts,
+              targetContractId: c.contract_id,
+              existingReadingId: matchedRow?.id || null,
+              initialReading: m.initial_reading,
+            });
+            return {
+              contract_id: c.contract_id,
+              contract_code: c.contract_code,
+              tenant_name: c.tenant_name,
+              status: c.status,
+              overlap_start: c.overlap_start,
+              overlap_end: c.overlap_end,
+              slot_index: sIdx,
+              total_slots: totalSlots,
+              is_period_finalized: c.is_period_finalized,
+              reading_id: matchedRow?.id || null,
+              previous_reading:
+                matchedRow?.previous_reading !== undefined && matchedRow?.previous_reading !== null
+                  ? Number(matchedRow.previous_reading)
+                  : slotBounds.previousReading,
+              current_reading:
+                matchedRow?.current_reading !== undefined && matchedRow?.current_reading !== null
+                  ? Number(matchedRow.current_reading)
+                  : null,
+              consumption:
+                matchedRow?.consumption !== undefined && matchedRow?.consumption !== null
+                  ? Number(matchedRow.consumption)
+                  : null,
+              reading_status: matchedRow?.status || null,
+              is_abnormal: Boolean(matchedRow?.is_abnormal),
+              abnormal_note: matchedRow?.abnormal_note || null,
+              image_url: matchedRow?.image_url || null,
+              is_billed: Boolean(matchedRow?.is_billed),
+            };
+          });
+
           const defaultUtilityPrice =
             m.meter_type === 'ELECTRICITY'
               ? billingCfg.electricityDefaultPrice
               : billingCfg.waterDefaultPrice;
+          const effPeriodEnd = targetContract?.overlap_end || periodEndYmd;
           const resolved = resolveUtilityUnitPrice({
             meterType: m.meter_type,
             meterUnitPrice: m.unit_price,
-            contractBuildingId: matchedContract?.building_id || m.building_id,
-            periodEndYmd,
-            contractServicePrices: matchedContract ? cspByContract.get(matchedContract.id) || [] : [],
+            contractBuildingId: targetContract?.building_id || m.building_id,
+            periodEndYmd: effPeriodEnd,
+            contractServicePrices: targetContractId
+              ? cspByContract.get(String(targetContractId)) || []
+              : [],
             catalogItems: catalogRes.rows,
             defaultUtilityPrice,
           });
+
+          const hasPriorOrChained =
+            priorObj !== null || samePeriodReadings.some((r) => r.id !== curReading?.id);
+
           return {
             ...m,
+            target_contract_id: targetContractId,
+            target_contract_code: targetContract?.contract_code || null,
+            target_tenant_name: targetContract?.tenant_name || null,
+            period_slot_index: slotIndex,
+            period_total_slots: totalSlots,
+            period_reading_billed: Boolean(curReading?.is_billed),
+            overlapping_contracts: slotSummaries,
+            period_reading_id: curReading?.id || null,
+            current_period: curReading?.period || null,
+            period_previous_reading:
+              curReading?.previous_reading !== undefined && curReading?.previous_reading !== null
+                ? curReading.previous_reading
+                : null,
+            period_current_reading:
+              curReading?.current_reading !== undefined && curReading?.current_reading !== null
+                ? curReading.current_reading
+                : null,
+            period_consumption:
+              curReading?.consumption !== undefined && curReading?.consumption !== null
+                ? curReading.consumption
+                : null,
+            period_is_abnormal: curReading ? Boolean(curReading.is_abnormal) : null,
+            period_abnormal_note: curReading?.abnormal_note || null,
+            period_image_url: curReading?.image_url || null,
+            period_reading_status: curReading?.status || null,
+            period_confirmed_at: curReading?.confirmed_at || null,
+            period_confirmed_by: curReading?.confirmed_by || null,
+            baseline_avg_consumption:
+              curReading?.baseline_avg_consumption ?? m.prior_baseline_avg_consumption ?? null,
+            last_known_reading: hasPriorOrChained ? bounds.previousReading : m.prior_period_reading,
+            last_known_consumption: m.prior_period_consumption,
+            last_known_period: m.prior_period_ym,
             effective_unit_price: resolved.unitPrice,
             effective_price_source: resolved.priceSource,
           };
         });
+
+        if (normalizedStatusFilter) {
+          enrichedRows = enrichedRows.filter(
+            (r) => r.period_reading_status === normalizedStatusFilter
+          );
+        }
       }
 
       res.json({
@@ -347,7 +477,7 @@ router.get(
   authenticateToken,
   requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']),
   async (req, res) => {
-    const { building_id, period, meter_type, abnormal_only, status } = req.query;
+    const { building_id, period, meter_type, abnormal_only, status, contract_id } = req.query;
     const orgId = req.user.org_id;
 
     try {
@@ -363,6 +493,10 @@ router.get(
 
       let sql = `
         SELECT mr.*,
+               CASE
+                 WHEN mr.contract_id IS NOT NULL THEN 'HĐ-' || UPPER(LEFT(mr.contract_id::text, 8))
+                 ELSE NULL
+               END AS contract_code,
                mr.status AS period_reading_status,
                mr.confirmed_at AS period_confirmed_at,
                m.meter_type,
@@ -394,6 +528,10 @@ router.get(
         params.push(period);
         sql += ` AND mr.period = $${params.length}`;
       }
+      if (contract_id && UUID_RE.test(String(contract_id))) {
+        params.push(String(contract_id));
+        sql += ` AND mr.contract_id = $${params.length}`;
+      }
       if (meter_type) {
         params.push(meter_type);
         sql += ` AND m.meter_type = $${params.length}`;
@@ -406,7 +544,7 @@ router.get(
         sql += ` AND mr.is_abnormal = TRUE`;
       }
 
-      sql += ` ORDER BY mr.period DESC, b.code ASC, a.code ASC`;
+      sql += ` ORDER BY mr.period DESC, b.code ASC, a.code ASC, mr.current_reading DESC, mr.recorded_at DESC`;
       const result = await pool.query(sql, params);
       res.json({ data: result.rows });
     } catch (err) {
@@ -417,7 +555,7 @@ router.get(
 );
 
 /**
- * Helper ghi nhận 1 chỉ số đồng hồ + tự động cảnh báo bất thường > ngưỡng trung bình 3 kỳ trước (FR-031)
+ * Helper ghi nhận 1 chỉ số đồng hồ theo đợt hợp đồng trong kỳ + cảnh báo bất thường > ngưỡng 3 kỳ + khóa hóa đơn + đồng bộ HĐ nháp
  */
 async function upsertSingleReading(
   client,
@@ -425,6 +563,7 @@ async function upsertSingleReading(
   meterId,
   {
     period,
+    contract_id,
     current_reading,
     reading_value,
     abnormal_note,
@@ -435,7 +574,7 @@ async function upsertSingleReading(
     ai_suggestion_id,
     source,
   },
-  thresholdRatio = 0.3
+  billingCfg = { anomalyThresholdRatio: 0.3, electricityDefaultPrice: 3800, waterDefaultPrice: 22000 }
 ) {
   if (!period || !PERIOD_RE.test(period)) {
     throw Object.assign(new Error('Kỳ chốt chỉ số phải theo định dạng YYYY-MM.'), { status: 400, code: 'INVALID_PERIOD' });
@@ -446,6 +585,13 @@ async function upsertSingleReading(
     : null;
   if (reqStatus && !VALID_READING_STATUSES.includes(reqStatus)) {
     throw Object.assign(new Error('Trạng thái chỉ số không hợp lệ (DRAFT | CONFIRMED | FLAGGED).'), {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  if (contract_id !== undefined && contract_id !== null && String(contract_id).trim() !== '' && !UUID_RE.test(String(contract_id).trim())) {
+    throw Object.assign(new Error('Mã hợp đồng (contract_id) không hợp lệ.'), {
       status: 400,
       code: 'VALIDATION_ERROR',
     });
@@ -469,48 +615,59 @@ async function upsertSingleReading(
   }
   const meter = meterRes.rows[0];
 
-  const prevRes = await client.query(
-    `SELECT current_reading, consumption
-     FROM meter_reading
-     WHERE meter_id = $1 AND period < $2
-     ORDER BY period DESC
-     LIMIT 1`,
-    [meterId, period]
-  );
+  const thresholdRatio = Number(billingCfg.anomalyThresholdRatio ?? 0.3);
+  const defaultUtilityPrice =
+    meter.meter_type === 'ELECTRICITY'
+      ? Number(billingCfg.electricityDefaultPrice ?? 3800)
+      : Number(billingCfg.waterDefaultPrice ?? 22000);
 
-  const previousReading = prevRes.rows.length > 0
-    ? Number(prevRes.rows[0].current_reading)
-    : Number(meter.initial_reading || 0);
+  const contractsByApt = await loadApartmentPeriodContractsMap(client, [meter.apartment_id], period);
+  const overlappingContracts = contractsByApt.get(String(meter.apartment_id)) || [];
+  const { targetContract, slotIndex } = selectTargetPeriodContract(
+    overlappingContracts,
+    contract_id || null
+  );
+  const targetContractId = targetContract ? targetContract.contract_id : null;
+
+  const [samePeriodMap, { priorReading, nextPeriodReading, baselineConsumptions }] =
+    await Promise.all([
+      loadMeterPeriodReadingsWithLocks(client, [meter.id], period, contractsByApt),
+      loadPriorAndNextMeterReadings(client, meter.id, period),
+    ]);
+  const samePeriodReadings = samePeriodMap.get(String(meter.id)) || [];
+  const existingRow = findMatchingReadingForSlot(samePeriodReadings, targetContractId, slotIndex);
+
+  if (existingRow && existingRow.is_billed) {
+    throw Object.assign(
+      new Error('Chỉ số đồng hồ của đợt hợp đồng này đã được lập hóa đơn phát hành, không thể chỉnh sửa hoặc ghi đè.'),
+      { status: 409, code: 'READING_ALREADY_BILLED' }
+    );
+  }
+
+  const { previousReading, nextReading } = resolveChainedReadingBounds({
+    priorPeriodReading: priorReading,
+    samePeriodReadings,
+    nextPeriodReading,
+    overlappingContracts,
+    targetContractId,
+    existingReadingId: existingRow?.id || null,
+    initialReading: meter.initial_reading,
+  });
+
   const rawReadingInput =
     current_reading !== undefined && current_reading !== null && current_reading !== ''
       ? current_reading
       : reading_value;
-  const currentVal = Number(rawReadingInput);
-
-  if (Number.isNaN(currentVal) || currentVal < previousReading) {
-    throw Object.assign(
-      new Error(`Chỉ số mới (${currentVal}) không được nhỏ hơn chỉ số kỳ trước (${previousReading}).`),
-      { status: 400, code: 'INVALID_READING' }
-    );
-  }
-
-  const baselineRes = await client.query(
-    `SELECT consumption
-     FROM meter_reading
-     WHERE meter_id = $1
-       AND period < $2
-       AND status = 'CONFIRMED'
-       AND consumption > 0
-     ORDER BY period DESC
-     LIMIT 3`,
-    [meterId, period]
-  );
-  const priorConfirmedConsumptions = baselineRes.rows.map((r) => Number(r.consumption));
+  const { currentVal } = validateChainedReadingInput({
+    currentReading: rawReadingInput,
+    previousReading,
+    nextReading,
+  });
 
   const { consumption, isAbnormal, baselineAvg, diffPct } = evaluateMeterReadingAnomaly({
     previousReading,
     currentReading: currentVal,
-    recentConsumptions: priorConfirmedConsumptions,
+    recentConsumptions: baselineConsumptions,
     thresholdRatio,
   });
 
@@ -541,66 +698,115 @@ async function upsertSingleReading(
     ai_suggestion_id && UUID_RE.test(String(ai_suggestion_id)) ? String(ai_suggestion_id) : null;
   const resolvedSource = validAiSuggestionId ? 'AI' : source === 'IOT' ? 'IOT' : 'MANUAL';
 
-  const upserted = await client.query(
-    `INSERT INTO meter_reading (
-       org_id, building_id, meter_id, apartment_id, period,
-       previous_reading, current_reading, consumption,
-       is_abnormal, abnormal_note, image_url,
-       recorded_by, recorded_at,
-       status, confirmed_by, confirmed_at, baseline_avg_consumption,
-       source, ai_suggestion_id
-     )
-     VALUES (
-       $1, $2, $3, $4, $5,
-       $6, $7, $8,
-       $9, $10, $11,
-       $12, NOW(),
-       $13, $14, CASE WHEN $13 = 'CONFIRMED' THEN NOW() ELSE NULL END, $15,
-       $17, $18
-     )
-     ON CONFLICT (meter_id, period) DO UPDATE
-       SET previous_reading = EXCLUDED.previous_reading,
-           current_reading = EXCLUDED.current_reading,
-           consumption = EXCLUDED.consumption,
-           is_abnormal = EXCLUDED.is_abnormal,
+  let row;
+  if (existingRow) {
+    const upd = await client.query(
+      `UPDATE meter_reading
+       SET contract_id = $1,
+           previous_reading = $2,
+           current_reading = $3,
+           consumption = $4,
+           is_abnormal = $5,
            abnormal_note = CASE
-             WHEN $16::boolean THEN EXCLUDED.abnormal_note
-             WHEN EXCLUDED.status = 'CONFIRMED' THEN COALESCE(EXCLUDED.abnormal_note, meter_reading.abnormal_note)
-             ELSE EXCLUDED.abnormal_note
+             WHEN $11::boolean THEN $6
+             WHEN $8 = 'CONFIRMED' THEN COALESCE($6, abnormal_note)
+             ELSE $6
            END,
-           image_url = COALESCE(EXCLUDED.image_url, meter_reading.image_url),
-           recorded_by = EXCLUDED.recorded_by,
+           image_url = COALESCE($7, image_url),
+           recorded_by = $12,
            recorded_at = NOW(),
-           status = EXCLUDED.status,
-           confirmed_by = EXCLUDED.confirmed_by,
-           confirmed_at = CASE WHEN EXCLUDED.status = 'CONFIRMED' THEN NOW() ELSE NULL END,
-           baseline_avg_consumption = EXCLUDED.baseline_avg_consumption,
-           source = CASE WHEN $18::uuid IS NOT NULL THEN 'AI' ELSE meter_reading.source END,
-           ai_suggestion_id = COALESCE($18::uuid, meter_reading.ai_suggestion_id)
-     RETURNING *`,
-    [
-      meter.org_id,
-      meter.building_id,
-      meter.id,
-      meter.apartment_id,
-      period,
-      previousReading,
-      currentVal,
-      consumption,
-      isAbnormal,
-      computedNote,
-      image_url || null,
-      req.user.sub,
-      resolvedStatus,
-      confirmedBy,
-      baselineAvg,
-      explicitNoteProvided,
-      resolvedSource,
-      validAiSuggestionId,
-    ]
-  );
+           status = $8,
+           confirmed_by = $9,
+           confirmed_at = CASE WHEN $8 = 'CONFIRMED' THEN NOW() ELSE NULL END,
+           baseline_avg_consumption = $10,
+           source = CASE WHEN $13::uuid IS NOT NULL THEN 'AI' ELSE source END,
+           ai_suggestion_id = COALESCE($13::uuid, ai_suggestion_id)
+       WHERE id = $14
+       RETURNING *`,
+      [
+        targetContractId,
+        previousReading,
+        currentVal,
+        consumption,
+        isAbnormal,
+        computedNote,
+        image_url || null,
+        resolvedStatus,
+        confirmedBy,
+        baselineAvg,
+        explicitNoteProvided,
+        req.user.sub,
+        validAiSuggestionId,
+        existingRow.id,
+      ]
+    );
+    row = upd.rows[0];
+  } else {
+    const conflictClause = targetContractId
+      ? `ON CONFLICT (meter_id, period, contract_id) WHERE contract_id IS NOT NULL`
+      : `ON CONFLICT (meter_id, period) WHERE contract_id IS NULL`;
+    const ins = await client.query(
+      `INSERT INTO meter_reading (
+         org_id, building_id, meter_id, apartment_id, contract_id, period,
+         previous_reading, current_reading, consumption,
+         is_abnormal, abnormal_note, image_url,
+         recorded_by, recorded_at,
+         status, confirmed_by, confirmed_at, baseline_avg_consumption,
+         source, ai_suggestion_id
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6,
+         $7, $8, $9,
+         $10, $11, $12,
+         $13, NOW(),
+         $14, $15, CASE WHEN $14 = 'CONFIRMED' THEN NOW() ELSE NULL END, $16,
+         $18, $19
+       )
+       ${conflictClause} DO UPDATE
+         SET previous_reading = EXCLUDED.previous_reading,
+             current_reading = EXCLUDED.current_reading,
+             consumption = EXCLUDED.consumption,
+             is_abnormal = EXCLUDED.is_abnormal,
+             abnormal_note = CASE
+               WHEN $17::boolean THEN EXCLUDED.abnormal_note
+               WHEN EXCLUDED.status = 'CONFIRMED' THEN COALESCE(EXCLUDED.abnormal_note, meter_reading.abnormal_note)
+               ELSE EXCLUDED.abnormal_note
+             END,
+             image_url = COALESCE(EXCLUDED.image_url, meter_reading.image_url),
+             recorded_by = EXCLUDED.recorded_by,
+             recorded_at = NOW(),
+             status = EXCLUDED.status,
+             confirmed_by = EXCLUDED.confirmed_by,
+             confirmed_at = CASE WHEN EXCLUDED.status = 'CONFIRMED' THEN NOW() ELSE NULL END,
+             baseline_avg_consumption = EXCLUDED.baseline_avg_consumption,
+             source = CASE WHEN $19::uuid IS NOT NULL THEN 'AI' ELSE meter_reading.source END,
+             ai_suggestion_id = COALESCE($19::uuid, meter_reading.ai_suggestion_id)
+       RETURNING *`,
+      [
+        meter.org_id,
+        meter.building_id,
+        meter.id,
+        meter.apartment_id,
+        targetContractId,
+        period,
+        previousReading,
+        currentVal,
+        consumption,
+        isAbnormal,
+        computedNote,
+        image_url || null,
+        req.user.sub,
+        resolvedStatus,
+        confirmedBy,
+        baselineAvg,
+        explicitNoteProvided,
+        resolvedSource,
+        validAiSuggestionId,
+      ]
+    );
+    row = ins.rows[0];
+  }
 
-  let row = upserted.rows[0];
   if (validAiSuggestionId) {
     try {
       await reviewAiSuggestion(client, {
@@ -616,6 +822,7 @@ async function upsertSingleReading(
       }
     }
   }
+
   if (image_base64 && typeof image_base64 === 'string' && image_base64.startsWith('data:image/')) {
     const uploaded = await saveBase64Image({
       imageBase64: image_base64,
@@ -636,6 +843,73 @@ async function upsertSingleReading(
     }
   }
 
+  // Cascade baseline update onto immediate unlocked successor reading if its previous_reading shifted
+  if (nextReading && !nextReading.is_billed && roundReadingValue(nextReading.previous_reading) !== currentVal) {
+    let nextBaselineConsumptions = baselineConsumptions;
+    if (nextReading.period !== period) {
+      const nextCtx = await loadPriorAndNextMeterReadings(client, meter.id, nextReading.period);
+      nextBaselineConsumptions = nextCtx.baselineConsumptions;
+    }
+    const nextEval = evaluateMeterReadingAnomaly({
+      previousReading: currentVal,
+      currentReading: roundReadingValue(nextReading.current_reading),
+      recentConsumptions: nextBaselineConsumptions,
+      thresholdRatio,
+    });
+    const nextHasNote = Boolean(nextReading.abnormal_note && String(nextReading.abnormal_note).trim());
+    let nextStatus = nextReading.status || 'CONFIRMED';
+    if (nextEval.isAbnormal && !nextHasNote) {
+      nextStatus = 'FLAGGED';
+    } else if (nextStatus === 'DRAFT' && nextEval.isAbnormal) {
+      nextStatus = 'FLAGGED';
+    }
+
+    const nextUpd = await client.query(
+      `UPDATE meter_reading
+       SET previous_reading = $1,
+           consumption = $2,
+           is_abnormal = $3,
+           baseline_avg_consumption = $4,
+           status = $5,
+           confirmed_by = CASE WHEN $5 = 'CONFIRMED' THEN confirmed_by ELSE NULL END,
+           confirmed_at = CASE WHEN $5 = 'CONFIRMED' THEN confirmed_at ELSE NULL END
+       WHERE id = $6
+       RETURNING *`,
+      [
+        currentVal,
+        nextEval.consumption,
+        nextEval.isAbnormal,
+        nextEval.baselineAvg,
+        nextStatus,
+        nextReading.id,
+      ]
+    );
+    const updatedNextRow = nextUpd.rows[0];
+    if (updatedNextRow?.contract_id) {
+      await syncDraftInvoiceMeterLineInTx(client, {
+        orgId: meter.org_id,
+        contractId: updatedNextRow.contract_id,
+        period: updatedNextRow.period,
+        meter,
+        readingRow: updatedNextRow,
+        defaultUtilityPrice,
+        actorId: req.user.sub,
+      });
+    }
+  }
+
+  if (row.contract_id) {
+    await syncDraftInvoiceMeterLineInTx(client, {
+      orgId: meter.org_id,
+      contractId: row.contract_id,
+      period: row.period,
+      meter,
+      readingRow: row,
+      defaultUtilityPrice,
+      actorId: req.user.sub,
+    });
+  }
+
   await client.query(
     `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
      VALUES ($1, 'RECORD_METER_READING', 'meter_reading', $2, $3)`,
@@ -644,6 +918,7 @@ async function upsertSingleReading(
       row.id,
       JSON.stringify({
         meter_id: row.meter_id,
+        contract_id: row.contract_id,
         period: row.period,
         previous_reading: row.previous_reading,
         current_reading: row.current_reading,
@@ -655,7 +930,10 @@ async function upsertSingleReading(
     ]
   );
 
-  return row;
+  return {
+    ...row,
+    contract_code: formatContractCode(row.contract_id),
+  };
 }
 
 /**
@@ -676,7 +954,7 @@ router.post(
     const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
-      const thresholdRatio = await loadAnomalyThresholdRatio(client, req.user.org_id);
+      const billingCfg = await loadBillingConfigValues(client, req.user.org_id);
       const saved = [];
       for (const item of readings) {
         const rawItemReading = item.current_reading ?? item.reading_value;
@@ -687,6 +965,7 @@ router.post(
           item.meter_id,
           {
             period: item.period || period,
+            contract_id: item.contract_id,
             current_reading: rawItemReading,
             abnormal_note: item.abnormal_note,
             image_base64: item.image_base64,
@@ -696,7 +975,7 @@ router.post(
             ai_suggestion_id: item.ai_suggestion_id,
             source: item.source,
           },
-          thresholdRatio
+          billingCfg
         );
         saved.push(row);
       }
@@ -747,6 +1026,7 @@ router.post(
     const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
+      const billingCfg = await loadBillingConfigValues(client, req.user.org_id);
 
       if (building_id) {
         const ok = await checkBuildingAccess(req, building_id, 'meter_reading');
@@ -798,6 +1078,13 @@ router.post(
       const confirmed = [];
       let skippedAbnormalWithoutNote = 0;
 
+      const candMeterIds = [...new Set(candidates.rows.map((r) => r.meter_id))];
+      const metersMap = new Map();
+      if (candMeterIds.length > 0) {
+        const mRes = await client.query(`SELECT * FROM meter WHERE id = ANY($1::uuid[])`, [candMeterIds]);
+        for (const m of mRes.rows) metersMap.set(String(m.id), m);
+      }
+
       for (const row of candidates.rows) {
         const hasNote = row.abnormal_note && String(row.abnormal_note).trim().length > 0;
         if (row.is_abnormal && !hasNote) {
@@ -815,6 +1102,23 @@ router.post(
         );
         const updatedRow = upd.rows[0];
         confirmed.push(updatedRow);
+
+        const meter = metersMap.get(String(updatedRow.meter_id));
+        if (updatedRow.contract_id && meter) {
+          const defaultUtilityPrice =
+            meter.meter_type === 'ELECTRICITY'
+              ? billingCfg.electricityDefaultPrice
+              : billingCfg.waterDefaultPrice;
+          await syncDraftInvoiceMeterLineInTx(client, {
+            orgId: req.user.org_id,
+            contractId: updatedRow.contract_id,
+            period: updatedRow.period,
+            meter,
+            readingRow: updatedRow,
+            defaultUtilityPrice,
+            actorId: req.user.sub,
+          });
+        }
 
         await client.query(
           `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
@@ -918,6 +1222,29 @@ router.post(
       );
       const updated = upd.rows[0];
 
+      if (updated.contract_id) {
+        const [meterRes, billingCfg] = await Promise.all([
+          client.query(`SELECT * FROM meter WHERE id = $1`, [updated.meter_id]),
+          loadBillingConfigValues(client, req.user.org_id),
+        ]);
+        const meter = meterRes.rows[0];
+        if (meter) {
+          const defaultUtilityPrice =
+            meter.meter_type === 'ELECTRICITY'
+              ? billingCfg.electricityDefaultPrice
+              : billingCfg.waterDefaultPrice;
+          await syncDraftInvoiceMeterLineInTx(client, {
+            orgId: req.user.org_id,
+            contractId: updated.contract_id,
+            period: updated.period,
+            meter,
+            readingRow: updated,
+            defaultUtilityPrice,
+            actorId: req.user.sub,
+          });
+        }
+      }
+
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
          VALUES ($1, 'CONFIRM_METER_READING', 'meter_reading', $2, $3, $4)`,
@@ -978,6 +1305,10 @@ router.get(
 
       const rows = await pool.query(
         `SELECT mr.*,
+                CASE
+                  WHEN mr.contract_id IS NOT NULL THEN 'HĐ-' || UPPER(LEFT(mr.contract_id::text, 8))
+                  ELSE NULL
+                END AS contract_code,
                 mr.status AS period_reading_status,
                 mr.confirmed_at AS period_confirmed_at,
                 p.full_name AS recorded_by_name,
@@ -988,7 +1319,7 @@ router.get(
          LEFT JOIN app_user auc ON auc.id = mr.confirmed_by
          LEFT JOIN person pc ON pc.id = auc.person_id
          WHERE mr.meter_id = $1
-         ORDER BY mr.period DESC`,
+         ORDER BY mr.period DESC, mr.current_reading DESC, mr.recorded_at DESC`,
         [id]
       );
       res.json({ data: rows.rows });
@@ -1013,8 +1344,8 @@ router.post(
     const { client, release } = await getUserClient(req);
     try {
       await client.query('BEGIN');
-      const thresholdRatio = await loadAnomalyThresholdRatio(client, req.user.org_id);
-      const row = await upsertSingleReading(client, req, id, req.body, thresholdRatio);
+      const billingCfg = await loadBillingConfigValues(client, req.user.org_id);
+      const row = await upsertSingleReading(client, req, id, req.body, billingCfg);
       await client.query('COMMIT');
       res.status(201).json({
         message: row.is_abnormal

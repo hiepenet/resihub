@@ -2,7 +2,15 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { adminPool, pool } from '../db/client.js';
 import { MAX_IMAGE_BYTES, MAX_CONTRACT_SCAN_BYTES } from './imageUpload.js';
-import { currentVietnamPeriod } from './serviceBilling.js';
+import {
+  currentVietnamPeriod,
+  resolveChainedReadingBounds,
+  selectTargetPeriodContract,
+} from './serviceBilling.js';
+import {
+  loadApartmentPeriodContractsMap,
+  loadMeterPeriodReadingsWithLocks,
+} from './meterTurnoverContext.js';
 import {
   PROMPT_VERSIONS,
   normalizeAiConfig,
@@ -269,10 +277,11 @@ export async function runExtractSuggestion(
     extractedFields,
     fieldConfidences
   );
+  const usedModel = geminiRes.modelVersion || ctx.aiConfig.model;
   const estimatedCostVnd = estimateGeminiCostVnd({
     inputTokens: geminiRes.inputTokens,
     outputTokens: geminiRes.outputTokens,
-    model: ctx.aiConfig.model,
+    model: usedModel,
   });
 
   const inputRef = {
@@ -310,7 +319,7 @@ export async function runExtractSuggestion(
       confidence,
       needsHumanReview,
       totalFieldsCount,
-      ctx.aiConfig.model,
+      usedModel,
       PROMPT_VERSIONS[taskType],
       geminiRes.inputTokens,
       geminiRes.outputTokens,
@@ -332,7 +341,7 @@ export async function runExtractSuggestion(
         task_type: taskType,
         confidence,
         needs_human_review: needsHumanReview,
-        model: ctx.aiConfig.model,
+        model: usedModel,
       }),
     ]
   );
@@ -351,7 +360,7 @@ export async function runExtractSuggestion(
     field_confidences: fieldConfidences,
     confidence,
     needs_human_review: needsHumanReview,
-    model: ctx.aiConfig.model,
+    model: usedModel,
     warnings,
     expires_at: insRes.rows[0].expires_at,
   };
@@ -392,12 +401,12 @@ export async function runMeterOcrSuggestion(
   const meter = meterRes.rows[0];
   const effectiveBuildingId = buildingId || meter.building_id;
 
-  const [histRes, billingCfgRes] = await Promise.all([
+  const [histRes, billingCfgRes, contractsByApt] = await Promise.all([
     dbClient.query(
       `SELECT period, current_reading, consumption, status
        FROM meter_reading
        WHERE meter_id = $1 AND period < $2
-       ORDER BY period DESC
+       ORDER BY period DESC, current_reading DESC, recorded_at DESC
        LIMIT 3`,
       [meter.id, period]
     ),
@@ -405,12 +414,33 @@ export async function runMeterOcrSuggestion(
       `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
       [orgId]
     ),
+    loadApartmentPeriodContractsMap(dbClient, [meter.apartment_id], period),
   ]);
 
-  const previousValue =
-    histRes.rows.length > 0
-      ? Number(histRes.rows[0].current_reading)
-      : Number(meter.initial_reading || 0);
+  const overlappingContracts = contractsByApt.get(String(meter.apartment_id)) || [];
+  const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
+    dbClient,
+    [meter.id],
+    period,
+    contractsByApt
+  );
+  const samePeriodReadings = samePeriodMap.get(String(meter.id)) || [];
+  const { targetContract, slotIndex } = selectTargetPeriodContract(overlappingContracts);
+  const targetContractId = targetContract ? targetContract.contract_id : null;
+  const existingSlotRow = targetContractId
+    ? samePeriodReadings.find((r) => String(r.contract_id) === String(targetContractId)) ||
+      (slotIndex <= 1 ? samePeriodReadings.find((r) => !r.contract_id && !r.is_billed) : null)
+    : samePeriodReadings.find((r) => !r.contract_id) || null;
+
+  const { previousReading: previousValue } = resolveChainedReadingBounds({
+    priorPeriodReading: histRes.rows[0] || null,
+    samePeriodReadings,
+    nextPeriodReading: null,
+    overlappingContracts,
+    targetContractId,
+    existingReadingId: existingSlotRow?.id || null,
+    initialReading: meter.initial_reading,
+  });
 
   const confirmedConsumptions = histRes.rows
     .filter((r) => r.status === 'CONFIRMED' && Number(r.consumption) > 0)
@@ -462,10 +492,11 @@ export async function runMeterOcrSuggestion(
     reason: validated.reason,
   };
 
+  const usedModel = geminiRes.modelVersion || ctx.aiConfig.model;
   const estimatedCostVnd = estimateGeminiCostVnd({
     inputTokens: geminiRes.inputTokens,
     outputTokens: geminiRes.outputTokens,
-    model: ctx.aiConfig.model,
+    model: usedModel,
   });
 
   const insRes = await dbClient.query(
@@ -495,7 +526,7 @@ export async function runMeterOcrSuggestion(
       validated.confidence,
       validated.needsHumanReview,
       validated.reading !== null ? 1 : 0,
-      ctx.aiConfig.model,
+      usedModel,
       PROMPT_VERSIONS.METER_OCR,
       geminiRes.inputTokens,
       geminiRes.outputTokens,
@@ -519,6 +550,7 @@ export async function runMeterOcrSuggestion(
         reading: validated.reading,
         confidence: validated.confidence,
         needs_human_review: validated.needsHumanReview,
+        model: usedModel,
       }),
     ]
   );
@@ -536,7 +568,7 @@ export async function runMeterOcrSuggestion(
     output: outputPayload,
     confidence: validated.confidence,
     needs_human_review: validated.needsHumanReview,
-    model: ctx.aiConfig.model,
+    model: usedModel,
     warnings: validated.warnings,
     expires_at: insRes.rows[0].expires_at,
   };
@@ -601,7 +633,7 @@ export async function runTicketTriageSuggestion(
       await dbClient.query(
         `SELECT fn_record_background_ticket_triage(
           $1::uuid, 'SKIPPED', NULL, NULL, NULL, NULL, NULL,
-          '{}'::jsonb, '[]'::jsonb, TRUE, 'gemini-2.5-flash', $2::text, 0, 0, 0, 0, $3::text
+          '{}'::jsonb, '[]'::jsonb, TRUE, 'gemini-3.8-flash', $2::text, 0, 0, 0, 0, $3::text
         )`,
         [sr.id, PROMPT_VERSIONS.TICKET_TRIAGE, gateErr.code || 'AI_DISABLED']
       );
@@ -702,10 +734,11 @@ export async function runTicketTriageSuggestion(
     triage_status: validated.triageStatus,
   };
 
+  const usedModel = geminiRes.modelVersion || ctx.aiConfig.model;
   const estimatedCostVnd = estimateGeminiCostVnd({
     inputTokens: geminiRes.inputTokens,
     outputTokens: geminiRes.outputTokens,
-    model: ctx.aiConfig.model,
+    model: usedModel,
   });
 
   let suggestionId = null;
@@ -727,7 +760,7 @@ export async function runTicketTriageSuggestion(
         JSON.stringify(outputPayload),
         JSON.stringify(validated.warnings),
         validated.needsHumanReview,
-        ctx.aiConfig.model,
+        usedModel,
         PROMPT_VERSIONS.TICKET_TRIAGE,
         geminiRes.inputTokens,
         geminiRes.outputTokens,
@@ -760,7 +793,7 @@ export async function runTicketTriageSuggestion(
         validated.confidence,
         validated.needsHumanReview,
         validated.category && validated.priority ? 2 : 0,
-        ctx.aiConfig.model,
+        usedModel,
         PROMPT_VERSIONS.TICKET_TRIAGE,
         geminiRes.inputTokens,
         geminiRes.outputTokens,

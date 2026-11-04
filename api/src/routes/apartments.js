@@ -224,8 +224,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
       ),
       pool.query(
         `SELECT m.*,
-                (SELECT mr.current_reading FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC LIMIT 1) AS latest_reading,
-                (SELECT mr.period FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC LIMIT 1) AS latest_period
+                (SELECT mr.current_reading FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC, mr.current_reading DESC, mr.recorded_at DESC LIMIT 1) AS latest_reading,
+                (SELECT mr.period FROM meter_reading mr WHERE mr.meter_id = m.id ORDER BY mr.period DESC, mr.current_reading DESC, mr.recorded_at DESC LIMIT 1) AS latest_period
          FROM meter m
          WHERE m.apartment_id = $1
          ORDER BY m.meter_type ASC`,
