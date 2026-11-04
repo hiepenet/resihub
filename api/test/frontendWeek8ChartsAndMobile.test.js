@@ -428,3 +428,29 @@ test('Final Review Fix — Select mobile anti-zoom, empty-debt Quick Action guar
     'NotificationBell trigger must meet 44x44px touch target and expose aria-label + aria-expanded'
   );
 });
+
+test('DevTools Responsive Fix — ResidentLayout keeps sticky top tablist visible when shrunk (<1024px) alongside mobile thumb bottom bar', () => {
+  const layoutSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/layout/ResidentLayout.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    layoutSrc.includes('aria-label="Danh mục cổng cư dân"') &&
+      layoutSrc.includes('role="tablist"') &&
+      layoutSrc.includes('lg:hidden'),
+    'ResidentLayout header must render sticky lg:hidden tablist so shrinking screen <1024px never loses Tổng quan / Hợp đồng / Hóa đơn bar'
+  );
+  assert.ok(
+    layoutSrc.includes('md:hidden fixed bottom-0 inset-x-0'),
+    'ResidentLayout must keep fixed 5-slot thumb bottom bar for phone viewports (<768px)'
+  );
+
+  const notifSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/resident/tabs/NotificationsTab.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    notifSrc.includes('flex-col sm:flex-row sm:items-start justify-between'),
+    'NotificationsTab item header must stack on <640px to prevent 360px right-edge overflow'
+  );
+});

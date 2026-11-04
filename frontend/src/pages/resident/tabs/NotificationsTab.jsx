@@ -270,13 +270,13 @@ export function NotificationsTab({ onNavigateTab }) {
                     </div>
 
                     <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 flex-wrap">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-2">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
                           {isUnread ? (
                             <span className="w-2 h-2 rounded-full bg-primary-500 shrink-0" />
                           ) : null}
                           <h4
-                            className={`text-sm ${
+                            className={`text-sm break-words ${
                               isUnread
                                 ? 'font-bold text-slate-900'
                                 : 'font-semibold text-slate-700'
