@@ -808,7 +808,7 @@ export function evaluateMeterReadingAnomaly({
     };
   }
 
-  const consumption = Number((curr - prev).toFixed(2));
+  const consumption = roundReadingValue(curr - prev);
   const positiveHistory = (Array.isArray(recentConsumptions) ? recentConsumptions : [])
     .map((v) => Number(v))
     .filter((v) => Number.isFinite(v) && v > 0)
@@ -846,4 +846,253 @@ export function evaluateMeterReadingAnomaly({
     diffPct,
     isAbnormal,
   };
+}
+
+/**
+ * Deposit statuses indicating a terminated/expired contract has entered or completed deposit settlement.
+ * Explicitly excludes 'HELD' and 'TRANSFERRED' (room-transfer deposits become TRANSFERRED before final meter readings).
+ */
+export const FINALIZED_SETTLEMENT_DEPOSIT_STATUSES = [
+  'PENDING_APPROVAL',
+  'APPROVED_PENDING_PAYOUT',
+  'RETURNED',
+  'PARTIALLY_REFUNDED',
+  'REFUNDED',
+  'DEDUCTED_FULL',
+  'DISPUTED',
+];
+
+const BILLABLE_OVERLAP_CONTRACT_STATUSES = new Set([
+  'ACTIVE',
+  'RENEWAL_PENDING',
+  'TERMINATION_PENDING',
+  'TERMINATED',
+  'EXPIRED',
+]);
+
+/**
+ * Rounds meter readings and deltas cleanly to 2 decimal places (NUMERIC(12,2)).
+ */
+export function roundReadingValue(val) {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return NaN;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * Filters and sorts billable contracts overlapping a YYYY-MM period in chronological order.
+ */
+export function buildPeriodOverlappingContracts(contracts, periodYm) {
+  const { monthStart, monthEnd } = getMonthBoundsYmd(periodYm);
+  if (!monthStart || !monthEnd || !Array.isArray(contracts)) return [];
+
+  const result = [];
+  for (const c of contracts) {
+    if (!c) continue;
+    const rawStatus = String(c.status || '').trim().toUpperCase();
+    if (!BILLABLE_OVERLAP_CONTRACT_STATUSES.has(rawStatus)) continue;
+
+    const contractId = c.contract_id || c.id;
+    const startYmd = toDateOnlyYmd(c.start_date);
+    if (!contractId || !startYmd || startYmd > monthEnd) continue;
+
+    const childStartYmd = c.room_transfer_child_start_date
+      ? toDateOnlyYmd(c.room_transfer_child_start_date)
+      : null;
+    const { movedIn, lastActiveDayYmd } = resolveContractLastActiveDay(c, {
+      roomTransferChildStartDate: childStartYmd,
+      isRoomTransfer: Boolean(childStartYmd),
+      isNaturalExpiry: rawStatus === 'EXPIRED',
+    });
+
+    if (!movedIn || !lastActiveDayYmd || lastActiveDayYmd < monthStart) continue;
+
+    const overlapStart = startYmd > monthStart ? startYmd : monthStart;
+    const overlapEnd = lastActiveDayYmd < monthEnd ? lastActiveDayYmd : monthEnd;
+    if (overlapEnd < overlapStart) continue;
+
+    const depStatus = String(c.deposit_status || '').trim().toUpperCase();
+    const endedStatus = rawStatus === 'TERMINATED' || rawStatus === 'EXPIRED';
+    const isPeriodFinalized =
+      Boolean(c.has_finalized_invoice) ||
+      (endedStatus && FINALIZED_SETTLEMENT_DEPOSIT_STATUSES.includes(depStatus));
+
+    result.push({
+      contract_id: String(contractId),
+      contract_code: c.contract_code || c.code || null,
+      tenant_name: c.tenant_name || c.full_name || null,
+      building_id: c.building_id || null,
+      apartment_id: c.apartment_id || null,
+      status: rawStatus,
+      start_date: startYmd,
+      last_active_day: lastActiveDayYmd,
+      overlap_start: overlapStart,
+      overlap_end: overlapEnd,
+      is_room_transfer: Boolean(c.is_room_transfer || childStartYmd),
+      is_period_finalized: isPeriodFinalized,
+      created_at: c.created_at ? String(c.created_at) : '',
+    });
+  }
+
+  result.sort((a, b) => {
+    if (a.overlap_start !== b.overlap_start) return a.overlap_start.localeCompare(b.overlap_start);
+    if (a.start_date !== b.start_date) return a.start_date.localeCompare(b.start_date);
+    if (a.created_at !== b.created_at) return a.created_at.localeCompare(b.created_at);
+    return a.contract_id.localeCompare(b.contract_id);
+  });
+
+  return result;
+}
+
+/**
+ * Resolves the target contract slot within a billing period.
+ */
+export function selectTargetPeriodContract(overlappingContracts = [], requestedContractId = null) {
+  const list = Array.isArray(overlappingContracts) ? overlappingContracts : [];
+  const totalSlots = list.length;
+
+  if (requestedContractId !== undefined && requestedContractId !== null && String(requestedContractId).trim() !== '') {
+    const reqId = String(requestedContractId).trim();
+    const idx = list.findIndex((c) => String(c.contract_id) === reqId);
+    if (idx === -1) {
+      throw Object.assign(
+        new Error('Hợp đồng được chọn không thuộc căn hộ hoặc không hiệu lực trong kỳ chốt này.'),
+        { status: 400, code: 'VALIDATION_ERROR' }
+      );
+    }
+    return {
+      targetContract: list[idx],
+      slotIndex: idx + 1,
+      totalSlots,
+    };
+  }
+
+  if (totalSlots === 0) {
+    return { targetContract: null, slotIndex: 0, totalSlots: 0 };
+  }
+
+  const openIdx = list.findIndex((c) => !c.is_period_finalized);
+  const chosenIdx = openIdx !== -1 ? openIdx : totalSlots - 1;
+  return {
+    targetContract: list[chosenIdx],
+    slotIndex: chosenIdx + 1,
+    totalSlots,
+  };
+}
+
+/**
+ * Resolves chained previousReading and immediate nextReading across prior, same-period, and next-period readings.
+ */
+export function resolveChainedReadingBounds({
+  priorPeriodReading = null,
+  samePeriodReadings = [],
+  nextPeriodReading = null,
+  overlappingContracts = [],
+  targetContractId = null,
+  existingReadingId = null,
+  initialReading = 0,
+} = {}) {
+  const contractOrder = new Map();
+  (Array.isArray(overlappingContracts) ? overlappingContracts : []).forEach((c, idx) => {
+    contractOrder.set(String(c.contract_id), idx);
+  });
+
+  const targetRank =
+    targetContractId && contractOrder.has(String(targetContractId))
+      ? contractOrder.get(String(targetContractId))
+      : targetContractId
+      ? Number.MAX_SAFE_INTEGER - 1
+      : -1;
+
+  const earlierSamePeriod = [];
+  const laterSamePeriod = [];
+
+  for (const r of Array.isArray(samePeriodReadings) ? samePeriodReadings : []) {
+    if (!r) continue;
+    if (existingReadingId && String(r.id) === String(existingReadingId)) continue;
+    if (targetContractId && r.contract_id && String(r.contract_id) === String(targetContractId)) continue;
+
+    // Unbilled orphan null-contract row when targeting Slot 1 is adopted, not treated as earlier
+    if (!r.contract_id && !r.is_billed && targetContractId && !existingReadingId && targetRank <= 0) {
+      continue;
+    }
+
+    const rRank =
+      r.contract_id && contractOrder.has(String(r.contract_id))
+        ? contractOrder.get(String(r.contract_id))
+        : r.contract_id
+        ? -1
+        : -2;
+
+    if (rRank < targetRank || (!r.contract_id && r.is_billed && targetContractId)) {
+      earlierSamePeriod.push({ ...r, _rank: rRank });
+    } else if (rRank > targetRank) {
+      laterSamePeriod.push({ ...r, _rank: rRank });
+    }
+  }
+
+  earlierSamePeriod.sort((a, b) => {
+    if (a._rank !== b._rank) return b._rank - a._rank;
+    return roundReadingValue(b.current_reading) - roundReadingValue(a.current_reading);
+  });
+
+  laterSamePeriod.sort((a, b) => {
+    if (a._rank !== b._rank) return a._rank - b._rank;
+    return roundReadingValue(a.current_reading) - roundReadingValue(b.current_reading);
+  });
+
+  let previousReading;
+  if (earlierSamePeriod.length > 0) {
+    previousReading = roundReadingValue(earlierSamePeriod[0].current_reading);
+  } else if (priorPeriodReading && priorPeriodReading.current_reading !== null && priorPeriodReading.current_reading !== undefined) {
+    previousReading = roundReadingValue(priorPeriodReading.current_reading);
+  } else {
+    previousReading = roundReadingValue(initialReading || 0);
+  }
+
+  const nextReading = laterSamePeriod.length > 0 ? laterSamePeriod[0] : nextPeriodReading || null;
+  return { previousReading, nextReading };
+}
+
+/**
+ * Validates currentReading against chained previousReading and optional nextReading (monotonicity + billed lock).
+ */
+export function validateChainedReadingInput({
+  currentReading,
+  previousReading,
+  nextReading = null,
+} = {}) {
+  const prev = roundReadingValue(previousReading ?? 0);
+  const currentVal = roundReadingValue(currentReading);
+
+  if (!Number.isFinite(currentVal) || currentVal < prev) {
+    throw Object.assign(
+      new Error(`Chỉ số mới (${currentReading}) không được nhỏ hơn chỉ số đầu đợt (${prev}).`),
+      { status: 400, code: 'INVALID_READING' }
+    );
+  }
+
+  if (nextReading) {
+    const nextPrev = roundReadingValue(nextReading.previous_reading);
+    const nextCurr = roundReadingValue(nextReading.current_reading);
+    if (nextReading.is_billed && currentVal !== nextPrev) {
+      throw Object.assign(
+        new Error(
+          `Không thể thay đổi chỉ số thành ${currentVal} vì đợt/kỳ kế tiếp đã lập hóa đơn phát hành với chỉ số đầu kỳ khóa ở mức ${nextPrev}.`
+        ),
+        { status: 409, code: 'READING_ALREADY_BILLED' }
+      );
+    }
+    if (Number.isFinite(nextCurr) && currentVal > nextCurr) {
+      throw Object.assign(
+        new Error(
+          `Chỉ số mới (${currentVal}) không được lớn hơn chỉ số đã ghi nhận của đợt/kỳ kế tiếp (${nextCurr}).`
+        ),
+        { status: 400, code: 'INVALID_READING' }
+      );
+    }
+  }
+
+  const consumption = roundReadingValue(currentVal - prev);
+  return { currentVal, consumption };
 }
