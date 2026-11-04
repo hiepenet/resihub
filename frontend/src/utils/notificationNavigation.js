@@ -49,6 +49,21 @@ export function stripNotificationTriggerParams(searchParams) {
   return next;
 }
 
+export function syncBuildingFilterBeforeNavigate(
+  targetBuildingId,
+  { selectedBuildingId, accessibleBuildingIds = [], setSelectedBuildingId } = {}
+) {
+  if (!targetBuildingId || typeof setSelectedBuildingId !== 'function') return;
+  if (!selectedBuildingId || selectedBuildingId === targetBuildingId) return;
+
+  const list = Array.isArray(accessibleBuildingIds) ? accessibleBuildingIds : [];
+  if (list.includes(targetBuildingId)) {
+    setSelectedBuildingId(targetBuildingId);
+  } else {
+    setSelectedBuildingId('');
+  }
+}
+
 export function readOrgNotifStorageKey(userId) {
   return `resihub:read-org-notifs:${userId || 'anon'}`;
 }

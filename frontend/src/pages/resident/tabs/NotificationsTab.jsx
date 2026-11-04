@@ -21,7 +21,9 @@ import { Badge } from '../../../components/ui/Badge';
 import { Tabs } from '../../../components/ui/Tabs';
 import { Skeleton } from '../../../components/ui/Skeleton';
 import { EmptyState } from '../../../components/common/EmptyState';
+import { NotificationDetailModal } from '../../../components/common/NotificationDetailModal';
 import { useNotificationStore } from '../../../stores/notificationStore';
+import { useNotificationAction } from '../../../hooks/useNotificationAction';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 
 function getNotificationMeta(type = '') {
@@ -160,15 +162,15 @@ function getNotificationMeta(type = '') {
   };
 }
 
-export function NotificationsTab({ onNavigateTab }) {
+export function NotificationsTab() {
   const {
     notifications,
     unreadCount,
     loading,
     fetchNotifications,
-    markAsRead,
     markAllAsRead,
   } = useNotificationStore();
+  const { handleNotificationClick, getActionMeta, detailModalProps } = useNotificationAction();
 
   const [filterTab, setFilterTab] = useState('all');
 
@@ -182,12 +184,6 @@ export function NotificationsTab({ onNavigateTab }) {
     }
     return notifications;
   }, [notifications, filterTab]);
-
-  const handleNotificationClick = (notif) => {
-    if (!notif.read_at) {
-      markAsRead(notif.id);
-    }
-  };
 
   return (
     <div className="space-y-6">
@@ -251,6 +247,7 @@ export function NotificationsTab({ onNavigateTab }) {
               {filteredList.map((n) => {
                 const isUnread = !n.read_at;
                 const meta = getNotificationMeta(n.type);
+                const actionMeta = getActionMeta(n);
                 const NotifIcon = meta.icon;
 
                 return (
@@ -309,7 +306,7 @@ export function NotificationsTab({ onNavigateTab }) {
                         <span className="text-slate-400">
                           {isUnread ? (
                             <span className="text-primary-600 font-medium">
-                              Nhấn để đánh dấu đã đọc
+                              Nhấn để xử lý ngay
                             </span>
                           ) : (
                             <span className="inline-flex items-center gap-1">
@@ -319,20 +316,17 @@ export function NotificationsTab({ onNavigateTab }) {
                           )}
                         </span>
 
-                        {meta.targetTab && onNavigateTab ? (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (isUnread) markAsRead(n.id);
-                              onNavigateTab(meta.targetTab);
-                            }}
-                            className="inline-flex items-center gap-1 text-xs font-semibold text-primary-600 hover:text-primary-700"
-                          >
-                            {meta.actionLabel}
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </button>
-                        ) : null}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleNotificationClick(n);
+                          }}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-primary-600 hover:text-primary-700"
+                        >
+                          {actionMeta.actionLabel || meta.actionLabel || 'Xem chi tiết'}
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -342,6 +336,8 @@ export function NotificationsTab({ onNavigateTab }) {
           )}
         </div>
       </Card>
+
+      <NotificationDetailModal {...detailModalProps} />
     </div>
   );
 }

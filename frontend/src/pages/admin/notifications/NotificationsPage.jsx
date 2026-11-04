@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bell,
   BellRing,
@@ -15,6 +16,7 @@ import {
   XCircle,
   ExternalLink,
   MessageSquare,
+  ArrowRight,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -34,6 +36,9 @@ import { useNotificationStore } from '../../../stores/notificationStore';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
+import { useNotificationAction } from '../../../hooks/useNotificationAction';
+import { NotificationDetailModal } from '../../../components/common/NotificationDetailModal';
+import { mergeOrgNotificationReadState } from '../../../utils/notificationNavigation';
 import { APARTMENT_STATUS, ANNOUNCEMENT_STATUS } from '../../../constants/statuses';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
@@ -61,7 +66,22 @@ const NOTIFICATION_TYPES = {
   SERVICE_REQUEST_URGENT: { label: 'Báo hỏng KHẨN CẤP', variant: 'red' },
   SERVICE_REQUEST_REOPENED: { label: 'Mở lại báo hỏng', variant: 'red' },
   SERVICE_REQUEST_ESCALATED: { label: 'Quá hạn SLA kỹ thuật', variant: 'red' },
+  SERVICE_REQUEST_SLA_BREACH: { label: 'Quá hạn SLA kỹ thuật', variant: 'red' },
   SERVICE_UPDATE: { label: 'Cập nhật dịch vụ', variant: 'purple' },
+  SERVICE_TERMINATED: { label: 'Chấm dứt dịch vụ', variant: 'slate' },
+  SERVICE_SUBSCRIPTION_REQUESTED: { label: 'Đăng ký dịch vụ mới', variant: 'sky' },
+  SERVICE_CANCELLATION_REQUESTED: { label: 'Yêu cầu hủy dịch vụ', variant: 'amber' },
+  PAYMENT_REPORTED: { label: 'Cư dân báo đã thanh toán', variant: 'emerald' },
+  CONTRACT_REQUEST_SUBMITTED: { label: 'Đề nghị gia hạn / chấm dứt HĐ', variant: 'indigo' },
+  PENDING_CREDIT_REFUND: { label: 'Chờ duyệt hoàn tín dụng (4 mắt)', variant: 'amber' },
+  CREDIT_REFUND_PENDING: { label: 'Chờ hoàn tiền tín dụng', variant: 'amber' },
+  CREDIT_REFUNDED: { label: 'Đã hoàn tiền tín dụng', variant: 'emerald' },
+  CREDIT_REFUND_REJECTED: { label: 'Từ chối hoàn tín dụng', variant: 'red' },
+  INVOICE_ADJUSTMENT_PENDING: { label: 'Chờ duyệt điều chỉnh HĐ (4 mắt)', variant: 'amber' },
+  INVOICE_ADJUSTED: { label: 'Hóa đơn đã điều chỉnh', variant: 'purple' },
+  AI_BUDGET_WARNING: { label: 'Cảnh báo ngân sách AI', variant: 'amber' },
+  AI_BUDGET_EXCEEDED: { label: 'Chạm trần ngân sách AI', variant: 'red' },
+  CRON_JOB_FAILED: { label: 'Lỗi tiến trình nền', variant: 'red' },
 };
 
 const COMPOSE_TYPE_OPTIONS = [
@@ -102,12 +122,24 @@ function toLocalDateTimeInputValue(isoValue) {
 
 export function NotificationsPage() {
   const toast = useToast();
+  const [searchParams] = useSearchParams();
   const { canSendNotifications } = usePermission();
+  const user = useAuthStore((s) => s.user);
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
   const syncBellStore = useNotificationStore((s) => s.fetchNotifications);
 
   // 3 tabs: 'announcements' ("Thông báo & Xuất Zalo") | 'zalo_groups' ("Danh bạ Nhóm Zalo") | 'inbox' ("Hộp thư đến")
-  const [activeTab, setActiveTab] = useState('announcements');
+  const initialTab = ['announcements', 'zalo_groups', 'inbox'].includes(searchParams.get('tab'))
+    ? searchParams.get('tab')
+    : 'announcements';
+  const [activeTab, setActiveTab] = useState(initialTab);
+
+  useEffect(() => {
+    const qTab = searchParams.get('tab');
+    if (['announcements', 'zalo_groups', 'inbox'].includes(qTab)) {
+      setActiveTab(qTab);
+    }
+  }, [searchParams]);
 
   const [announcements, setAnnouncements] = useState([]);
   const [zaloGroups, setZaloGroups] = useState([]);
@@ -187,8 +219,10 @@ export function NotificationsPage() {
         }),
       ]);
 
-      setInbox(notifRes?.data || []);
-      setUnreadCount(Number(notifRes?.unread_count || 0));
+      const currentUserId = user?.id || user?.sub || null;
+      const mergedInbox = mergeOrgNotificationReadState(notifRes?.data || [], currentUserId);
+      setInbox(mergedInbox.notifications);
+      setUnreadCount(mergedInbox.unreadCount);
       setAnnouncements(annRes?.data || []);
       setZaloGroups(zgRes?.data || []);
       syncBellStore();
@@ -629,19 +663,19 @@ export function NotificationsPage() {
   };
 
   // Inbox handlers
-  const handleMarkRead = async (item) => {
-    if (item.read_at) return;
-    try {
-      await notificationsService.markRead(item.id);
-      setInbox((prev) =>
-        prev.map((n) => (n.id === item.id ? { ...n, read_at: new Date().toISOString() } : n))
-      );
-      setUnreadCount((c) => Math.max(0, c - 1));
-      syncBellStore();
-    } catch {
-      // ignore
-    }
-  };
+  const markInboxItemReadLocal = useCallback((item) => {
+    if (!item || item.read_at) return;
+    setInbox((prev) =>
+      prev.map((n) => (n.id === item.id ? { ...n, read_at: new Date().toISOString() } : n))
+    );
+    setUnreadCount((c) => Math.max(0, c - 1));
+  }, []);
+
+  const {
+    handleNotificationClick: handleInboxItemAction,
+    getActionMeta,
+    detailModalProps,
+  } = useNotificationAction({ onMarkReadLocal: markInboxItemReadLocal });
 
   const handleMarkAllRead = async () => {
     try {
@@ -1330,10 +1364,11 @@ export function NotificationsPage() {
                   variant: 'slate',
                 };
                 const isUnread = !item.read_at;
+                const actionMeta = getActionMeta(item);
                 return (
                   <div
                     key={item.id}
-                    onClick={() => handleMarkRead(item)}
+                    onClick={() => handleInboxItemAction(item)}
                     className={`p-4 sm:px-5 transition-colors cursor-pointer hover:bg-slate-50 flex items-start gap-3.5 ${
                       isUnread ? 'bg-primary-50/35' : ''
                     }`}
@@ -1364,6 +1399,12 @@ export function NotificationsPage() {
                       <p className="text-xs text-slate-600 whitespace-pre-line leading-relaxed break-words">
                         {item.content}
                       </p>
+                      <div className="pt-1 flex justify-end">
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-primary-600">
+                          {actionMeta.actionLabel}
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </span>
+                      </div>
                     </div>
                   </div>
                 );
@@ -1682,6 +1723,8 @@ export function NotificationsPage() {
           </label>
         </form>
       </Modal>
+
+      <NotificationDetailModal {...detailModalProps} />
     </div>
   );
 }

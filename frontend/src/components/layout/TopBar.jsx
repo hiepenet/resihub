@@ -133,7 +133,7 @@ export function TopBar({ onOpenMobileMenu }) {
             {ROLE_LABELS[primaryRole] || primaryRole}
           </Badge>
 
-          <NotificationBell onViewAll={() => navigate('/admin/notifications')} />
+          <NotificationBell onViewAll={() => navigate('/admin/notifications?tab=inbox')} />
 
           <button
             type="button"
