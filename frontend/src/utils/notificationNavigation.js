@@ -283,6 +283,7 @@ function resolveResidentAction(type, p) {
     [
       'CONTRACT_ACTIVATED',
       'CONTRACT_TERMINATED',
+      'CONTRACT_REQUEST_SUBMITTED',
       'CONTRACT_REQUEST_APPROVED',
       'CONTRACT_REQUEST_REJECTED',
       'CONTRACT_BILLING_SCHEDULED',
@@ -340,7 +341,14 @@ function resolveResidentAction(type, p) {
   }
 
   // 9. Service subscriptions
-  if (['SERVICE_UPDATE', 'SERVICE_TERMINATED'].includes(type)) {
+  if (
+    [
+      'SERVICE_UPDATE',
+      'SERVICE_TERMINATED',
+      'SERVICE_SUBSCRIPTION_REQUESTED',
+      'SERVICE_CANCELLATION_REQUESTED',
+    ].includes(type)
+  ) {
     return navigateResult(
       buildUrl('/resident', [
         ['tab', 'services'],
@@ -596,7 +604,7 @@ function resolveAdminAction(type, p, role) {
   }
 
   // 11. Missing meter readings
-  if (type === 'MISSING_METER_READING') {
+  if (['MISSING_METER_READING', 'METER_UNRECORDED', 'METER_UNRECORDED_ALERT'].includes(type)) {
     return navigateResult(
       buildUrl('/admin/meters', [
         ['period', p.period],
@@ -653,10 +661,12 @@ function resolveAdminAction(type, p, role) {
   return detailModalResult(bid, cid, safeFallback, 'Xem chi tiết');
 }
 
-export function resolveNotificationAction(
-  notification,
-  { role = 'RESIDENT', isAdminPortal = false } = {}
-) {
+export function resolveNotificationAction(notification, roleOrOpts = {}) {
+  const opts =
+    typeof roleOrOpts === 'string'
+      ? { role: roleOrOpts, isAdminPortal: false }
+      : roleOrOpts || {};
+  const { role = 'RESIDENT', isAdminPortal = false } = opts;
   if (!notification) {
     return detailModalResult(null, null, null, 'Xem chi tiết');
   }

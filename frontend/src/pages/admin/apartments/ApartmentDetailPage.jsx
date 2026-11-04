@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   Edit3,
   CheckCircle2,
@@ -49,12 +49,15 @@ import {
   canPayoutReservationCancel,
   computeSuggestedCancelSplit,
 } from '../../../utils/depositUiHelpers';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
 
 export function ApartmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [reviewReservationModal, setReviewReservationModal] = useState(null);
   const toast = useToast();
   const { canEditRealEstate, isOwner, isManager, isSysAdmin, user } = usePermission();
   const currentUserId = user?.id || user?.sub;
@@ -691,6 +694,40 @@ export function ApartmentDetailPage() {
       setSaving(false);
     }
   };
+
+  useEffect(() => {
+    const targetRsvId = searchParams.get('reservation_id');
+    const modal = searchParams.get('modal');
+    if (loading || !apt || (!targetRsvId && modal !== 'reservation')) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    const list = Array.isArray(apt.reservations) ? apt.reservations : [];
+    const rsv = targetRsvId
+      ? list.find((r) => String(r.id) === String(targetRsvId))
+      : list[0];
+    if (!rsv) return;
+
+    const allowApproveCancel = canApproveReservationCancel(rsv, {
+      isOwner,
+      isManager,
+      isSysAdmin,
+      currentUserId,
+      buildingHasActiveOwner: Boolean(
+        rsv.building_has_active_owner ?? apt.building_has_active_owner
+      ),
+      allowSelfApproval,
+    });
+    const allowPayout = canPayoutReservationCancel(rsv, { isManager });
+
+    if (rsv.status === 'CANCEL_PENDING_APPROVAL' && allowApproveCancel) {
+      handleOpenReviewCancelModal(rsv, 'approve');
+    } else if (rsv.status === 'APPROVED_PENDING_PAYOUT' && allowPayout) {
+      handleOpenPayoutCancelModal(rsv);
+    } else {
+      setReviewReservationModal(rsv);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSearchParams, loading, apt]);
 
   if (loading && !apt) return <PageSkeleton />;
   if (!apt) return null;
@@ -1903,6 +1940,118 @@ export function ApartmentDetailPage() {
               </Button>
             </div>
           </form>
+        ) : null}
+      </Modal>
+
+      {/* Modal Chi tiết & Đối soát Biên lai Giữ chỗ từ Thông báo (?reservation_id=...&modal=reservation) */}
+      <Modal
+        open={Boolean(reviewReservationModal)}
+        onClose={() => setReviewReservationModal(null)}
+        title="Chi tiết Phiếu Giữ chỗ & Chứng từ Đặt cọc"
+        subtitle={
+          reviewReservationModal
+            ? `Căn ${apt.code} (${apt.building_code}) • Khách: ${reviewReservationModal.prospect_name || '—'}`
+            : ''
+        }
+        size="md"
+        footer={
+          reviewReservationModal ? (
+            <>
+              <Button variant="outline" onClick={() => setReviewReservationModal(null)} disabled={saving}>
+                Đóng
+              </Button>
+              {canManagerConfirmReservationPayment(reviewReservationModal, { isManager }) ? (
+                <>
+                  <Button
+                    variant="danger"
+                    icon={XCircle}
+                    disabled={saving}
+                    onClick={() => {
+                      const target = reviewReservationModal;
+                      setReviewReservationModal(null);
+                      handleOpenRejectModal(target);
+                    }}
+                  >
+                    Từ chối biên lai
+                  </Button>
+                  <Button
+                    variant="success"
+                    icon={CheckCircle2}
+                    loading={saving}
+                    onClick={async () => {
+                      const target = reviewReservationModal;
+                      await handleConfirmPayment(target);
+                      setReviewReservationModal(null);
+                    }}
+                  >
+                    Xác nhận tiền về
+                  </Button>
+                </>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {reviewReservationModal ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Trạng thái giữ chỗ</p>
+                <div className="mt-1">
+                  <StatusBadge status={reviewReservationModal.status} domain="reservation" />
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Số điện thoại liên hệ</p>
+                <p className="font-semibold text-slate-900 mt-1">
+                  {reviewReservationModal.phone || '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Số tiền giữ chỗ</p>
+                <p className="font-mono text-sm font-bold text-emerald-700 mt-0.5">
+                  {formatMoney(reviewReservationModal.hold_amount)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Thời hạn giữ chỗ</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {formatDate(reviewReservationModal.hold_from || reviewReservationModal.created_at)} →{' '}
+                  {formatDate(reviewReservationModal.hold_until)}
+                </p>
+              </div>
+            </div>
+
+            {Array.isArray(reviewReservationModal.evidence) &&
+            reviewReservationModal.evidence.length > 0 ? (
+              <div className="space-y-2">
+                <p className="font-semibold text-slate-700">
+                  Ảnh chụp biên lai chuyển khoản ({reviewReservationModal.evidence.length})
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {reviewReservationModal.evidence.map((src, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-xl border border-slate-200 bg-slate-900 overflow-hidden flex items-center justify-center max-h-72"
+                    >
+                      <AuthImage
+                        src={src}
+                        alt={`Biên lai giữ chỗ #${idx + 1}`}
+                        className="max-h-72 w-auto object-contain"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {reviewReservationModal.note ? (
+              <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+                <p className="font-semibold text-slate-700">Ghi chú</p>
+                <p className="text-slate-600 whitespace-pre-line">{reviewReservationModal.note}</p>
+              </div>
+            ) : null}
+          </div>
         ) : null}
       </Modal>
 

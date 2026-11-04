@@ -78,6 +78,7 @@ import {
   isValidEmail,
   isValidIdNumber,
 } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const CONTRACT_STATUS_OPTIONS = [
   { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
@@ -235,6 +236,7 @@ export function ContractsPage() {
   });
 
   // Approve / Reject Resident Request state
+  const [reviewRequestTarget, setReviewRequestTarget] = useState(null);
   const [approveReqTarget, setApproveReqTarget] = useState(null);
   const [rejectReqTarget, setRejectReqTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState('');
@@ -262,6 +264,26 @@ export function ContractsPage() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam === 'requests' && activeTab !== 'requests') {
+      setActiveTab('requests');
+    }
+    const targetReqId = searchParams.get('request_id');
+    const modal = searchParams.get('modal');
+    if (loading || (!targetReqId && modal !== 'request')) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    setActiveTab('requests');
+    setReqStatusFilter('');
+    const matched = targetReqId
+      ? requests.find((r) => String(r.id) === String(targetReqId))
+      : requests[0];
+    if (matched) {
+      setReviewRequestTarget(matched);
+    }
+  }, [searchParams, setSearchParams, loading, requests, activeTab]);
 
   // AI-01: Quét hợp đồng giấy/PDF & CCCD khách thuê mới ngay trong modal tạo nháp
   const [contractScanFiles, setContractScanFiles] = useState([]);
@@ -2954,6 +2976,130 @@ export function ContractsPage() {
             />
           </AISuggestionField>
         </form>
+      </Modal>
+
+      {/* Modal Chi tiết & Xử lý Yêu cầu Hợp đồng từ Cư dân (mở tự động từ thông báo) */}
+      <Modal
+        open={Boolean(reviewRequestTarget)}
+        onClose={() => setReviewRequestTarget(null)}
+        title="Chi tiết Đề nghị Hợp đồng từ Cư dân"
+        subtitle={
+          reviewRequestTarget
+            ? `Căn ${reviewRequestTarget.apartment_code || '—'} (${reviewRequestTarget.building_name || '—'}) • ${reviewRequestTarget.resident_name || 'Cư dân'}`
+            : ''
+        }
+        size="md"
+        footer={
+          reviewRequestTarget ? (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => setReviewRequestTarget(null)}
+                disabled={processingReq}
+              >
+                Đóng
+              </Button>
+              {reviewRequestTarget.contract_id ? (
+                <Button
+                  variant="outline"
+                  icon={Eye}
+                  onClick={() => {
+                    const cid = reviewRequestTarget.contract_id;
+                    setReviewRequestTarget(null);
+                    navigate(`/admin/contracts/${cid}`);
+                  }}
+                >
+                  Mở hợp đồng gốc
+                </Button>
+              ) : null}
+              {canApproveContracts && reviewRequestTarget.status === 'SUBMITTED' ? (
+                <>
+                  <Button
+                    variant="danger"
+                    icon={XCircle}
+                    disabled={processingReq}
+                    onClick={() => {
+                      const target = reviewRequestTarget;
+                      setReviewRequestTarget(null);
+                      setRejectReqTarget(target);
+                      setRejectReason('');
+                    }}
+                  >
+                    Từ chối
+                  </Button>
+                  <Button
+                    variant="success"
+                    icon={CheckCircle2}
+                    disabled={processingReq}
+                    onClick={() => {
+                      const target = reviewRequestTarget;
+                      setReviewRequestTarget(null);
+                      setApproveReqTarget(target);
+                    }}
+                  >
+                    Phê duyệt đề nghị
+                  </Button>
+                </>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {reviewRequestTarget ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Loại đề nghị</p>
+                <div className="mt-1">
+                  <Badge
+                    variant={REQUEST_TYPE_MAP[reviewRequestTarget.type]?.variant || 'slate'}
+                    dot
+                  >
+                    {REQUEST_TYPE_MAP[reviewRequestTarget.type]?.label || reviewRequestTarget.type}
+                  </Badge>
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Trạng thái xử lý</p>
+                <div className="mt-1">
+                  <Badge
+                    variant={REQUEST_STATUS_BADGE[reviewRequestTarget.status]?.variant || 'slate'}
+                    dot
+                  >
+                    {REQUEST_STATUS_BADGE[reviewRequestTarget.status]?.label ||
+                      reviewRequestTarget.status}
+                  </Badge>
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Ngày mong muốn</p>
+                <p className="font-semibold text-slate-900 mt-0.5">
+                  {formatDate(reviewRequestTarget.desired_date)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Liên hệ cư dân</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {reviewRequestTarget.resident_phone || '—'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+              <p className="font-semibold text-slate-700">Nội dung / Lý do từ cư dân</p>
+              <p className="text-slate-600 whitespace-pre-line">
+                {reviewRequestTarget.note || 'Không có ghi chú thêm.'}
+              </p>
+            </div>
+
+            {reviewRequestTarget.rejection_reason ? (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 space-y-1">
+                <p className="font-semibold text-rose-800">Lý do từ chối</p>
+                <p className="text-rose-700">{reviewRequestTarget.rejection_reason}</p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Modal>
 
       {/* Xác nhận Phê duyệt yêu cầu từ cư dân */}

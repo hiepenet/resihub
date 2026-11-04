@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   FileText,
   Printer,
@@ -82,6 +82,7 @@ import {
   isValidIdNumber,
   extractErrorMessage,
 } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const RELATIONSHIP_OPTIONS = [
   { value: 'family', label: 'Gia đình / Người thân' },
@@ -248,6 +249,8 @@ function ContractTimeline({ status, isRoomTransfer = false }) {
 export function ContractDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [approvalReviewOpen, setApprovalReviewOpen] = useState(false);
   const toast = useToast();
   const {
     isSysAdmin,
@@ -1590,6 +1593,20 @@ export function ContractDetailPage() {
       toast.error(extractErrorMessage(err, 'Không thể xóa đơn giá dịch vụ.'));
     }
   };
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal === 'auto' && !loading && contract) {
+      setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+      const hasPendingAmend = amendments.some(
+        (v) => !v.approved_by && v.diff?.status !== 'REJECTED'
+      );
+      if (hasPendingAmend) {
+        setActiveTab('amendments');
+      }
+      setApprovalReviewOpen(true);
+    }
+  }, [searchParams, setSearchParams, loading, contract, amendments]);
 
   if (loading) {
     return <LoadingSpinner label="Đang tải chi tiết hợp đồng..." />;
@@ -3676,6 +3693,161 @@ export function ContractDetailPage() {
             error={spEffectiveDateError}
           />
         </form>
+      </Modal>
+
+      {/* Modal Tóm tắt & Phê duyệt Hợp đồng từ Thông báo (?modal=auto) */}
+      <Modal
+        open={approvalReviewOpen}
+        onClose={() => setApprovalReviewOpen(false)}
+        title={
+          contract.status === 'PENDING_APPROVAL'
+            ? contract.is_room_transfer
+              ? 'Phê duyệt Hợp đồng Đổi phòng & Kết chuyển cọc (4 mắt)'
+              : 'Phê duyệt Hợp đồng Giá ưu đãi (4 mắt)'
+            : `Tổng quan Hợp đồng ${contractCode}`
+        }
+        subtitle={`Căn ${contract.apartment_code} (${contract.building_name}) • Khách thuê: ${contract.tenant_name || '—'}`}
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setApprovalReviewOpen(false)}>
+              Đóng
+            </Button>
+            <Button
+              variant="outline"
+              icon={Printer}
+              loading={printing}
+              onClick={() => {
+                setApprovalReviewOpen(false);
+                handlePrintA4();
+              }}
+            >
+              Xem & In A4
+            </Button>
+            {canApprovePrice &&
+            contract.status === 'PENDING_APPROVAL' &&
+            (!contract.created_by ||
+              String(contract.created_by) !== String(currentUserId) ||
+              allowSelfApproval) ? (
+              <>
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    setApprovalReviewOpen(false);
+                    setRejectPriceReason('');
+                    setRejectPriceOpen(true);
+                  }}
+                >
+                  Từ chối (trả về nháp)
+                </Button>
+                <Button
+                  variant="success"
+                  icon={ShieldCheck}
+                  onClick={() => {
+                    setApprovalReviewOpen(false);
+                    setConfirmState({ open: true, type: 'approve' });
+                  }}
+                >
+                  Phê duyệt & Kích hoạt
+                </Button>
+              </>
+            ) : canManageOps && contract.status === 'DRAFT' ? (
+              <>
+                <Button
+                  variant="outline"
+                  icon={Edit3}
+                  onClick={() => {
+                    setApprovalReviewOpen(false);
+                    handleOpenEditDraft();
+                  }}
+                >
+                  Sửa nháp
+                </Button>
+                <Button
+                  variant="primary"
+                  icon={CheckCircle2}
+                  onClick={() => {
+                    setApprovalReviewOpen(false);
+                    setConfirmState({ open: true, type: 'activate' });
+                  }}
+                >
+                  Kích hoạt HĐ
+                </Button>
+              </>
+            ) : canTerminateContracts && contract.status === 'TERMINATION_PENDING' ? (
+              <Button
+                variant="danger"
+                icon={CheckCircle2}
+                onClick={() => {
+                  setApprovalReviewOpen(false);
+                  handleOpenTerminate();
+                }}
+              >
+                Chốt trả phòng & Chấm dứt
+              </Button>
+            ) : canManageOps && ['ACTIVE', 'RENEWAL_PENDING', 'EXPIRED'].includes(contract.status) ? (
+              <Button
+                variant="primary"
+                icon={RefreshCw}
+                onClick={() => {
+                  setApprovalReviewOpen(false);
+                  handleOpenRenew();
+                }}
+              >
+                Gia hạn HĐ
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <p className="text-slate-500">Trạng thái hợp đồng</p>
+              <div className="mt-1">
+                <StatusBadge status={contract.status} domain="contract" />
+              </div>
+            </div>
+            <div>
+              <p className="text-slate-500">Thời hạn hiệu lực</p>
+              <p className="font-semibold text-slate-900 mt-1">
+                {formatDate(contract.start_date)} → {formatDate(contract.end_date)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Giá thuê áp dụng / tháng</p>
+              <p className="font-mono text-sm font-bold text-primary-700 mt-0.5">
+                {formatMoney(contract.rent_amount)}
+              </p>
+              {isContractDiscounted ? (
+                <p className="text-[11px] text-amber-700 font-medium">
+                  Niêm yết: {formatMoney(contract.apartment_base_rent)} (Ưu đãi &gt;10%)
+                </p>
+              ) : null}
+            </div>
+            <div>
+              <p className="text-slate-500">Tiền đặt cọc hợp đồng</p>
+              <p className="font-mono text-sm font-bold text-slate-900 mt-0.5">
+                {formatMoney(contract.deposit_amount)}
+              </p>
+            </div>
+          </div>
+
+          {contract.price_rejection_reason ? (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 space-y-1">
+              <p className="font-semibold text-rose-800">Lý do từ chối phê duyệt gần nhất</p>
+              <p className="text-rose-700">{contract.price_rejection_reason}</p>
+            </div>
+          ) : null}
+
+          {contract.note ? (
+            <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+              <p className="font-semibold text-slate-700">Ghi chú hợp đồng</p>
+              <p className="text-slate-600 whitespace-pre-line">{contract.note}</p>
+            </div>
+          ) : null}
+        </div>
       </Modal>
 
       {/* Confirm Dialog cho Kích hoạt / Phê duyệt giá / Phê duyệt chấm dứt */}

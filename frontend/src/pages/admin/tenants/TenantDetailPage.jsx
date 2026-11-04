@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   User,
   Phone,
@@ -54,6 +54,7 @@ import {
   isValidIdNumber,
   extractErrorMessage,
 } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const RELATIONSHIP_LABELS = {
   family: 'Gia đình / Người thân',
@@ -75,6 +76,8 @@ function getAvatarLetters(fullName) {
 export function TenantDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [applicationReviewOpen, setApplicationReviewOpen] = useState(false);
   const toast = useToast();
   const { canManageTenants, isSysAdmin } = usePermission();
 
@@ -497,6 +500,14 @@ export function TenantDetailPage() {
     ],
     [navigate]
   );
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal === 'approval' && !loading && tenant) {
+      setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+      setApplicationReviewOpen(true);
+    }
+  }, [searchParams, setSearchParams, loading, tenant]);
 
   if (loading) {
     return <LoadingSpinner label="Đang tải hồ sơ cư dân..." />;
@@ -1198,6 +1209,118 @@ export function TenantDetailPage() {
           {previewSrc ? (
             <AuthImage src={previewSrc} alt={previewTitle} className="max-h-[70vh] w-auto rounded-lg object-contain" />
           ) : null}
+        </div>
+      </Modal>
+
+      {/* Modal Xem nhanh & Phê duyệt Hồ sơ Định danh Cư dân từ Thông báo (?modal=approval) */}
+      <Modal
+        open={applicationReviewOpen}
+        onClose={() => setApplicationReviewOpen(false)}
+        title="Hồ sơ Định danh & Xét duyệt Cư dân"
+        subtitle={`${tenant.full_name || 'Cư dân'} • SĐT: ${tenant.phone || '—'}`}
+        size="lg"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setApplicationReviewOpen(false)}>
+              Đóng
+            </Button>
+            {canManageTenants &&
+            (tenant.status === 'PENDING' || displayTenantStatus === 'PENDING') ? (
+              <>
+                <Button
+                  variant="danger"
+                  icon={XCircle}
+                  onClick={() => {
+                    setApplicationReviewOpen(false);
+                    setApprovalDialog({ open: true, action: 'reject', reason: '', error: '' });
+                  }}
+                >
+                  Từ chối / Yêu cầu bổ sung
+                </Button>
+                <Button
+                  variant="success"
+                  icon={CheckCircle2}
+                  onClick={() => {
+                    setApplicationReviewOpen(false);
+                    setApprovalDialog({ open: true, action: 'approve', reason: '', error: '' });
+                  }}
+                >
+                  Phê duyệt hồ sơ
+                </Button>
+              </>
+            ) : null}
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <p className="text-slate-500">Trạng thái hồ sơ</p>
+              <div className="mt-1">
+                <StatusBadge status={displayTenantStatus} domain="tenant" />
+              </div>
+            </div>
+            <div>
+              <p className="text-slate-500">Số CCCD / Hộ chiếu</p>
+              <p className="font-mono font-semibold text-slate-900 mt-1">
+                {tenant.id_number || 'Chưa cập nhật'}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Ngày sinh</p>
+              <p className="font-medium text-slate-800 mt-0.5">
+                {tenant.dob ? formatDate(tenant.dob) : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Email</p>
+              <p className="font-medium text-slate-800 mt-0.5">{tenant.email || '—'}</p>
+            </div>
+            <div className="col-span-2">
+              <p className="text-slate-500">Địa chỉ thường trú</p>
+              <p className="font-medium text-slate-800 mt-0.5">{tenant.address || '—'}</p>
+            </div>
+          </div>
+
+          {idImagesMeta.maskedForOwner ? (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start gap-2.5">
+              <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p>
+                Ảnh chụp CCCD gốc được ẩn đối với vai trò Chủ sở hữu theo chính sách bảo mật dữ liệu cá nhân (PII).
+              </p>
+            </div>
+          ) : latestFrontImg || latestBackImg ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {latestFrontImg ? (
+                <div className="space-y-1">
+                  <p className="font-semibold text-slate-600">Mặt trước CCCD</p>
+                  <div className="rounded-xl border border-slate-200 bg-slate-900/5 p-2 flex items-center justify-center min-h-[160px]">
+                    <AuthImage
+                      src={latestFrontImg.image_url || latestFrontImg.url}
+                      alt="CCCD mặt trước"
+                      className="max-h-44 w-auto rounded object-contain"
+                    />
+                  </div>
+                </div>
+              ) : null}
+              {latestBackImg ? (
+                <div className="space-y-1">
+                  <p className="font-semibold text-slate-600">Mặt sau CCCD</p>
+                  <div className="rounded-xl border border-slate-200 bg-slate-900/5 p-2 flex items-center justify-center min-h-[160px]">
+                    <AuthImage
+                      src={latestBackImg.image_url || latestBackImg.url}
+                      alt="CCCD mặt sau"
+                      className="max-h-44 w-auto rounded object-contain"
+                    />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-slate-500 italic text-center py-2">
+              Chưa có ảnh CCCD đính kèm trong hồ sơ.
+            </p>
+          )}
         </div>
       </Modal>
 
