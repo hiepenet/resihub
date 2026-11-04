@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 import { notificationsService } from '../services/notifications.service';
+import { useAuthStore } from './authStore';
+import {
+  getReadOrgNotifIds,
+  persistReadOrgNotifIds,
+  mergeOrgNotificationReadState,
+} from '../utils/notificationNavigation';
+
+function getCurrentUserId() {
+  const user = useAuthStore.getState()?.user;
+  return user?.id || user?.sub || null;
+}
 
 export const useNotificationStore = create((set, get) => ({
   notifications: [],
@@ -11,10 +22,12 @@ export const useNotificationStore = create((set, get) => ({
     set({ loading: true });
     try {
       const res = await notificationsService.list();
+      const userId = getCurrentUserId();
+      const merged = mergeOrgNotificationReadState(res.data || [], userId);
       set({
-        notifications: res.data || [],
+        notifications: merged.notifications,
         sentHistory: res.sent_history || [],
-        unreadCount: Number(res.unread_count || 0),
+        unreadCount: merged.unreadCount,
         loading: false,
       });
     } catch {
@@ -23,27 +36,50 @@ export const useNotificationStore = create((set, get) => ({
   },
 
   markAsRead: async (id) => {
+    const state = get();
+    const target = state.notifications.find((n) => n.id === id);
+    const wasUnread = target && !target.read_at;
+    const now = new Date().toISOString();
+
+    if (target && target.user_id == null) {
+      const userId = getCurrentUserId();
+      const ids = getReadOrgNotifIds(userId);
+      ids.add(String(id));
+      persistReadOrgNotifIds(userId, ids);
+    }
+
+    set((prev) => ({
+      notifications: prev.notifications.map((n) =>
+        n.id === id ? { ...n, read_at: n.read_at || now } : n
+      ),
+      unreadCount: wasUnread ? Math.max(0, prev.unreadCount - 1) : prev.unreadCount,
+    }));
+
     try {
       await notificationsService.markRead(id);
-      set((state) => ({
-        notifications: state.notifications.map((n) =>
-          n.id === id ? { ...n, read_at: n.read_at || new Date().toISOString() } : n
-        ),
-        unreadCount: Math.max(0, state.unreadCount - 1),
-      }));
     } catch {
       // ignore
     }
   },
 
   markAllAsRead: async () => {
+    const state = get();
+    const userId = getCurrentUserId();
+    const orgNotifIds = state.notifications.filter((n) => n.user_id == null).map((n) => String(n.id));
+    if (orgNotifIds.length > 0) {
+      const ids = getReadOrgNotifIds(userId);
+      orgNotifIds.forEach((id) => ids.add(id));
+      persistReadOrgNotifIds(userId, ids);
+    }
+
+    const now = new Date().toISOString();
+    set((prev) => ({
+      notifications: prev.notifications.map((n) => ({ ...n, read_at: n.read_at || now })),
+      unreadCount: 0,
+    }));
+
     try {
       await notificationsService.markAllRead();
-      const now = new Date().toISOString();
-      set((state) => ({
-        notifications: state.notifications.map((n) => ({ ...n, read_at: n.read_at || now })),
-        unreadCount: 0,
-      }));
     } catch {
       // ignore
     }
@@ -51,4 +87,3 @@ export const useNotificationStore = create((set, get) => ({
 
   reset: () => set({ notifications: [], sentHistory: [], unreadCount: 0, loading: false }),
 }));
-
