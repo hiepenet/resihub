@@ -25,6 +25,7 @@ import {
   releaseInvoiceCreditsInTx,
   notifyBuildingInvoiceAdjustmentApprovers,
 } from '../services/invoiceLifecycle.js';
+import { notifyUser } from '../services/notificationService.js';
 
 const router = express.Router();
 const PERIOD_RE = /^\d{4}-\d{2}$/;
@@ -102,7 +103,13 @@ export async function issueDraftInvoiceInTx(
             uRes.rows[0].id,
             `Phát hành hóa đơn ${inv.invoice_code}`,
             `Hóa đơn kỳ ${inv.period} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
-            JSON.stringify({ invoice_id: invoiceId, invoice_code: inv.invoice_code }),
+            JSON.stringify({
+              invoice_id: invoiceId,
+              invoice_code: inv.invoice_code,
+              contract_id: inv.contract_id,
+              building_id: inv.building_id,
+              apartment_id: inv.apartment_id,
+            }),
           ]
         );
       }
@@ -1603,6 +1610,34 @@ router.post(
         [adjId]
       );
       await client.query('COMMIT');
+
+      try {
+        const adjMeta = await adminPool.query(
+          `SELECT ia.org_id, ia.building_id, ia.invoice_id, ia.created_by, i.invoice_code, i.contract_id
+           FROM invoice_adjustment ia
+           JOIN invoice i ON i.id = ia.invoice_id
+           WHERE ia.id = $1
+           LIMIT 1`,
+          [adjId]
+        );
+        const row = adjMeta.rows[0];
+        if (row && row.created_by && row.created_by !== req.user.sub) {
+          await notifyUser(row.org_id, row.created_by, {
+            title: `Đã phê duyệt điều chỉnh hóa đơn ${row.invoice_code}`,
+            content: `Đề nghị điều chỉnh hóa đơn ${row.invoice_code} của bạn đã được phê duyệt.`,
+            type: 'INVOICE_ADJUSTED',
+            payload: {
+              invoice_id: row.invoice_id,
+              adjustment_id: adjId,
+              contract_id: row.contract_id,
+              building_id: row.building_id,
+            },
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Approve Adjustment Notification Warning]:', notifErr);
+      }
+
       res.json({ message: 'Phê duyệt điều chỉnh hóa đơn thành công.', data: rpcRes.rows[0]?.result });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -1653,6 +1688,35 @@ router.post(
         [adjId, reason.trim()]
       );
       await client.query('COMMIT');
+
+      try {
+        const adjMeta = await adminPool.query(
+          `SELECT ia.org_id, ia.building_id, ia.invoice_id, ia.created_by, i.invoice_code, i.contract_id
+           FROM invoice_adjustment ia
+           JOIN invoice i ON i.id = ia.invoice_id
+           WHERE ia.id = $1
+           LIMIT 1`,
+          [adjId]
+        );
+        const row = adjMeta.rows[0];
+        if (row && row.created_by && row.created_by !== req.user.sub) {
+          await notifyUser(row.org_id, row.created_by, {
+            title: `Từ chối điều chỉnh hóa đơn ${row.invoice_code}`,
+            content: `Đề nghị điều chỉnh hóa đơn ${row.invoice_code} của bạn đã bị từ chối. Lý do: ${reason.trim()}`,
+            type: 'INVOICE_ADJUSTED',
+            payload: {
+              invoice_id: row.invoice_id,
+              adjustment_id: adjId,
+              contract_id: row.contract_id,
+              building_id: row.building_id,
+              decision: 'REJECTED',
+            },
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Reject Adjustment Notification Warning]:', notifErr);
+      }
+
       res.json({ message: 'Đã từ chối đề nghị điều chỉnh hóa đơn.', data: rpcRes.rows[0]?.result });
     } catch (err) {
       await client.query('ROLLBACK');

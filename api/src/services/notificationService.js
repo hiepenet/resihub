@@ -361,10 +361,11 @@ export async function notifyBuildingFourEyesApprovers(
        JOIN app_user au ON au.id = ur.user_id
        JOIN person p ON p.id = au.person_id
        LEFT JOIN building b ON b.id = $1
+       LEFT JOIN owner o ON o.id = b.owner_id
        WHERE p.org_id = $2
          AND au.status = 'ACTIVE'
          AND r.code = 'OWNER'
-         AND (ur.building_id = $1 OR ur.building_id IS NULL OR b.owner_id = ur.user_id)`,
+         AND (ur.building_id = $1 OR ur.building_id IS NULL OR o.person_id = au.person_id)`,
       [buildingId, orgId]
     );
     recipients = ownerRes.rows

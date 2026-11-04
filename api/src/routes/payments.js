@@ -9,6 +9,10 @@ import {
   scopedBuildingFilter,
   checkBuildingAccess,
 } from '../services/ownerScope.js';
+import {
+  notifyBuildingFourEyesApprovers,
+  notifyUser,
+} from '../services/notificationService.js';
 
 export const receivablesRouter = express.Router();
 const router = express.Router();
@@ -409,7 +413,12 @@ router.patch(
             pay.reported_by,
             `Xác nhận thanh toán #${pay.payment_code}`,
             `Khoản thanh toán ${Number(pay.amount).toLocaleString('vi-VN')} ₫ của bạn đã được Ban quản lý đối soát và xác nhận.`,
-            JSON.stringify({ payment_id: id, invoice_id: pay.invoice_id }),
+            JSON.stringify({
+              payment_id: id,
+              invoice_id: pay.invoice_id,
+              contract_id: pay.contract_id,
+              building_id: pay.building_id,
+            }),
           ]
         );
       }
@@ -491,7 +500,12 @@ router.patch(
             pay.reported_by,
             `Từ chối chứng từ #${pay.payment_code}`,
             `Chứng từ thanh toán của bạn chưa được chấp nhận. Lý do: ${reason.trim()}`,
-            JSON.stringify({ payment_id: id }),
+            JSON.stringify({
+              payment_id: id,
+              invoice_id: pay.invoice_id,
+              contract_id: pay.contract_id,
+              building_id: pay.building_id,
+            }),
           ]
         );
       }
@@ -886,6 +900,45 @@ router.post(
       );
 
       await client.query('COMMIT');
+
+      try {
+        const metaRes = await adminPool.query(
+          `SELECT a.code AS apartment_code, au.id AS resident_user_id
+           FROM credit_balance cb
+           LEFT JOIN contract c ON c.id = cb.contract_id
+           LEFT JOIN apartment a ON a.id = c.apartment_id
+           LEFT JOIN tenant t ON t.id = COALESCE(cb.tenant_id, c.primary_tenant_id)
+           LEFT JOIN app_user au ON au.person_id = t.person_id AND au.status = 'ACTIVE'
+           WHERE cb.id = $1
+           LIMIT 1`,
+          [targetCreditRow.id]
+        );
+        const aptCode = metaRes.rows[0]?.apartment_code || '';
+        const residentUserId = metaRes.rows[0]?.resident_user_id || null;
+        const refundPayload = {
+          credit_id: targetCreditRow.id,
+          contract_id: targetCreditRow.contract_id,
+          building_id: targetCreditRow.building_id,
+          refund_amount: reqRefundAmt,
+        };
+        await notifyBuildingFourEyesApprovers(orgId, targetCreditRow.building_id, req.user.sub, {
+          title: `Chờ phê duyệt hoàn số dư tín dụng${aptCode ? ` — Phòng ${aptCode}` : ''}`,
+          content: `Quản lý vừa lập đề nghị hoàn số dư tín dụng ${reqRefundAmt.toLocaleString('vi-VN')} ₫${aptCode ? ` cho căn ${aptCode}` : ''}. Vui lòng kiểm tra và phê duyệt (4 mắt).`,
+          type: 'PENDING_CREDIT_REFUND',
+          payload: refundPayload,
+        });
+        if (residentUserId) {
+          await notifyUser(orgId, residentUserId, {
+            title: `Đề nghị hoàn tiền số dư tín dụng đang chờ duyệt`,
+            content: `Ban Quản Lý đã lập đề nghị hoàn trả ${reqRefundAmt.toLocaleString('vi-VN')} ₫ từ sổ tín dụng của bạn và đang trình cấp phê duyệt.`,
+            type: 'CREDIT_REFUND_PENDING',
+            payload: refundPayload,
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Credit Refund Notification Warning]:', notifErr);
+      }
+
       res.status(201).json({
         message: 'Đã tạo yêu cầu hoàn trả số dư tín dụng thành công.',
         data: targetCreditRow,
@@ -919,6 +972,35 @@ router.post(
         [id]
       );
       await client.query('COMMIT');
+
+      try {
+        const cbMeta = await adminPool.query(
+          `SELECT cb.org_id, cb.building_id, cb.contract_id, cb.amount, cb.refund_meta, a.code AS apartment_code
+           FROM credit_balance cb
+           LEFT JOIN contract c ON c.id = cb.contract_id
+           LEFT JOIN apartment a ON a.id = c.apartment_id
+           WHERE cb.id = $1
+           LIMIT 1`,
+          [id]
+        );
+        const row = cbMeta.rows[0];
+        const requesterId = row?.refund_meta?.requested_by;
+        if (row && requesterId && requesterId !== req.user.sub) {
+          await notifyUser(row.org_id, requesterId, {
+            title: `Đã phê duyệt hoàn số dư tín dụng${row.apartment_code ? ` — Phòng ${row.apartment_code}` : ''}`,
+            content: `Đề nghị hoàn số dư tín dụng ${Number(row.amount || 0).toLocaleString('vi-VN')} ₫ của bạn đã được phê duyệt.`,
+            type: 'CREDIT_REFUNDED',
+            payload: {
+              credit_id: id,
+              contract_id: row.contract_id,
+              building_id: row.building_id,
+            },
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Approve Credit Refund Notification Warning]:', notifErr);
+      }
+
       res.json({ message: 'Phê duyệt hoàn số dư tín dụng thành công.', data: rpcRes.rows[0]?.result });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -969,6 +1051,35 @@ router.post(
         [id, reason.trim()]
       );
       await client.query('COMMIT');
+
+      try {
+        const cbMeta = await adminPool.query(
+          `SELECT cb.org_id, cb.building_id, cb.contract_id, cb.amount, cb.refund_meta, a.code AS apartment_code
+           FROM credit_balance cb
+           LEFT JOIN contract c ON c.id = cb.contract_id
+           LEFT JOIN apartment a ON a.id = c.apartment_id
+           WHERE cb.id = $1
+           LIMIT 1`,
+          [id]
+        );
+        const row = cbMeta.rows[0];
+        const requesterId = row?.refund_meta?.requested_by || row?.created_by;
+        if (row && requesterId && requesterId !== req.user.sub) {
+          await notifyUser(row.org_id, requesterId, {
+            title: `Từ chối đề nghị hoàn số dư tín dụng${row.apartment_code ? ` — Phòng ${row.apartment_code}` : ''}`,
+            content: `Đề nghị hoàn số dư tín dụng của bạn bị từ chối. Lý do: ${reason.trim()}`,
+            type: 'CREDIT_REFUND_REJECTED',
+            payload: {
+              credit_id: id,
+              contract_id: row.contract_id,
+              building_id: row.building_id,
+            },
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Reject Credit Refund Notification Warning]:', notifErr);
+      }
+
       res.json({ message: 'Đã từ chối yêu cầu hoàn số dư tín dụng.', data: rpcRes.rows[0]?.result });
     } catch (err) {
       await client.query('ROLLBACK');

@@ -756,6 +756,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
       const payload = {
         invoice_id: inv.id,
         contract_id: inv.contract_id,
+        building_id: inv.building_id,
         reminder_stage: stageKey,
         days_diff: daysDiff,
         remaining_amount: remainingAmount,
@@ -877,6 +878,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
           `Hợp đồng thuê căn ${c.apartment_code} (${c.building_name}) còn ${daysLeft} ngày là hết hạn (ngày kết thúc: ${endDateStr}). Vui lòng liên hệ để gia hạn hoặc chuẩn bị bàn giao.`,
           JSON.stringify({
             contract_id: c.id,
+            building_id: c.building_id,
             days_left: daysLeft,
             as_of_date: effectiveDateYmd,
             link: item.link,
@@ -1161,6 +1163,7 @@ export async function runOverdueDepositSettlementAlerts(options = {}) {
           JSON.stringify({
             deposit_id: dep.deposit_id,
             contract_id: dep.contract_id,
+            building_id: dep.building_id,
             days_since: days,
             as_of_date: todayStr,
             link: '/admin/deposits',
@@ -1328,7 +1331,7 @@ export async function escalateOverdueServiceRequests(
         apartment_id: sr.apartment_id,
         priority: sr.priority,
         sla_due_at: sr.sla_due_at,
-        link: '/admin/service-requests',
+        link: '/admin/maintenance',
       };
 
       for (const rec of recipientsRes.rows) {

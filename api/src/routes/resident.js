@@ -24,6 +24,7 @@ import {
   validateServiceRequestTransition,
 } from '../services/serviceRequestRules.js';
 import { triggerAsyncTicketTriage } from '../services/aiGateway.js';
+import { notifyBuildingManagers } from '../services/notificationService.js';
 
 const router = express.Router();
 
@@ -1639,6 +1640,35 @@ router.post('/payments/report', authenticateToken, idempotencyGuard(), async (re
     );
 
     await client.query('COMMIT');
+
+    try {
+      const aptMetaRes = await adminPool.query(
+        `SELECT a.code AS apartment_code, i.invoice_code
+         FROM invoice i
+         LEFT JOIN apartment a ON a.id = i.apartment_id
+         WHERE i.id = $1
+         LIMIT 1`,
+        [inv.id]
+      );
+      const aptCode = aptMetaRes.rows[0]?.apartment_code || '';
+      const invCode = aptMetaRes.rows[0]?.invoice_code || inv.invoice_code || '';
+      await notifyBuildingManagers(inv.org_id, inv.building_id, {
+        title: `Cư dân báo đã thanh toán ${invCode ? `#${invCode}` : ''}`.trim(),
+        content: `Cư dân${aptCode ? ` phòng ${aptCode}` : ''} vừa gửi chứng từ thanh toán ${Math.round(numAmount).toLocaleString('vi-VN')} ₫${invCode ? ` cho hóa đơn ${invCode}` : ''}. Vui lòng đối soát và xác nhận.`,
+        type: 'PAYMENT_REPORTED',
+        payload: {
+          payment_id: finalPay.id,
+          invoice_id: inv.id,
+          contract_id: inv.contract_id,
+          building_id: inv.building_id,
+          apartment_id: inv.apartment_id || null,
+          amount: Math.round(numAmount),
+        },
+      });
+    } catch (notifErr) {
+      console.error('[Report Payment Notification Warning]:', notifErr);
+    }
+
     res.status(201).json({
       message: 'Đã gửi thông báo thanh toán kèm chứng từ. Ban Quản Lý sẽ đối soát và xác nhận sớm nhất!',
       data: finalPay,
@@ -1885,6 +1915,28 @@ router.post('/services', authenticateToken, idempotencyGuard(), async (req, res)
       [req.user.sub, newSub.id, JSON.stringify(newSub)]
     );
 
+    try {
+      const aptCodeRes = await adminPool.query('SELECT code FROM apartment WHERE id = $1 LIMIT 1', [
+        c.apartment_id,
+      ]);
+      const aptCode = aptCodeRes.rows[0]?.code || '';
+      await notifyBuildingManagers(c.org_id, c.building_id, {
+        title: `Yêu cầu đăng ký dịch vụ "${svc.name}"${aptCode ? ` — Phòng ${aptCode}` : ''}`,
+        content: `Cư dân${aptCode ? ` căn ${aptCode}` : ''} vừa gửi yêu cầu đăng ký dịch vụ "${svc.name}" (SL: ${qty}). Vui lòng kiểm tra và phê duyệt.`,
+        type: 'SERVICE_SUBSCRIPTION_REQUESTED',
+        payload: {
+          subscription_id: newSub.id,
+          service_id: svc.id,
+          contract_id: c.contract_id,
+          building_id: c.building_id,
+          apartment_id: c.apartment_id,
+          status: newSub.status,
+        },
+      });
+    } catch (notifErr) {
+      console.error('[Subscribe Service Notification Warning]:', notifErr);
+    }
+
     res.status(201).json({
       message: 'Đã gửi yêu cầu đăng ký dịch vụ, chờ Ban Quản Lý phê duyệt.',
       data: newSub,
@@ -2000,6 +2052,37 @@ router.patch('/services/:id/cancel', authenticateToken, idempotencyGuard(), asyn
     );
 
     await client.query('COMMIT');
+
+    if (nextStatus === 'CANCELLATION_PENDING') {
+      try {
+        const metaRes = await adminPool.query(
+          `SELECT sc.name AS service_name, a.code AS apartment_code
+           FROM service_subscription ss
+           LEFT JOIN service_catalog sc ON sc.id = ss.service_id
+           LEFT JOIN apartment a ON a.id = ss.apartment_id
+           WHERE ss.id = $1
+           LIMIT 1`,
+          [id]
+        );
+        const svcName = metaRes.rows[0]?.service_name || 'dịch vụ tiện ích';
+        const aptCode = metaRes.rows[0]?.apartment_code || '';
+        await notifyBuildingManagers(sub.org_id, sub.building_id, {
+          title: `Yêu cầu hủy dịch vụ "${svcName}"${aptCode ? ` — Phòng ${aptCode}` : ''}`,
+          content: `Cư dân${aptCode ? ` căn ${aptCode}` : ''} vừa gửi yêu cầu hủy dịch vụ "${svcName}" từ ngày ${effEnd}. Vui lòng kiểm tra và xác nhận phí pro-rata.`,
+          type: 'SERVICE_CANCELLATION_REQUESTED',
+          payload: {
+            subscription_id: updatedRow.id,
+            service_id: sub.service_id,
+            contract_id: sub.contract_id,
+            building_id: sub.building_id,
+            apartment_id: sub.apartment_id,
+            status: nextStatus,
+          },
+        });
+      } catch (notifErr) {
+        console.error('[Cancel Service Notification Warning]:', notifErr);
+      }
+    }
 
     res.json({
       message: nextStatus === 'TERMINATED' ? 'Đã hủy yêu cầu đăng ký dịch vụ.' : 'Đã gửi yêu cầu hủy dịch vụ tới Ban Quản Lý.',
@@ -2240,7 +2323,7 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
     }
 
     const contractRes = await pool.query(
-      `SELECT c.id, c.building_id, b.org_id, c.end_date, a.code as apartment_code
+      `SELECT c.id, c.building_id, c.apartment_id, b.org_id, c.end_date, a.code as apartment_code
        FROM contract c
        JOIN tenant t ON t.id = c.primary_tenant_id
        JOIN apartment a ON a.id = c.apartment_id
@@ -2281,6 +2364,24 @@ router.post('/contract-requests', authenticateToken, async (req, res) => {
        VALUES ($1, 'CREATE', 'contract_request', $2, $3)`,
       [userId, insertRes.rows[0].id, JSON.stringify({ type, desired_date, note, contract_id: contract.id })]
     );
+
+    try {
+      const reqLabel = type === 'TERMINATION' ? 'chấm dứt hợp đồng' : 'gia hạn hợp đồng';
+      await notifyBuildingManagers(contract.org_id, contract.building_id, {
+        title: `Đề nghị ${reqLabel} — Phòng ${contract.apartment_code}`,
+        content: `Cư dân căn ${contract.apartment_code} vừa gửi đề nghị ${reqLabel}${desired_date ? ` (ngày mong muốn: ${String(desired_date).slice(0, 10)})` : ''}. Vui lòng xem xét và phản hồi.`,
+        type: 'CONTRACT_REQUEST_SUBMITTED',
+        payload: {
+          request_id: insertRes.rows[0].id,
+          contract_id: contract.id,
+          building_id: contract.building_id,
+          apartment_id: contract.apartment_id,
+          request_type: type,
+        },
+      });
+    } catch (notifErr) {
+      console.error('[Contract Request Notification Warning]:', notifErr);
+    }
 
     const noticeNotice = type === 'TERMINATION'
       ? 'Theo quy định (AC-006.1), đề nghị chấm dứt cần báo trước tối thiểu 30 ngày để BQL sắp xếp kiểm tra bàn giao phòng.'
