@@ -755,8 +755,8 @@ export function ServiceRequestsPage() {
 
       {/* Bộ lọc */}
       <Card className="p-4 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          <div className="lg:col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
+          <div className="sm:col-span-2 xl:col-span-3">
             <SearchBar
               value={search}
               onChange={setSearch}
@@ -764,18 +764,21 @@ export function ServiceRequestsPage() {
             />
           </div>
           <Select
+            containerClassName="xl:col-span-3"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
             placeholder="Tất cả hạng mục"
             options={CATEGORY_OPTIONS}
           />
           <Select
+            containerClassName="xl:col-span-3"
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value)}
             placeholder="Tất cả mức ưu tiên"
             options={PRIORITY_OPTIONS}
           />
           <Select
+            containerClassName="xl:col-span-3"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             placeholder="Tất cả trạng thái"

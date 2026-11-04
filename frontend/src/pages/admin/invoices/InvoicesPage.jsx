@@ -419,13 +419,13 @@ export function InvoicesPage() {
 
       {/* Bộ lọc */}
       <Card className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-center">
-          <div className="flex items-center gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3 items-center">
+          <div className="flex items-center gap-2 xl:col-span-4">
             <input
               type="month"
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
-              className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-800 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
+              className="w-full min-h-[44px] sm:min-h-0 sm:h-9 px-3 rounded-lg border border-slate-200 bg-white text-base sm:text-sm font-medium text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04)] focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
             />
             {period ? (
               <button
@@ -439,13 +439,14 @@ export function InvoicesPage() {
           </div>
 
           <Select
+            containerClassName="xl:col-span-3"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             placeholder="Tất cả trạng thái"
             options={STATUS_OPTIONS}
           />
 
-          <div className="sm:col-span-2 lg:col-span-3">
+          <div className="sm:col-span-2 xl:col-span-5">
             <SearchBar
               value={search}
               onChange={setSearch}

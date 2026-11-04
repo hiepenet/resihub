@@ -1152,8 +1152,8 @@ export function PaymentsPage() {
           ) : null}
 
           <Card className="p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <div className="sm:col-span-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
+              <div className="sm:col-span-2 xl:col-span-6">
                 <SearchBar
                   value={paySearch}
                   onChange={setPaySearch}
@@ -1161,6 +1161,7 @@ export function PaymentsPage() {
                 />
               </div>
               <Select
+                containerClassName="xl:col-span-3"
                 value={payStatusFilter}
                 onChange={(e) => setPayStatusFilter(e.target.value)}
                 placeholder="Tất cả trạng thái"
@@ -1170,6 +1171,7 @@ export function PaymentsPage() {
                 }))}
               />
               <Select
+                containerClassName="xl:col-span-3"
                 value={payMethodFilter}
                 onChange={(e) => setPayMethodFilter(e.target.value)}
                 placeholder="Tất cả phương thức"
@@ -1245,8 +1247,8 @@ export function PaymentsPage() {
           </div>
 
           <Card className="p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-center">
-              <div className="sm:col-span-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3 items-center">
+              <div className="sm:col-span-2 xl:col-span-4">
                 <SearchBar
                   value={recSearch}
                   onChange={setRecSearch}
@@ -1254,6 +1256,7 @@ export function PaymentsPage() {
                 />
               </div>
               <Select
+                containerClassName="xl:col-span-3"
                 value={agingBucketFilter}
                 onChange={(e) => setAgingBucketFilter(e.target.value)}
                 placeholder="Tất cả nhóm tuổi nợ (AC-016.1)"
@@ -1263,6 +1266,7 @@ export function PaymentsPage() {
                 }))}
               />
               <Select
+                containerClassName="xl:col-span-3"
                 value={recStatusFilter}
                 onChange={(e) => setRecStatusFilter(e.target.value)}
                 options={[
@@ -1272,7 +1276,12 @@ export function PaymentsPage() {
                   { value: 'WRITTEN_OFF', label: 'Đã xóa nợ' },
                 ]}
               />
-              <Button variant="outline" icon={Download} onClick={handleExportAgingCsv}>
+              <Button
+                variant="outline"
+                icon={Download}
+                onClick={handleExportAgingCsv}
+                className="sm:col-span-2 xl:col-span-2 justify-center whitespace-nowrap"
+              >
                 Xuất CSV Aging
               </Button>
             </div>

@@ -300,8 +300,8 @@ export function ServiceCatalogPage() {
 
       {/* Bộ lọc */}
       <Card className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          <div className="sm:col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
+          <div className="sm:col-span-2 xl:col-span-6">
             <SearchBar
               value={search}
               onChange={setSearch}
@@ -309,12 +309,14 @@ export function ServiceCatalogPage() {
             />
           </div>
           <Select
+            containerClassName="xl:col-span-3"
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value)}
             placeholder="Tất cả nhóm dịch vụ"
             options={CATEGORY_OPTIONS}
           />
           <Select
+            containerClassName="xl:col-span-3"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             options={[

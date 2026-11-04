@@ -1011,8 +1011,12 @@ export function NotificationsPage() {
             } space-y-4`}
           >
             <Card padding={false} className="overflow-hidden">
-              <div className="p-4 border-b border-slate-100 bg-slate-50/50 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-1">
+              <div
+                className={`p-4 border-b border-slate-100 bg-slate-50/50 grid grid-cols-1 sm:grid-cols-2 ${
+                  canSendNotifications ? '' : 'xl:grid-cols-12'
+                } gap-3`}
+              >
+                <div className={canSendNotifications ? 'sm:col-span-2' : 'sm:col-span-2 xl:col-span-6'}>
                   <SearchBar
                     value={search}
                     onChange={setSearch}
@@ -1020,12 +1024,14 @@ export function NotificationsPage() {
                   />
                 </div>
                 <Select
+                  containerClassName={canSendNotifications ? '' : 'xl:col-span-3'}
                   value={annStatusFilter}
                   onChange={(e) => setAnnStatusFilter(e.target.value)}
                   placeholder="Tất cả trạng thái"
                   options={ANNOUNCEMENT_STATUS_OPTIONS}
                 />
                 <Select
+                  containerClassName={canSendNotifications ? '' : 'xl:col-span-3'}
                   value={annScopeFilter}
                   onChange={(e) => setAnnScopeFilter(e.target.value)}
                   placeholder="Tất cả phạm vi"

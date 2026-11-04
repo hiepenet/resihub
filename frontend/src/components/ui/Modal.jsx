@@ -42,7 +42,7 @@ export function Modal({
           aria-labelledby={title ? titleId : undefined}
           className="relative z-10 w-full max-w-lg bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col"
         >
-          <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-start justify-between gap-4">
+          <div className="px-5 sm:px-6 py-4 border-b border-slate-200 flex items-start justify-between gap-4 shrink-0">
             <div className="min-w-0">
               <h3 id={titleId} className="text-base font-semibold text-slate-900 break-words">
                 {title}
@@ -60,11 +60,15 @@ export function Modal({
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className={`flex-1 overflow-y-auto p-4 sm:p-6 ${footer ? '' : 'pb-safe'}`}>
+          <div
+            className={`flex-1 overflow-y-auto ${
+              footer ? 'p-5 sm:p-6' : 'px-5 sm:px-6 pt-5 sm:pt-6 pb-modal-body-safe'
+            }`}
+          >
             {children}
           </div>
           {footer ? (
-            <div className="px-4 sm:px-6 py-3.5 pb-safe border-t border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-end gap-2.5">
+            <div className="px-5 sm:px-6 pt-4 pb-modal-footer-safe border-t border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-end gap-2.5 shrink-0">
               {footer}
             </div>
           ) : null}
@@ -74,7 +78,7 @@ export function Modal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/45 backdrop-blur-[1px] overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 md:p-6 bg-slate-900/45 backdrop-blur-[1px] overflow-y-auto">
       <div className="fixed inset-0" onClick={onClose} aria-hidden="true" />
       <div
         role="dialog"
@@ -87,7 +91,7 @@ export function Modal({
         <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 shrink-0" aria-hidden="true">
           <span className="w-10 h-1 rounded-full bg-slate-300" />
         </div>
-        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-100 flex items-start justify-between gap-4 shrink-0">
+        <div className="px-5 sm:px-6 py-4 border-b border-slate-100 flex items-start justify-between gap-4 shrink-0">
           <div className="min-w-0">
             <h3 id={titleId} className="text-base font-semibold text-slate-900 break-words">
               {title}
@@ -105,11 +109,15 @@ export function Modal({
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className={`p-4 sm:p-6 overflow-y-auto flex-1 ${footer ? '' : 'pb-safe'}`}>
+        <div
+          className={`overflow-y-auto flex-1 ${
+            footer ? 'p-5 sm:p-6' : 'px-5 sm:px-6 pt-5 sm:pt-6 pb-modal-body-safe'
+          }`}
+        >
           {children}
         </div>
         {footer ? (
-          <div className="px-4 sm:px-6 py-3.5 pb-safe border-t border-slate-100 bg-slate-50/80 flex flex-wrap items-center justify-end gap-2.5 shrink-0">
+          <div className="px-5 sm:px-6 pt-4 pb-modal-footer-safe border-t border-slate-100 bg-slate-50/80 flex flex-wrap items-center justify-end gap-2.5 shrink-0">
             {footer}
           </div>
         ) : null}

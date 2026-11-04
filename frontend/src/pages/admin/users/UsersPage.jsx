@@ -584,8 +584,8 @@ export function UsersPage() {
       {activeTab === 'users' ? (
         <div className="space-y-4">
           <Card className="p-4 space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <div className="sm:col-span-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-3">
+              <div className="sm:col-span-2 xl:col-span-6">
                 <SearchBar
                   value={search}
                   onChange={setSearch}
@@ -593,12 +593,14 @@ export function UsersPage() {
                 />
               </div>
               <Select
+                containerClassName="xl:col-span-3"
                 value={roleFilter}
                 onChange={(e) => setRoleFilter(e.target.value)}
                 placeholder="Tất cả vai trò"
                 options={ALL_ROLE_OPTIONS}
               />
               <Select
+                containerClassName="xl:col-span-3"
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
                 placeholder="Tất cả trạng thái"

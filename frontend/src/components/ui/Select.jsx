@@ -27,7 +27,8 @@ export function Select({
   id,
   size = 'md',
   icon: LeftIcon,
-  searchPlaceholder = 'Nhập từ khóa để lọc nhanh...',
+  searchable,
+  searchPlaceholder,
   emptyText = 'Không tìm thấy mục phù hợp',
   className = '',
   containerClassName = '',
@@ -104,6 +105,13 @@ export function Select({
     [normalizedOptions, currentValStr]
   );
 
+  const showSearch =
+    searchable !== undefined
+      ? Boolean(searchable)
+      : normalizedOptions.length > 5 || Boolean(searchPlaceholder);
+
+  const effectiveSearchPlaceholder = searchPlaceholder || 'Nhập từ khóa để lọc nhanh...';
+
   const filteredOptions = useMemo(() => {
     const q = normalizeVnSearch(query);
     if (!q) return normalizedOptions;
@@ -115,10 +123,23 @@ export function Select({
     [normalizedOptions]
   );
 
-  const maxOptionLength = useMemo(
+  const longestPrimaryLen = useMemo(
     () =>
       normalizedOptions.reduce(
-        (maxLen, o) => Math.max(maxLen, String(o.label || '').length, String(o.sublabel || '').length),
+        (maxLen, o) =>
+          Math.max(
+            maxLen,
+            String(o.label || '').length + (o.badge ? String(o.badge).length + 4 : 0)
+          ),
+        0
+      ),
+    [normalizedOptions]
+  );
+
+  const longestSubLen = useMemo(
+    () =>
+      normalizedOptions.reduce(
+        (maxLen, o) => Math.max(maxLen, String(o.sublabel || '').length),
         0
       ),
     [normalizedOptions]
@@ -129,16 +150,17 @@ export function Select({
     const rect = triggerRef.current.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
     const placeAbove = spaceBelow < 260 && rect.top > 280;
-    const minSmartWidth = hasRichOptions
-      ? 360
-      : maxOptionLength > 45
-      ? 420
-      : maxOptionLength > 28
-      ? 320
-      : 250;
+    const estimatedWidth = Math.min(
+      560,
+      Math.max(
+        220,
+        Math.ceil(longestPrimaryLen * 8.4) + (hasRichOptions ? 96 : 64),
+        Math.ceil(longestSubLen * 7.2) + 96
+      )
+    );
     const desiredWidth = Math.min(
       window.innerWidth - 16,
-      Math.max(rect.width, minSmartWidth)
+      Math.max(rect.width, estimatedWidth)
     );
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - desiredWidth - 8));
     setCoords({
@@ -147,7 +169,7 @@ export function Select({
       width: desiredWidth,
       placeAbove,
     });
-  }, [hasRichOptions, maxOptionLength]);
+  }, [hasRichOptions, longestPrimaryLen, longestSubLen]);
 
   const openMenu = useCallback(() => {
     if (disabled) return;
@@ -168,11 +190,12 @@ export function Select({
     const isCoarsePointer =
       typeof window !== 'undefined' &&
       Boolean(window.matchMedia?.('(pointer: coarse)').matches);
-    const focusTimer = isCoarsePointer
-      ? null
-      : requestAnimationFrame(() => {
-          searchInputRef.current?.focus();
-        });
+    const focusTimer =
+      isCoarsePointer || !showSearch
+        ? null
+        : requestAnimationFrame(() => {
+            searchInputRef.current?.focus();
+          });
 
     const handleOutside = (e) => {
       if (
@@ -196,7 +219,7 @@ export function Select({
       window.removeEventListener('resize', handleReposition);
       window.removeEventListener('scroll', handleReposition, true);
     };
-  }, [open, closeMenu, updatePosition]);
+  }, [open, showSearch, closeMenu, updatePosition]);
 
   useEffect(() => {
     setHighlightIdx(0);
@@ -251,8 +274,8 @@ export function Select({
 
   const sizeClasses =
     size === 'sm'
-      ? 'min-h-[44px] sm:min-h-[32px] py-1.5 sm:py-1 pl-2.5 pr-8 text-sm sm:text-xs rounded-lg'
-      : 'min-h-[44px] sm:min-h-[36px] py-2 sm:py-1.5 pl-3 pr-8 text-base sm:text-sm rounded-lg';
+      ? 'min-h-[44px] sm:min-h-0 sm:h-8 py-1.5 sm:py-0 pl-2.5 pr-8 text-base sm:text-xs rounded-lg'
+      : 'min-h-[44px] sm:min-h-0 sm:h-9 py-2 sm:py-0 pl-3 pr-8 text-base sm:text-sm rounded-lg';
 
   const displayLabel = selectedOption
     ? selectedOption.label
@@ -261,7 +284,8 @@ export function Select({
     : 'Chọn...';
 
   const isMutedPlaceholder =
-    (!selectedOption && currentValStr === '') || Boolean(selectedOption?.isPlaceholder && currentValStr === '' && label);
+    (!selectedOption && currentValStr === '') ||
+    Boolean(selectedOption?.isPlaceholder && currentValStr === '' && label);
 
   return (
     <div className={label || error || hint ? `space-y-1.5 ${containerClassName}` : containerClassName}>
@@ -279,18 +303,19 @@ export function Select({
           id={fieldId}
           type="button"
           disabled={disabled}
+          title={displayLabel ? String(displayLabel) : undefined}
           aria-label={ariaLabel || label || placeholder || 'Chọn mục'}
           aria-haspopup="listbox"
           aria-expanded={open}
           onClick={() => (open ? closeMenu() : openMenu())}
           onKeyDown={handleKeyDown}
-          className={`w-full ${sizeClasses} border bg-white text-left flex items-center gap-2 transition-colors focus:outline-none focus:ring-2 ${
+          className={`w-full ${sizeClasses} border bg-white text-left flex items-center gap-2 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all focus:outline-none focus:ring-2 ${
             error
               ? 'border-rose-400 focus:border-rose-500 focus:ring-rose-500/20'
               : open
               ? 'border-primary-500 ring-2 ring-primary-500/20'
               : 'border-slate-200 hover:border-slate-300 focus:border-primary-500 focus:ring-primary-500/20'
-          } disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed ${className}`}
+          } disabled:bg-slate-50 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed ${className}`}
         >
           {selectedOption?.logo ? (
             <img
@@ -303,9 +328,9 @@ export function Select({
           ) : null}
 
           <span
-            title={!isMutedPlaceholder && displayLabel ? String(displayLabel) : undefined}
-            className={`flex-1 min-w-0 break-words leading-snug ${
-              isMutedPlaceholder ? 'text-slate-500' : 'text-slate-800 font-medium'
+            title={displayLabel ? String(displayLabel) : undefined}
+            className={`block flex-1 min-w-0 truncate whitespace-nowrap leading-normal ${
+              isMutedPlaceholder ? 'text-slate-500 font-normal' : 'text-slate-800 font-medium'
             }`}
           >
             {displayLabel}
@@ -337,42 +362,44 @@ export function Select({
                 width: `${coords.width}px`,
                 zIndex: 9999,
               }}
-              className="bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+              className="bg-white rounded-xl border border-slate-200/90 shadow-xl overflow-hidden animate-in fade-in zoom-in-95 duration-100"
             >
               {/* Ô input lọc dữ liệu nhanh */}
-              <div className="p-2 border-b border-slate-100 bg-slate-50/70">
-                <div className="relative flex items-center">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
-                  <input
-                    ref={searchInputRef}
-                    type="text"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder={searchPlaceholder}
-                    aria-label="Lọc danh sách tùy chọn"
-                    className="w-full min-h-[40px] sm:min-h-0 sm:h-8 pl-8 pr-7 rounded-lg border border-slate-200 bg-white text-base sm:text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/15"
-                  />
-                  {query ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setQuery('');
-                        searchInputRef.current?.focus();
-                      }}
-                      aria-label="Xóa từ khóa lọc"
-                      className="min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 p-1 inline-flex items-center justify-center text-slate-400 hover:text-slate-600 absolute right-1"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  ) : null}
+              {showSearch ? (
+                <div className="p-2 border-b border-slate-100 bg-slate-50/70">
+                  <div className="relative flex items-center">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
+                    <input
+                      ref={searchInputRef}
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder={effectiveSearchPlaceholder}
+                      aria-label="Lọc danh sách tùy chọn"
+                      className="w-full min-h-[40px] sm:min-h-0 sm:h-8 pl-8 pr-7 rounded-lg border border-slate-200 bg-white text-base sm:text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/15"
+                    />
+                    {query ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuery('');
+                          searchInputRef.current?.focus();
+                        }}
+                        aria-label="Xóa từ khóa lọc"
+                        className="min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 p-1 inline-flex items-center justify-center text-slate-400 hover:text-slate-600 absolute right-1"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
+              ) : null}
 
               {/* Danh sách kết quả */}
               <ul
                 role="listbox"
-                className="max-h-60 overflow-y-auto py-1 divide-y divide-slate-50"
+                className="max-h-64 overflow-y-auto p-1 space-y-0.5"
               >
                 {filteredOptions.length === 0 ? (
                   <li className="px-3 py-4 text-center text-xs text-slate-400">{emptyText}</li>
@@ -380,10 +407,14 @@ export function Select({
                   filteredOptions.map((opt, idx) => {
                     const isSelected = String(opt.value) === currentValStr;
                     const isHighlighted = idx === highlightIdx;
+                    const optionTooltip = opt.sublabel
+                      ? `${opt.label} — ${opt.sublabel}`
+                      : String(opt.label || '');
                     return (
                       <li
                         key={`${String(opt.value)}_${idx}`}
                         role="option"
+                        title={optionTooltip || undefined}
                         data-option-value={String(opt.value)}
                         aria-selected={isSelected}
                         onMouseEnter={() => setHighlightIdx(idx)}
@@ -391,13 +422,13 @@ export function Select({
                           e.preventDefault();
                           commitSelection(opt);
                         }}
-                        className={`min-h-[44px] sm:min-h-0 px-3 py-2 text-xs sm:text-sm flex items-center justify-between gap-2.5 cursor-pointer select-none transition-colors ${
+                        className={`min-h-[44px] sm:min-h-0 rounded-lg px-2.5 py-2 text-xs sm:text-sm flex items-center justify-between gap-2.5 cursor-pointer select-none transition-colors ${
                           opt.disabled
                             ? 'opacity-45 cursor-not-allowed'
                             : isSelected
-                            ? 'bg-primary-50/90 text-primary-800 font-semibold'
+                            ? 'bg-primary-50 text-primary-800 font-semibold'
                             : isHighlighted
-                            ? 'bg-slate-100/80 text-slate-900'
+                            ? 'bg-slate-100/90 text-slate-900'
                             : 'text-slate-700 hover:bg-slate-50'
                         }`}
                       >
@@ -410,8 +441,10 @@ export function Select({
                             />
                           ) : null}
                           <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                              <span className="whitespace-normal break-words leading-snug">{opt.label}</span>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="truncate whitespace-nowrap leading-snug">
+                                {opt.label}
+                              </span>
                               {opt.badge ? (
                                 <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-mono font-semibold text-slate-600 shrink-0">
                                   {opt.badge}
@@ -419,7 +452,7 @@ export function Select({
                               ) : null}
                             </div>
                             {opt.sublabel ? (
-                              <p className="text-[11px] text-slate-500 font-normal whitespace-normal break-words leading-snug mt-0.5">
+                              <p className="text-[11px] text-slate-500 font-normal truncate whitespace-nowrap leading-snug mt-0.5">
                                 {opt.sublabel}
                               </p>
                             ) : null}

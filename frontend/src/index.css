@@ -32,6 +32,20 @@
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
+  .pb-modal-body-safe {
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  @media (min-width: 640px) {
+    .pb-modal-body-safe {
+      padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    }
+  }
+
+  .pb-modal-footer-safe {
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  }
+
   .mb-safe {
     margin-bottom: env(safe-area-inset-bottom, 0px);
   }

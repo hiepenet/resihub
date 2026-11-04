@@ -354,7 +354,7 @@ export function AuditLogsView({ lockedScope = '' } = {}) {
   return (
     <div className="space-y-4">
       <Card className="p-4 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-3">
           <div className="sm:col-span-2">
             <SearchBar
               value={search}
@@ -478,18 +478,22 @@ export function AuditLogsView({ lockedScope = '' } = {}) {
               Trang <strong className="text-slate-900">{page}</strong> /{' '}
               <strong className="text-slate-900">{totalPages}</strong> ({total} dòng)
             </span>
-            <select
-              value={limit}
-              onChange={(e) => {
-                setLimit(Number(e.target.value));
-                setPage(1);
-              }}
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-            >
-              <option value={20}>20 / trang</option>
-              <option value={50}>50 / trang</option>
-              <option value={100}>100 / trang</option>
-            </select>
+            <div className="w-32">
+              <Select
+                size="sm"
+                aria-label="Số dòng mỗi trang"
+                value={String(limit)}
+                onChange={(e) => {
+                  setLimit(Number(e.target.value));
+                  setPage(1);
+                }}
+                options={[
+                  { value: '20', label: '20 / trang' },
+                  { value: '50', label: '50 / trang' },
+                  { value: '100', label: '100 / trang' },
+                ]}
+              />
+            </div>
           </div>
 
           <div className="flex items-center gap-1.5">

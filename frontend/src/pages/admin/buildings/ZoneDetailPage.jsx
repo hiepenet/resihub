@@ -143,7 +143,7 @@ export function ZoneDetailPage() {
       <Modal open={editOpen} onClose={() => setEditOpen(false)} title="Đổi tên phân khu" size="sm">
         <form onSubmit={handleSave} className="space-y-4">
           <Input label="Tên phân khu" required value={name} onChange={(e) => setName(e.target.value)} />
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 pt-2">
             <Button variant="outline" onClick={() => setEditOpen(false)}>
               Hủy
             </Button>

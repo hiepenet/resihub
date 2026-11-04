@@ -592,7 +592,7 @@ export function FloorPlanView({
 
         <div className="flex flex-wrap items-center gap-2">
           {zones.length > 0 ? (
-            <div className="w-56">
+            <div className="w-64 sm:w-72">
               <Select
                 size="sm"
                 aria-label="Lọc theo phân khu"

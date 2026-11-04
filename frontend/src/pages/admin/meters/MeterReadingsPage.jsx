@@ -753,14 +753,34 @@ export function MeterReadingsPage() {
       </div>
 
       {/* Bộ lọc */}
-      <Card className="p-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-center">
+      <Card className="p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1 min-w-0">
+            <SearchBar
+              value={search}
+              onChange={setSearch}
+              placeholder="Tìm theo mã căn hộ hoặc mã công tơ..."
+            />
+          </div>
+
+          <label className="inline-flex items-center gap-2 px-3.5 min-h-[44px] sm:min-h-0 sm:h-9 rounded-lg border border-amber-200 bg-amber-50/70 text-xs font-semibold text-amber-800 cursor-pointer select-none whitespace-nowrap shrink-0">
+            <input
+              type="checkbox"
+              checked={abnormalOnly}
+              onChange={(e) => setAbnormalOnly(e.target.checked)}
+              className="w-4 h-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+            />
+            <span>Chỉ hiện bất thường (&gt;{anomalyThresholdPct}%)</span>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 items-center">
           <div>
             <input
               type="month"
               value={period}
               onChange={(e) => setPeriod(e.target.value || getCurrentPeriod())}
-              className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-sm font-medium text-slate-800 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
+              className="w-full min-h-[44px] sm:min-h-0 sm:h-9 px-3 rounded-lg border border-slate-200 bg-white text-base sm:text-sm font-medium text-slate-800 shadow-[0_1px_2px_rgba(15,23,42,0.04)] focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
             />
           </div>
 
@@ -790,24 +810,6 @@ export function MeterReadingsPage() {
             onChange={(e) => setActiveContractFilter(e.target.value)}
             options={METER_CONTRACT_FILTER_OPTIONS}
           />
-
-          <div>
-            <SearchBar
-              value={search}
-              onChange={setSearch}
-              placeholder="Tìm theo mã căn hộ hoặc mã công tơ..."
-            />
-          </div>
-
-          <label className="inline-flex items-center gap-2 px-3 h-9 rounded-lg border border-amber-200 bg-amber-50/70 text-xs font-semibold text-amber-800 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={abnormalOnly}
-              onChange={(e) => setAbnormalOnly(e.target.checked)}
-              className="w-4 h-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
-            />
-            <span>Chỉ hiện bất thường (&gt;{anomalyThresholdPct}%)</span>
-          </label>
         </div>
       </Card>
 
