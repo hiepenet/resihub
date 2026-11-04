@@ -261,8 +261,32 @@ async function checkSettlementPreconditions(
            WHERE mr.meter_id = m.id
              AND mr.period >= $3
              AND mr.status = 'CONFIRMED'
+             AND (
+               mr.contract_id = $4
+               OR (
+                 mr.contract_id IS NULL
+                 AND (
+                   mr.period > $3
+                   OR NOT EXISTS (
+                     SELECT 1 FROM meter_reading mr_other
+                     WHERE mr_other.meter_id = m.id
+                       AND mr_other.period = $3
+                       AND mr_other.contract_id IS NOT NULL
+                       AND mr_other.contract_id <> $4
+                   )
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM invoice i2
+                   WHERE i2.apartment_id = $1
+                     AND i2.period = mr.period
+                     AND i2.status NOT IN ('VOID', 'CANCELLED')
+                     AND i2.contract_id <> $4
+                 )
+               )
+             )
          )`,
-      [contractRow.apartment_id, endRefStr, endPeriod]
+      [contractRow.apartment_id, endRefStr, endPeriod, contractRow.contract_id]
     );
     missingMeterTypes = meterRes.rows.map((r) => r.meter_type);
 
@@ -273,6 +297,25 @@ async function checkSettlementPreconditions(
          JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period = $3 AND mr.status = 'CONFIRMED'
          WHERE m.apartment_id = $1 AND m.status = 'ACTIVE'
            AND m.created_at::date <= $2::date
+           AND (
+             mr.contract_id = $4
+             OR (
+               mr.contract_id IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM meter_reading mr_own
+                 WHERE mr_own.meter_id = m.id
+                   AND mr_own.period = $3
+                   AND mr_own.contract_id = $4
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM invoice i2
+                 WHERE i2.apartment_id = $1
+                   AND i2.period = $3
+                   AND i2.status NOT IN ('VOID', 'CANCELLED')
+                   AND i2.contract_id <> $4
+               )
+             )
+           )
            AND COALESCE(mr.consumption, mr.current_reading - mr.previous_reading, 0) > 0
            AND NOT EXISTS (
              SELECT 1 FROM invoice inv

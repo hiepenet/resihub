@@ -1477,6 +1477,7 @@ router.get('/invoices', authenticateToken, async (req, res) => {
                  mr.apartment_id = inv.apartment_id
                  AND mr.period = inv.period
                  AND m.meter_type = il.item_type
+                 AND (mr.contract_id = inv.contract_id OR mr.contract_id IS NULL)
                )
              )
            ORDER BY (
@@ -1484,7 +1485,9 @@ router.get('/invoices', authenticateToken, async (req, res) => {
                WHEN (il.formula_meta->>'reading_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
                     AND mr.id = (il.formula_meta->>'reading_id')::uuid
                  THEN 0
-               ELSE 1
+               WHEN mr.contract_id = inv.contract_id
+                 THEN 1
+               ELSE 2
              END
            ) ASC, mr.recorded_at DESC
            LIMIT 1

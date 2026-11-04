@@ -212,8 +212,18 @@ export async function generateInvoicesCore(
          c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
          OR (
            c.status = 'TERMINATED'
-           AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= ($2 || '-01')::date
-           AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+           AND (
+             (
+               COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= ($2 || '-01')::date
+               AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+             )
+             OR (
+               rt.child_start_date IS NOT NULL
+               AND c.terminated_at IS NOT NULL
+               AND date_trunc('month', c.terminated_at)::date <= ($2 || '-01')::date
+               AND (rt.child_start_date - INTERVAL '1 day')::date >= ($2 || '-01')::date
+             )
+           )
          )
          OR (
            c.status = 'EXPIRED'
@@ -308,7 +318,7 @@ export async function generateInvoicesCore(
         ? resolvedActive.lastActiveDayYmd
         : monthEnd;
 
-    // AC-015.1: Cổng kiểm tra đồng hồ điện/nước đang hoạt động phải có chỉ số CONFIRMED trong kỳ
+    // AC-015.1: Cổng kiểm tra đồng hồ điện/nước đang hoạt động phải có chỉ số CONFIRMED trong kỳ cho đúng đợt hợp đồng
     if (!allowMissingMeterReadings) {
       const missingMetersRes = await client.query(
         `SELECT m.meter_type
@@ -321,16 +331,32 @@ export async function generateInvoicesCore(
              WHERE mr.meter_id = m.id
                AND mr.period = $3
                AND mr.status = 'CONFIRMED'
-           )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM invoice i2
-             JOIN invoice_line il2 ON il2.invoice_id = i2.id
-             WHERE i2.apartment_id = $1
-               AND i2.period = $3
-               AND i2.status NOT IN ('VOID', 'CANCELLED')
-               AND i2.contract_id <> $4
-               AND il2.item_type = m.meter_type
+               AND (
+                 mr.contract_id = $4
+                 OR (
+                   mr.contract_id IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM invoice i2
+                     WHERE i2.apartment_id = $1
+                       AND i2.period = $3
+                       AND i2.status NOT IN ('VOID', 'CANCELLED')
+                       AND i2.contract_id <> $4
+                       AND (
+                         EXISTS (
+                           SELECT 1 FROM invoice_line il2
+                           WHERE il2.invoice_id = i2.id
+                             AND il2.item_type = m.meter_type
+                             AND (
+                               (il2.formula_meta->>'reading_id') = mr.id::text
+                               OR (il2.formula_meta->>'reading_id') IS NULL
+                             )
+                         )
+                         OR COALESCE(mr.consumption, mr.current_reading - mr.previous_reading, 0) = 0
+                       )
+                   )
+                 )
+               )
            )
          ORDER BY m.meter_type ASC`,
         [c.apartment_id, effectivePeriodEndYmd, targetPeriod, c.id]
@@ -382,9 +408,10 @@ export async function generateInvoicesCore(
       [c.id, effectivePeriodEndYmd]
     );
 
-    // Điện / Nước từ meter_reading đã xác nhận (CONFIRMED) kỳ này
+    // Điện / Nước từ meter_reading đã xác nhận (CONFIRMED) của đúng đợt hợp đồng kỳ này
     const mrRes = await client.query(
-      `SELECT mr.id, mr.meter_id, mr.consumption, mr.previous_reading, mr.current_reading,
+      `SELECT DISTINCT ON (m.id)
+              mr.id, mr.meter_id, mr.contract_id, mr.consumption, mr.previous_reading, mr.current_reading,
               mr.image_url,
               m.meter_type, m.meter_code, m.unit, m.unit_price
        FROM meter_reading mr
@@ -392,8 +419,31 @@ export async function generateInvoicesCore(
        WHERE mr.apartment_id = $1
          AND mr.period = $2
          AND mr.status = 'CONFIRMED'
-         AND m.status = 'ACTIVE'`,
-      [c.apartment_id, targetPeriod]
+         AND m.status = 'ACTIVE'
+         AND (
+           mr.contract_id = $3
+           OR (
+             mr.contract_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM invoice i2
+               JOIN invoice_line il2 ON il2.invoice_id = i2.id
+               WHERE i2.apartment_id = $1
+                 AND i2.period = $2
+                 AND i2.status NOT IN ('VOID', 'CANCELLED')
+                 AND i2.contract_id <> $3
+                 AND il2.item_type = m.meter_type
+                 AND (
+                   (il2.formula_meta->>'reading_id') = mr.id::text
+                   OR (il2.formula_meta->>'reading_id') IS NULL
+                 )
+             )
+           )
+         )
+       ORDER BY m.id,
+                (CASE WHEN mr.contract_id = $3 THEN 0 ELSE 1 END) ASC,
+                mr.recorded_at DESC`,
+      [c.apartment_id, targetPeriod, c.id]
     );
     for (const mr of mrRes.rows) {
       const itemType = mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER';
@@ -406,8 +456,12 @@ export async function generateInvoicesCore(
            AND i2.status NOT IN ('VOID', 'CANCELLED')
            AND i2.contract_id <> $3
            AND il2.item_type = $4
+           AND (
+             (il2.formula_meta->>'reading_id') = $5
+             OR ($6::uuid IS NULL AND (il2.formula_meta->>'reading_id') IS NULL)
+           )
          LIMIT 1`,
-        [c.apartment_id, targetPeriod, c.id, itemType]
+        [c.apartment_id, targetPeriod, c.id, itemType, String(mr.id), mr.contract_id || null]
       );
       if (alreadyBilledRes.rows.length > 0) continue;
 
@@ -435,6 +489,7 @@ export async function generateInvoicesCore(
             meter_id: mr.meter_id,
             meter_code: mr.meter_code || null,
             reading_id: mr.id,
+            contract_id: c.id,
             meter_type: itemType,
             previous_reading: prevReadNum,
             current_reading: currReadNum,
