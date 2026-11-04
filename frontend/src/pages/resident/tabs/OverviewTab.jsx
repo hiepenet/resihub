@@ -1058,11 +1058,11 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
         <div className="sm:hidden grid grid-cols-2 gap-2.5">
           <button
             type="button"
-            onClick={() => onNavigateTab?.('invoices', { action: 'pay' })}
+            onClick={() => onNavigateTab?.('invoices', currentAmountDue > 0 ? { action: 'pay' } : undefined)}
             className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs shadow-sm flex items-center justify-center gap-2 transition-colors"
           >
             <Receipt className="w-4 h-4 shrink-0" />
-            <span>Thanh toán HĐ</span>
+            <span>{currentAmountDue > 0 ? 'Thanh toán HĐ' : 'Xem hóa đơn'}</span>
           </button>
           <button
             type="button"
@@ -1237,7 +1237,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <button
               type="button"
-              onClick={() => onNavigateTab?.('invoices', { action: 'pay' })}
+              onClick={() => onNavigateTab?.('invoices', currentAmountDue > 0 ? { action: 'pay' } : undefined)}
               className="group flex flex-col items-start p-4 rounded-xl border border-slate-200/80 hover:border-primary-300 hover:bg-primary-50/40 transition-all text-left"
             >
               <div className="w-10 h-10 rounded-xl bg-sky-100 text-sky-600 flex items-center justify-center mb-3 group-hover:scale-105 transition-transform">
@@ -1331,7 +1331,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                   Number(latestInvoice.total_amount || 0) - Number(latestInvoice.paid_amount || 0) > 0 ? (
                     <Button
                       size="sm"
-                      onClick={() => onNavigateTab?.('invoices', { action: 'pay' })}
+                      onClick={() => onNavigateTab?.('invoices', currentAmountDue > 0 ? { action: 'pay' } : undefined)}
                     >
                       Thanh toán
                     </Button>

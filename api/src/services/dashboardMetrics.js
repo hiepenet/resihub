@@ -69,7 +69,7 @@ export function getPeriodEndYmd(periodYm) {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 }
 
-function mapLineToSourceBucket(itemType, formulaMeta) {
+function mapLineToSourceBucket(itemType, formulaMeta, adjustmentTarget) {
   const rawType = String(itemType || '').trim().toUpperCase();
   let metaObj = formulaMeta;
   if (typeof metaObj === 'string') {
@@ -81,7 +81,9 @@ function mapLineToSourceBucket(itemType, formulaMeta) {
   }
   const effectiveType =
     rawType === 'ADJUSTMENT'
-      ? String(metaObj?.adjusts_item_type || 'OTHER').trim().toUpperCase()
+      ? String(metaObj?.adjusts_item_type || adjustmentTarget || 'OTHER')
+          .trim()
+          .toUpperCase()
       : rawType;
 
   if (effectiveType === 'RENT') return 'rent';
@@ -131,12 +133,12 @@ export function aggregateInvoiceLinesBySource({ invoices = [], lines = [], perio
       other: 0,
     };
 
-    const invLines = linesByInvId.get(String(inv.id)) || [];
+    const invLines = (linesByInvId.get(String(inv.id)) || []).filter((l) => !l.credit_id);
     if (invLines.length === 0) {
       invBuckets.other = invoiceBilled;
     } else {
       for (const l of invLines) {
-        const bKey = mapLineToSourceBucket(l.item_type, l.formula_meta);
+        const bKey = mapLineToSourceBucket(l.item_type, l.formula_meta, l.adjustment_target);
         invBuckets[bKey] += Math.round(Number(l.amount || 0));
       }
 
@@ -264,3 +266,4 @@ export function buildMonthlyOccupancySeries({
     };
   });
 }
+

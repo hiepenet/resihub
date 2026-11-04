@@ -358,3 +358,73 @@ test('Task 4 — Mobile-first Resident Portal, safe-area, 44px touch targets & W
     'OverviewTab must offer 2-tap quick action to report breakdown'
   );
 });
+
+test('Final Review Fix — Select mobile anti-zoom, empty-debt Quick Action guard & 44px WCAG icon buttons', () => {
+  // Important #1: Select.jsx mobile anti-zoom (text-base), coarse-pointer focus guard, and >=44px touch targets
+  const selectSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/Select.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    selectSrc.includes('min-h-[44px]'),
+    'Select trigger and options must enforce >=44px touch targets on mobile'
+  );
+  assert.ok(
+    selectSrc.includes('text-base sm:text-xs'),
+    'Select filter input must use 16px (text-base) on mobile to prevent iOS Safari auto-zoom'
+  );
+  assert.ok(
+    selectSrc.includes('pointer: coarse'),
+    'Select must avoid auto-focusing search input on coarse touch pointers'
+  );
+
+  // Important #2: OverviewTab & InvoicesTab must not trap paid-up residents in an empty payment modal
+  const overviewSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/resident/tabs/OverviewTab.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    overviewSrc.includes("currentAmountDue > 0 ? { action: 'pay' } : undefined"),
+    'OverviewTab Quick Action must only pass { action: "pay" } when currentAmountDue > 0'
+  );
+
+  const invoicesSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/resident/tabs/InvoicesTab.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    invoicesSrc.includes('if (unpaidInvoices.length > 0)'),
+    'InvoicesTab action=pay effect must guard against opening an empty payment modal when unpaidInvoices is empty'
+  );
+
+  // Important #3: 44x44px touch targets & WCAG aria-label on ProfileTab, InvoicesTab meter preview, and NotificationBell
+  assert.ok(
+    invoicesSrc.includes('min-h-[44px]') && invoicesSrc.includes('aria-label="Xem ảnh chụp mặt đồng hồ'),
+    'InvoicesTab meter-photo preview buttons must enforce >=44px touch target and aria-label'
+  );
+
+  const profileSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/resident/tabs/ProfileTab.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    profileSrc.includes('Ẩn mật khẩu mới') && profileSrc.includes('Hiện mật khẩu mới'),
+    'ProfileTab new-password visibility toggle must expose WCAG aria-label'
+  );
+  assert.equal(
+    (profileSrc.match(/min-w-\[44px\] min-h-\[44px\]/g) || []).length >= 2,
+    true,
+    'ProfileTab both password visibility toggles must meet 44x44px touch target on mobile'
+  );
+
+  const bellSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/common/NotificationBell.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    bellSrc.includes('min-w-[44px] min-h-[44px]') &&
+      bellSrc.includes('aria-label="Thông báo"') &&
+      bellSrc.includes('aria-expanded={open}'),
+    'NotificationBell trigger must meet 44x44px touch target and expose aria-label + aria-expanded'
+  );
+});

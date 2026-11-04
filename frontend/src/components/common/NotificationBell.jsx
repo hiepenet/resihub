@@ -26,8 +26,10 @@ export function NotificationBell({ onViewAll }) {
     <div className="relative" ref={ref}>
       <button
         type="button"
+        aria-label="Thông báo"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="relative p-2 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+        className="relative min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 inline-flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
         title="Thông báo"
       >
         <Bell className="w-5 h-5" />

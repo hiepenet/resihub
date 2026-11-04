@@ -165,9 +165,14 @@ export function Select({
 
   useEffect(() => {
     if (!open) return undefined;
-    const focusTimer = requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-    });
+    const isCoarsePointer =
+      typeof window !== 'undefined' &&
+      Boolean(window.matchMedia?.('(pointer: coarse)').matches);
+    const focusTimer = isCoarsePointer
+      ? null
+      : requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+        });
 
     const handleOutside = (e) => {
       if (
@@ -186,7 +191,7 @@ export function Select({
     window.addEventListener('scroll', handleReposition, true);
 
     return () => {
-      cancelAnimationFrame(focusTimer);
+      if (focusTimer !== null) cancelAnimationFrame(focusTimer);
       document.removeEventListener('mousedown', handleOutside);
       window.removeEventListener('resize', handleReposition);
       window.removeEventListener('scroll', handleReposition, true);
@@ -246,8 +251,8 @@ export function Select({
 
   const sizeClasses =
     size === 'sm'
-      ? 'min-h-[32px] py-1 pl-2.5 pr-8 text-xs rounded-lg'
-      : 'min-h-[36px] py-1.5 pl-3 pr-8 text-sm rounded-lg';
+      ? 'min-h-[44px] sm:min-h-[32px] py-1.5 sm:py-1 pl-2.5 pr-8 text-sm sm:text-xs rounded-lg'
+      : 'min-h-[44px] sm:min-h-[36px] py-2 sm:py-1.5 pl-3 pr-8 text-base sm:text-sm rounded-lg';
 
   const displayLabel = selectedOption
     ? selectedOption.label
@@ -346,7 +351,7 @@ export function Select({
                     onKeyDown={handleKeyDown}
                     placeholder={searchPlaceholder}
                     aria-label="Lọc danh sách tùy chọn"
-                    className="w-full h-8 pl-8 pr-7 rounded-lg border border-slate-200 bg-white text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/15"
+                    className="w-full min-h-[40px] sm:min-h-0 sm:h-8 pl-8 pr-7 rounded-lg border border-slate-200 bg-white text-base sm:text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/15"
                   />
                   {query ? (
                     <button
@@ -356,7 +361,7 @@ export function Select({
                         searchInputRef.current?.focus();
                       }}
                       aria-label="Xóa từ khóa lọc"
-                      className="p-1 text-slate-400 hover:text-slate-600 absolute right-1.5"
+                      className="min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 p-1 inline-flex items-center justify-center text-slate-400 hover:text-slate-600 absolute right-1"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -386,7 +391,7 @@ export function Select({
                           e.preventDefault();
                           commitSelection(opt);
                         }}
-                        className={`px-3 py-2 text-xs sm:text-sm flex items-center justify-between gap-2.5 cursor-pointer select-none transition-colors ${
+                        className={`min-h-[44px] sm:min-h-0 px-3 py-2 text-xs sm:text-sm flex items-center justify-between gap-2.5 cursor-pointer select-none transition-colors ${
                           opt.disabled
                             ? 'opacity-45 cursor-not-allowed'
                             : isSelected

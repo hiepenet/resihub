@@ -87,14 +87,24 @@ test('aggregateInvoiceLinesBySource maps 5 PRD sources, ignores DRAFT/VOID/CANCE
   ];
 
   const lines = [
-    // Inv 1 lines: RENT 5M, SERVICE 1M, ADJUSTMENT -2M on SERVICE -> service clamps to 0, -1M spills to rent -> rent = 4M
+    // Inv 1 lines: RENT 5M, SERVICE 1M, approved invoice_adjustment -2M via adjustment_target='SERVICE' (formula_meta={}),
+    // PLUS production credit_offset invoice_line (-1M with credit_id) which MUST be excluded so it does not double-count or fabricate 'other'!
+    // Expected: service clamps to 0, -1M spills to rent -> rent = 4M, other = 0, total_billed = 4M
     { invoice_id: 'inv-1', item_type: 'RENT', amount: 5_000_000 },
     { invoice_id: 'inv-1', item_type: 'SERVICE', amount: 1_000_000 },
     {
       invoice_id: 'inv-1',
       item_type: 'ADJUSTMENT',
       amount: -2_000_000,
-      formula_meta: { adjusts_item_type: 'SERVICE' },
+      formula_meta: {},
+      adjustment_target: 'SERVICE',
+    },
+    {
+      invoice_id: 'inv-1',
+      item_type: 'ADJUSTMENT',
+      amount: -1_000_000,
+      formula_meta: null,
+      credit_id: 'cred-offset-1',
     },
     // Inv 2 lines: RENT 6M, ELECTRICITY 700k, WATER 150k, SERVICE 300k, LATE_FEE 200k
     { invoice_id: 'inv-2', item_type: 'RENT', amount: 6_000_000 },
@@ -196,3 +206,4 @@ test('buildMonthlyOccupancySeries handles 0 exploitable apartments safely and al
     { period: '2026-11', occupied: 6, exploitable: 8, occupancy_rate: 75 },
   ]);
 });
+

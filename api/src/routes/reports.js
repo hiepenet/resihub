@@ -218,9 +218,17 @@ router.get(
       let invLinesRows = [];
       if (srcInvoiceIds.length > 0) {
         const linesRes = await client.query(
-          `SELECT il.id, il.invoice_id, il.item_type, il.amount, il.formula_meta
+          `SELECT il.id,
+                  il.invoice_id,
+                  il.item_type,
+                  il.amount,
+                  il.formula_meta,
+                  il.credit_id,
+                  ia.adjustment_target
            FROM invoice_line il
-           WHERE il.invoice_id = ANY($1::uuid[])`,
+           LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id
+           WHERE il.invoice_id = ANY($1::uuid[])
+             AND il.credit_id IS NULL`,
           [srcInvoiceIds]
         );
         invLinesRows = linesRes.rows;

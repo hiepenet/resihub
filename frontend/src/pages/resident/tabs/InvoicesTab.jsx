@@ -243,7 +243,9 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
 
   useEffect(() => {
     if (!loading && actionParam === 'pay') {
-      openReportPaymentModal(unpaidInvoices[0] || null);
+      if (unpaidInvoices.length > 0) {
+        openReportPaymentModal(unpaidInvoices[0]);
+      }
       onClearActionParam?.();
     }
   }, [loading, actionParam, unpaidInvoices, openReportPaymentModal, onClearActionParam]);
@@ -690,26 +692,28 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                           <div className="mt-1.5 flex items-center gap-2">
                                             <button
                                               type="button"
+                                              aria-label={`Xem ảnh chụp mặt đồng hồ — ${line.description || meta.label}`}
                                               onClick={() =>
                                                 openImagePreview(
                                                   meterImageUrl,
                                                   `Ảnh mặt đồng hồ đối chứng — ${line.description || meta.label}`
                                                 )
                                               }
-                                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-sky-200 bg-sky-50/80 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 transition-colors"
+                                              className="min-h-[44px] sm:min-h-0 inline-flex items-center gap-1.5 px-3 sm:px-2 py-2 sm:py-1 rounded-lg border border-sky-200 bg-sky-50/80 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 transition-colors"
                                             >
                                               <Camera className="w-3.5 h-3.5" />
                                               <span>Xem ảnh đồng hồ</span>
                                             </button>
                                             <button
                                               type="button"
+                                              aria-label="Xem ảnh chụp mặt đồng hồ"
                                               onClick={() =>
                                                 openImagePreview(
                                                   meterImageUrl,
                                                   `Ảnh mặt đồng hồ đối chứng — ${line.description || meta.label}`
                                                 )
                                               }
-                                              className="w-8 h-8 rounded-md border border-slate-200 overflow-hidden hover:ring-2 hover:ring-sky-400 transition-all shrink-0"
+                                              className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 w-11 h-11 sm:w-8 sm:h-8 rounded-md border border-slate-200 overflow-hidden hover:ring-2 hover:ring-sky-400 transition-all shrink-0"
                                               title="Xem ảnh chụp mặt đồng hồ"
                                             >
                                               <AuthImage

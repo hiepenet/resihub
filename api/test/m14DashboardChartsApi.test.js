@@ -100,6 +100,8 @@ test('Week 8 M14 Dashboard Charts API: revenue_by_source, PRD receivables_aging,
       await cleanClient.query("SET app.allow_test_cleanup = 'true'");
       for (const oId of cleanup.orgIds) {
         await cleanClient.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE org_id = $1)', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM credit_balance WHERE org_id = $1', [oId]).catch(() => {});
+        await cleanClient.query('DELETE FROM invoice_adjustment WHERE org_id = $1', [oId]).catch(() => {});
         await cleanClient.query('DELETE FROM receivable WHERE org_id = $1', [oId]).catch(() => {});
         await cleanClient.query('DELETE FROM payment WHERE org_id = $1', [oId]).catch(() => {});
         await cleanClient.query('DELETE FROM invoice WHERE org_id = $1', [oId]).catch(() => {});
@@ -297,20 +299,31 @@ test('Week 8 M14 Dashboard Charts API: revenue_by_source, PRD receivables_aging,
     [invPaid.rows[0].id]
   );
 
-  // 2) ADJUSTED invoice on cActive2 with negative spill + credit_offset:
-  // RENT 5M, SERVICE 500k, ADJUSTMENT -1.5M on SERVICE -> gross billed = 4M (total_amount 3M + credit_offset 1M)
-  // Expected buckets: service = 0, rent = 4M
+  // 2) ADJUSTED invoice on cActive2 with negative spill + realistic credit_offset line (credit_id) + approved invoice_adjustment (adjustment_target='SERVICE'):
+  // RENT 5M, SERVICE 500k, approved invoice_adjustment -1.5M on SERVICE (formula_meta='{}'), plus credit_offset line -1M (credit_id) -> gross billed = 4M (total_amount 3M + credit_offset 1M)
+  // Expected buckets: service = 0, rent = 4M, other = 0 (credit_offset line must NOT fabricate 'other'!)
   const invAdj = await adminPool.query(
     `INSERT INTO invoice (org_id, building_id, apartment_id, contract_id, tenant_id, invoice_code, period, due_date, subtotal_amount, adjustment_amount, total_amount, paid_amount, credit_offset_amount, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 5500000, -1500000, 3000000, 0, 1000000, 'ADJUSTED') RETURNING id`,
     [orgId, bldgAId, aptIds[1], cActive2.rows[0].id, tenantId, `INV_ADJ_${suffix}`, curPeriod, todayVn]
   );
+  const adjRow = await adminPool.query(
+    `INSERT INTO invoice_adjustment (org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, status, created_by, approved_by, approved_at)
+     VALUES ($1, $2, $3, 'SERVICE', 'ADJUST', -1500000, 'Giảm trừ DV đã duyệt', 'APPROVED', $4, $5, NOW()) RETURNING id`,
+    [orgId, bldgAId, invAdj.rows[0].id, managerA.userId, ownerA.userId]
+  );
+  const credRow = await adminPool.query(
+    `INSERT INTO credit_balance (org_id, building_id, contract_id, tenant_id, reason_type, amount, applied_amount, status, description, created_by)
+     VALUES ($1, $2, $3, $4, 'OVERPAYMENT', 1000000, 1000000, 'APPLIED', 'Bù trừ dư thanh toán kỳ trước', $5) RETURNING id`,
+    [orgId, bldgAId, cActive2.rows[0].id, tenantId, managerA.userId]
+  );
   await adminPool.query(
-    `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
-     VALUES ($1, 'RENT', 'Tiền phòng', 1, 'tháng', 5000000, 5000000, NULL),
-            ($1, 'SERVICE', 'Dịch vụ', 1, 'tháng', 500000, 500000, NULL),
-            ($1, 'ADJUSTMENT', 'Giảm trừ DV', 1, 'lần', -1500000, -1500000, $2::jsonb)`,
-    [invAdj.rows[0].id, JSON.stringify({ adjusts_item_type: 'SERVICE' })]
+    `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta, adjustment_id, credit_id)
+     VALUES ($1, 'RENT', 'Tiền phòng', 1, 'tháng', 5000000, 5000000, NULL, NULL, NULL),
+            ($1, 'SERVICE', 'Dịch vụ', 1, 'tháng', 500000, 500000, NULL, NULL, NULL),
+            ($1, 'ADJUSTMENT', 'Giảm trừ DV', 1, 'lần', -1500000, -1500000, '{}'::jsonb, $2, NULL),
+            ($1, 'ADJUSTMENT', 'Bù trừ số dư tín dụng hợp đồng', 1, 'lần', -1000000, -1000000, NULL, NULL, $3)`,
+    [invAdj.rows[0].id, adjRow.rows[0].id, credRow.rows[0].id]
   );
 
   // 3) DRAFT (in pMinus1) & VOID (in curPeriod) invoices on Bldg A -> must be ignored
