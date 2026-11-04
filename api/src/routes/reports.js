@@ -7,6 +7,13 @@ import {
   checkBuildingAccess,
 } from '../services/ownerScope.js';
 import { getTodayVnDateStr } from '../services/depositSettlement.js';
+import {
+  parseDashboardMonthsParam,
+  buildRecentMonthsPeriods,
+  aggregateInvoiceLinesBySource,
+  normalizeReceivablesAging,
+  buildMonthlyOccupancySeries,
+} from '../services/dashboardMetrics.js';
 import { toUtf8BomCsv, toXlsxBuffer } from '../utils/csv.js';
 
 const router = express.Router();
@@ -35,6 +42,14 @@ router.get(
   async (req, res) => {
     const { building_id } = req.query;
     const orgId = req.user.org_id;
+    const parsedMonths = parseDashboardMonthsParam(req.query.months);
+    if (!parsedMonths.valid) {
+      return res.status(400).json({
+        code: parsedMonths.code,
+        message: parsedMonths.message,
+      });
+    }
+    const selectedMonths = parsedMonths.months;
 
     const { client, release } = await getUserClient(req);
     try {
@@ -45,8 +60,9 @@ router.get(
         }
       }
 
-      const currentPeriod = new Date().toISOString().slice(0, 7);
-      const periods12 = buildLast12MonthsPeriods();
+      const todayVn = getTodayVnDateStr();
+      const currentPeriod = todayVn.slice(0, 7);
+      const periods12 = buildRecentMonthsPeriods(todayVn, selectedMonths);
 
       // 1. Thống kê căn hộ theo trạng thái
       const aptParams = [orgId];
@@ -177,8 +193,46 @@ router.get(
         ? Number((((currentMonthRev.collected - prevMonthRev.collected) / prevMonthRev.collected) * 100).toFixed(1))
         : 0;
 
-      // 3. Tổng công nợ chưa thu
-      const debtParams = [orgId];
+      // 2b. Doanh thu theo nguồn thu (M14 Stacked Bar — PRD 15.3)
+      const srcParams = [orgId, periods12];
+      const { sql: srcScope } = await scopedBuildingFilter(req, 'i.building_id', srcParams);
+      let srcFilter = '';
+      if (building_id) {
+        srcParams.push(building_id);
+        srcFilter = ` AND i.building_id = $${srcParams.length}`;
+      }
+      const invSrcRes = await client.query(
+        `SELECT i.id,
+                i.period,
+                i.status,
+                i.total_amount,
+                COALESCE(i.credit_offset_amount, 0)::bigint AS credit_offset_amount
+         FROM invoice i
+         WHERE i.org_id = $1
+           AND i.period = ANY($2::text[])
+           AND i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')
+           ${srcScope} ${srcFilter}`,
+        srcParams
+      );
+      const srcInvoiceIds = invSrcRes.rows.map((r) => r.id);
+      let invLinesRows = [];
+      if (srcInvoiceIds.length > 0) {
+        const linesRes = await client.query(
+          `SELECT il.id, il.invoice_id, il.item_type, il.amount, il.formula_meta
+           FROM invoice_line il
+           WHERE il.invoice_id = ANY($1::uuid[])`,
+          [srcInvoiceIds]
+        );
+        invLinesRows = linesRes.rows;
+      }
+      const revenueBySource = aggregateInvoiceLinesBySource({
+        invoices: invSrcRes.rows,
+        lines: invLinesRows,
+        periods: periods12,
+      });
+
+      // 3. Tổng công nợ chưa thu & phân nhóm 5 tuổi nợ chuẩn PRD AC-016.1
+      const debtParams = [orgId, todayVn];
       const { sql: debtScope } = await scopedBuildingFilter(req, 'r.building_id', debtParams);
       let debtFilter = '';
       if (building_id) {
@@ -186,7 +240,17 @@ router.get(
         debtFilter = ` AND r.building_id = $${debtParams.length}`;
       }
       const debtRes = await client.query(
-        `SELECT COALESCE(SUM(r.amount - r.paid_amount), 0)::bigint AS unpaid_debt
+        `SELECT COALESCE(SUM(r.amount - r.paid_amount), 0)::bigint AS unpaid_debt,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE ($2::date - r.due_date) <= 0), 0)::bigint AS current_not_due,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE ($2::date - r.due_date) BETWEEN 1 AND 15), 0)::bigint AS bucket_0_15,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE ($2::date - r.due_date) BETWEEN 16 AND 30), 0)::bigint AS bucket_16_30,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE ($2::date - r.due_date) BETWEEN 31 AND 60), 0)::bigint AS bucket_31_60,
+                COALESCE(SUM(r.amount - r.paid_amount) FILTER (WHERE ($2::date - r.due_date) > 60), 0)::bigint AS bucket_over_60,
+                COUNT(*) FILTER (WHERE (r.amount - r.paid_amount) > 0 AND ($2::date - r.due_date) <= 0)::int AS count_current_not_due,
+                COUNT(*) FILTER (WHERE (r.amount - r.paid_amount) > 0 AND ($2::date - r.due_date) BETWEEN 1 AND 15)::int AS count_0_15,
+                COUNT(*) FILTER (WHERE (r.amount - r.paid_amount) > 0 AND ($2::date - r.due_date) BETWEEN 16 AND 30)::int AS count_16_30,
+                COUNT(*) FILTER (WHERE (r.amount - r.paid_amount) > 0 AND ($2::date - r.due_date) BETWEEN 31 AND 60)::int AS count_31_60,
+                COUNT(*) FILTER (WHERE (r.amount - r.paid_amount) > 0 AND ($2::date - r.due_date) > 60)::int AS count_over_60
          FROM receivable r
          WHERE r.org_id = $1
            AND r.status IN ('OPEN', 'PARTIALLY_PAID')
@@ -194,6 +258,42 @@ router.get(
         debtParams
       );
       const unpaidDebt = Number(debtRes.rows[0]?.unpaid_debt || 0);
+      const receivablesAging = normalizeReceivablesAging(debtRes.rows[0] || {});
+
+      // 3b. Chuỗi tỷ lệ lấp đầy theo kỳ (M14 Occupancy Trend — PRD 15.3)
+      const occHistParams = [orgId, periods12];
+      const { sql: occHistScope } = await scopedBuildingFilter(req, 'c.building_id', occHistParams);
+      let occHistFilter = '';
+      if (building_id) {
+        occHistParams.push(building_id);
+        occHistFilter = ` AND c.building_id = $${occHistParams.length}`;
+      }
+      const occHistRes = await client.query(
+        `SELECT p.period,
+                COUNT(DISTINCT c.apartment_id)::int AS occupied_count
+         FROM unnest($2::text[]) AS p(period)
+         JOIN contract c
+           ON c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING', 'EXPIRED', 'TERMINATED')
+          AND c.start_date <= (date_trunc('month', (p.period || '-01')::date) + INTERVAL '1 month - 1 day')::date
+          AND COALESCE(c.terminated_at::date, c.end_date) >= (date_trunc('month', (p.period || '-01')::date) + INTERVAL '1 month - 1 day')::date
+         JOIN apartment a ON a.id = c.apartment_id AND a.status <> 'INACTIVE'
+         JOIN building b ON b.id = c.building_id
+         WHERE b.org_id = $1
+           ${occHistScope} ${occHistFilter}
+         GROUP BY p.period`,
+        occHistParams
+      );
+      const monthlyOccupiedByPeriod = {};
+      for (const r of occHistRes.rows) {
+        monthlyOccupiedByPeriod[r.period] = Number(r.occupied_count || 0);
+      }
+      const occupancy12m = buildMonthlyOccupancySeries({
+        periods: periods12,
+        currentPeriod,
+        totalExploitableApartments: totalApts,
+        currentOccupiedCount: statusCounts.OCCUPIED,
+        monthlyOccupiedByPeriod,
+      });
 
       // 4. Yêu cầu đang chờ xử lý + 5 yêu cầu gần nhất
       const srParams = [orgId];
@@ -355,8 +455,13 @@ router.get(
             pending_invoice_adjustments: Number(adjKpiRes?.rows[0]?.pending_adjustments || 0),
             pending_credit_refunds: Number(cbKpiRes?.rows[0]?.pending_credit_refunds || 0),
           },
+          generated_at: new Date().toISOString(),
+          selected_months: selectedMonths,
           apartment_status_breakdown: statusCounts,
           revenue_12m: revenue12m,
+          revenue_by_source: revenueBySource,
+          receivables_aging: receivablesAging,
+          occupancy_12m: occupancy12m,
           expiring_contracts: expRes.rows,
           recent_service_requests: srRecentRes.rows,
         },
