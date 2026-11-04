@@ -39,6 +39,7 @@ import { PAYMENT_STATUS, RECEIVABLE_STATUS, CREDIT_BALANCE_STATUS } from '../../
 import { formatMoney, formatDate, formatDateTime, exportToCsv } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 import { resolvePrdAgingBucket, canActorApproveCreditRefund, PRD_AGING_BUCKETS } from '../../../utils/billing';
+import { resolvePaymentsUrlQuery } from '../../../utils/chartHelpers';
 
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
@@ -219,20 +220,17 @@ export function PaymentsPage() {
     }
   }, [selectedBuildingId, toast]);
 
-  // Hỗ trợ drill-down từ Dashboard: ?tab=credits hoặc ?status=PENDING_DIRECT_REFUND (Ruling 2)
+  // Hỗ trợ drill-down từ Dashboard: ?tab=aging&bucket=<key> hoặc ?tab=credits&status=PENDING_DIRECT_REFUND
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const tabParam = params.get('tab');
-    const statusParam = params.get('status');
-    if (
-      tabParam === 'credits' ||
-      tabParam === 'refunds' ||
-      statusParam === 'PENDING_DIRECT_REFUND'
-    ) {
-      setActiveTab('credits');
+    const { tab, agingBucket, creditStatus } = resolvePaymentsUrlQuery(location.search);
+    if (tab) {
+      setActiveTab(tab);
     }
-    if (statusParam) {
-      setCreditStatusFilter(statusParam);
+    if (tab === 'aging') {
+      setAgingBucketFilter(agingBucket);
+    }
+    if (creditStatus) {
+      setCreditStatusFilter(creditStatus);
     }
   }, [location.search]);
 

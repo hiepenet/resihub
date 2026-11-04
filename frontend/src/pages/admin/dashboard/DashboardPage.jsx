@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Chart as ChartJS,
@@ -6,13 +6,14 @@ import {
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   ArcElement,
   Title,
   Tooltip as ChartTooltip,
   Legend,
   Filler,
 } from 'chart.js';
-import { Line, Doughnut } from 'react-chartjs-2';
+import { Line, Bar, Doughnut } from 'react-chartjs-2';
 import {
   Building2,
   TrendingUp,
@@ -27,17 +28,35 @@ import {
   ShieldAlert,
   Clock,
   CheckCircle2,
+  BarChart3,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { StatusBadge } from '../../../components/common/StatusBadge';
+import { EmptyState } from '../../../components/common/EmptyState';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { reportsService } from '../../../services/reports.service';
 import { useAuthStore } from '../../../stores/authStore';
 import { useToast } from '../../../hooks/useToast';
-import { formatCompactMoney, formatMoney, formatDate, formatRelativeTime } from '../../../utils/format';
+import {
+  formatCompactMoney,
+  formatMoney,
+  formatDate,
+  formatDateTime,
+  formatRelativeTime,
+} from '../../../utils/format';
+import {
+  hasRevenueChartData,
+  hasAgingChartData,
+  hasOccupancyChartData,
+  buildRevenueTrendChartData,
+  buildRevenueBySourceChartData,
+  buildReceivablesAgingChartData,
+  buildOccupancyTrendChartData,
+  buildApartmentStatusDoughnutData,
+} from '../../../utils/chartHelpers';
 import { extractErrorMessage } from '../../../utils/validation';
 
 ChartJS.register(
@@ -45,6 +64,7 @@ ChartJS.register(
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   ArcElement,
   Title,
   ChartTooltip,
@@ -59,94 +79,112 @@ export function DashboardPage() {
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [months, setMonths] = useState(12);
+  const [revenueMode, setRevenueMode] = useState('trend'); // 'trend' | 'source'
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await reportsService.getDashboard(
-        selectedBuildingId ? { building_id: selectedBuildingId } : {}
-      );
+      const params = {
+        months,
+        ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
+      };
+      const res = await reportsService.getDashboard(params);
       setData(res.data);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu bảng điều khiển.'));
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, toast]);
+  }, [selectedBuildingId, months, toast]);
 
   useEffect(() => {
     loadDashboard();
   }, [loadDashboard]);
 
+  const kpis = data?.kpis || {};
+  const breakdown = data?.apartment_status_breakdown || {};
+  const rev12m = data?.revenue_12m || [];
+  const revBySource = data?.revenue_by_source || [];
+  const agingInfo = data?.receivables_aging || {};
+  const occ12m = data?.occupancy_12m || [];
+  const expiringContracts = data?.expiring_contracts || [];
+  const recentRequests = data?.recent_service_requests || [];
+
+  const revenueTrendData = useMemo(() => buildRevenueTrendChartData(rev12m), [rev12m]);
+  const revenueSourceData = useMemo(
+    () => buildRevenueBySourceChartData(revBySource),
+    [revBySource]
+  );
+  const agingChart = useMemo(
+    () => buildReceivablesAgingChartData(agingInfo),
+    [agingInfo]
+  );
+  const occupancyTrend = useMemo(
+    () => buildOccupancyTrendChartData(occ12m),
+    [occ12m]
+  );
+  const doughnutData = useMemo(
+    () => buildApartmentStatusDoughnutData(breakdown),
+    [breakdown]
+  );
+
   if (loading && !data) {
     return <PageSkeleton />;
   }
 
-  const kpis = data?.kpis || {};
-  const breakdown = data?.apartment_status_breakdown || {};
-  const rev12m = data?.revenue_12m || [];
-  const expiringContracts = data?.expiring_contracts || [];
-  const recentRequests = data?.recent_service_requests || [];
+  const showRevenueChart = hasRevenueChartData(rev12m, revBySource);
+  const showAgingChart = hasAgingChartData(agingInfo);
+  const showOccupancyChart = hasOccupancyChartData(kpis.total_apartments, occ12m);
 
-  const lineData = {
-    labels: rev12m.map((r) => r.period || r.month),
-    datasets: [
-      {
-        label: 'Phát hành (Billed)',
-        data: rev12m.map((r) => Number(r.billed || 0)),
-        borderColor: '#6366f1',
-        borderDash: [5, 5],
-        backgroundColor: 'transparent',
-        tension: 0.35,
-        pointRadius: 2,
-      },
-      {
-        label: 'Tất toán hóa đơn (Invoice Settled)',
-        data: rev12m.map((r) => Number(r.invoice_settled || 0)),
-        borderColor: '#10b981',
-        backgroundColor: 'transparent',
-        tension: 0.35,
-        pointRadius: 3,
-      },
-      {
-        label: 'Thực thu ròng (Collected)',
-        data: rev12m.map((r) => Number(r.collected || 0)),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.12)',
-        fill: true,
-        tension: 0.35,
-        pointRadius: 3,
-      },
-    ],
-  };
-
-  const doughnutData = {
-    labels: ['Đang thuê', 'Còn trống', 'Đã giữ chỗ', 'Đang bảo trì', 'Ngưng khai thác'],
-    datasets: [
-      {
-        data: [
-          breakdown.OCCUPIED || 0,
-          breakdown.AVAILABLE || 0,
-          breakdown.RESERVED || 0,
-          breakdown.MAINTENANCE || 0,
-          (breakdown.BLOCKED || 0) + (breakdown.INACTIVE || 0),
-        ],
-        backgroundColor: ['#f43f5e', '#10b981', '#f59e0b', '#64748b', '#a855f7'],
-        borderWidth: 2,
-        borderColor: '#ffffff',
-      },
-    ],
-  };
+  const subtitleParts = [
+    `Tổng hợp chỉ số kinh doanh & kỹ thuật theo thời gian thực (Kỳ ${kpis.current_period || ''})`,
+  ];
+  if (data?.generated_at) {
+    subtitleParts.push(`Cập nhật lúc ${formatDateTime(data.generated_at)}`);
+  }
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Bảng điều khiển vận hành"
-        subtitle={`Tổng hợp chỉ số kinh doanh & kỹ thuật theo thời gian thực (Kỳ ${kpis.current_period || ''})`}
+        subtitle={subtitleParts.join(' · ')}
         actions={
-          <Button variant="outline" size="sm" icon={RefreshCw} onClick={loadDashboard} loading={loading}>
-            Làm mới
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div
+              role="group"
+              aria-label="Chọn khoảng kỳ thống kê"
+              className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+            >
+              {[6, 12].map((m) => {
+                const active = months === m;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMonths(m)}
+                    aria-pressed={active}
+                    className={`px-3 py-1.5 min-h-[36px] sm:min-h-0 text-xs font-semibold rounded-md transition-colors ${
+                      active
+                        ? 'bg-white text-primary-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {m} kỳ
+                  </button>
+                );
+              })}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={RefreshCw}
+              onClick={loadDashboard}
+              loading={loading}
+            >
+              Làm mới
+            </Button>
+          </div>
         }
       />
 
@@ -221,6 +259,7 @@ export function DashboardPage() {
           </div>
           <Receipt className="w-6 h-6 text-indigo-600 shrink-0" />
         </button>
+
         <button
           type="button"
           onClick={() => navigate('/admin/deposits?tab=pending')}
@@ -297,66 +336,346 @@ export function DashboardPage() {
         </button>
       </div>
 
-      {/* Charts Row */}
+      {/* Charts Row 1: Biểu đồ Doanh thu (Trend / Stacked Source) & Biểu đồ Công nợ Tuổi nợ (PRD 5 Buckets) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <Card className="lg:col-span-8">
+        <Card className="lg:col-span-7">
           <CardHeader
-            title="Xu hướng doanh thu 12 tháng gần nhất"
-            subtitle="So sánh giá trị hóa đơn phát hành và dòng tiền thực thu theo kỳ (AC-018)"
+            title={`Biểu đồ doanh thu (${months} kỳ gần nhất)`}
+            subtitle={
+              revenueMode === 'trend'
+                ? 'So sánh giá trị hóa đơn phát hành, tất toán và dòng tiền thực thu theo kỳ (AC-018)'
+                : 'Cơ cấu doanh thu phát hành theo nguồn: Tiền phòng, Điện, Nước, Dịch vụ & Khác'
+            }
             action={
-              <Button variant="ghost" size="xs" rightIcon={ArrowRight} onClick={() => navigate('/admin/reports')}>
-                Báo cáo chi tiết
+              <div className="flex flex-wrap items-center gap-2">
+                <div
+                  role="group"
+                  aria-label="Chế độ xem biểu đồ doanh thu"
+                  className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setRevenueMode('trend')}
+                    aria-pressed={revenueMode === 'trend'}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                      revenueMode === 'trend'
+                        ? 'bg-white text-primary-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Xu hướng thu
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRevenueMode('source')}
+                    aria-pressed={revenueMode === 'source'}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                      revenueMode === 'source'
+                        ? 'bg-white text-primary-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Theo nguồn thu
+                  </button>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  rightIcon={ArrowRight}
+                  onClick={() => navigate('/admin/reports')}
+                >
+                  Báo cáo
+                </Button>
+              </div>
+            }
+          />
+          {!showRevenueChart ? (
+            <EmptyState
+              icon={BarChart3}
+              title="Chưa phát sinh doanh thu trong giai đoạn này"
+              description="Biểu đồ sẽ hiển thị ngay khi có hóa đơn phát hành hoặc giao dịch thanh toán được xác nhận."
+              action={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigate('/admin/invoices')}
+                >
+                  Quản lý hóa đơn
+                </Button>
+              }
+            />
+          ) : (
+            <div className="h-72">
+              {revenueMode === 'trend' ? (
+                <Line
+                  data={revenueTrendData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                      legend: {
+                        position: 'top',
+                        labels: { boxWidth: 12, font: { size: 11 } },
+                      },
+                      tooltip: {
+                        callbacks: {
+                          label: (ctx) =>
+                            ` ${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`,
+                        },
+                      },
+                    },
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        ticks: {
+                          callback: (v) => formatCompactMoney(v),
+                          font: { size: 11 },
+                        },
+                        grid: { color: '#f1f5f9' },
+                      },
+                      x: {
+                        grid: { display: false },
+                        ticks: { font: { size: 11 } },
+                      },
+                    },
+                  }}
+                />
+              ) : (
+                <Bar
+                  data={revenueSourceData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                      legend: {
+                        position: 'top',
+                        labels: { boxWidth: 12, font: { size: 11 } },
+                      },
+                      tooltip: {
+                        callbacks: {
+                          label: (ctx) =>
+                            ` ${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`,
+                          footer: (items) => {
+                            const sum = items.reduce(
+                              (acc, item) => acc + Number(item.parsed?.y || 0),
+                              0
+                            );
+                            return `Tổng phát hành kỳ: ${formatMoney(sum)}`;
+                          },
+                        },
+                      },
+                    },
+                    scales: {
+                      x: {
+                        stacked: true,
+                        grid: { display: false },
+                        ticks: { font: { size: 11 } },
+                      },
+                      y: {
+                        stacked: true,
+                        beginAtZero: true,
+                        ticks: {
+                          callback: (v) => formatCompactMoney(v),
+                          font: { size: 11 },
+                        },
+                        grid: { color: '#f1f5f9' },
+                      },
+                    },
+                  }}
+                />
+              )}
+            </div>
+          )}
+        </Card>
+
+        <Card className="lg:col-span-5 flex flex-col">
+          <CardHeader
+            title="Công nợ theo nhóm tuổi nợ"
+            subtitle={`Quá hạn: ${formatMoney(agingInfo.overdue_debt || 0)} / Tổng: ${formatMoney(agingInfo.total_debt ?? kpis.unpaid_debt ?? 0)} · Bấm cột để lọc`}
+            action={
+              <Button
+                variant="ghost"
+                size="xs"
+                rightIcon={ArrowRight}
+                onClick={() => navigate('/admin/payments?tab=aging')}
+              >
+                Sổ công nợ
               </Button>
             }
           />
-          <div className="h-72">
-            <Line
-              data={lineData}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
-                },
-                scales: {
-                  y: {
-                    ticks: {
-                      callback: (v) =>
-                        v >= 1_000_000 ? `${Math.round(v / 1_000_000)}M` : v,
-                      font: { size: 11 },
+          {!showAgingChart ? (
+            <div className="flex-1 flex items-center justify-center">
+              <EmptyState
+                icon={CheckCircle2}
+                title="Không có công nợ tồn đọng"
+                description="Toàn bộ khoản phải thu trong phạm vi hiện đã được thanh toán đầy đủ."
+              />
+            </div>
+          ) : (
+            <div className="h-72">
+              <Bar
+                data={agingChart.chartData}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  onClick: (_evt, elements) => {
+                    if (elements && elements.length > 0) {
+                      const idx = elements[0].index;
+                      const bKey = agingChart.bucketKeys[idx];
+                      if (bKey) {
+                        navigate(`/admin/payments?tab=aging&bucket=${bKey}`);
+                      }
+                    }
+                  },
+                  onHover: (evt, elements) => {
+                    if (evt?.native?.target) {
+                      evt.native.target.style.cursor =
+                        elements && elements.length > 0 ? 'pointer' : 'default';
+                    }
+                  },
+                  plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                      callbacks: {
+                        label: (ctx) => {
+                          const cnt = agingChart.counts[ctx.dataIndex] || 0;
+                          return ` Dư nợ: ${formatMoney(ctx.parsed.y)} (${cnt} khoản)`;
+                        },
+                      },
                     },
-                    grid: { color: '#f1f5f9' },
                   },
-                  x: {
-                    grid: { display: false },
-                    ticks: { font: { size: 11 } },
+                  scales: {
+                    y: {
+                      beginAtZero: true,
+                      ticks: {
+                        callback: (v) => formatCompactMoney(v),
+                        font: { size: 11 },
+                      },
+                      grid: { color: '#f1f5f9' },
+                    },
+                    x: {
+                      grid: { display: false },
+                      ticks: { font: { size: 11 } },
+                    },
                   },
-                },
-              }}
+                }}
+              />
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* Charts Row 2: Biểu đồ Lấp đầy theo kỳ (Line 0-100%) & Cơ cấu trạng thái căn hộ (Doughnut) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <Card className="lg:col-span-8">
+          <CardHeader
+            title={`Xu hướng tỷ lệ lấp đầy (${months} kỳ gần nhất)`}
+            subtitle="Tỷ lệ căn hộ có hợp đồng hiệu lực trên tổng số căn hộ đang khai thác (không tính căn hộ ngưng khai thác)"
+            action={
+              <Button
+                variant="ghost"
+                size="xs"
+                rightIcon={ArrowRight}
+                onClick={() => navigate('/admin/buildings')}
+              >
+                Danh mục căn hộ
+              </Button>
+            }
+          />
+          {!showOccupancyChart ? (
+            <EmptyState
+              icon={Building2}
+              title="Chưa có căn hộ khai thác"
+              description="Hãy khởi tạo tòa nhà và danh sách căn hộ để theo dõi tỷ lệ lấp đầy theo kỳ."
+              action={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => navigate('/admin/buildings')}
+                >
+                  Thiết lập tòa nhà
+                </Button>
+              }
             />
-          </div>
+          ) : (
+            <div className="h-64">
+              <Line
+                data={occupancyTrend.chartData}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  interaction: { mode: 'index', intersect: false },
+                  plugins: {
+                    legend: {
+                      position: 'top',
+                      labels: { boxWidth: 12, font: { size: 11 } },
+                    },
+                    tooltip: {
+                      callbacks: {
+                        label: (ctx) => {
+                          const pt = occupancyTrend.metaPoints[ctx.dataIndex];
+                          if (!pt) return ` Tỷ lệ lấp đầy: ${ctx.parsed.y}%`;
+                          return ` Tỷ lệ lấp đầy: ${pt.occupancy_rate}% (${pt.occupied}/${pt.exploitable} căn đang khai thác)`;
+                        },
+                      },
+                    },
+                  },
+                  scales: {
+                    y: {
+                      min: 0,
+                      max: 100,
+                      ticks: {
+                        callback: (v) => `${v}%`,
+                        font: { size: 11 },
+                      },
+                      grid: { color: '#f1f5f9' },
+                    },
+                    x: {
+                      grid: { display: false },
+                      ticks: { font: { size: 11 } },
+                    },
+                  },
+                }}
+              />
+            </div>
+          )}
         </Card>
 
         <Card className="lg:col-span-4 flex flex-col">
           <CardHeader
             title="Cơ cấu trạng thái căn hộ"
-            subtitle={`Tổng số ${kpis.total_apartments || 0} căn hộ trong phạm vi`}
+            subtitle={`Tổng số ${kpis.total_apartments || 0} căn hộ đang khai thác`}
           />
-          <div className="flex-1 flex items-center justify-center min-h-[240px]">
-            <div className="w-56 h-56">
-              <Doughnut
-                data={doughnutData}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  cutout: '66%',
-                  plugins: {
-                    legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
-                  },
-                }}
+          {!showOccupancyChart ? (
+            <div className="flex-1 flex items-center justify-center">
+              <EmptyState
+                icon={Building2}
+                title="Chưa có căn hộ khai thác"
+                description="Chưa có dữ liệu phân bổ trạng thái phòng."
               />
             </div>
-          </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center min-h-[240px]">
+              <div className="w-56 h-56">
+                <Doughnut
+                  data={doughnutData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '66%',
+                    plugins: {
+                      legend: {
+                        position: 'bottom',
+                        labels: { boxWidth: 10, font: { size: 11 } },
+                      },
+                    },
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </Card>
       </div>
 
@@ -467,4 +786,3 @@ export function DashboardPage() {
 }
 
 export default DashboardPage;
-

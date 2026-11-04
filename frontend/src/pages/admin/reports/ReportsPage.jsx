@@ -43,6 +43,7 @@ import { useToast } from '../../../hooks/useToast';
 import { useAuthStore } from '../../../stores/authStore';
 import { SERVICE_REQUEST_CATEGORY, DEPOSIT_STATUS } from '../../../constants/statuses';
 import { formatMoney, formatCompactMoney, formatDate, exportToCsv } from '../../../utils/format';
+import { buildReportsBuildingAgingChartData } from '../../../utils/chartHelpers';
 import { extractErrorMessage } from '../../../utils/validation';
 import { AuditLogsView } from '../audit/AuditLogsPage';
 
@@ -315,39 +316,11 @@ export function ReportsPage() {
     };
   }, [reportData.occupancy_by_building]);
 
-  // --- Dữ liệu Biểu đồ Tab 3: Tuổi nợ theo tòa ---
-  const agingChartData = useMemo(() => {
-    const rows = reportData.aging_by_building || [];
-    return {
-      labels: rows.map((r) => r.building_code || r.building_name),
-      datasets: [
-        {
-          label: '0 – 30 ngày',
-          data: rows.map((r) => Number(r.bucket_0_30 || 0)),
-          backgroundColor: '#38bdf8',
-          borderRadius: 4,
-        },
-        {
-          label: '31 – 60 ngày',
-          data: rows.map((r) => Number(r.bucket_31_60 || 0)),
-          backgroundColor: '#fbbf24',
-          borderRadius: 4,
-        },
-        {
-          label: '61 – 90 ngày',
-          data: rows.map((r) => Number(r.bucket_61_90 || 0)),
-          backgroundColor: '#f97316',
-          borderRadius: 4,
-        },
-        {
-          label: '> 90 ngày',
-          data: rows.map((r) => Number(r.bucket_over_90 || 0)),
-          backgroundColor: '#e11d48',
-          borderRadius: 4,
-        },
-      ],
-    };
-  }, [reportData.aging_by_building]);
+  // --- Dữ liệu Biểu đồ Tab 3: Tuổi nợ theo tòa (5 nhóm chuẩn PRD AC-016.1) ---
+  const agingChartData = useMemo(
+    () => buildReportsBuildingAgingChartData(reportData.aging_by_building || []),
+    [reportData.aging_by_building]
+  );
 
   // --- Dữ liệu Biểu đồ Tab 4: SLA Báo hỏng ---
   const slaChartData = useMemo(() => {
@@ -464,10 +437,11 @@ export function ReportsPage() {
       [
         { label: 'Mã tòa', key: 'building_code' },
         { label: 'Tên tòa nhà', key: 'building_name' },
-        { label: '0 - 30 ngày (VNĐ)', key: 'bucket_0_30' },
+        { label: 'Chưa đến hạn (VNĐ)', key: 'current_not_due' },
+        { label: '1 - 15 ngày (VNĐ)', key: 'bucket_0_15' },
+        { label: '16 - 30 ngày (VNĐ)', key: 'bucket_16_30' },
         { label: '31 - 60 ngày (VNĐ)', key: 'bucket_31_60' },
-        { label: '61 - 90 ngày (VNĐ)', key: 'bucket_61_90' },
-        { label: '> 90 ngày (VNĐ)', key: 'bucket_over_90' },
+        { label: '> 60 ngày (VNĐ)', key: 'bucket_over_60' },
         { label: 'Tổng dư nợ (VNĐ)', key: 'total_debt' },
       ],
       reportData.aging_by_building || []
@@ -820,7 +794,7 @@ export function ReportsPage() {
           <Card>
             <CardHeader
               title="Phân bổ tuổi nợ (Aging) theo từng tòa nhà"
-              subtitle="Phân tầng công nợ quá hạn theo 4 ngưỡng rủi ro: 0–30, 31–60, 61–90 và trên 90 ngày."
+              subtitle="Phân tầng công nợ theo 5 nhóm tuổi nợ chuẩn PRD: Chưa đến hạn, 1–15, 16–30, 31–60 và trên 60 ngày."
               action={
                 <div className="flex items-center gap-2">
                   <Button
@@ -897,10 +871,10 @@ export function ReportsPage() {
               },
               {
                 key: 'bucket_0_15',
-                label: '0 – 15 ngày',
+                label: '1 – 15 ngày',
                 className: 'text-right font-mono tabular-nums whitespace-nowrap text-emerald-700',
                 headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_0_15 ?? r.bucket_0_30 ?? 0),
+                render: (r) => formatMoney(r.bucket_0_15 || 0),
               },
               {
                 key: 'bucket_16_30',
@@ -921,7 +895,7 @@ export function ReportsPage() {
                 label: '> 60 ngày',
                 className: 'text-right font-mono tabular-nums whitespace-nowrap text-rose-700 font-semibold',
                 headerClassName: 'text-right whitespace-nowrap',
-                render: (r) => formatMoney(r.bucket_over_60 ?? r.bucket_over_90 ?? 0),
+                render: (r) => formatMoney(r.bucket_over_60 || 0),
               },
               {
                 key: 'total_debt',

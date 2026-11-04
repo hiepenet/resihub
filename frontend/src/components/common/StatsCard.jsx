@@ -12,6 +12,7 @@ const ICON_COLORS = {
 export function StatsCard({
   title,
   value,
+  valueTitle: propValueTitle,
   subtext,
   icon: Icon,
   trend, // number (% tăng/giảm)
@@ -20,12 +21,31 @@ export function StatsCard({
 }) {
   const isPositive = typeof trend === 'number' && trend >= 0;
   const valueTitle =
-    typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+    propValueTitle !== undefined
+      ? propValueTitle
+      : typeof value === 'string' || typeof value === 'number'
+      ? String(value)
+      : undefined;
+
+  const handleKeyDown = onClick
+    ? (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick(e);
+        }
+      }
+    : undefined;
+
   return (
     <div
       onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
       className={`bg-white rounded-xl border border-slate-200/80 p-4 sm:p-5 shadow-card flex flex-col justify-between transition-all ${
-        onClick ? 'cursor-pointer hover:border-primary-300 hover:shadow-md' : ''
+        onClick
+          ? 'cursor-pointer hover:border-primary-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40'
+          : ''
       }`}
     >
       <div>
