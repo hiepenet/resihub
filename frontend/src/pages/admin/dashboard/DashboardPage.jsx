@@ -125,7 +125,7 @@ export function DashboardPage() {
     return <PageSkeleton />;
   }
 
-  const showRevenueChart = hasRevenueChartData(rev12m, revBySource);
+  const showRevenueChart = hasRevenueChartData(rev12m, revBySource, revenueMode);
   const showAgingChart = hasAgingChartData(agingInfo);
   const showOccupancyChart = hasOccupancyChartData(kpis.total_apartments, occ12m);
 

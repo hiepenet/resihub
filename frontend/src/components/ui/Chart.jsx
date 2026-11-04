@@ -94,17 +94,16 @@ export function ChartTooltipContent({
       <div className="space-y-1">
         {payload.map((item, index) => {
           const key = `${item.dataKey || item.name || 'value'}`;
-          const itemConfig =
-            config?.[key] ||
-            config?.[item?.payload?.key] ||
-            {};
+          const seriesConfig = config?.[key] || {};
+          const payloadKeyConfig = config?.[item?.payload?.key] || {};
           const indicatorColor =
             item.color ||
             item?.payload?.fill ||
-            itemConfig.color ||
+            seriesConfig.color ||
+            payloadKeyConfig.color ||
             '#0ea5e9';
           const displayLabel =
-            itemConfig.label || item.name || key;
+            seriesConfig.label || item.name || payloadKeyConfig.label || key;
 
           return (
             <div

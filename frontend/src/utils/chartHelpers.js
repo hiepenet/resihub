@@ -90,18 +90,20 @@ function toNonNegativeNumber(val) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-export function hasRevenueChartData(revenueSeries = [], sourceSeries = []) {
+export function hasRevenueChartData(
+  revenueSeries = [],
+  sourceSeries = [],
+  mode = ''
+) {
   const revHasPositive =
     Array.isArray(revenueSeries) &&
     revenueSeries.some(
       (r) =>
         Number(r?.billed || 0) > 0 ||
-        Number(r?.collected || 0) > 0 ||
-        Number(r?.invoice_settled || 0) > 0
+        Number(r?.collected || 0) > 0
     );
-  if (revHasPositive) return true;
 
-  return (
+  const srcHasPositive =
     Array.isArray(sourceSeries) &&
     sourceSeries.some(
       (s) =>
@@ -111,8 +113,11 @@ export function hasRevenueChartData(revenueSeries = [], sourceSeries = []) {
         Number(s?.water || 0) > 0 ||
         Number(s?.service || 0) > 0 ||
         Number(s?.other || 0) > 0
-    )
-  );
+    );
+
+  if (mode === 'comparison') return revHasPositive;
+  if (mode === 'source') return srcHasPositive;
+  return revHasPositive || srcHasPositive;
 }
 
 export function hasAgingChartData(receivablesAging) {
@@ -185,7 +190,11 @@ export function buildReceivablesAgingBarRows(receivablesAging = {}) {
   const rawBuckets = Array.isArray(receivablesAging?.buckets)
     ? receivablesAging.buckets
     : [];
-  const byKey = new Map(rawBuckets.map((b) => [b.key, b]));
+  const byKey = new Map(
+    rawBuckets
+      .filter((b) => b && typeof b === 'object' && b.key)
+      .map((b) => [b.key, b])
+  );
 
   return DASHBOARD_AGING_BUCKET_META.map((meta) => {
     const matched = byKey.get(meta.key);

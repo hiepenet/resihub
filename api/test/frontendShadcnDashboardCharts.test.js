@@ -257,3 +257,61 @@ test('Task 2 Polish — getTopRevenueSourceKey identifies topmost positive stack
     ''
   );
 });
+
+test('Final Review Fix — mode-aware hasRevenueChartData, null-safe aging buckets, and non-duplicated Aging tooltip label', async () => {
+  const {
+    hasRevenueChartData,
+    buildReceivablesAgingBarRows,
+  } = await import('../../frontend/src/utils/chartHelpers.js');
+
+  // 1. invoice_settled-only row must NOT trigger blank 0-bar comparison chart
+  assert.equal(
+    hasRevenueChartData(
+      [{ period: '2026-10', billed: 0, collected: 0, invoice_settled: 3_000_000 }],
+      [],
+      'comparison'
+    ),
+    false
+  );
+  assert.equal(
+    hasRevenueChartData(
+      [{ period: '2026-10', billed: 0, collected: 0, invoice_settled: 3_000_000 }],
+      []
+    ),
+    false
+  );
+
+  // 2. Mode-aware empty state: arrears collected > 0 with 0 issued sources shows comparison bars, but EmptyState in source mode
+  const arrearsOnlyRev = [{ period: '2026-10', billed: 0, collected: 4_000_000, invoice_settled: 0 }];
+  const zeroSources = [
+    { period: '2026-10', rent: 0, electricity: 0, water: 0, service: 0, other: 0, total_billed: 0 },
+  ];
+  assert.equal(hasRevenueChartData(arrearsOnlyRev, zeroSources, 'comparison'), true);
+  assert.equal(hasRevenueChartData(arrearsOnlyRev, zeroSources, 'source'), false);
+
+  // 3. Null/undefined elements inside receivablesAging.buckets must not throw TypeError
+  const agingRows = buildReceivablesAgingBarRows({
+    total_debt: 2_000_000,
+    buckets: [null, undefined, { key: '0_15', amount: 2_000_000, count: 1 }],
+  });
+  assert.equal(agingRows.find((r) => r.key === '0_15')?.amount, 2_000_000);
+
+  // 4. DashboardPage passes revenueMode into hasRevenueChartData & ChartTooltipContent does not shadow explicit item.name with payload.key label
+  const dashSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    dashSrc.includes('hasRevenueChartData(rev12m, revBySource, revenueMode)'),
+    'DashboardPage must evaluate showRevenueChart per active revenueMode'
+  );
+
+  const chartSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/Chart.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    chartSrc.includes('seriesConfig.label || item.name || payloadKeyConfig.label || key'),
+    'ChartTooltipContent must prefer explicit series item.name over payload.key config label to avoid duplicating Aging bucket labels'
+  );
+});
