@@ -416,8 +416,9 @@ export function ProfileTab({ overview, onRefreshOverview }) {
               rightElement={
                 <button
                   type="button"
+                  aria-label={showCurrentPwd ? 'Ẩn mật khẩu hiện tại' : 'Hiện mật khẩu hiện tại'}
                   onClick={() => setShowCurrentPwd((v) => !v)}
-                  className="text-slate-400 hover:text-slate-600"
+                  className="min-w-[40px] min-h-[40px] sm:min-w-0 sm:min-h-0 inline-flex items-center justify-center text-slate-400 hover:text-slate-600"
                 >
                   {showCurrentPwd ? (
                     <EyeOff className="w-4 h-4" />

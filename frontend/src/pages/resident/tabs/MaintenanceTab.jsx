@@ -379,7 +379,7 @@ export function MaintenanceTab({
             icon={Plus}
             onClick={openCreateModal}
             disabled={!contract}
-            className="shrink-0"
+            className="w-full sm:w-auto shrink-0"
           >
             Gửi yêu cầu báo hỏng
           </Button>
@@ -1009,10 +1009,11 @@ export function MaintenanceTab({
                   <button
                     key={star}
                     type="button"
+                    aria-label={`Đánh giá ${star} sao`}
                     onMouseEnter={() => setHoverStars(star)}
                     onMouseLeave={() => setHoverStars(0)}
                     onClick={() => setRatingStars(star)}
-                    className="p-1 transition-transform hover:scale-110 focus:outline-none"
+                    className="min-w-[44px] min-h-[44px] p-1.5 inline-flex items-center justify-center rounded-xl transition-transform hover:scale-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
                   >
                     <Star
                       className={`w-8 h-8 transition-colors ${

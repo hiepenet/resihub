@@ -108,16 +108,16 @@ export function ContactTab({ overview, onNavigateTab }) {
           <div className="flex flex-col sm:flex-row lg:flex-col gap-2.5 shrink-0">
             <a
               href={`tel:${cleanTel(managerPhone)}`}
-              className="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-xl bg-white text-primary-700 hover:bg-sky-50 font-semibold text-sm shadow-sm transition-colors"
+              className="inline-flex items-center justify-center gap-2 min-h-[44px] sm:min-h-0 sm:h-10 px-4 rounded-xl bg-white text-primary-700 hover:bg-sky-50 font-semibold text-sm shadow-sm transition-colors"
             >
-              <PhoneCall className="w-4 h-4" />
+              <PhoneCall className="w-4 h-4 shrink-0" />
               Gọi Quản lý: {managerPhone}
             </a>
             <a
               href={`mailto:${managerEmail}`}
-              className="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/25 font-medium text-xs transition-colors"
+              className="inline-flex items-center justify-center gap-2 min-h-[44px] sm:min-h-0 sm:h-10 px-4 rounded-xl bg-white/15 hover:bg-white/25 text-white border border-white/25 font-medium text-xs transition-colors"
             >
-              <Mail className="w-4 h-4" />
+              <Mail className="w-4 h-4 shrink-0" />
               {managerEmail}
             </a>
           </div>
@@ -163,7 +163,8 @@ export function ContactTab({ overview, onNavigateTab }) {
                 <button
                   type="button"
                   onClick={() => handleCopy(technicalHotline, 'tech')}
-                  className="p-2 rounded-lg hover:bg-slate-200/70 text-slate-500"
+                  aria-label="Sao chép số Hotline kỹ thuật"
+                  className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 rounded-lg hover:bg-slate-200/70 text-slate-500 inline-flex items-center justify-center"
                   title="Sao chép số"
                 >
                   {copiedKey === 'tech' ? (
@@ -174,7 +175,7 @@ export function ContactTab({ overview, onNavigateTab }) {
                 </button>
                 <a
                   href={`tel:${cleanTel(technicalHotline)}`}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-xs font-semibold transition-colors"
+                  className="inline-flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0 px-3.5 py-2 sm:py-1.5 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-xs font-semibold transition-colors"
                 >
                   <PhoneCall className="w-3.5 h-3.5" />
                   Gọi ngay
@@ -227,7 +228,8 @@ export function ContactTab({ overview, onNavigateTab }) {
                 <button
                   type="button"
                   onClick={() => handleCopy(securityHotline, 'sec')}
-                  className="p-2 rounded-lg hover:bg-slate-200/70 text-slate-500"
+                  aria-label="Sao chép số Hotline an ninh"
+                  className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 rounded-lg hover:bg-slate-200/70 text-slate-500 inline-flex items-center justify-center"
                   title="Sao chép số"
                 >
                   {copiedKey === 'sec' ? (
@@ -238,7 +240,7 @@ export function ContactTab({ overview, onNavigateTab }) {
                 </button>
                 <a
                   href={`tel:${cleanTel(securityHotline)}`}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
+                  className="inline-flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0 px-3.5 py-2 sm:py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold transition-colors"
                 >
                   <PhoneCall className="w-3.5 h-3.5" />
                   Gọi ngay

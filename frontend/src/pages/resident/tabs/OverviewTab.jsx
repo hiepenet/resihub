@@ -1054,6 +1054,26 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
           </div>
         ) : null}
 
+        {/* Mobile-First Thumb-Zone 2-Tap Quick Actions (< 640px) */}
+        <div className="sm:hidden grid grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            onClick={() => onNavigateTab?.('invoices', { action: 'pay' })}
+            className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs shadow-sm flex items-center justify-center gap-2 transition-colors"
+          >
+            <Receipt className="w-4 h-4 shrink-0" />
+            <span>Thanh toán HĐ</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateTab?.('maintenance', { action: 'new' })}
+            className="min-h-[48px] px-3.5 py-2.5 rounded-xl bg-white hover:bg-amber-50 text-slate-800 border border-amber-300 font-semibold text-xs shadow-sm flex items-center justify-center gap-2 transition-colors"
+          >
+            <Wrench className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Báo hỏng ngay</span>
+          </button>
+        </div>
+
         {/* 4 KPI Cards Row */}
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           {/* KPI 1: Current Amount Due (AC-002.1) */}

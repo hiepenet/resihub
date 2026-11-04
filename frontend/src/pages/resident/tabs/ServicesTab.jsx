@@ -342,7 +342,7 @@ export function ServicesTab({ overview, actionParam, onClearActionParam }) {
           subtitle="Quản lý các gói dịch vụ định kỳ gắn với hợp đồng thuê hiện tại của bạn"
           action={
             hasActiveContract && catalog.length > 0 ? (
-              <Button size="sm" icon={Plus} onClick={() => openSubscribeModal('')}>
+              <Button size="sm" icon={Plus} onClick={() => openSubscribeModal('')} className="w-full sm:w-auto">
                 Đăng ký thêm dịch vụ
               </Button>
             ) : null

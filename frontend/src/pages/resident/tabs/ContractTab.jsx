@@ -618,7 +618,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
               <Button
                 variant="soft"
                 size="sm"
@@ -896,7 +896,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab }) {
                       ) : null}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
                       <Button
                         variant="outline"
                         size="xs"

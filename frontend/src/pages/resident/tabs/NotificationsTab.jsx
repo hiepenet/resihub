@@ -207,7 +207,7 @@ export function NotificationsTab({ onNavigateTab }) {
               size="sm"
               icon={CheckCheck}
               onClick={markAllAsRead}
-              className="shrink-0"
+              className="w-full sm:w-auto shrink-0"
             >
               Đánh dấu đọc tất cả ({unreadCount})
             </Button>

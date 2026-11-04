@@ -13,10 +13,10 @@ const VARIANTS = {
 };
 
 const SIZES = {
-  xs: 'h-7 px-2.5 text-xs gap-1 rounded-md',
-  sm: 'h-8 px-3 text-xs gap-1.5 rounded-lg',
-  md: 'h-9 px-4 text-sm gap-2 rounded-lg',
-  lg: 'h-11 px-5 text-sm gap-2 rounded-xl',
+  xs: 'min-h-[36px] sm:min-h-0 sm:h-7 px-2.5 text-xs gap-1 rounded-md',
+  sm: 'min-h-[40px] sm:min-h-0 sm:h-8 px-3 text-xs gap-1.5 rounded-lg',
+  md: 'min-h-[44px] sm:min-h-0 sm:h-9 px-4 text-sm gap-2 rounded-lg',
+  lg: 'min-h-[48px] sm:min-h-0 sm:h-11 px-5 text-sm gap-2 rounded-xl',
 };
 
 export function Button({
@@ -53,4 +53,3 @@ export function Button({
 }
 
 export default Button;
-

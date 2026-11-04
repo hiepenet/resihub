@@ -363,7 +363,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
         {/* Financial Summary */}
         <Card className="lg:col-span-7 flex flex-col justify-between">
           <div>
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
               <div>
                 <h2 className="text-base font-bold text-slate-900">
                   Hóa đơn & Đối soát Thanh toán
@@ -377,6 +377,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                 size="sm"
                 disabled={unpaidInvoices.length === 0}
                 onClick={() => openReportPaymentModal(unpaidInvoices[0])}
+                className="w-full sm:w-auto"
               >
                 Báo đã thanh toán
               </Button>
@@ -624,7 +625,9 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                           <button
                             type="button"
                             onClick={() => setExpandedId(isExpanded ? null : inv.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                            aria-label={isExpanded ? 'Thu gọn chi tiết hóa đơn' : 'Mở rộng chi tiết hóa đơn'}
+                            aria-expanded={isExpanded}
+                            className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 inline-flex items-center justify-center"
                             title="Chi tiết hóa đơn"
                           >
                             {isExpanded ? (

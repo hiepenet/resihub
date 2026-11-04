@@ -16,7 +16,12 @@ export function Input({
 }) {
   const generatedId = useId();
   const fieldId = id || generatedId;
-  const baseInputCls = `w-full rounded-lg border bg-white text-sm text-slate-800 placeholder:text-slate-400 transition-colors focus:outline-none focus:ring-2 ${
+  const errorId = `${fieldId}-error`;
+  const hintId = `${fieldId}-hint`;
+  const describedBy =
+    props['aria-describedby'] || (error ? errorId : hint ? hintId : undefined);
+
+  const baseInputCls = `w-full rounded-lg border bg-white text-base sm:text-sm text-slate-800 placeholder:text-slate-400 transition-colors focus:outline-none focus:ring-2 ${
     error
       ? 'border-rose-400 focus:border-rose-500 focus:ring-rose-500/20'
       : 'border-slate-200 hover:border-slate-300 focus:border-primary-500 focus:ring-primary-500/20'
@@ -38,13 +43,21 @@ export function Input({
           <textarea
             id={fieldId}
             rows={rows}
-            className={`${baseInputCls} px-3 py-2 ${className}`}
+            required={required}
+            aria-invalid={Boolean(error)}
+            aria-describedby={describedBy}
+            className={`${baseInputCls} min-h-[88px] px-3 py-2.5 sm:py-2 ${className}`}
             {...props}
           />
         ) : (
           <input
             id={fieldId}
-            className={`${baseInputCls} h-9 ${Icon ? 'pl-9' : 'pl-3'} ${rightElement ? 'pr-9' : 'pr-3'} ${className}`}
+            required={required}
+            aria-invalid={Boolean(error)}
+            aria-describedby={describedBy}
+            className={`${baseInputCls} min-h-[44px] sm:min-h-0 sm:h-9 ${
+              Icon ? 'pl-9' : 'pl-3'
+            } ${rightElement ? 'pr-9' : 'pr-3'} ${className}`}
             {...props}
           />
         )}
@@ -55,13 +68,16 @@ export function Input({
         ) : null}
       </div>
       {error ? (
-        <p className="text-xs text-rose-600">{error}</p>
+        <p id={errorId} role="alert" className="text-xs text-rose-600">
+          {error}
+        </p>
       ) : hint ? (
-        <p className="text-xs text-slate-500">{hint}</p>
+        <p id={hintId} className="text-xs text-slate-500">
+          {hint}
+        </p>
       ) : null}
     </div>
   );
 }
 
 export default Input;
-

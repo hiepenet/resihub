@@ -2,7 +2,10 @@ import React from 'react';
 
 export function Tabs({ tabs = [], activeTab, onChange, className = '' }) {
   return (
-    <div className={`flex items-center gap-1 border-b border-slate-200 overflow-x-auto ${className}`}>
+    <div
+      role="tablist"
+      className={`flex items-center gap-1 border-b border-slate-200 overflow-x-auto no-scrollbar ${className}`}
+    >
       {tabs.map((tab) => {
         const isActive = activeTab === tab.id;
         const Icon = tab.icon;
@@ -10,14 +13,16 @@ export function Tabs({ tabs = [], activeTab, onChange, className = '' }) {
           <button
             key={tab.id}
             type="button"
+            role="tab"
+            aria-selected={isActive}
             onClick={() => onChange?.(tab.id)}
-            className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap -mb-px ${
+            className={`inline-flex items-center gap-2 px-3.5 sm:px-4 py-2.5 min-h-[44px] sm:min-h-0 text-sm font-medium border-b-2 transition-colors whitespace-nowrap -mb-px ${
               isActive
                 ? 'border-primary-500 text-primary-600'
                 : 'border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300'
             }`}
           >
-            {Icon ? <Icon className="w-4 h-4" /> : null}
+            {Icon ? <Icon className="w-4 h-4 shrink-0" /> : null}
             <span>{tab.label}</span>
             {tab.count !== undefined && tab.count !== null ? (
               <span
@@ -36,4 +41,3 @@ export function Tabs({ tabs = [], activeTab, onChange, className = '' }) {
 }
 
 export default Tabs;
-

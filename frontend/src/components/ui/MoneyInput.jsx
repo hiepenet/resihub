@@ -33,6 +33,8 @@ export function MoneyInput({
 }) {
   const generatedId = useId();
   const fieldId = id || generatedId;
+  const errorId = `${fieldId}-error`;
+  const hintId = `${fieldId}-hint`;
   const inputRef = useRef(null);
   const pendingCaretRef = useRef(null);
   const [transientMinus, setTransientMinus] = useState(false);
@@ -45,6 +47,10 @@ export function MoneyInput({
     step: _ignoredStep,
     ...safeRestProps
   } = restProps;
+
+  const describedBy =
+    safeRestProps['aria-describedby'] ||
+    (error ? errorId : hint ? hintId : undefined);
 
   const formattedFromProp = formatMoneyInputDisplay(value, { allowNegative });
   const displayValue =
@@ -107,7 +113,7 @@ export function MoneyInput({
     onBlur?.(e);
   };
 
-  const baseInputCls = `w-full rounded-lg border bg-white text-sm font-mono tabular-nums text-slate-800 placeholder:font-sans placeholder:text-slate-400 transition-colors focus:outline-none focus:ring-2 ${
+  const baseInputCls = `w-full rounded-lg border bg-white text-base sm:text-sm font-mono tabular-nums text-slate-800 placeholder:font-sans placeholder:text-slate-400 transition-colors focus:outline-none focus:ring-2 ${
     error
       ? 'border-rose-400 focus:border-rose-500 focus:ring-rose-500/20'
       : 'border-slate-200 hover:border-slate-300 focus:border-primary-500 focus:ring-primary-500/20'
@@ -134,14 +140,16 @@ export function MoneyInput({
           autoComplete="off"
           disabled={disabled}
           required={required}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
           placeholder={placeholder}
           value={displayValue}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onBlur={handleBlur}
-          className={`${baseInputCls} h-9 ${Icon ? 'pl-9' : 'pl-3'} ${
-            rightElement ? 'pr-9' : 'pr-3'
-          } ${className}`}
+          className={`${baseInputCls} min-h-[44px] sm:min-h-0 sm:h-9 ${
+            Icon ? 'pl-9' : 'pl-3'
+          } ${rightElement ? 'pr-9' : 'pr-3'} ${className}`}
           {...safeRestProps}
         />
         {rightElement ? (
@@ -151,13 +159,16 @@ export function MoneyInput({
         ) : null}
       </div>
       {error ? (
-        <p className="text-xs text-rose-600">{error}</p>
+        <p id={errorId} role="alert" className="text-xs text-rose-600">
+          {error}
+        </p>
       ) : hint ? (
-        <p className="text-xs text-slate-500">{hint}</p>
+        <p id={hintId} className="text-xs text-slate-500">
+          {hint}
+        </p>
       ) : null}
     </div>
   );
 }
 
 export default MoneyInput;
-

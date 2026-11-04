@@ -50,9 +50,9 @@ test('Resident OverviewTab KPI cards and subtitles never clip monetary values or
   assert.equal(src.includes('total_amount_due_all'), true, 'OverviewTab must surface total_amount_due_all for multi-apartment residents');
 });
 
-test('Resident tabs map backend fields accurately (MaintenanceTab internal_note, ContractTab deposit_refund_due_date, ProfileTab id_images)', () => {
+test('Resident tabs map backend fields accurately (MaintenanceTab resolution_note, ContractTab deposit_refund_due_date, ProfileTab id_images)', () => {
   const maintSrc = readSrc('pages/resident/tabs/MaintenanceTab.jsx');
-  assert.equal(maintSrc.includes('internal_note'), true, 'MaintenanceTab must display internal_note resolution details');
+  assert.equal(maintSrc.includes('resolution_note'), true, 'MaintenanceTab must display resolution_note details (internal_note is staff-only per PRD 13.5)');
   assert.equal(maintSrc.includes('resolved_at'), true, 'MaintenanceTab must display resolved_at timestamp');
 
   const contractTabSrc = readSrc('pages/resident/tabs/ContractTab.jsx');

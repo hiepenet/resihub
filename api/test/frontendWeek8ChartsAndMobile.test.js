@@ -208,3 +208,153 @@ test('Task 3 — DashboardPage, ReportsPage, PaymentsPage & StatsCard source int
   assert.ok(statsSrc.includes('onKeyDown'), 'StatsCard must support Enter/Space activation');
   assert.equal(statsSrc.includes('truncate'), false, 'StatsCard must never truncate KPI values or subtext');
 });
+
+test('Task 4 — residentNavHelpers: 4 primary + 4 secondary mobile tabs, unread badge & <=2 tap budget', async () => {
+  const {
+    PRIMARY_RESIDENT_MOBILE_TAB_IDS,
+    SECONDARY_RESIDENT_MOBILE_TAB_IDS,
+    resolveResidentMobileNavState,
+    getResidentActionTapCount,
+  } = await import('../../frontend/src/utils/residentNavHelpers.js');
+
+  assert.deepEqual(PRIMARY_RESIDENT_MOBILE_TAB_IDS, [
+    'overview',
+    'invoices',
+    'maintenance',
+    'services',
+  ]);
+  assert.deepEqual(SECONDARY_RESIDENT_MOBILE_TAB_IDS, [
+    'contract',
+    'notifications',
+    'contact',
+    'profile',
+  ]);
+
+  const stNotif = resolveResidentMobileNavState({
+    activeTab: 'notifications',
+    unreadCount: 5,
+  });
+  assert.equal(stNotif.primaryTabs.length, 4);
+  assert.equal(stNotif.secondaryTabs.length, 4);
+  assert.equal(stNotif.isMoreActive, true);
+  assert.equal(stNotif.moreBadgeCount, 5);
+  assert.equal(stNotif.activeSecondaryTab?.id, 'notifications');
+
+  const stInvZero = resolveResidentMobileNavState({
+    activeTab: 'invoices',
+    unreadCount: 0,
+  });
+  assert.equal(stInvZero.isMoreActive, false);
+  assert.equal(stInvZero.moreBadgeCount, 0);
+  assert.equal(stInvZero.activeSecondaryTab, null);
+
+  const stInvUnread = resolveResidentMobileNavState({
+    activeTab: 'invoices',
+    unreadCount: 3,
+  });
+  assert.equal(stInvUnread.isMoreActive, false);
+  assert.equal(stInvUnread.moreBadgeCount, 3);
+
+  assert.equal(getResidentActionTapCount('view_invoices'), 1);
+  assert.equal(getResidentActionTapCount('view_maintenance'), 1);
+  assert.ok(getResidentActionTapCount('pay_invoice') <= 2);
+  assert.ok(getResidentActionTapCount('create_maintenance') <= 2);
+  assert.ok(getResidentActionTapCount('open_secondary_tab') <= 2);
+});
+
+test('Task 4 — Mobile-first Resident Portal, safe-area, 44px touch targets & WCAG a11y source checks', () => {
+  const indexHtml = fs.readFileSync(
+    path.resolve(__dirname, '../../frontend/index.html'),
+    'utf8'
+  );
+  assert.ok(
+    indexHtml.includes('viewport-fit=cover'),
+    'index.html must include viewport-fit=cover for mobile safe areas'
+  );
+
+  const indexCss = fs.readFileSync(path.join(FRONTEND_SRC, 'index.css'), 'utf8');
+  assert.ok(indexCss.includes('.pb-safe'), 'index.css must define .pb-safe');
+  assert.ok(
+    indexCss.includes('env(safe-area-inset-bottom'),
+    'index.css must use env(safe-area-inset-bottom)'
+  );
+
+  const layoutSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/layout/ResidentLayout.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    layoutSrc.includes('resolveResidentMobileNavState'),
+    'ResidentLayout must use resolveResidentMobileNavState'
+  );
+  assert.ok(
+    layoutSrc.includes('grid-cols-5'),
+    'ResidentLayout mobile bottom bar must use 5-column thumb grid'
+  );
+  assert.ok(
+    layoutSrc.includes('min-h-[56px]'),
+    'ResidentLayout mobile bottom bar must enforce >= 56px bar height'
+  );
+  assert.ok(
+    layoutSrc.includes('pb-safe'),
+    'ResidentLayout mobile bottom bar must respect iOS/Android safe area'
+  );
+  assert.equal(
+    /<nav[^>]*overflow-x-auto/.test(layoutSrc),
+    false,
+    'ResidentLayout mobile bottom bar must not horizontally scroll 8 tabs'
+  );
+
+  const inputSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/Input.jsx'),
+    'utf8'
+  );
+  assert.ok(inputSrc.includes('text-base sm:text-sm'), 'Input must prevent mobile iOS auto-zoom');
+  assert.ok(inputSrc.includes('min-h-[44px]'), 'Input must have >=44px mobile touch height');
+  assert.ok(inputSrc.includes('aria-invalid'), 'Input must expose aria-invalid');
+  assert.ok(inputSrc.includes('aria-describedby'), 'Input must expose aria-describedby');
+
+  const moneySrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/MoneyInput.jsx'),
+    'utf8'
+  );
+  assert.ok(moneySrc.includes('text-base sm:text-sm'), 'MoneyInput must prevent mobile iOS auto-zoom');
+  assert.ok(moneySrc.includes('min-h-[44px]'), 'MoneyInput must have >=44px mobile touch height');
+  assert.ok(moneySrc.includes('aria-invalid'), 'MoneyInput must expose aria-invalid');
+  assert.ok(moneySrc.includes('aria-describedby'), 'MoneyInput must expose aria-describedby');
+
+  const modalSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/Modal.jsx'),
+    'utf8'
+  );
+  assert.ok(modalSrc.includes('role="dialog"'), 'Modal must declare role="dialog"');
+  assert.ok(modalSrc.includes('aria-modal="true"'), 'Modal must declare aria-modal="true"');
+  assert.ok(modalSrc.includes('aria-labelledby'), 'Modal must link title via aria-labelledby');
+  assert.ok(
+    modalSrc.includes('items-end sm:items-center'),
+    'Modal must render as bottom-sheet on mobile (<640px)'
+  );
+  assert.ok(modalSrc.includes('aria-label='), 'Modal close buttons must have aria-label');
+
+  const tabsSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'components/ui/Tabs.jsx'),
+    'utf8'
+  );
+  assert.ok(tabsSrc.includes('role="tablist"'), 'Tabs container must have role="tablist"');
+  assert.ok(tabsSrc.includes('role="tab"'), 'Tab buttons must have role="tab"');
+  assert.ok(tabsSrc.includes('aria-selected'), 'Tab buttons must have aria-selected');
+  assert.ok(tabsSrc.includes('min-h-[44px]'), 'Tab buttons must meet 44px touch target on mobile');
+
+  const overviewSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/resident/tabs/OverviewTab.jsx'),
+    'utf8'
+  );
+  assert.ok(
+    overviewSrc.includes("action: 'pay'"),
+    'OverviewTab must offer 2-tap quick action to pay invoice'
+  );
+  assert.ok(
+    overviewSrc.includes("action: 'new'"),
+    'OverviewTab must offer 2-tap quick action to report breakdown'
+  );
+});
