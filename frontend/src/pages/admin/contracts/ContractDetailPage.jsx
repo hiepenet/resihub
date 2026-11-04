@@ -56,7 +56,10 @@ import { tenantsService } from '../../../services/tenants.service';
 import { servicesService } from '../../../services/services.service';
 import { usersService } from '../../../services/users.service';
 import { paymentsService } from '../../../services/payments.service';
-import { canActorApproveCreditRefund } from '../../../utils/billing';
+import {
+  canActorApproveCreditRefund,
+  buildContractServiceCodeOptions,
+} from '../../../utils/billing';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
@@ -89,7 +92,7 @@ const RELATIONSHIP_OPTIONS = [
   { value: 'other', label: 'Khác' },
 ];
 
-const SERVICE_CODE_OPTIONS = [
+const _SERVICE_CODE_OPTIONS = [
   { value: 'ELECTRICITY', label: 'Điện sinh hoạt (kWh)' },
   { value: 'WATER', label: 'Nước sinh hoạt (m³)' },
   { value: 'INTERNET', label: 'Internet / Wifi (INTERNET)' },
@@ -261,6 +264,16 @@ export function ContractDetailPage() {
   const [occupants, setOccupants] = useState([]);
   const [amendments, setAmendments] = useState([]);
   const [servicePrices, setServicePrices] = useState([]);
+  const [catalogServices, setCatalogServices] = useState([]);
+  const contractBuildingId = contract?.building_id || null;
+  const serviceCodeOptions = useMemo(() => {
+    const scopedCatalog = contractBuildingId
+      ? catalogServices.filter(
+          (item) => !item.building_id || item.building_id === contractBuildingId
+        )
+      : catalogServices;
+    return buildContractServiceCodeOptions(scopedCatalog, servicePrices);
+  }, [catalogServices, contractBuildingId, servicePrices]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
 
@@ -568,6 +581,8 @@ export function ContractDetailPage() {
       setAmendments(Array.isArray(aRes?.data) ? aRes.data : []);
       setServicePrices(Array.isArray(spRes?.data) ? spRes.data : []);
       setAllowSelfApproval(Boolean(settingsRes?.data?.approval_config?.allow_self_approval));
+      const catRes = await servicesService.listCatalog({ is_active: true }).catch(() => ({ data: [] }));
+      setCatalogServices(Array.isArray(catRes?.data) ? catRes.data : []);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải thông tin chi tiết hợp đồng.'));
     } finally {
@@ -2646,7 +2661,7 @@ export function ContractDetailPage() {
                   >
                     <div>
                       <p className="font-semibold text-slate-800">
-                        {SERVICE_CODE_OPTIONS.find((opt) => opt.value === sp.service_code)?.label || sp.service_code}
+                        {serviceCodeOptions.find((opt) => opt.value === sp.service_code)?.label || sp.service_code}
                       </p>
                       <p className="text-slate-500">
                         Hiệu lực từ: {formatDate(sp.effective_from)}
@@ -3642,7 +3657,7 @@ export function ContractDetailPage() {
             label="Dịch vụ"
             value={spForm.service_code}
             onChange={(e) => setSpForm((p) => ({ ...p, service_code: e.target.value }))}
-            options={SERVICE_CODE_OPTIONS}
+            options={serviceCodeOptions}
           />
           <MoneyInput
             label="Đơn giá áp dụng (VND)"

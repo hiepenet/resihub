@@ -1,4 +1,5 @@
 import api from './api';
+import { withIdempotency } from '../utils/idempotency';
 
 export const usersService = {
   list: (params) => api.get('/api/v1/admin/users', { params }).then((r) => r.data),
@@ -13,6 +14,13 @@ export const usersService = {
         settings,
         ...(settings && typeof settings === 'object' ? settings : {}),
       })
+      .then((r) => r.data),
+
+  listCronRuns: (params) =>
+    api.get('/api/v1/settings/cron-runs', { params }).then((r) => r.data),
+  triggerCronRun: (payload = {}, options) =>
+    api
+      .post('/api/v1/settings/cron-runs/trigger', payload, withIdempotency(options))
       .then((r) => r.data),
 };
 

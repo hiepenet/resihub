@@ -15,6 +15,7 @@ import {
 import { Button } from '../../../components/ui/Button';
 import { Select } from '../../../components/ui/Select';
 import { Modal } from '../../../components/ui/Modal';
+import { Badge } from '../../../components/ui/Badge';
 import { Card } from '../../../components/ui/Card';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';

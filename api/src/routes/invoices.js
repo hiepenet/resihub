@@ -385,7 +385,8 @@ export async function generateInvoicesCore(
     // Điện / Nước từ meter_reading đã xác nhận (CONFIRMED) kỳ này
     const mrRes = await client.query(
       `SELECT mr.id, mr.meter_id, mr.consumption, mr.previous_reading, mr.current_reading,
-              m.meter_type, m.unit, m.unit_price
+              mr.image_url,
+              m.meter_type, m.meter_code, m.unit, m.unit_price
        FROM meter_reading mr
        JOIN meter m ON m.id = mr.meter_id
        WHERE mr.apartment_id = $1
@@ -432,6 +433,7 @@ export async function generateInvoicesCore(
           amount: lineAmt,
           formula_meta: {
             meter_id: mr.meter_id,
+            meter_code: mr.meter_code || null,
             reading_id: mr.id,
             meter_type: itemType,
             previous_reading: prevReadNum,
@@ -440,6 +442,7 @@ export async function generateInvoicesCore(
             unit_price: price,
             amount: lineAmt,
             price_source: priceSource,
+            image_url: mr.image_url || null,
           },
         });
       }

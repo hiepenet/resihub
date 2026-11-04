@@ -15,6 +15,11 @@ import {
   evaluateClientMeterAnomaly,
   summarizeSkippedContracts,
   resolveBatchConfirmFeedback,
+  resolveResidentInvoiceLineMeterImage,
+  resolveResidentInvoiceTotalsSummary,
+  resolveAnomalyThresholdPct,
+  computeMeterEstimatedAmount,
+  buildContractServiceCodeOptions,
 } from '../../frontend/src/utils/billing.js';
 import { getCurrentPeriod } from '../../frontend/src/utils/format.js';
 
@@ -509,5 +514,125 @@ test('10. resolveBatchConfirmFeedback warns when skipped_abnormal_without_note i
   assert.equal(ok.confirmedCount, 5);
   assert.match(ok.message, /5 chỉ số/);
 });
+
+test('11. resolveResidentInvoiceLineMeterImage & resolveResidentInvoiceTotalsSummary support FR-032 photo & credit_offset_amount', () => {
+  // Meter image extraction only for ELECTRICITY / WATER
+  assert.equal(
+    resolveResidentInvoiceLineMeterImage({
+      item_type: 'ELECTRICITY',
+      meter_image_url: '/api/v1/attachments/11111111-1111-1111-1111-111111111111/view',
+    }),
+    '/api/v1/attachments/11111111-1111-1111-1111-111111111111/view'
+  );
+  assert.equal(
+    resolveResidentInvoiceLineMeterImage({
+      item_type: 'WATER',
+      formula_meta: { image_url: '/api/v1/attachments/22222222-2222-2222-2222-222222222222/view' },
+    }),
+    '/api/v1/attachments/22222222-2222-2222-2222-222222222222/view'
+  );
+  assert.equal(
+    resolveResidentInvoiceLineMeterImage({
+      item_type: 'RENT',
+      meter_image_url: '/api/v1/attachments/should-ignore/view',
+    }),
+    null
+  );
+  assert.equal(
+    resolveResidentInvoiceLineMeterImage({
+      item_type: 'ELECTRICITY',
+      meter_image_url: '   ',
+      formula_meta: {},
+    }),
+    null
+  );
+
+  // Totals summary with credit_offset_amount & adjustment_amount
+  const summaryWithCredit = resolveResidentInvoiceTotalsSummary({
+    status: 'ISSUED',
+    subtotal_amount: 10525000,
+    adjustment_amount: -200000,
+    credit_offset_amount: 1500000,
+    total_amount: 8825000,
+    paid_amount: 3000000,
+  });
+  assert.equal(summaryWithCredit.subtotalAmount, 10525000);
+  assert.equal(summaryWithCredit.adjustmentAmount, -200000);
+  assert.equal(summaryWithCredit.creditOffsetAmount, 1500000);
+  assert.equal(summaryWithCredit.totalAmount, 8825000);
+  assert.equal(summaryWithCredit.paidAmount, 3000000);
+  assert.equal(summaryWithCredit.remainingAmount, 5825000);
+  assert.equal(summaryWithCredit.showPreTotalBreakdown, true);
+
+  const plainSummary = resolveResidentInvoiceTotalsSummary({
+    status: 'VOID',
+    subtotal_amount: 5000000,
+    adjustment_amount: 0,
+    credit_offset_amount: 0,
+    total_amount: 5000000,
+    paid_amount: 0,
+  });
+  assert.equal(plainSummary.showPreTotalBreakdown, false);
+  assert.equal(plainSummary.remainingAmount, 0);
+});
+
+test('12. resolveAnomalyThresholdPct & computeMeterEstimatedAmount apply dynamic threshold, 3-tier effective_unit_price & roundVND', () => {
+  assert.equal(resolveAnomalyThresholdPct(20), 20);
+  assert.equal(resolveAnomalyThresholdPct('45'), 45);
+  assert.equal(resolveAnomalyThresholdPct(0), 30);
+  assert.equal(resolveAnomalyThresholdPct(null), 30);
+  assert.equal(resolveAnomalyThresholdPct('abc'), 30);
+
+  // Custom threshold 20% flags +25% variance (which default 30% would not flag)
+  const custom20 = evaluateClientMeterAnomaly({
+    prevReading: 100,
+    currentReading: 225,
+    baselineAvg: 100,
+    thresholdPct: resolveAnomalyThresholdPct(20),
+  });
+  assert.equal(custom20.consumption, 125);
+  assert.equal(custom20.diffPct, 25);
+  assert.equal(custom20.isAbnormal, true);
+
+  // Contract override effective_unit_price (3500) wins over meter.unit_price (3800) + roundVND to nearest 1.000 ₫
+  // 123.3 kWh * 3500 = 431,550 -> roundVND = 432,000
+  assert.equal(
+    computeMeterEstimatedAmount(123.3, {
+      unit_price: 3800,
+      effective_unit_price: 3500,
+    }),
+    432000
+  );
+  // Fallback to meter.unit_price when effective_unit_price is absent: 10.1 * 3800 = 38,380 -> 38,000
+  assert.equal(computeMeterEstimatedAmount(10.1, { unit_price: 3800 }), 38000);
+  assert.equal(computeMeterEstimatedAmount(0, { unit_price: 3800 }), 0);
+  assert.equal(computeMeterEstimatedAmount(null, { unit_price: 3800 }), null);
+});
+
+test('13. buildContractServiceCodeOptions merges standard utility/service codes with custom service_catalog & existing overrides', () => {
+  const options = buildContractServiceCodeOptions(
+    [
+      { code: 'internet', name: 'Internet tốc độ cao', is_active: true },
+      { code: 'CAR_PARKING', name: 'Gửi xe ô tô hầm B1', is_active: true },
+      { code: 'CLEANING', name: 'Dọn phòng hàng tuần', is_active: true },
+      { code: 'OLD_SVC', name: 'Dịch vụ ngừng cung cấp', is_active: false },
+    ],
+    [{ service_code: 'LEGACY_GYM' }]
+  );
+
+  const values = options.map((o) => o.value);
+  assert.ok(values.includes('ELECTRICITY'), 'Must keep ELECTRICITY');
+  assert.ok(values.includes('WATER'), 'Must keep WATER');
+  assert.ok(values.includes('INTERNET'), 'Must keep INTERNET without duplicating lowercase');
+  assert.equal(values.filter((v) => v === 'INTERNET').length, 1);
+  assert.ok(values.includes('CAR_PARKING'), 'Must include active custom catalog code CAR_PARKING');
+  assert.ok(values.includes('CLEANING'), 'Must include active custom catalog code CLEANING');
+  assert.ok(!values.includes('OLD_SVC'), 'Inactive catalog service not in existingPrices should be omitted');
+  assert.ok(values.includes('LEGACY_GYM'), 'Existing contract override code should remain selectable/displayable');
+
+  const cleaningOpt = options.find((o) => o.value === 'CLEANING');
+  assert.match(cleaningOpt.label, /Dọn phòng hàng tuần.*CLEANING/);
+});
+
 
 

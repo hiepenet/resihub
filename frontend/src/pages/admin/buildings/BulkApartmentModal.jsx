@@ -480,3 +480,4 @@ export function BulkApartmentModal({ open, buildingId, floors = [], zones = [], 
 }
 
 export default BulkApartmentModal;
+

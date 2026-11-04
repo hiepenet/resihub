@@ -463,4 +463,131 @@ export function resolveBatchConfirmFeedback(res = {}) {
   };
 }
 
+/**
+ * Trích xuất đường dẫn ảnh mặt đồng hồ công tơ (FR-032) cho dòng hóa đơn ĐIỆN / NƯỚC bên Cổng Cư dân.
+ */
+export function resolveResidentInvoiceLineMeterImage(line = {}) {
+  if (!line || typeof line !== 'object') return null;
+  const typeKey = String(line.item_type || line.line_type || '').trim().toUpperCase();
+  if (typeKey !== 'ELECTRICITY' && typeKey !== 'WATER') {
+    return null;
+  }
+  const candidate = line.meter_image_url || line.formula_meta?.image_url || '';
+  const trimmed = String(candidate || '').trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * Chuẩn hóa số liệu tổng kết chân hóa đơn bên Cổng Cư dân (bao gồm cả credit_offset_amount & adjustment_amount).
+ */
+export function resolveResidentInvoiceTotalsSummary(invoice = {}) {
+  const inv = invoice || {};
+  const statusUpper = String(inv.status || '').trim().toUpperCase();
+  const totalAmount = Math.max(0, Number(inv.total_amount || 0));
+  const paidAmount = Math.max(0, Number(inv.paid_amount || 0));
+  const adjustmentAmount = Number(inv.adjustment_amount || 0);
+  const creditOffsetAmount = Math.max(0, Number(inv.credit_offset_amount || 0));
+  const subtotalAmount =
+    inv.subtotal_amount !== undefined && inv.subtotal_amount !== null
+      ? Number(inv.subtotal_amount || 0)
+      : totalAmount - adjustmentAmount + creditOffsetAmount;
+  const remainingAmount =
+    statusUpper === 'VOID' || statusUpper === 'CANCELLED'
+      ? 0
+      : Math.max(0, totalAmount - paidAmount);
+
+  return {
+    subtotalAmount,
+    adjustmentAmount,
+    creditOffsetAmount,
+    totalAmount,
+    paidAmount,
+    remainingAmount,
+    showPreTotalBreakdown: adjustmentAmount !== 0 || creditOffsetAmount > 0,
+  };
+}
+
+/**
+ * Chuẩn hóa ngưỡng cảnh báo biến động chỉ số công tơ (%) từ cấu hình hệ thống (mặc định 30%).
+ */
+export function resolveAnomalyThresholdPct(rawPct) {
+  const num = Number(rawPct);
+  return Number.isFinite(num) && num > 0 ? num : 30;
+}
+
+/**
+ * Tính số tiền tạm tính cho công tơ trên bảng ghi chỉ số (M08):
+ * - Ưu tiên `effective_unit_price` (đã áp dụng thứ tự ưu tiên 3 tầng FR-065) trước `unit_price` gốc.
+ * - Làm tròn hàng nghìn chuẩn `roundVND` (`ROUND(x, -3)`) đồng nhất với hóa đơn M09.
+ */
+export function computeMeterEstimatedAmount(consumption, meterRow = {}) {
+  if (consumption === null || consumption === undefined || consumption === '') {
+    return null;
+  }
+  const cons = Number(consumption);
+  if (!Number.isFinite(cons) || cons < 0) {
+    return null;
+  }
+  if (cons === 0) {
+    return 0;
+  }
+  const rawPrice =
+    meterRow?.effective_unit_price !== undefined && meterRow?.effective_unit_price !== null
+      ? Number(meterRow.effective_unit_price)
+      : Number(meterRow?.unit_price || 0);
+  const safePrice = Number.isFinite(rawPrice) && rawPrice >= 0 ? rawPrice : 0;
+  return roundVND(cons * safePrice);
+}
+
+export const DEFAULT_CONTRACT_SERVICE_CODE_OPTIONS = [
+  { value: 'ELECTRICITY', label: 'Điện sinh hoạt (kWh)' },
+  { value: 'WATER', label: 'Nước sinh hoạt (m³)' },
+  { value: 'INTERNET', label: 'Internet / Wifi (INTERNET)' },
+  { value: 'MOTORBIKE_PARKING', label: 'Gửi xe máy xăng (MOTORBIKE_PARKING)' },
+  { value: 'ELECTRICBIKE_PARKING', label: 'Gửi xe đạp/máy điện (ELECTRICBIKE_PARKING)' },
+  { value: 'TRASH', label: 'Phí thu gom rác (TRASH)' },
+  { value: 'COMMON_SERVICE', label: 'Dịch vụ chung (COMMON_SERVICE)' },
+];
+
+/**
+ * Xây dựng danh sách mã dịch vụ riêng theo hợp đồng (FR-065):
+ * Kết hợp 7 mã chuẩn (gồm Điện, Nước) với các mã dịch vụ đang hoạt động trong `service_catalog`
+ * và các mã đã cấu hình trên hợp đồng để không bỏ sót dịch vụ tùy chỉnh mới.
+ */
+export function buildContractServiceCodeOptions(catalogItems = [], existingPrices = []) {
+  const map = new Map();
+  for (const std of DEFAULT_CONTRACT_SERVICE_CODE_OPTIONS) {
+    map.set(std.value, { value: std.value, label: std.label });
+  }
+
+  const existingCodeSet = new Set(
+    (Array.isArray(existingPrices) ? existingPrices : [])
+      .map((sp) => String(sp?.service_code || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+
+  for (const item of Array.isArray(catalogItems) ? catalogItems : []) {
+    if (!item) continue;
+    const code = String(item.code || item.service_code || '').trim().toUpperCase();
+    if (!code) continue;
+    if (item.is_active === false && !existingCodeSet.has(code)) continue;
+    if (!map.has(code)) {
+      const name = String(item.name || item.service_name || code).trim();
+      map.set(code, {
+        value: code,
+        label: name.toUpperCase() === code ? code : `${name} (${code})`,
+      });
+    }
+  }
+
+  for (const code of existingCodeSet) {
+    if (!map.has(code)) {
+      map.set(code, { value: code, label: code });
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+
 

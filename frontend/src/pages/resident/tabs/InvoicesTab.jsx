@@ -16,6 +16,7 @@ import {
   Send,
   Calendar,
   AlertTriangle,
+  Camera,
 } from 'lucide-react';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -35,6 +36,10 @@ import { usersService } from '../../../services/users.service';
 import { useToast } from '../../../hooks/useToast';
 import { useVietQrBanks } from '../../../hooks/useVietQrBanks';
 import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../utils/format';
+import {
+  resolveResidentInvoiceLineMeterImage,
+  resolveResidentInvoiceTotalsSummary,
+} from '../../../utils/billing';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
 
@@ -119,6 +124,12 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
   const hasAutoExpandedRef = useRef(false);
   const [copiedField, setCopiedField] = useState('');
   const [previewImage, setPreviewImage] = useState(null);
+  const [previewImageTitle, setPreviewImageTitle] = useState('Ảnh chứng từ thanh toán');
+
+  const openImagePreview = (url, title = 'Ảnh chứng từ thanh toán') => {
+    setPreviewImageTitle(title);
+    setPreviewImage(url);
+  };
 
   // Report Payment Modal
   const [payModalOpen, setPayModalOpen] = useState(false);
@@ -646,6 +657,7 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                 ).toUpperCase();
                                 const meta = LINE_TYPE_META[typeKey] || LINE_TYPE_META.OTHER;
                                 const LineIcon = meta.icon;
+                                const meterImageUrl = resolveResidentInvoiceLineMeterImage(line);
                                 return (
                                   <div
                                     key={line.id}
@@ -671,6 +683,40 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                             {line.formula_meta.description || line.formula_meta.formula}
                                           </p>
                                         ) : null}
+                                        {meterImageUrl ? (
+                                          <div className="mt-1.5 flex items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                openImagePreview(
+                                                  meterImageUrl,
+                                                  `Ảnh mặt đồng hồ đối chứng — ${line.description || meta.label}`
+                                                )
+                                              }
+                                              className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-sky-200 bg-sky-50/80 text-[11px] font-semibold text-sky-700 hover:bg-sky-100 transition-colors"
+                                            >
+                                              <Camera className="w-3.5 h-3.5" />
+                                              <span>Xem ảnh đồng hồ</span>
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                openImagePreview(
+                                                  meterImageUrl,
+                                                  `Ảnh mặt đồng hồ đối chứng — ${line.description || meta.label}`
+                                                )
+                                              }
+                                              className="w-8 h-8 rounded-md border border-slate-200 overflow-hidden hover:ring-2 hover:ring-sky-400 transition-all shrink-0"
+                                              title="Xem ảnh chụp mặt đồng hồ"
+                                            >
+                                              <AuthImage
+                                                src={meterImageUrl}
+                                                alt="Ảnh mặt đồng hồ"
+                                                className="w-full h-full object-cover"
+                                              />
+                                            </button>
+                                          </div>
+                                        ) : null}
                                       </div>
                                     </div>
                                     <span className="font-bold text-slate-900 shrink-0">
@@ -682,38 +728,51 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                             )}
 
                             {/* Totals Footer */}
-                            <div className="px-4 py-3 bg-slate-50/80 space-y-1 text-xs">
-                              {Number(inv.adjustment_amount || 0) !== 0 ? (
-                                <>
-                                  <div className="flex justify-between text-slate-600">
-                                    <span>Tạm tính trước điều chỉnh:</span>
-                                    <span>{formatMoney(inv.subtotal_amount ?? (Number(inv.total_amount || 0) - Number(inv.adjustment_amount || 0)))}</span>
+                            {(() => {
+                              const totalsSummary = resolveResidentInvoiceTotalsSummary(inv);
+                              return (
+                                <div className="px-4 py-3 bg-slate-50/80 space-y-1 text-xs">
+                                  {totalsSummary.hasBreakdown ? (
+                                    <>
+                                      <div className="flex justify-between text-slate-600">
+                                        <span>Cộng tiền trước điều chỉnh / cấn trừ:</span>
+                                        <span>{formatMoney(totalsSummary.subtotalAmount)}</span>
+                                      </div>
+                                      {totalsSummary.adjustmentAmount !== 0 ? (
+                                        <div className="flex justify-between text-slate-600">
+                                          <span>Điều chỉnh / Giảm trừ:</span>
+                                          <span>{formatMoney(totalsSummary.adjustmentAmount)}</span>
+                                        </div>
+                                      ) : null}
+                                      {totalsSummary.creditOffsetAmount > 0 ? (
+                                        <div className="flex justify-between text-emerald-700 font-medium">
+                                          <span>Tín dụng cấn trừ kỳ trước:</span>
+                                          <span>-{formatMoney(totalsSummary.creditOffsetAmount)}</span>
+                                        </div>
+                                      ) : null}
+                                    </>
+                                  ) : null}
+                                  <div className="flex justify-between font-semibold text-slate-800">
+                                    <span>Tổng cộng hóa đơn:</span>
+                                    <span>{formatMoney(totalsSummary.totalAmount)}</span>
                                   </div>
-                                  <div className="flex justify-between text-slate-600">
-                                    <span>Điều chỉnh / Giảm trừ:</span>
-                                    <span>{formatMoney(inv.adjustment_amount)}</span>
+                                  <div className="flex justify-between text-emerald-700">
+                                    <span>Đã thanh toán xác nhận:</span>
+                                    <span>{formatMoney(inv.paid_amount)}</span>
                                   </div>
-                                </>
-                              ) : null}
-                              <div className="flex justify-between font-semibold text-slate-800">
-                                <span>Tổng cộng hóa đơn:</span>
-                                <span>{formatMoney(inv.total_amount)}</span>
-                              </div>
-                              <div className="flex justify-between text-emerald-700">
-                                <span>Đã thanh toán xác nhận:</span>
-                                <span>{formatMoney(inv.paid_amount)}</span>
-                              </div>
-                              <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200/70">
-                                <span className="text-slate-900">Số tiền còn lại:</span>
-                                <span
-                                  className={
-                                    remaining > 0 ? 'text-rose-600' : 'text-emerald-600'
-                                  }
-                                >
-                                  {formatMoney(remaining)}
-                                </span>
-                              </div>
-                            </div>
+                                  <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200/70">
+                                    <span className="text-slate-900">Số tiền còn lại:</span>
+                                    <span
+                                      className={
+                                        remaining > 0 ? 'text-rose-600' : 'text-emerald-600'
+                                      }
+                                    >
+                                      {formatMoney(remaining)}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </div>
                           {inv.note ? (
                             <div className="mt-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200/80 text-xs text-slate-700 whitespace-pre-line break-words">
@@ -792,7 +851,9 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
                                             <button
                                               key={idx}
                                               type="button"
-                                              onClick={() => setPreviewImage(imgUrl)}
+                                              onClick={() =>
+                                                openImagePreview(imgUrl, 'Ảnh chứng từ thanh toán')
+                                              }
                                               className="w-12 h-12 rounded-lg border border-slate-200 overflow-hidden hover:ring-2 hover:ring-primary-400 transition-all"
                                             >
                                               <AuthImage
@@ -926,11 +987,11 @@ export function InvoicesTab({ overview, onRefreshOverview, actionParam, onClearA
         </form>
       </Modal>
 
-      {/* Lightbox xem ảnh biên lai */}
+      {/* Lightbox xem ảnh biên lai / ảnh mặt đồng hồ */}
       <Modal
         open={Boolean(previewImage)}
         onClose={() => setPreviewImage(null)}
-        title="Ảnh chứng từ thanh toán"
+        title={previewImageTitle}
         size="lg"
       >
         {previewImage ? (
