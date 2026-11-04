@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
   Printer,
@@ -41,6 +41,7 @@ import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../u
 import { formatDateVi, getDateOrderError, minDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { canConfirmInvoiceVoid, canActorApproveInvoiceAdjustment } from '../../../utils/billing';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const LINE_TYPE_LABELS = {
   RENT: { label: 'Tiền thuê phòng', variant: 'sky' },
@@ -82,6 +83,7 @@ const ADJUSTMENT_TARGET_OPTIONS = [
 export function InvoiceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const toast = useToast();
   const {
     canManageInvoices,
@@ -147,8 +149,10 @@ export function InvoiceDetailPage() {
     proof_image: '',
   });
 
-  // Lightbox xem ảnh chứng từ
+  // Lightbox xem ảnh chứng từ & Modal mở tự động từ thông báo
   const [previewProof, setPreviewProof] = useState(null);
+  const [reviewAdjustment, setReviewAdjustment] = useState(null);
+  const [summaryModalOpen, setSummaryModalOpen] = useState(false);
 
   const fetchDetail = useCallback(async () => {
     if (!id) return;
@@ -199,6 +203,38 @@ export function InvoiceDetailPage() {
       fetchAuditLogs();
     }
   }, [activeTab, fetchAuditLogs]);
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal === 'auto' && !loading && !adjLoading && invoice) {
+      setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+
+      const pendingAdj = adjustments.find(
+        (a) => a.status === 'PENDING_APPROVAL' || a.status === 'PENDING'
+      );
+      if (pendingAdj) {
+        setReviewAdjustment(pendingAdj);
+        return;
+      }
+
+      const rem = Math.max(0, Number(invoice.total_amount || 0) - Number(invoice.paid_amount || 0));
+      const allowCollect =
+        canManagePayments && !['DRAFT', 'VOID', 'CANCELLED'].includes(invoice.status) && rem > 0;
+      if (allowCollect) {
+        setPayForm({
+          amount: String(rem > 0 ? rem : Number(invoice.total_amount || 0)),
+          method: 'BANK_TRANSFER',
+          reference_code: '',
+          note: `Thu tiền hóa đơn ${invoice.invoice_code}`,
+          proof_image: '',
+        });
+        setPayOpen(true);
+        return;
+      }
+
+      setSummaryModalOpen(true);
+    }
+  }, [searchParams, setSearchParams, loading, adjLoading, invoice, adjustments, canManagePayments]);
 
   // --- 1. DRAFT Line Editor Handlers ---
   const openAddLineModal = () => {
@@ -1266,6 +1302,183 @@ export function InvoiceDetailPage() {
             onChange={(img) => setPayForm((s) => ({ ...s, proof_image: img }))}
           />
         </form>
+      </Modal>
+
+      {/* Modal xem chi tiết / phê duyệt đề nghị điều chỉnh hóa đơn (4 mắt) */}
+      <Modal
+        open={Boolean(reviewAdjustment)}
+        onClose={() => setReviewAdjustment(null)}
+        title="Phê duyệt Đề nghị Điều chỉnh Hóa đơn (4 mắt)"
+        subtitle={
+          reviewAdjustment
+            ? `Hóa đơn ${invoice.invoice_code} • Căn ${invoice.apartment_code} (${invoice.building_name})`
+            : ''
+        }
+        size="md"
+        footer={
+          reviewAdjustment ? (
+            <>
+              <Button variant="outline" onClick={() => setReviewAdjustment(null)} disabled={submitting}>
+                Đóng
+              </Button>
+              {canActorApproveInvoiceAdjustment({
+                actor: user,
+                record: reviewAdjustment,
+                buildingHasActiveOwner: true,
+              }) &&
+              canApproveInvoiceAdjustments &&
+              reviewAdjustment.status === 'PENDING_APPROVAL' ? (
+                <>
+                  <Button
+                    variant="danger"
+                    disabled={submitting}
+                    onClick={() => {
+                      const target = reviewAdjustment;
+                      setReviewAdjustment(null);
+                      setRejectAdjTarget(target);
+                      setRejectionReason('');
+                    }}
+                  >
+                    Từ chối
+                  </Button>
+                  <Button
+                    variant="success"
+                    icon={CheckCircle}
+                    loading={submitting}
+                    onClick={async () => {
+                      const target = reviewAdjustment;
+                      await handleApproveAdjustment(target);
+                      setReviewAdjustment(null);
+                    }}
+                  >
+                    Phê duyệt điều chỉnh
+                  </Button>
+                </>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {reviewAdjustment ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Trạng thái đề nghị</p>
+                <div className="mt-1">
+                  <StatusBadge status={reviewAdjustment.status} domain="invoice_adjustment" />
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Loại điều chỉnh</p>
+                <div className="mt-1">
+                  <Badge variant={reviewAdjustment.action_type === 'VOID' ? 'slate' : 'purple'} size="xs">
+                    {reviewAdjustment.action_type === 'VOID'
+                      ? 'HỦY HÓA ĐƠN (VOID)'
+                      : reviewAdjustment.adjustment_target}
+                  </Badge>
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Số tiền thay đổi (Delta)</p>
+                <p className="font-mono text-sm font-bold text-slate-900 mt-0.5">
+                  {reviewAdjustment.delta_amount != null
+                    ? `${Number(reviewAdjustment.delta_amount) > 0 ? '+' : ''}${formatMoney(reviewAdjustment.delta_amount)}`
+                    : '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Thời gian lập</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {formatDateTime(reviewAdjustment.created_at)}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+              <p className="font-semibold text-slate-700">Lý do đề xuất điều chỉnh</p>
+              <p className="text-slate-600 whitespace-pre-line">{reviewAdjustment.reason || '—'}</p>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Modal Tóm tắt nhanh hóa đơn (mở từ thông báo cho vai trò giám sát / hóa đơn đã tất toán) */}
+      <Modal
+        open={summaryModalOpen}
+        onClose={() => setSummaryModalOpen(false)}
+        title={`Tóm tắt Hóa đơn ${invoice.invoice_code}`}
+        subtitle={`Kỳ ${invoice.period} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setSummaryModalOpen(false)}>
+              Đóng
+            </Button>
+            <Button
+              variant="outline"
+              icon={Printer}
+              onClick={() => {
+                setSummaryModalOpen(false);
+                window.print();
+              }}
+            >
+              In hóa đơn PDF
+            </Button>
+            {canManageInvoices && isDraft ? (
+              <Button
+                variant="primary"
+                icon={Send}
+                onClick={() => {
+                  setSummaryModalOpen(false);
+                  setIssueConfirmOpen(true);
+                }}
+              >
+                Phát hành hóa đơn
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <p className="text-slate-500">Trạng thái hóa đơn</p>
+              <div className="mt-1">
+                <StatusBadge status={invoice.status} domain="invoice" />
+              </div>
+            </div>
+            <div>
+              <p className="text-slate-500">Hạn thanh toán</p>
+              <p className="font-semibold text-slate-800 mt-1">{formatDate(invoice.due_date)}</p>
+            </div>
+            <div>
+              <p className="text-slate-500">Tổng cộng phải thu</p>
+              <p className="font-mono text-sm font-bold text-primary-700 mt-0.5">
+                {formatMoney(invoice.total_amount)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Còn phải thu</p>
+              <p className="font-mono text-sm font-bold text-rose-600 mt-0.5">
+                {isVoid || isCancelled ? '0 ₫' : formatMoney(remaining)}
+              </p>
+            </div>
+          </div>
+
+          {adjustments.length > 0 ? (
+            <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-1">
+              <p className="font-semibold text-indigo-900">
+                Đề nghị điều chỉnh gần nhất ({adjustments[0].status})
+              </p>
+              <p className="text-indigo-800">{adjustments[0].reason || '—'}</p>
+              {adjustments[0].rejection_reason ? (
+                <p className="text-rose-700 font-medium">
+                  Lý do từ chối: {adjustments[0].rejection_reason}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </Modal>
 
       {/* Lightbox xem ảnh chứng từ */}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import {
   Wallet,
   Plus,
@@ -40,6 +40,7 @@ import { formatMoney, formatDate, formatDateTime, exportToCsv } from '../../../u
 import { extractErrorMessage } from '../../../utils/validation';
 import { resolvePrdAgingBucket, canActorApproveCreditRefund, PRD_AGING_BUCKETS } from '../../../utils/billing';
 import { resolvePaymentsUrlQuery } from '../../../utils/chartHelpers';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'BANK_TRANSFER', label: 'Chuyển khoản' },
@@ -73,6 +74,7 @@ const AGING_LABELS = {
 export function PaymentsPage() {
   const toast = useToast();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { canManagePayments, canApproveCreditRefunds, user } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
@@ -119,6 +121,7 @@ export function PaymentsPage() {
   });
 
   // Modal từ chối hoàn tiền tín dụng (4 mắt)
+  const [reviewCredit, setReviewCredit] = useState(null);
   const [rejectCreditTarget, setRejectCreditTarget] = useState(null);
   const [creditRejectReason, setCreditRejectReason] = useState('');
 
@@ -246,6 +249,37 @@ export function PaymentsPage() {
     fetchOverpayments();
     fetchCredits();
   }, [fetchReceivables, fetchOverpayments, fetchCredits]);
+
+  useEffect(() => {
+    const targetPaymentId = searchParams.get('payment_id');
+    if (!targetPaymentId || paymentsLoading) return;
+    if (payStatusFilter) {
+      setPayStatusFilter('');
+      return;
+    }
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    setActiveTab('transactions');
+    const matched = payments.find((p) => String(p.id) === String(targetPaymentId));
+    if (matched) {
+      setReviewPayment(matched);
+      setConfirmNote(matched.note || '');
+    }
+  }, [searchParams, setSearchParams, paymentsLoading, payStatusFilter, payments]);
+
+  useEffect(() => {
+    const targetCreditId = searchParams.get('credit_id');
+    if (!targetCreditId || creditsLoading) return;
+    const matched = credits.find((c) => String(c.id) === String(targetCreditId));
+    if (!matched && creditStatusFilter) {
+      setCreditStatusFilter('');
+      return;
+    }
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    setActiveTab('credits');
+    if (matched) {
+      setReviewCredit(matched);
+    }
+  }, [searchParams, setSearchParams, creditsLoading, creditStatusFilter, credits]);
 
   const pendingConfirmList = useMemo(
     () => payments.filter((p) => p.status === 'PENDING_CONFIRMATION'),
@@ -1748,6 +1782,144 @@ export function PaymentsPage() {
             onChange={(img) => setRefundForm((s) => ({ ...s, proof_image: img }))}
           />
         </form>
+      </Modal>
+
+      {/* Modal xem chi tiết / phê duyệt đề nghị hoàn tiền tín dụng (4 mắt) */}
+      <Modal
+        open={Boolean(reviewCredit)}
+        onClose={() => setReviewCredit(null)}
+        title="Chi tiết Sổ tín dụng & Hoàn tiền (4 mắt)"
+        subtitle={
+          reviewCredit
+            ? `Căn ${reviewCredit.apartment_code || '—'} (${reviewCredit.building_code || '—'}) • Khách: ${reviewCredit.tenant_name || '—'}`
+            : ''
+        }
+        size="md"
+        footer={
+          reviewCredit ? (
+            <>
+              <Button variant="outline" onClick={() => setReviewCredit(null)} disabled={processingAction}>
+                Đóng
+              </Button>
+              {reviewCredit.status === 'PENDING_DIRECT_REFUND' &&
+              canActorApproveCreditRefund({
+                actor: user,
+                record: reviewCredit,
+                buildingHasActiveOwner: true,
+              }) &&
+              canApproveCreditRefunds ? (
+                <>
+                  <Button
+                    variant="danger"
+                    icon={X}
+                    disabled={processingAction}
+                    onClick={() => {
+                      const target = reviewCredit;
+                      setReviewCredit(null);
+                      setRejectCreditTarget(target);
+                      setCreditRejectReason('');
+                    }}
+                  >
+                    Từ chối
+                  </Button>
+                  <Button
+                    variant="success"
+                    icon={CheckCircle2}
+                    loading={processingAction}
+                    onClick={async () => {
+                      const target = reviewCredit;
+                      await handleApproveCreditRefund(target);
+                      setReviewCredit(null);
+                    }}
+                  >
+                    Phê duyệt hoàn tiền
+                  </Button>
+                </>
+              ) : ['AVAILABLE', 'PARTIALLY_APPLIED'].includes(reviewCredit.status) &&
+                canManagePayments &&
+                Math.max(0, Number(reviewCredit.amount || 0) - Number(reviewCredit.applied_amount || 0)) > 0 ? (
+                <Button
+                  variant="primary"
+                  icon={TrendingUp}
+                  onClick={() => {
+                    const target = reviewCredit;
+                    const avail = Math.max(
+                      0,
+                      Number(target.amount || 0) - Number(target.applied_amount || 0)
+                    );
+                    setReviewCredit(null);
+                    setRefundRequestModalTarget(target);
+                    setRefundForm({
+                      amount: String(avail),
+                      reason: '',
+                      bank_info: '',
+                      proof_image: '',
+                    });
+                  }}
+                >
+                  Đề nghị hoàn tiền
+                </Button>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {reviewCredit ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Trạng thái hiện tại</p>
+                <div className="mt-1">
+                  <StatusBadge status={reviewCredit.status} domain="credit_balance" />
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Thời gian ghi nhận</p>
+                <p className="font-medium text-slate-800 mt-1">
+                  {formatDateTime(reviewCredit.created_at)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Tổng số tiền tín dụng</p>
+                <p className="font-mono text-sm font-bold text-slate-900 mt-0.5">
+                  {formatMoney(reviewCredit.amount)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Số dư còn khả dụng</p>
+                <p className="font-mono text-sm font-bold text-emerald-700 mt-0.5">
+                  {formatMoney(
+                    Math.max(
+                      0,
+                      Number(reviewCredit.amount || 0) - Number(reviewCredit.applied_amount || 0)
+                    )
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {reviewCredit.description ? (
+              <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+                <p className="font-semibold text-slate-700">Diễn giải / Lý do đề nghị</p>
+                <p className="text-slate-600 whitespace-pre-line">{reviewCredit.description}</p>
+              </div>
+            ) : null}
+
+            {reviewCredit.bank_info ? (
+              <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 space-y-1">
+                <p className="font-semibold text-sky-900">Thông tin tài khoản nhận hoàn</p>
+                <p className="text-sky-800">{reviewCredit.bank_info}</p>
+              </div>
+            ) : null}
+
+            {reviewCredit.rejection_reason ? (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 space-y-1">
+                <p className="font-semibold text-rose-800">Lý do từ chối phê duyệt</p>
+                <p className="text-rose-700">{reviewCredit.rejection_reason}</p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Modal>
 
       {/* Modal từ chối hoàn tiền tín dụng (4 mắt) */}

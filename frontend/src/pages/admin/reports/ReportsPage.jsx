@@ -30,6 +30,7 @@ import {
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
 import { Select } from '../../../components/ui/Select';
+import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Tabs } from '../../../components/ui/Tabs';
@@ -45,6 +46,7 @@ import { SERVICE_REQUEST_CATEGORY, DEPOSIT_STATUS } from '../../../constants/sta
 import { formatMoney, formatCompactMoney, formatDate, exportToCsv } from '../../../utils/format';
 import { buildReportsBuildingAgingChartData } from '../../../utils/chartHelpers';
 import { extractErrorMessage } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 import { AuditLogsView } from '../audit/AuditLogsPage';
 
 ChartJS.register(
@@ -110,6 +112,7 @@ export function ReportsPage() {
   const [ledgerStatus, setLedgerStatus] = useState(() => searchParams.get('status') || '');
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [exportingLedgerFormat, setExportingLedgerFormat] = useState('');
+  const [depositSummaryModalOpen, setDepositSummaryModalOpen] = useState(false);
   const [exportingSummarySection, setExportingSummarySection] = useState('');
   const [ledgerData, setLedgerData] = useState({
     period: { from_date: defaultRange.from_date, to_date: defaultRange.to_date },
@@ -146,7 +149,23 @@ export function ReportsPage() {
     if (tabParam && VALID_REPORT_TABS.includes(tabParam) && tabParam !== activeTab) {
       setActiveTab(tabParam);
     }
-  }, [searchParams, activeTab]);
+    const fromParam = searchParams.get('from_date');
+    const toParam = searchParams.get('to_date');
+    if (fromParam && fromParam !== ledgerFromDate) {
+      setLedgerFromDate(fromParam);
+    }
+    if (toParam && toParam !== ledgerToDate) {
+      setLedgerToDate(toParam);
+    }
+  }, [searchParams, activeTab, ledgerFromDate, ledgerToDate]);
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal === 'summary' && activeTab === 'deposit-ledger' && !ledgerLoading) {
+      setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+      setDepositSummaryModalOpen(true);
+    }
+  }, [searchParams, setSearchParams, activeTab, ledgerLoading]);
 
   const handleTabChange = (nextTab) => {
     setActiveTab(nextTab);
@@ -1226,6 +1245,65 @@ export function ReportsPage() {
           <AuditLogsView lockedScope="financial" />
         </div>
       ) : null}
+
+      {/* Modal Tóm tắt Báo cáo Sổ cọc định kỳ RP-07 (mở từ thông báo MONTHLY_DEPOSIT_REPORT) */}
+      <Modal
+        open={depositSummaryModalOpen}
+        onClose={() => setDepositSummaryModalOpen(false)}
+        title="Tổng hợp Báo cáo Sổ cọc định kỳ (RP-07)"
+        subtitle={`Kỳ đối soát: ${ledgerFromDate || '—'} → ${ledgerToDate || '—'}`}
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDepositSummaryModalOpen(false)}>
+              Đóng
+            </Button>
+            <Button
+              variant="primary"
+              icon={FileSpreadsheet}
+              loading={exportingLedgerFormat === 'xlsx'}
+              onClick={() => handleExportDepositLedger('xlsx')}
+            >
+              Xuất Sổ cọc Excel (.xlsx)
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4 text-xs">
+          <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <p className="text-slate-500">Đầu kỳ đang giữ</p>
+              <p className="font-mono text-sm font-bold text-slate-900 mt-0.5">
+                {formatMoney(ledgerData.summary?.opening_held || 0)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Cuối kỳ đang giữ</p>
+              <p className="font-mono text-sm font-bold text-emerald-700 mt-0.5">
+                {formatMoney(ledgerData.summary?.closing_held || 0)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Thu mới trong kỳ</p>
+              <p className="font-mono font-semibold text-sky-700 mt-0.5">
+                +{formatMoney(ledgerData.summary?.collected || 0)}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-500">Hoàn chi / Khấu trừ</p>
+              <p className="font-mono font-semibold text-indigo-700 mt-0.5">
+                -{formatMoney(Number(ledgerData.summary?.refunded || 0) + Number(ledgerData.summary?.deducted || 0))}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900">
+            <span>Hồ sơ quá hạn hoàn cọc: <strong>{ledgerData.summary?.overdue_count || 0}</strong></span>
+            <span>Đang khiếu nại: <strong>{ledgerData.summary?.disputed_count || 0}</strong></span>
+            <span>Chờ chi hoàn: <strong>{ledgerData.summary?.pending_payout_count || 0}</strong></span>
+          </div>
+        </div>
+      </Modal>
 
       {/* TAB 5: SLA BÁO HỎNG */}
       {activeTab === 'sla' ? (

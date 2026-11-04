@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Wrench,
   Plus,
@@ -51,6 +52,7 @@ import {
 import { ROLE_LABELS } from '../../../constants/roles';
 import { formatDateTime, formatRelativeTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 import {
   formatConfidenceBadge,
   mapAiErrorToVietnamese,
@@ -194,6 +196,7 @@ function StarRatingDisplay({ rating, size = 'sm' }) {
 
 export function ServiceRequestsPage() {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { canHandleMaintenance } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
@@ -399,7 +402,7 @@ export function ServiceRequestsPage() {
     });
   };
 
-  const openDetailDrawer = async (id) => {
+  const openDetailDrawer = useCallback(async (id) => {
     setDrawerOpen(true);
     setDetailLoading(true);
     setCopiedRoomZalo(false);
@@ -415,7 +418,14 @@ export function ServiceRequestsPage() {
     } finally {
       setDetailLoading(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    const reqId = searchParams.get('request_id');
+    if (!reqId) return;
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    openDetailDrawer(reqId);
+  }, [searchParams, setSearchParams, openDetailDrawer]);
 
   const handleApplyAiSuggestionExact = async () => {
     if (!canHandleMaintenance || !detail) return;

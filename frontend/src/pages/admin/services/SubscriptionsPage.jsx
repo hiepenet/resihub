@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Sparkles,
   Users,
@@ -43,6 +43,7 @@ import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { previewSubscriptionProrata } from '../../../utils/billing';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 function estimateProrata(unitPrice, quantity, dateStr, mode = 'subscribe') {
   if (mode === 'cancel') {
@@ -63,6 +64,7 @@ const STATUS_FILTER_PILLS = [
 
 export function SubscriptionsPage() {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { canManageServices } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
@@ -97,8 +99,9 @@ export function SubscriptionsPage() {
   const [cancelZeroUsage, setCancelZeroUsage] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
 
-  // Confirm từ chối đăng ký
+  // Confirm từ chối đăng ký & Modal chi tiết/duyệt đăng ký từ thông báo
   const [rejectTarget, setRejectTarget] = useState(null);
+  const [reviewSubscription, setReviewSubscription] = useState(null);
 
   const fetchSubscriptions = useCallback(async () => {
     setLoading(true);
@@ -270,6 +273,20 @@ export function SubscriptionsPage() {
     setCancelNote(sub.note || '');
     setCancelZeroUsage(false);
   };
+
+  useEffect(() => {
+    const subId = searchParams.get('subscription_id');
+    if (!subId || loading) return;
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    setStatusFilter('');
+    const matched = subscriptions.find((s) => String(s.id) === String(subId));
+    if (!matched) return;
+    if (matched.status === 'CANCELLATION_PENDING' && canManageServices) {
+      openCancelModal(matched);
+    } else {
+      setReviewSubscription(matched);
+    }
+  }, [searchParams, setSearchParams, loading, subscriptions, canManageServices]);
 
   const cancelStartDateStr = toDateOnlyStr(cancelTarget?.start_date);
   const cancelEndDateError = cancelTarget
@@ -871,6 +888,127 @@ export function SubscriptionsPage() {
               value={cancelNote}
               onChange={(e) => setCancelNote(e.target.value)}
             />
+          </div>
+        ) : null}
+      </Modal>
+
+      {/* Modal xem chi tiết / phê duyệt yêu cầu dịch vụ từ thông báo */}
+      <Modal
+        open={Boolean(reviewSubscription)}
+        onClose={() => setReviewSubscription(null)}
+        title="Chi tiết Đăng ký Dịch vụ Căn hộ"
+        subtitle={
+          reviewSubscription
+            ? `Căn ${reviewSubscription.apartment_code || '—'} (${reviewSubscription.building_code || '—'}) • ${reviewSubscription.service_name || 'Dịch vụ'}`
+            : ''
+        }
+        size="md"
+        footer={
+          reviewSubscription ? (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => setReviewSubscription(null)}
+                disabled={submittingAction}
+              >
+                Đóng
+              </Button>
+              {canManageServices && reviewSubscription.status === 'PENDING_APPROVAL' ? (
+                <>
+                  <Button
+                    variant="danger"
+                    icon={X}
+                    disabled={submittingAction}
+                    onClick={() => {
+                      const target = reviewSubscription;
+                      setReviewSubscription(null);
+                      setRejectTarget(target);
+                    }}
+                  >
+                    Từ chối
+                  </Button>
+                  <Button
+                    variant="success"
+                    icon={Check}
+                    loading={submittingAction}
+                    onClick={async () => {
+                      const target = reviewSubscription;
+                      await handleApprove(target);
+                      setReviewSubscription(null);
+                    }}
+                  >
+                    Phê duyệt đăng ký
+                  </Button>
+                </>
+              ) : canManageServices && reviewSubscription.status === 'CANCELLATION_PENDING' ? (
+                <>
+                  <Button
+                    variant="outline"
+                    icon={Check}
+                    loading={submittingAction}
+                    onClick={async () => {
+                      const target = reviewSubscription;
+                      await handleKeepService(target);
+                      setReviewSubscription(null);
+                    }}
+                  >
+                    Giữ lại dịch vụ
+                  </Button>
+                  <Button
+                    variant="warning"
+                    icon={Ban}
+                    onClick={() => {
+                      const target = reviewSubscription;
+                      setReviewSubscription(null);
+                      openCancelModal(target);
+                    }}
+                  >
+                    Xác nhận hủy & Pro-rata
+                  </Button>
+                </>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {reviewSubscription ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Trạng thái gói</p>
+                <div className="mt-1">
+                  <StatusBadge status={reviewSubscription.status} domain="service_subscription" />
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Khách thuê</p>
+                <p className="font-semibold text-slate-900 mt-1">
+                  {reviewSubscription.tenant_name || '—'}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Số lượng × Đơn giá</p>
+                <p className="font-mono font-semibold text-slate-900 mt-0.5">
+                  {reviewSubscription.quantity || 1} × {formatMoney(reviewSubscription.unit_price)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Ngày bắt đầu / kết thúc</p>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {formatDate(reviewSubscription.start_date)}
+                  {reviewSubscription.end_date ? ` → ${formatDate(reviewSubscription.end_date)}` : ''}
+                </p>
+              </div>
+            </div>
+
+            <VehiclePlatesBadges plates={reviewSubscription.vehicle_plates} />
+
+            {reviewSubscription.note ? (
+              <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+                <p className="font-semibold text-slate-700">Ghi chú đăng ký</p>
+                <p className="text-slate-600 whitespace-pre-line">{reviewSubscription.note}</p>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </Modal>

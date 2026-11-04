@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Save,
   ShieldCheck,
@@ -12,6 +13,7 @@ import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
 import { MoneyInput } from '../../../components/ui/MoneyInput';
 import { Select } from '../../../components/ui/Select';
+import { Modal } from '../../../components/ui/Modal';
 import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Table, THead, TBody, TH, TD } from '../../../components/ui/Table';
@@ -20,8 +22,9 @@ import { usersService } from '../../../services/users.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
 import { useToast } from '../../../hooks/useToast';
-import { formatDate, formatDateTime } from '../../../utils/format';
+import { formatDate, formatDateTime, formatMoney } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 import { DEFAULT_RESERVATION_CANCEL_POLICY } from '../../../utils/depositUiHelpers';
 import { DEFAULT_AI_CONFIG, mergeAiConfigState } from '../../../utils/aiHelpers';
 import { AiGatewayConfigCard } from '../../../components/settings/AiGatewayConfigCard';
@@ -63,6 +66,8 @@ const DEFAULT_APPROVAL_CONFIG = {
 export function SettingsPage() {
   const toast = useToast();
   const { isSysAdmin } = usePermission();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [systemAlertModal, setSystemAlertModal] = useState('');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -119,6 +124,16 @@ export function SettingsPage() {
   useEffect(() => {
     fetchCronRuns();
   }, [fetchCronRuns]);
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal !== 'ai' && modal !== 'cron') return;
+    if (loading || (modal === 'cron' && cronLoading)) return;
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    if (isSysAdmin) {
+      setSystemAlertModal(modal);
+    }
+  }, [searchParams, setSearchParams, loading, cronLoading, isSysAdmin]);
 
   const handleTriggerCron = async () => {
     if (!isSysAdmin) return;
@@ -888,6 +903,107 @@ export function SettingsPage() {
           </div>
         </Card>
       ) : null}
+      {/* Modal Chi tiết Cảnh báo Hệ thống (AI Gateway Budget / Cron Job Failure) */}
+      <Modal
+        open={Boolean(systemAlertModal)}
+        onClose={() => setSystemAlertModal('')}
+        title={
+          systemAlertModal === 'ai'
+            ? 'Cảnh báo Ngân sách & Trạng thái AI Gateway'
+            : 'Chi tiết Cảnh báo Tiến trình Tự động Hằng ngày (Cron)'
+        }
+        subtitle={
+          systemAlertModal === 'ai'
+            ? 'Kiểm tra hạn mức chi tiêu AI hằng tháng và điều chỉnh ngưỡng cảnh báo'
+            : 'Kiểm tra bản ghi thực thi tiến trình gần nhất và chạy lại nếu cần'
+        }
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setSystemAlertModal('')}>
+              Đóng
+            </Button>
+            {systemAlertModal === 'cron' && isSysAdmin ? (
+              <Button
+                variant="primary"
+                icon={Play}
+                loading={triggeringCron}
+                onClick={async () => {
+                  await handleTriggerCron();
+                  setSystemAlertModal('');
+                }}
+              >
+                Chạy lại tiến trình ngay
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        {systemAlertModal === 'ai' ? (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div>
+                <p className="text-slate-500">Trạng thái cổng AI</p>
+                <div className="mt-1">
+                  <Badge variant={aiConfig.enabled ? 'emerald' : 'slate'} dot>
+                    {aiConfig.enabled ? 'Đang bật' : 'Đang tắt'}
+                  </Badge>
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Ngân sách trần / tháng</p>
+                <p className="font-mono text-sm font-bold text-slate-900 mt-0.5">
+                  {formatMoney(aiConfig.monthly_budget_vnd || 0)}
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">Ngưỡng cảnh báo sớm</p>
+                <p className="font-semibold text-amber-700 mt-0.5">
+                  {aiConfig.warning_threshold_pct ?? 80}% hạn mức
+                </p>
+              </div>
+              <div>
+                <p className="text-slate-500">API Key cấu hình</p>
+                <p className="font-semibold text-slate-800 mt-0.5">
+                  {aiKeyConfigured ? 'Đã cấu hình' : 'Chưa cấu hình'}
+                </p>
+              </div>
+            </div>
+            <p className="text-slate-600">
+              Bạn có thể nâng hạn mức ngân sách tháng hoặc tắt tạm thời các tác vụ AI không thiết yếu ngay tại thẻ <strong>Cấu hình AI Gateway</strong> bên dưới trang Cài đặt hệ thống.
+            </p>
+          </div>
+        ) : systemAlertModal === 'cron' ? (
+          <div className="space-y-4 text-xs">
+            {cronRuns[0] ? (
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-800">
+                    Ngày đối soát: {formatDate(cronRuns[0].run_date)}
+                  </span>
+                  <Badge
+                    variant={String(cronRuns[0].status).toUpperCase() === 'SUCCEEDED' ? 'emerald' : 'red'}
+                    dot
+                  >
+                    {String(cronRuns[0].status).toUpperCase() === 'SUCCEEDED' ? 'Thành công' : 'Thất bại'}
+                  </Badge>
+                </div>
+                <p className="text-slate-500">
+                  Lần thử: {cronRuns[0].attempt_count || 1} • Thời điểm chạy:{' '}
+                  {formatDateTime(cronRuns[0].started_at)}
+                </p>
+                {cronRuns[0].error_message ? (
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 font-mono">
+                    {cronRuns[0].error_message}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-slate-500 italic">Chưa có bản ghi thực thi tiến trình nào.</p>
+            )}
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

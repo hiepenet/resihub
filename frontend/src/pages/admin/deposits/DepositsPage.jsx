@@ -57,6 +57,7 @@ import { toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey, canCollectAdditionalDeposit } from '../../../utils/idempotency';
 import { canActorApproveDepositRow } from '../../../utils/depositUiHelpers';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 // Khớp 100% với DEDUCT_CATEGORIES trong api/src/services/depositSettlement.js
 const DEDUCT_CATEGORY_OPTIONS = [
@@ -670,6 +671,50 @@ export function DepositsPage() {
       setLoadingSettlement(false);
     }
   }, [banks, toast]);
+
+  useEffect(() => {
+    const targetDepId = searchParams.get('deposit_id');
+    const modal = searchParams.get('modal');
+    if (loading || (!targetDepId && modal !== 'settlement')) return;
+
+    setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
+    const dep = targetDepId
+      ? deposits.find((d) => String(d.id) === String(targetDepId))
+      : scopedDeposits[0];
+    if (!dep) return;
+
+    if (dep.status === 'DISPUTED') {
+      setActiveTab('disputed');
+    } else if (dep.status === 'RETURNED') {
+      setActiveTab('returned');
+    } else if (['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].includes(dep.status)) {
+      setActiveTab('pending');
+    } else if (
+      ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].includes(dep.status)
+    ) {
+      setActiveTab('refunded');
+    } else {
+      setActiveTab('held');
+    }
+
+    if (
+      dep.status === 'HELD' &&
+      !dep.settlement &&
+      ['ACTIVE', 'RENEWAL_PENDING'].includes(dep.contract_status)
+    ) {
+      handleOpenTransactions(dep);
+    } else {
+      handleOpenSettlement(dep);
+    }
+  }, [
+    searchParams,
+    setSearchParams,
+    loading,
+    deposits,
+    scopedDeposits,
+    handleOpenTransactions,
+    handleOpenSettlement,
+  ]);
 
   // Tính toán tự động số tiền hoàn & công nợ từ DB (R-06: Cọc chỉ trừ nợ dịch vụ, KHÔNG trừ nợ tiền thuê)
   const liveCalc = useMemo(() => {

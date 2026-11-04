@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Gauge,
   Plus,
@@ -50,6 +51,7 @@ import {
   buildMeterListQueryParams,
 } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
+import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
 
 function getPreviousBaseline(row) {
   if (row.period_previous_reading !== null && row.period_previous_reading !== undefined) {
@@ -145,8 +147,9 @@ export function MeterReadingsPage() {
   // PRD 6.2: Chỉ MANAGER mới được khởi tạo, ghi nhận và xác nhận chốt chỉ số đồng hồ (SYS_ADMIN / OWNER chỉ đọc)
   const canWriteMeters = isManager;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [period, setPeriod] = useState(getCurrentPeriod());
+  const [period, setPeriod] = useState(() => searchParams.get('period') || getCurrentPeriod());
   const [meterType, setMeterType] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [activeContractFilter, setActiveContractFilter] = useState('');
@@ -539,6 +542,50 @@ export function MeterReadingsPage() {
       setHistoryLoading(false);
     }
   };
+
+  useEffect(() => {
+    const urlPeriod = searchParams.get('period');
+    if (urlPeriod && /^\d{4}-\d{2}$/.test(urlPeriod) && urlPeriod !== period) {
+      setPeriod(urlPeriod);
+    }
+  }, [searchParams, period]);
+
+  useEffect(() => {
+    const modal = searchParams.get('modal');
+    if (modal === 'record' && !loading) {
+      const urlPeriod = searchParams.get('period');
+      if (urlPeriod && /^\d{4}-\d{2}$/.test(urlPeriod) && urlPeriod !== period) return;
+
+      const targetContractId = searchParams.get('contract_id') || '';
+      setSearchParams(
+        (prev) => {
+          const next = stripNotificationTriggerParams(prev);
+          next.delete('contract_id');
+          return next;
+        },
+        { replace: true }
+      );
+
+      const matchesContract = (m) =>
+        targetContractId &&
+        (String(m.target_contract_id || '') === String(targetContractId) ||
+          String(m.contract_id || '') === String(targetContractId) ||
+          (Array.isArray(m.period_slots) &&
+            m.period_slots.some((s) => String(s.contract_id) === String(targetContractId))));
+
+      const targetMeter =
+        (targetContractId &&
+          meters.find((m) => matchesContract(m) && m.period_reading_status !== 'CONFIRMED')) ||
+        (targetContractId && meters.find((m) => matchesContract(m))) ||
+        meters.find((m) => m.period_reading_status !== 'CONFIRMED') ||
+        meters[0];
+
+      if (targetMeter) {
+        openSingleModal(targetMeter);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, setSearchParams, loading, period, meters]);
 
   const handleSaveSingle = async (e, targetStatus = 'CONFIRMED') => {
     e?.preventDefault();
