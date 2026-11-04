@@ -14,6 +14,82 @@ export const DASHBOARD_AGING_BUCKET_META = [
   { key: 'over_60', label: '>60 ngày', color: '#e11d48' },
 ];
 
+export const REVENUE_COMPARISON_CHART_CONFIG = {
+  billed: {
+    label: 'Doanh thu phát hành',
+    color: '#0ea5e9',
+  },
+  collected: {
+    label: 'Tiền thực thu',
+    color: '#10b981',
+  },
+};
+
+export const REVENUE_SOURCE_CHART_CONFIG = {
+  rent: {
+    label: 'Tiền thuê phòng',
+    color: '#0ea5e9',
+  },
+  electricity: {
+    label: 'Tiền điện',
+    color: '#f59e0b',
+  },
+  water: {
+    label: 'Tiền nước',
+    color: '#06b6d4',
+  },
+  service: {
+    label: 'Phí dịch vụ',
+    color: '#10b981',
+  },
+  other: {
+    label: 'Phí trễ hạn & Khác',
+    color: '#8b5cf6',
+  },
+};
+
+export const AGING_BUCKETS_CHART_CONFIG = Object.fromEntries(
+  DASHBOARD_AGING_BUCKET_META.map((m) => [
+    m.key,
+    { label: m.label, color: m.color },
+  ])
+);
+
+export const OCCUPANCY_BAR_CHART_CONFIG = {
+  occupancy_rate: {
+    label: 'Tỷ lệ lấp đầy (%)',
+    color: '#0ea5e9',
+  },
+};
+
+const SAFE_CSS_COLOR_RE =
+  /^(#[0-9a-fA-F]{3,8}|(?:rgb|rgba|hsl|hsla|oklch)\([0-9a-zA-Z.,%\s/-]+\)|var\(--[a-zA-Z0-9_-]+\))$/;
+
+export function sanitizeChartKey(key = '') {
+  return String(key || '').replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+export function buildChartCssVariables(chartId = '', config = {}) {
+  const safeId = sanitizeChartKey(chartId);
+  if (!safeId || !config || typeof config !== 'object') return '';
+
+  const declarations = [];
+  for (const [rawKey, item] of Object.entries(config)) {
+    const safeKey = sanitizeChartKey(rawKey);
+    const rawColor = typeof item?.color === 'string' ? item.color.trim() : '';
+    if (!safeKey || !rawColor || !SAFE_CSS_COLOR_RE.test(rawColor)) continue;
+    declarations.push(`  --color-${safeKey}: ${rawColor};`);
+  }
+
+  if (declarations.length === 0) return '';
+  return `[data-chart="${safeId}"] {\n${declarations.join('\n')}\n}`;
+}
+
+function toNonNegativeNumber(val) {
+  const n = Number(val);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export function hasRevenueChartData(revenueSeries = [], sourceSeries = []) {
   const revHasPositive =
     Array.isArray(revenueSeries) &&
@@ -56,168 +132,80 @@ export function hasOccupancyChartData(totalApartments = 0, occupancySeries = [])
   );
 }
 
-export function buildRevenueTrendChartData(revenueSeries = []) {
+export function buildRevenueComparisonBarRows(revenueSeries = []) {
   const rows = Array.isArray(revenueSeries) ? revenueSeries : [];
-  return {
-    labels: rows.map((r) => r.period || r.month || ''),
-    datasets: [
-      {
-        label: 'Phát hành (Billed)',
-        data: rows.map((r) => Number(r?.billed || 0)),
-        borderColor: '#6366f1',
-        borderDash: [5, 5],
-        backgroundColor: 'transparent',
-        tension: 0.35,
-        pointRadius: 2,
-      },
-      {
-        label: 'Tất toán hóa đơn (Invoice Settled)',
-        data: rows.map((r) => Number(r?.invoice_settled || 0)),
-        borderColor: '#10b981',
-        backgroundColor: 'transparent',
-        tension: 0.35,
-        pointRadius: 3,
-      },
-      {
-        label: 'Thực thu ròng (Collected)',
-        data: rows.map((r) => Number(r?.collected || 0)),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.12)',
-        fill: true,
-        tension: 0.35,
-        pointRadius: 3,
-      },
-    ],
-  };
+  return rows.map((r) => ({
+    period: String(r?.period || r?.month || ''),
+    billed: toNonNegativeNumber(r?.billed),
+    collected: toNonNegativeNumber(r?.collected),
+    invoice_settled: toNonNegativeNumber(r?.invoice_settled),
+  }));
 }
 
-export function buildRevenueBySourceChartData(sourceSeries = []) {
+export function buildRevenueSourceBarRows(sourceSeries = []) {
   const rows = Array.isArray(sourceSeries) ? sourceSeries : [];
-  return {
-    labels: rows.map((r) => r.period || ''),
-    datasets: [
-      {
-        label: 'Tiền phòng',
-        data: rows.map((r) => Number(r?.rent || 0)),
-        backgroundColor: '#0ea5e9',
-        stack: 'revenue_source',
-        borderRadius: 2,
-      },
-      {
-        label: 'Điện',
-        data: rows.map((r) => Number(r?.electricity || 0)),
-        backgroundColor: '#f59e0b',
-        stack: 'revenue_source',
-        borderRadius: 2,
-      },
-      {
-        label: 'Nước',
-        data: rows.map((r) => Number(r?.water || 0)),
-        backgroundColor: '#06b6d4',
-        stack: 'revenue_source',
-        borderRadius: 2,
-      },
-      {
-        label: 'Dịch vụ',
-        data: rows.map((r) => Number(r?.service || 0)),
-        backgroundColor: '#10b981',
-        stack: 'revenue_source',
-        borderRadius: 2,
-      },
-      {
-        label: 'Phí trễ hạn & Khác',
-        data: rows.map((r) => Number(r?.other || 0)),
-        backgroundColor: '#8b5cf6',
-        stack: 'revenue_source',
-        borderRadius: 2,
-      },
-    ],
-  };
+  return rows.map((r) => {
+    const rent = toNonNegativeNumber(r?.rent);
+    const electricity = toNonNegativeNumber(r?.electricity);
+    const water = toNonNegativeNumber(r?.water);
+    const service = toNonNegativeNumber(r?.service);
+    const other = toNonNegativeNumber(r?.other);
+    const sum = rent + electricity + water + service + other;
+    const explicitTotal = Number(r?.total_billed);
+    return {
+      period: String(r?.period || ''),
+      rent,
+      electricity,
+      water,
+      service,
+      other,
+      total_billed:
+        Number.isFinite(explicitTotal) && explicitTotal > 0 ? explicitTotal : sum,
+    };
+  });
 }
 
-export function buildReceivablesAgingChartData(receivablesAging = {}) {
+export function buildReceivablesAgingBarRows(receivablesAging = {}) {
   const rawBuckets = Array.isArray(receivablesAging?.buckets)
     ? receivablesAging.buckets
     : [];
   const byKey = new Map(rawBuckets.map((b) => [b.key, b]));
 
-  const bucketKeys = DASHBOARD_AGING_BUCKET_META.map((m) => m.key);
-  const labels = DASHBOARD_AGING_BUCKET_META.map(
-    (m) => byKey.get(m.key)?.label || m.label
-  );
-  const amounts = DASHBOARD_AGING_BUCKET_META.map((m) =>
-    Number(byKey.get(m.key)?.amount || 0)
-  );
-  const counts = DASHBOARD_AGING_BUCKET_META.map((m) =>
-    Number(byKey.get(m.key)?.count || 0)
-  );
-  const colors = DASHBOARD_AGING_BUCKET_META.map((m) => m.color);
-
-  return {
-    bucketKeys,
-    counts,
-    chartData: {
-      labels,
-      datasets: [
-        {
-          label: 'Dư nợ chưa thu',
-          data: amounts,
-          backgroundColor: colors,
-          borderRadius: 6,
-          maxBarThickness: 48,
-        },
-      ],
-    },
-  };
+  return DASHBOARD_AGING_BUCKET_META.map((meta) => {
+    const matched = byKey.get(meta.key);
+    const safeKey = sanitizeChartKey(meta.key);
+    return {
+      key: meta.key,
+      label: matched?.label || meta.label,
+      amount: toNonNegativeNumber(matched?.amount),
+      count: toNonNegativeNumber(matched?.count),
+      fill: `var(--color-${safeKey})`,
+    };
+  });
 }
 
-export function buildOccupancyTrendChartData(occupancySeries = []) {
+export function resolveAgingBarBucketKey(barItem, index, rows = []) {
+  const candidate =
+    barItem?.payload?.key ??
+    barItem?.key ??
+    (Array.isArray(rows) && Number.isInteger(index) ? rows[index]?.key : '');
+  return DASHBOARD_AGING_BUCKET_KEYS.includes(candidate) ? candidate : '';
+}
+
+export function buildOccupancyBarRows(occupancySeries = []) {
   const rows = Array.isArray(occupancySeries) ? occupancySeries : [];
-  const metaPoints = rows.map((r) => ({
-    period: r.period || '',
-    occupied: Number(r?.occupied || 0),
-    exploitable: Number(r?.exploitable || 0),
-    occupancy_rate: Number(r?.occupancy_rate || 0),
-  }));
-
-  return {
-    metaPoints,
-    chartData: {
-      labels: metaPoints.map((m) => m.period),
-      datasets: [
-        {
-          label: 'Tỷ lệ lấp đầy (%)',
-          data: metaPoints.map((m) => m.occupancy_rate),
-          borderColor: '#0ea5e9',
-          backgroundColor: 'rgba(14, 165, 233, 0.14)',
-          fill: true,
-          tension: 0.35,
-          pointRadius: 3,
-        },
-      ],
-    },
-  };
-}
-
-export function buildApartmentStatusDoughnutData(breakdown = {}) {
-  const b = breakdown || {};
-  return {
-    labels: ['Đang thuê', 'Còn trống', 'Đã giữ chỗ', 'Đang bảo trì', 'Ngưng khai thác'],
-    datasets: [
-      {
-        data: [
-          Number(b.OCCUPIED || 0),
-          Number(b.AVAILABLE || 0),
-          Number(b.RESERVED || 0),
-          Number(b.MAINTENANCE || 0),
-          Number(b.BLOCKED || 0) + Number(b.INACTIVE || 0),
-        ],
-        backgroundColor: ['#f43f5e', '#10b981', '#f59e0b', '#64748b', '#a855f7'],
-        borderWidth: 2,
-        borderColor: '#ffffff',
-      },
-    ],
-  };
+  return rows.map((r) => {
+    const rawRate = Number(r?.occupancy_rate);
+    const clampedRate = Number.isFinite(rawRate)
+      ? Math.min(100, Math.max(0, rawRate))
+      : 0;
+    return {
+      period: String(r?.period || ''),
+      occupied: toNonNegativeNumber(r?.occupied),
+      exploitable: toNonNegativeNumber(r?.exploitable),
+      occupancy_rate: clampedRate,
+    };
+  });
 }
 
 export function buildReportsBuildingAgingChartData(agingByBuildingRows = []) {
