@@ -1012,6 +1012,15 @@ export function resolveChainedReadingBounds({
     if (existingReadingId && String(r.id) === String(existingReadingId)) continue;
     if (targetContractId && r.contract_id && String(r.contract_id) === String(targetContractId)) continue;
 
+    // Unconfirmed DRAFT/FLAGGED reading on an already-finalized contract can never be billed on that contract
+    const rContract =
+      r.contract_id && Array.isArray(overlappingContracts)
+        ? overlappingContracts.find((c) => String(c.contract_id) === String(r.contract_id))
+        : null;
+    if (rContract?.is_period_finalized && r.status && r.status !== 'CONFIRMED' && !r.is_billed) {
+      continue;
+    }
+
     // Unbilled orphan null-contract row when targeting Slot 1 is adopted, not treated as earlier
     if (!r.contract_id && !r.is_billed && targetContractId && !existingReadingId && targetRank <= 0) {
       continue;

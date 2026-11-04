@@ -142,7 +142,7 @@ router.post(
   aiRateLimiter,
   idempotencyGuard(),
   async (req, res) => {
-    const { meter_id, period, image_base64 } = req.body || {};
+    const { meter_id, period, contract_id, image_base64 } = req.body || {};
     const orgId = req.user.org_id;
 
     if (!meter_id || !UUID_RE.test(String(meter_id))) {
@@ -150,6 +150,18 @@ router.post(
         code: 'VALIDATION_ERROR',
         message: 'Mã đồng hồ (meter_id) là bắt buộc và phải đúng định dạng UUID.',
       });
+    }
+
+    let validatedContractId = null;
+    if (contract_id !== null && contract_id !== undefined && String(contract_id).trim() !== '') {
+      const rawCid = String(contract_id).trim();
+      if (!UUID_RE.test(rawCid)) {
+        return res.status(400).json({
+          code: 'VALIDATION_ERROR',
+          message: 'Mã hợp đồng (contract_id) không đúng định dạng UUID.',
+        });
+      }
+      validatedContractId = rawCid;
     }
 
     const { client, release } = await getUserClient(req);
@@ -180,6 +192,7 @@ router.post(
         buildingId,
         meterId: meter_id,
         ...(period ? { period } : {}),
+        contractId: validatedContractId,
         imageBase64: image_base64,
       });
       await client.query('COMMIT');

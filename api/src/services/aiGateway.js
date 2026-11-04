@@ -368,7 +368,15 @@ export async function runExtractSuggestion(
 
 export async function runMeterOcrSuggestion(
   dbClient,
-  { actorId, orgId, buildingId, meterId, period = currentVietnamPeriod(), imageBase64 } = {}
+  {
+    actorId,
+    orgId,
+    buildingId,
+    meterId,
+    period = currentVietnamPeriod(),
+    contractId = null,
+    imageBase64,
+  } = {}
 ) {
   const parsedImg = parseDataUriPayload(imageBase64, {
     allowPdf: false,
@@ -401,21 +409,23 @@ export async function runMeterOcrSuggestion(
   const meter = meterRes.rows[0];
   const effectiveBuildingId = buildingId || meter.building_id;
 
-  const [histRes, billingCfgRes, contractsByApt] = await Promise.all([
-    dbClient.query(
-      `SELECT period, current_reading, consumption, status
-       FROM meter_reading
-       WHERE meter_id = $1 AND period < $2
-       ORDER BY period DESC, current_reading DESC, recorded_at DESC
-       LIMIT 3`,
-      [meter.id, period]
-    ),
-    dbClient.query(
-      `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
-      [orgId]
-    ),
-    loadApartmentPeriodContractsMap(dbClient, [meter.apartment_id], period),
-  ]);
+  const histRes = await dbClient.query(
+    `SELECT period, current_reading, consumption, status
+     FROM meter_reading
+     WHERE meter_id = $1 AND period < $2
+     ORDER BY period DESC, current_reading DESC, recorded_at DESC
+     LIMIT 3`,
+    [meter.id, period]
+  );
+  const billingCfgRes = await dbClient.query(
+    `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
+    [orgId]
+  );
+  const contractsByApt = await loadApartmentPeriodContractsMap(
+    dbClient,
+    [meter.apartment_id],
+    period
+  );
 
   const overlappingContracts = contractsByApt.get(String(meter.apartment_id)) || [];
   const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
@@ -425,7 +435,10 @@ export async function runMeterOcrSuggestion(
     contractsByApt
   );
   const samePeriodReadings = samePeriodMap.get(String(meter.id)) || [];
-  const { targetContract, slotIndex } = selectTargetPeriodContract(overlappingContracts);
+  const { targetContract, slotIndex } = selectTargetPeriodContract(
+    overlappingContracts,
+    contractId || null
+  );
   const targetContractId = targetContract ? targetContract.contract_id : null;
   const existingSlotRow = targetContractId
     ? samePeriodReadings.find((r) => String(r.contract_id) === String(targetContractId)) ||

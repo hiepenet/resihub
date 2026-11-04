@@ -265,15 +265,18 @@ async function checkSettlementPreconditions(
                mr.contract_id = $4
                OR (
                  mr.contract_id IS NULL
-                 AND (
-                   mr.period > $3
-                   OR NOT EXISTS (
-                     SELECT 1 FROM meter_reading mr_other
-                     WHERE mr_other.meter_id = m.id
-                       AND mr_other.period = $3
-                       AND mr_other.contract_id IS NOT NULL
-                       AND mr_other.contract_id <> $4
-                   )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM meter_reading mr_own
+                   WHERE mr_own.meter_id = m.id
+                     AND mr_own.period = mr.period
+                     AND mr_own.contract_id = $4
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM meter_reading mr_other
+                   WHERE mr_other.meter_id = m.id
+                     AND mr_other.period = $3
+                     AND mr_other.contract_id IS NOT NULL
+                     AND mr_other.contract_id <> $4
                  )
                  AND NOT EXISTS (
                    SELECT 1
@@ -282,6 +285,19 @@ async function checkSettlementPreconditions(
                      AND i2.period = mr.period
                      AND i2.status NOT IN ('VOID', 'CANCELLED')
                      AND i2.contract_id <> $4
+                 )
+                 AND (
+                   mr.period = $3
+                   OR NOT EXISTS (
+                     SELECT 1
+                     FROM contract c2
+                     WHERE c2.apartment_id = $1
+                       AND c2.id <> $4
+                       AND c2.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')
+                       AND COALESCE(c2.terminated_at, c2.end_date) >= c2.start_date
+                       AND c2.start_date <= ((mr.period || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
+                       AND COALESCE(c2.terminated_at, c2.end_date) >= $2::date
+                   )
                  )
                )
              )
@@ -294,7 +310,7 @@ async function checkSettlementPreconditions(
       const unbilledRes = await client.query(
         `SELECT DISTINCT m.meter_type
          FROM meter m
-         JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period = $3 AND mr.status = 'CONFIRMED'
+         JOIN meter_reading mr ON mr.meter_id = m.id AND mr.period >= $3 AND mr.status = 'CONFIRMED'
          WHERE m.apartment_id = $1 AND m.status = 'ACTIVE'
            AND m.created_at::date <= $2::date
            AND (
@@ -304,15 +320,35 @@ async function checkSettlementPreconditions(
                AND NOT EXISTS (
                  SELECT 1 FROM meter_reading mr_own
                  WHERE mr_own.meter_id = m.id
-                   AND mr_own.period = $3
+                   AND mr_own.period = mr.period
                    AND mr_own.contract_id = $4
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM meter_reading mr_other
+                 WHERE mr_other.meter_id = m.id
+                   AND mr_other.period = $3
+                   AND mr_other.contract_id IS NOT NULL
+                   AND mr_other.contract_id <> $4
                )
                AND NOT EXISTS (
                  SELECT 1 FROM invoice i2
                  WHERE i2.apartment_id = $1
-                   AND i2.period = $3
+                   AND i2.period = mr.period
                    AND i2.status NOT IN ('VOID', 'CANCELLED')
                    AND i2.contract_id <> $4
+               )
+               AND (
+                 mr.period = $3
+                 OR NOT EXISTS (
+                   SELECT 1
+                   FROM contract c2
+                   WHERE c2.apartment_id = $1
+                     AND c2.id <> $4
+                     AND c2.status NOT IN ('DRAFT', 'PENDING_APPROVAL', 'CANCELLED')
+                     AND COALESCE(c2.terminated_at, c2.end_date) >= c2.start_date
+                     AND c2.start_date <= ((mr.period || '-01')::date + INTERVAL '1 month' - INTERVAL '1 day')::date
+                     AND COALESCE(c2.terminated_at, c2.end_date) >= $2::date
+                 )
                )
              )
            )

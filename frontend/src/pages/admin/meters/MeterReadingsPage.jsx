@@ -133,6 +133,10 @@ function renderReadingStatusBadge(status, thresholdPct = 30) {
   return <span className="text-xs text-slate-400 whitespace-nowrap">Chưa ghi</span>;
 }
 
+function getMeterOcrSlotKey(meterId, contractId) {
+  return contractId ? `${meterId}:${contractId}` : String(meterId);
+}
+
 export function MeterReadingsPage() {
   const toast = useToast();
   const { isManager } = usePermission();
@@ -174,6 +178,10 @@ export function MeterReadingsPage() {
     [selectedMeter, selectedSlotContractId]
   );
   const isModalSlotLocked = isMeterRowLockedForEdit(activeModalMeter, canWriteMeters);
+  const activeModalOcrKey =
+    selectedMeter && activeModalMeter
+      ? getMeterOcrSlotKey(selectedMeter.id, activeModalMeter.target_contract_id)
+      : '';
 
   // Modal khởi tạo đồng hồ mới
   const [createOpen, setCreateOpen] = useState(false);
@@ -286,10 +294,12 @@ export function MeterReadingsPage() {
 
   const handleMeterOcrScan = async (meter, rawFileOrDataUri, { intoSingleModal = false } = {}) => {
     if (!canWriteMeters || !meter || !rawFileOrDataUri) return;
+    const ocrContractId = meter.target_contract_id || undefined;
+    const ocrKey = getMeterOcrSlotKey(meter.id, ocrContractId);
     setAiOcrByMeter((prev) => ({
       ...prev,
-      [meter.id]: {
-        ...(prev[meter.id] || {}),
+      [ocrKey]: {
+        ...(prev[ocrKey] || {}),
         loading: true,
         errorBanner: null,
       },
@@ -302,6 +312,7 @@ export function MeterReadingsPage() {
       const res = await aiService.ocrMeterReading({
         meter_id: meter.id,
         period,
+        contract_id: ocrContractId,
         image_base64: imageBase64,
       });
       const data = res?.data || res;
@@ -312,7 +323,7 @@ export function MeterReadingsPage() {
         // AC-014.1: Ảnh mờ/lóa -> giữ nguyên ô nhập trống, yêu cầu nhập tay
         setAiOcrByMeter((prev) => ({
           ...prev,
-          [meter.id]: {
+          [ocrKey]: {
             suggestionId: data?.suggestion_id || null,
             reading: null,
             confidence: data?.confidence ?? null,
@@ -336,13 +347,18 @@ export function MeterReadingsPage() {
       }
 
       const valStr = String(Number(out.reading));
-      setDrafts((prev) => ({ ...prev, [meter.id]: valStr }));
+      if (
+        !intoSingleModal ||
+        String(ocrContractId || '') === String(selectedMeter?.target_contract_id || '')
+      ) {
+        setDrafts((prev) => ({ ...prev, [meter.id]: valStr }));
+      }
       if (intoSingleModal) {
         setSingleForm((prev) => ({ ...prev, current_reading: valStr, image: imageBase64 }));
       }
       setAiOcrByMeter((prev) => ({
         ...prev,
-        [meter.id]: {
+        [ocrKey]: {
           suggestionId: data?.suggestion_id || null,
           reading: Number(out.reading),
           confidence: data?.confidence ?? null,
@@ -363,8 +379,8 @@ export function MeterReadingsPage() {
       const mappedErr = mapAiErrorToVietnamese(err);
       setAiOcrByMeter((prev) => ({
         ...prev,
-        [meter.id]: {
-          ...(prev[meter.id] || {}),
+        [ocrKey]: {
+          ...(prev[ocrKey] || {}),
           loading: false,
           errorBanner: `${mappedErr.title}: ${mappedErr.guidance}`,
         },
@@ -388,20 +404,23 @@ export function MeterReadingsPage() {
       const payload = {
         period,
         status: targetStatus,
-        readings: dirtyValidRows.map((m) => ({
-          meter_id: m.id,
-          period,
-          ...(m.target_contract_id ? { contract_id: m.target_contract_id } : {}),
-          status: targetStatus,
-          current_reading: Number(drafts[m.id]),
-          abnormal_note: notes[m.id]?.trim() || undefined,
-          ...(aiOcrByMeter[m.id]?.suggestionId
-            ? { ai_suggestion_id: aiOcrByMeter[m.id].suggestionId }
-            : {}),
-          ...(aiOcrByMeter[m.id]?.imageBase64
-            ? { image_base64: aiOcrByMeter[m.id].imageBase64 }
-            : {}),
-        })),
+        readings: dirtyValidRows.map((m) => {
+          const rowOcrKey = getMeterOcrSlotKey(m.id, m.target_contract_id);
+          return {
+            meter_id: m.id,
+            period,
+            ...(m.target_contract_id ? { contract_id: m.target_contract_id } : {}),
+            status: targetStatus,
+            current_reading: Number(drafts[m.id]),
+            abnormal_note: notes[m.id]?.trim() || undefined,
+            ...(aiOcrByMeter[rowOcrKey]?.suggestionId
+              ? { ai_suggestion_id: aiOcrByMeter[rowOcrKey].suggestionId }
+              : {}),
+            ...(aiOcrByMeter[rowOcrKey]?.imageBase64
+              ? { image_base64: aiOcrByMeter[rowOcrKey].imageBase64 }
+              : {}),
+          };
+        }),
       };
       const res = await metersService.recordBatch(payload);
       if (res.abnormal_count > 0) {
@@ -471,22 +490,26 @@ export function MeterReadingsPage() {
     if (!selectedMeter) return;
     const slotView = resolveMeterSlotView(selectedMeter, nextContractId);
     const isDefaultTarget = String(nextContractId || '') === String(selectedMeter.target_contract_id || '');
+    const slotOcr = aiOcrByMeter[getMeterOcrSlotKey(selectedMeter.id, nextContractId)];
     setSingleForm({
       current_reading:
         isDefaultTarget && drafts[selectedMeter.id] !== undefined && drafts[selectedMeter.id] !== ''
           ? drafts[selectedMeter.id]
+          : slotOcr?.reading !== null && slotOcr?.reading !== undefined
+          ? String(Number(slotOcr.reading))
           : slotView.period_current_reading !== null && slotView.period_current_reading !== undefined
           ? String(Number(slotView.period_current_reading))
           : '',
       abnormal_note:
         (isDefaultTarget ? notes[selectedMeter.id] : '') || slotView.period_abnormal_note || '',
-      image: slotView.period_image_url || '',
+      image: slotOcr?.imageBase64 || slotView.period_image_url || '',
     });
   };
 
   const openSingleModal = async (meter) => {
     const initContractId = meter.target_contract_id || '';
     const slotView = resolveMeterSlotView(meter, initContractId);
+    const initOcr = aiOcrByMeter[getMeterOcrSlotKey(meter.id, initContractId)];
     setSelectedMeter(meter);
     setSelectedSlotContractId(initContractId);
     setSingleForm({
@@ -497,7 +520,7 @@ export function MeterReadingsPage() {
           ? String(Number(slotView.period_current_reading))
           : '',
       abnormal_note: notes[meter.id] || slotView.period_abnormal_note || '',
-      image: slotView.period_image_url || '',
+      image: initOcr?.imageBase64 || slotView.period_image_url || '',
     });
     setDetailModalOpen(true);
     setHistoryLoading(true);
@@ -538,14 +561,18 @@ export function MeterReadingsPage() {
 
     setSavingSingle(true);
     try {
+      const modalOcrKey = getMeterOcrSlotKey(
+        selectedMeter.id,
+        selectedSlotContractId || targetMeter.target_contract_id
+      );
       const payload = {
         period,
         contract_id: selectedSlotContractId || undefined,
         status: targetStatus,
         current_reading: val,
         abnormal_note: singleForm.abnormal_note.trim() || undefined,
-        ...(aiOcrByMeter[selectedMeter.id]?.suggestionId
-          ? { ai_suggestion_id: aiOcrByMeter[selectedMeter.id].suggestionId }
+        ...(aiOcrByMeter[modalOcrKey]?.suggestionId
+          ? { ai_suggestion_id: aiOcrByMeter[modalOcrKey].suggestionId }
           : {}),
       };
       if (singleForm.image && singleForm.image.startsWith('data:image/')) {
@@ -825,6 +852,7 @@ export function MeterReadingsPage() {
                 const appliedPrice = row.effective_unit_price ?? row.unit_price;
                 const rowLocked = isMeterRowLockedForEdit(row, canWriteMeters);
                 const turnoverBadge = resolveMeterTurnoverBadgeMeta(row);
+                const rowOcrKey = getMeterOcrSlotKey(row.id, row.target_contract_id);
 
                 const canQuickConfirm =
                   !rowLocked &&
@@ -898,35 +926,35 @@ export function MeterReadingsPage() {
                       <AISuggestionField
                         active={Boolean(
                           canWriteMeters &&
-                            aiOcrByMeter[row.id] &&
-                            aiOcrByMeter[row.id].reading !== null &&
-                            aiOcrByMeter[row.id].reading !== undefined
+                            aiOcrByMeter[rowOcrKey] &&
+                            aiOcrByMeter[rowOcrKey].reading !== null &&
+                            aiOcrByMeter[rowOcrKey].reading !== undefined
                         )}
-                        confirmed={Boolean(aiOcrByMeter[row.id]?.confirmed)}
-                        edited={Boolean(aiOcrByMeter[row.id]?.edited)}
-                        confidence={aiOcrByMeter[row.id]?.confidence}
+                        confirmed={Boolean(aiOcrByMeter[rowOcrKey]?.confirmed)}
+                        edited={Boolean(aiOcrByMeter[rowOcrKey]?.edited)}
+                        confidence={aiOcrByMeter[rowOcrKey]?.confidence}
                         threshold={0.85}
                         warningText={
-                          aiOcrByMeter[row.id]?.warnings?.length
-                            ? aiOcrByMeter[row.id].reason ||
-                              `Cảnh báo hậu kiểm AI: ${aiOcrByMeter[row.id].warnings.join(', ')}`
+                          aiOcrByMeter[rowOcrKey]?.warnings?.length
+                            ? aiOcrByMeter[rowOcrKey].reason ||
+                              `Cảnh báo hậu kiểm AI: ${aiOcrByMeter[rowOcrKey].warnings.join(', ')}`
                             : ''
                         }
                         onConfirm={() =>
                           setAiOcrByMeter((prev) => ({
                             ...prev,
-                            [row.id]: {
-                              ...prev[row.id],
+                            [rowOcrKey]: {
+                              ...prev[rowOcrKey],
                               confirmed: true,
                               edited:
-                                Number(drafts[row.id]) !== Number(prev[row.id]?.reading),
+                                Number(drafts[row.id]) !== Number(prev[rowOcrKey]?.reading),
                             },
                           }))
                         }
                         onDismiss={() =>
                           setAiOcrByMeter((prev) => {
                             const next = { ...prev };
-                            delete next[row.id];
+                            delete next[rowOcrKey];
                             return next;
                           })
                         }
@@ -942,13 +970,13 @@ export function MeterReadingsPage() {
                             const val = e.target.value;
                             setDrafts((prev) => ({ ...prev, [row.id]: val }));
                             setAiOcrByMeter((prev) =>
-                              prev[row.id]?.reading !== null && prev[row.id]?.reading !== undefined
+                              prev[rowOcrKey]?.reading !== null && prev[rowOcrKey]?.reading !== undefined
                                 ? {
                                     ...prev,
-                                    [row.id]: {
-                                      ...prev[row.id],
+                                    [rowOcrKey]: {
+                                      ...prev[rowOcrKey],
                                       confirmed: true,
-                                      edited: Number(val) !== Number(prev[row.id].reading),
+                                      edited: Number(val) !== Number(prev[rowOcrKey].reading),
                                     },
                                   }
                                 : prev
@@ -969,14 +997,14 @@ export function MeterReadingsPage() {
                           Nhỏ hơn chỉ số cũ ({metrics.prevReading})
                         </p>
                       ) : null}
-                      {aiOcrByMeter[row.id]?.reading === null && aiOcrByMeter[row.id]?.reason ? (
+                      {aiOcrByMeter[rowOcrKey]?.reading === null && aiOcrByMeter[rowOcrKey]?.reason ? (
                         <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
-                          {aiOcrByMeter[row.id].reason}
+                          {aiOcrByMeter[rowOcrKey].reason}
                         </p>
                       ) : null}
-                      {aiOcrByMeter[row.id]?.errorBanner ? (
+                      {aiOcrByMeter[rowOcrKey]?.errorBanner ? (
                         <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
-                          {aiOcrByMeter[row.id].errorBanner}
+                          {aiOcrByMeter[rowOcrKey].errorBanner}
                         </p>
                       ) : null}
                     </TD>
@@ -1063,24 +1091,24 @@ export function MeterReadingsPage() {
                         {!rowLocked ? (
                           <label
                             className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
-                              aiOcrByMeter[row.id]?.loading
+                              aiOcrByMeter[rowOcrKey]?.loading
                                 ? 'bg-indigo-50 text-indigo-400 border-indigo-200 pointer-events-none'
                                 : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
                             }`}
                             title="Chụp hoặc chọn ảnh mặt đồng hồ để AI đọc chỉ số nháp (AI-02)"
                           >
-                            {aiOcrByMeter[row.id]?.loading ? (
+                            {aiOcrByMeter[rowOcrKey]?.loading ? (
                               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Sparkles className="w-3.5 h-3.5" />
                             )}
-                            <span>{aiOcrByMeter[row.id]?.loading ? 'Đang đọc...' : 'Ảnh AI'}</span>
+                            <span>{aiOcrByMeter[rowOcrKey]?.loading ? 'Đang đọc...' : 'Ảnh AI'}</span>
                             <input
                               type="file"
                               accept="image/jpeg,image/png,image/webp"
                               capture="environment"
                               className="hidden"
-                              disabled={Boolean(aiOcrByMeter[row.id]?.loading)}
+                              disabled={Boolean(aiOcrByMeter[rowOcrKey]?.loading)}
                               onChange={(e) => {
                                 const f = e.target.files?.[0];
                                 e.target.value = '';
@@ -1220,31 +1248,31 @@ export function MeterReadingsPage() {
                   <AISuggestionField
                     active={Boolean(
                       !isModalSlotLocked &&
-                        aiOcrByMeter[selectedMeter.id] &&
-                        aiOcrByMeter[selectedMeter.id].reading !== null &&
-                        aiOcrByMeter[selectedMeter.id].reading !== undefined
+                        aiOcrByMeter[activeModalOcrKey] &&
+                        aiOcrByMeter[activeModalOcrKey].reading !== null &&
+                        aiOcrByMeter[activeModalOcrKey].reading !== undefined
                     )}
-                    confirmed={Boolean(aiOcrByMeter[selectedMeter.id]?.confirmed)}
-                    edited={Boolean(aiOcrByMeter[selectedMeter.id]?.edited)}
-                    confidence={aiOcrByMeter[selectedMeter.id]?.confidence}
+                    confirmed={Boolean(aiOcrByMeter[activeModalOcrKey]?.confirmed)}
+                    edited={Boolean(aiOcrByMeter[activeModalOcrKey]?.edited)}
+                    confidence={aiOcrByMeter[activeModalOcrKey]?.confidence}
                     threshold={0.85}
-                    warningText={aiOcrByMeter[selectedMeter.id]?.reason || ''}
+                    warningText={aiOcrByMeter[activeModalOcrKey]?.reason || ''}
                     onConfirm={() =>
                       setAiOcrByMeter((prev) => ({
                         ...prev,
-                        [selectedMeter.id]: {
-                          ...prev[selectedMeter.id],
+                        [activeModalOcrKey]: {
+                          ...prev[activeModalOcrKey],
                           confirmed: true,
                           edited:
                             Number(singleForm.current_reading) !==
-                            Number(prev[selectedMeter.id]?.reading),
+                            Number(prev[activeModalOcrKey]?.reading),
                         },
                       }))
                     }
                     onDismiss={() =>
                       setAiOcrByMeter((prev) => {
                         const next = { ...prev };
-                        delete next[selectedMeter.id];
+                        delete next[activeModalOcrKey];
                         return next;
                       })
                     }
@@ -1260,15 +1288,15 @@ export function MeterReadingsPage() {
                         const val = e.target.value;
                         setSingleForm((s) => ({ ...s, current_reading: val }));
                         setAiOcrByMeter((prev) =>
-                          prev[selectedMeter.id]?.reading !== null &&
-                          prev[selectedMeter.id]?.reading !== undefined
+                          prev[activeModalOcrKey]?.reading !== null &&
+                          prev[activeModalOcrKey]?.reading !== undefined
                             ? {
                                 ...prev,
-                                [selectedMeter.id]: {
-                                  ...prev[selectedMeter.id],
+                                [activeModalOcrKey]: {
+                                  ...prev[activeModalOcrKey],
                                   confirmed: true,
                                   edited:
-                                    Number(val) !== Number(prev[selectedMeter.id].reading),
+                                    Number(val) !== Number(prev[activeModalOcrKey].reading),
                                 },
                               }
                             : prev
@@ -1278,17 +1306,17 @@ export function MeterReadingsPage() {
                   </AISuggestionField>
                 </div>
 
-                {aiOcrByMeter[selectedMeter.id]?.reading === null &&
-                aiOcrByMeter[selectedMeter.id]?.reason ? (
+                {aiOcrByMeter[activeModalOcrKey]?.reading === null &&
+                aiOcrByMeter[activeModalOcrKey]?.reason ? (
                   <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                    <span>{aiOcrByMeter[selectedMeter.id].reason}</span>
+                    <span>{aiOcrByMeter[activeModalOcrKey].reason}</span>
                   </div>
                 ) : null}
 
-                {aiOcrByMeter[selectedMeter.id]?.errorBanner ? (
+                {aiOcrByMeter[activeModalOcrKey]?.errorBanner ? (
                   <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
-                    {aiOcrByMeter[selectedMeter.id].errorBanner}
+                    {aiOcrByMeter[activeModalOcrKey].errorBanner}
                   </div>
                 ) : null}
 
@@ -1318,7 +1346,7 @@ export function MeterReadingsPage() {
                       variant="soft"
                       size="sm"
                       icon={Sparkles}
-                      loading={Boolean(aiOcrByMeter[selectedMeter.id]?.loading)}
+                      loading={Boolean(aiOcrByMeter[activeModalOcrKey]?.loading)}
                       onClick={() =>
                         handleMeterOcrScan(activeModalMeter, singleForm.image, {
                           intoSingleModal: true,

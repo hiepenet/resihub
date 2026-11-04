@@ -213,7 +213,7 @@ export async function generateInvoicesCore(
          OR (
            c.status = 'TERMINATED'
            AND (
-             (
+             ${contractId ? 'TRUE OR ' : ''}(
                COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) >= ($2 || '-01')::date
                AND COALESCE(rt.child_start_date - INTERVAL '1 day', c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
              )
@@ -227,8 +227,12 @@ export async function generateInvoicesCore(
          )
          OR (
            c.status = 'EXPIRED'
-           AND COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
-           AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+           AND (
+             ${contractId ? 'TRUE OR ' : ''}(
+               COALESCE(c.terminated_at, c.end_date) > ($2 || '-01')::date
+               AND COALESCE(c.terminated_at, c.end_date) < (($2 || '-01')::date + INTERVAL '1 month')::date
+             )
+           )
          )
        )`;
 

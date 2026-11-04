@@ -250,6 +250,11 @@ router.get(
             initialReading: m.initial_reading,
           });
 
+          const defaultUtilityPrice =
+            m.meter_type === 'ELECTRICITY'
+              ? billingCfg.electricityDefaultPrice
+              : billingCfg.waterDefaultPrice;
+
           const slotSummaries = overlappingContracts.map((c, idx) => {
             const sIdx = idx + 1;
             const matchedRow = findMatchingReadingForSlot(samePeriodReadings, c.contract_id, sIdx);
@@ -261,6 +266,15 @@ router.get(
               targetContractId: c.contract_id,
               existingReadingId: matchedRow?.id || null,
               initialReading: m.initial_reading,
+            });
+            const slotPrice = resolveUtilityUnitPrice({
+              meterType: m.meter_type,
+              meterUnitPrice: m.unit_price,
+              contractBuildingId: c.building_id || m.building_id,
+              periodEndYmd: c.overlap_end || periodEndYmd,
+              contractServicePrices: cspByContract.get(String(c.contract_id)) || [],
+              catalogItems: catalogRes.rows,
+              defaultUtilityPrice,
             });
             return {
               contract_id: c.contract_id,
@@ -289,14 +303,12 @@ router.get(
               is_abnormal: Boolean(matchedRow?.is_abnormal),
               abnormal_note: matchedRow?.abnormal_note || null,
               image_url: matchedRow?.image_url || null,
-              is_billed: Boolean(matchedRow?.is_billed),
+              is_billed: Boolean(matchedRow?.is_billed || c.is_period_finalized),
+              effective_unit_price: slotPrice.unitPrice,
+              effective_price_source: slotPrice.priceSource,
             };
           });
 
-          const defaultUtilityPrice =
-            m.meter_type === 'ELECTRICITY'
-              ? billingCfg.electricityDefaultPrice
-              : billingCfg.waterDefaultPrice;
           const effPeriodEnd = targetContract?.overlap_end || periodEndYmd;
           const resolved = resolveUtilityUnitPrice({
             meterType: m.meter_type,
@@ -320,7 +332,7 @@ router.get(
             target_tenant_name: targetContract?.tenant_name || null,
             period_slot_index: slotIndex,
             period_total_slots: totalSlots,
-            period_reading_billed: Boolean(curReading?.is_billed),
+            period_reading_billed: Boolean(curReading?.is_billed || targetContract?.is_period_finalized),
             overlapping_contracts: slotSummaries,
             period_reading_id: curReading?.id || null,
             current_period: curReading?.period || null,
@@ -629,15 +641,18 @@ async function upsertSingleReading(
   );
   const targetContractId = targetContract ? targetContract.contract_id : null;
 
-  const [samePeriodMap, { priorReading, nextPeriodReading, baselineConsumptions }] =
-    await Promise.all([
-      loadMeterPeriodReadingsWithLocks(client, [meter.id], period, contractsByApt),
-      loadPriorAndNextMeterReadings(client, meter.id, period),
-    ]);
+  const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
+    client,
+    [meter.id],
+    period,
+    contractsByApt
+  );
+  const { priorReading, nextPeriodReading, baselineConsumptions } =
+    await loadPriorAndNextMeterReadings(client, meter.id, period);
   const samePeriodReadings = samePeriodMap.get(String(meter.id)) || [];
   const existingRow = findMatchingReadingForSlot(samePeriodReadings, targetContractId, slotIndex);
 
-  if (existingRow && existingRow.is_billed) {
+  if ((existingRow && existingRow.is_billed) || targetContract?.is_period_finalized) {
     throw Object.assign(
       new Error('Chỉ số đồng hồ của đợt hợp đồng này đã được lập hóa đơn phát hành, không thể chỉnh sửa hoặc ghi đè.'),
       { status: 409, code: 'READING_ALREADY_BILLED' }
@@ -1001,6 +1016,54 @@ router.post(
   }
 );
 
+async function resolveConfirmReadingContractAndLock(client, row) {
+  const contractsByApt = await loadApartmentPeriodContractsMap(
+    client,
+    [row.apartment_id],
+    row.period
+  );
+  const overlappingContracts = contractsByApt.get(String(row.apartment_id)) || [];
+  const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
+    client,
+    [row.meter_id],
+    row.period,
+    contractsByApt
+  );
+  const samePeriodReadings = samePeriodMap.get(String(row.meter_id)) || [];
+  const selfLockedRow =
+    samePeriodReadings.find((r) => String(r.id) === String(row.id)) || null;
+
+  let matchedContract = row.contract_id
+    ? overlappingContracts.find((c) => String(c.contract_id) === String(row.contract_id)) || null
+    : null;
+  let adoptedContractId = null;
+
+  if (!row.contract_id && overlappingContracts.length > 0) {
+    const slot1 = overlappingContracts[0];
+    const slot1HasOwnReading = samePeriodReadings.some(
+      (r) =>
+        String(r.id) !== String(row.id) &&
+        r.contract_id &&
+        String(r.contract_id) === String(slot1.contract_id)
+    );
+    if (!slot1HasOwnReading) {
+      matchedContract = slot1;
+      if (!slot1.is_period_finalized) {
+        adoptedContractId = slot1.contract_id;
+      }
+    }
+  }
+
+  const isLocked =
+    Boolean(selfLockedRow?.is_billed) || Boolean(matchedContract?.is_period_finalized);
+
+  return {
+    isLocked,
+    adoptedContractId,
+    matchedContract,
+  };
+}
+
 /**
  * POST /api/v1/meters/readings/confirm-batch
  * Xác nhận hàng loạt các chỉ số DRAFT / FLAGGED đủ điều kiện (FR-030, FR-031)
@@ -1086,6 +1149,10 @@ router.post(
       }
 
       for (const row of candidates.rows) {
+        const lockInfo = await resolveConfirmReadingContractAndLock(client, row);
+        if (lockInfo.isLocked) {
+          continue;
+        }
         const hasNote = row.abnormal_note && String(row.abnormal_note).trim().length > 0;
         if (row.is_abnormal && !hasNote) {
           skippedAbnormalWithoutNote += 1;
@@ -1094,11 +1161,12 @@ router.post(
         const upd = await client.query(
           `UPDATE meter_reading
            SET status = 'CONFIRMED',
+               contract_id = COALESCE(contract_id, $3),
                confirmed_by = $1,
                confirmed_at = NOW()
            WHERE id = $2
            RETURNING *`,
-          [req.user.sub, row.id]
+          [req.user.sub, row.id, lockInfo.adoptedContractId || null]
         );
         const updatedRow = upd.rows[0];
         confirmed.push(updatedRow);
@@ -1126,12 +1194,17 @@ router.post(
           [
             req.user.sub,
             row.id,
-            JSON.stringify({ status: row.status, confirmed_by: row.confirmed_by }),
+            JSON.stringify({
+              status: row.status,
+              confirmed_by: row.confirmed_by,
+              contract_id: row.contract_id,
+            }),
             JSON.stringify({
               status: updatedRow.status,
               confirmed_by: updatedRow.confirmed_by,
               confirmed_at: updatedRow.confirmed_at,
               abnormal_note: updatedRow.abnormal_note,
+              contract_id: updatedRow.contract_id,
             }),
           ]
         );
@@ -1195,6 +1268,15 @@ router.post(
       }
       const existing = existingRes.rows[0];
 
+      const lockInfo = await resolveConfirmReadingContractAndLock(client, existing);
+      if (lockInfo.isLocked) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'READING_ALREADY_BILLED',
+          message: 'Chỉ số đồng hồ của đợt hợp đồng này đã được lập hóa đơn phát hành, không thể chỉnh sửa hoặc xác nhận lại.',
+        });
+      }
+
       const effectiveNote =
         incomingNote !== undefined && incomingNote !== null && String(incomingNote).trim().length > 0
           ? String(incomingNote).trim()
@@ -1213,20 +1295,19 @@ router.post(
       const upd = await client.query(
         `UPDATE meter_reading
          SET status = 'CONFIRMED',
+             contract_id = COALESCE(contract_id, $4),
              confirmed_by = $1,
              confirmed_at = NOW(),
              abnormal_note = COALESCE($2, abnormal_note)
          WHERE id = $3
          RETURNING *`,
-        [req.user.sub, effectiveNote || null, readingId]
+        [req.user.sub, effectiveNote || null, readingId, lockInfo.adoptedContractId || null]
       );
       const updated = upd.rows[0];
 
       if (updated.contract_id) {
-        const [meterRes, billingCfg] = await Promise.all([
-          client.query(`SELECT * FROM meter WHERE id = $1`, [updated.meter_id]),
-          loadBillingConfigValues(client, req.user.org_id),
-        ]);
+        const meterRes = await client.query(`SELECT * FROM meter WHERE id = $1`, [updated.meter_id]);
+        const billingCfg = await loadBillingConfigValues(client, req.user.org_id);
         const meter = meterRes.rows[0];
         if (meter) {
           const defaultUtilityPrice =
@@ -1255,12 +1336,14 @@ router.post(
             status: existing.status,
             confirmed_by: existing.confirmed_by,
             abnormal_note: existing.abnormal_note,
+            contract_id: existing.contract_id,
           }),
           JSON.stringify({
             status: updated.status,
             confirmed_by: updated.confirmed_by,
             confirmed_at: updated.confirmed_at,
             abnormal_note: updated.abnormal_note,
+            contract_id: updated.contract_id,
           }),
         ]
       );

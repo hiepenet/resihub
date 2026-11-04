@@ -288,21 +288,19 @@ export async function syncDraftInvoiceMeterLineInTx(
     const cons = roundReadingValue(readingRow.consumption ?? currReadNum - prevReadNum);
 
     if (cons > 0) {
-      const [cspRes, catalogRes] = await Promise.all([
-        client.query(
-          `SELECT service_code, unit_price, effective_from
-           FROM contract_service_price
-           WHERE contract_id = $1 AND effective_from <= $2::date
-           ORDER BY effective_from DESC`,
-          [contractId, periodEndYmd]
-        ),
-        client.query(
-          `SELECT id, code, building_id, unit_price, is_active
-           FROM service_catalog
-           WHERE org_id = $1 AND is_active = TRUE`,
-          [orgId]
-        ),
-      ]);
+      const cspRes = await client.query(
+        `SELECT service_code, unit_price, effective_from
+         FROM contract_service_price
+         WHERE contract_id = $1 AND effective_from <= $2::date
+         ORDER BY effective_from DESC`,
+        [contractId, periodEndYmd]
+      );
+      const catalogRes = await client.query(
+        `SELECT id, code, building_id, unit_price, is_active
+         FROM service_catalog
+         WHERE org_id = $1 AND is_active = TRUE`,
+        [orgId]
+      );
 
       const { unitPrice, priceSource } = resolveUtilityUnitPrice({
         meterType: itemType,
