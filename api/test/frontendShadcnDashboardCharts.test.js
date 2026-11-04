@@ -181,3 +181,79 @@ test('Task 1 — Recharts occupancy bar builder clamps occupancy_rate to [0, 100
   assert.ok(chartUiSrc.includes('export function ChartLegendContent'));
   assert.ok(chartUiSrc.includes('ResponsiveContainer'));
 });
+
+test('Task 2 — DashboardPage uses strictly 3 Shadcn Recharts BarCharts aligned with PRD 15.1-15.3 and removes Chart.js & extra charts', () => {
+  const dashSrc = fs.readFileSync(
+    path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
+    'utf8'
+  );
+
+  // Zero Chart.js or non-bar chart remnants
+  assert.equal(dashSrc.includes('chart.js'), false, 'DashboardPage must not import chart.js');
+  assert.equal(dashSrc.includes('react-chartjs-2'), false, 'DashboardPage must not import react-chartjs-2');
+  assert.equal(dashSrc.includes('Doughnut'), false, 'DashboardPage must not render Doughnut chart');
+  assert.equal(dashSrc.includes('PieChart'), false, 'DashboardPage must not render PieChart');
+  assert.equal(dashSrc.includes('LineChart'), false, 'DashboardPage must not render LineChart');
+  assert.equal(/<Line\b/.test(dashSrc), false, 'DashboardPage must not render <Line />');
+  assert.equal(
+    dashSrc.includes('Cơ cấu trạng thái căn hộ'),
+    false,
+    'DashboardPage must remove the unrelated Apartment Status Doughnut card'
+  );
+
+  // Shadcn Chart primitives + Recharts BarChart
+  assert.ok(dashSrc.includes('ChartContainer'), 'DashboardPage must use Shadcn ChartContainer');
+  assert.ok(dashSrc.includes('ChartTooltip'), 'DashboardPage must use Shadcn ChartTooltip');
+  assert.ok(dashSrc.includes('ChartTooltipContent'), 'DashboardPage must use Shadcn ChartTooltipContent');
+  assert.ok(dashSrc.includes('ChartLegend'), 'DashboardPage must use Shadcn ChartLegend');
+  assert.ok(dashSrc.includes('ChartLegendContent'), 'DashboardPage must use Shadcn ChartLegendContent');
+  assert.ok(dashSrc.includes("from 'recharts'"), 'DashboardPage must import BarChart primitives from recharts');
+  assert.ok(dashSrc.includes('<BarChart'), 'DashboardPage must render Recharts <BarChart>');
+  assert.ok(dashSrc.includes('<Bar'), 'DashboardPage must render Recharts <Bar>');
+
+  // Strictly 3 ChartContainer instances: Doanh thu, Công nợ, Lấp đầy
+  const chartContainerCount = (dashSrc.match(/<ChartContainer\b/g) || []).length;
+  assert.equal(
+    chartContainerCount,
+    3,
+    `DashboardPage must render strictly 3 Shadcn ChartContainer charts, got ${chartContainerCount}`
+  );
+  assert.ok(dashSrc.includes('id="dashboard-revenue"'), 'Must include Revenue chart id');
+  assert.ok(dashSrc.includes('id="dashboard-aging"'), 'Must include Debt Aging chart id');
+  assert.ok(dashSrc.includes('id="dashboard-occupancy"'), 'Must include Occupancy chart id');
+
+  // PRD 15.3 drill-downs, full VND formatting & EmptyState fallbacks
+  assert.ok(
+    dashSrc.includes('/admin/payments?tab=aging&bucket='),
+    'Aging column chart must drill down to PaymentsPage aging bucket'
+  );
+  assert.ok(
+    dashSrc.includes('resolveAgingBarBucketKey'),
+    'Aging column chart must resolve Recharts v3 bar click payload safely'
+  );
+  assert.ok(dashSrc.includes('<EmptyState'), 'DashboardPage must keep PRD 16.2 EmptyState fallbacks');
+  assert.ok(dashSrc.includes('formatMoney('), 'DashboardPage tooltips must format money in full VND per PRD 16.1');
+});
+
+test('Task 2 Polish — getTopRevenueSourceKey identifies topmost positive stacked segment for rounded top corners', async () => {
+  const { getTopRevenueSourceKey } = await import(
+    '../../frontend/src/utils/chartHelpers.js'
+  );
+
+  assert.equal(
+    getTopRevenueSourceKey({ rent: 500, electricity: 100, water: 50, service: 20, other: 10 }),
+    'other'
+  );
+  assert.equal(
+    getTopRevenueSourceKey({ rent: 500, electricity: 100, water: 50, service: 20, other: 0 }),
+    'service'
+  );
+  assert.equal(
+    getTopRevenueSourceKey({ rent: 500, electricity: 0, water: 0, service: 0, other: 0 }),
+    'rent'
+  );
+  assert.equal(
+    getTopRevenueSourceKey({ rent: 0, electricity: 0, water: 0, service: 0, other: 0 }),
+    ''
+  );
+});

@@ -11,7 +11,7 @@ import {
 
 const ChartContext = createContext(null);
 
-export function useChart() {
+function useChart() {
   const context = useContext(ChartContext);
   if (!context) {
     throw new Error('useChart must be used within a <ChartContainer />');
@@ -169,13 +169,25 @@ export function ChartLegendContent({
     return null;
   }
 
+  const configKeys = config ? Object.keys(config) : [];
+  const orderedPayload = [...payload].sort((a, b) => {
+    const ka = `${a.dataKey || a.value || ''}`;
+    const kb = `${b.dataKey || b.value || ''}`;
+    const ia = configKeys.indexOf(ka);
+    const ib = configKeys.indexOf(kb);
+    if (ia === -1 && ib === -1) return 0;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+
   return (
     <div
       className={`flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 ${
         verticalAlign === 'top' ? 'pb-2.5' : 'pt-2.5'
       } ${className}`}
     >
-      {payload.map((item, idx) => {
+      {orderedPayload.map((item, idx) => {
         const key = `${item.dataKey || item.value || idx}`;
         const itemConfig = config?.[key] || {};
         const swatchColor = item.color || itemConfig.color || '#0ea5e9';

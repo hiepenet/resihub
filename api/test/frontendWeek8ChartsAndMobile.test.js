@@ -47,14 +47,13 @@ test('Task 3 — chartHelpers: empty-state detectors handle all-zero vs positive
   assert.equal(hasOccupancyChartData(4, [{ period: '2026-10', exploitable: 4, occupancy_rate: 0 }]), true);
 });
 
-test('Task 3 — chartHelpers: revenue by source stacked datasets & PRD aging bucket builders', async () => {
+test('Task 3 — chartHelpers: PRD Recharts bar rows,ReportsPage building aging & Payments URL query builders', async () => {
   const {
     DASHBOARD_AGING_BUCKET_KEYS,
-    buildRevenueTrendChartData,
-    buildRevenueBySourceChartData,
-    buildReceivablesAgingChartData,
-    buildOccupancyTrendChartData,
-    buildApartmentStatusDoughnutData,
+    buildRevenueComparisonBarRows,
+    buildRevenueSourceBarRows,
+    buildReceivablesAgingBarRows,
+    buildOccupancyBarRows,
     buildReportsBuildingAgingChartData,
     resolvePaymentsUrlQuery,
   } = await import('../../frontend/src/utils/chartHelpers.js');
@@ -67,13 +66,14 @@ test('Task 3 — chartHelpers: revenue by source stacked datasets & PRD aging bu
     'over_60',
   ]);
 
-  const trend = buildRevenueTrendChartData([
+  const comp = buildRevenueComparisonBarRows([
     { period: '2026-10', billed: 10_000_000, invoice_settled: 8_000_000, collected: 7_500_000 },
   ]);
-  assert.deepEqual(trend.labels, ['2026-10']);
-  assert.equal(trend.datasets.length, 3);
+  assert.equal(comp[0].period, '2026-10');
+  assert.equal(comp[0].billed, 10_000_000);
+  assert.equal(comp[0].collected, 7_500_000);
 
-  const srcChart = buildRevenueBySourceChartData([
+  const srcRows = buildRevenueSourceBarRows([
     {
       period: '2026-10',
       rent: 6_000_000,
@@ -84,13 +84,9 @@ test('Task 3 — chartHelpers: revenue by source stacked datasets & PRD aging bu
       total_billed: 7_500_000,
     },
   ]);
-  assert.deepEqual(srcChart.labels, ['2026-10']);
-  assert.equal(srcChart.datasets.length, 5);
-  assert.ok(srcChart.datasets.every((ds) => ds.stack === 'revenue_source'));
-  const sumAt0 = srcChart.datasets.reduce((sum, ds) => sum + ds.data[0], 0);
-  assert.equal(sumAt0, 7_500_000);
+  assert.equal(srcRows[0].total_billed, 7_500_000);
 
-  const aging = buildReceivablesAgingChartData({
+  const aging = buildReceivablesAgingBarRows({
     total_debt: 15_000_000,
     overdue_debt: 14_000_000,
     buckets: [
@@ -101,33 +97,23 @@ test('Task 3 — chartHelpers: revenue by source stacked datasets & PRD aging bu
       { key: 'over_60', label: '>60 ngày', amount: 5_000_000, count: 1 },
     ],
   });
-  assert.deepEqual(aging.bucketKeys, DASHBOARD_AGING_BUCKET_KEYS);
-  assert.deepEqual(aging.counts, [1, 2, 1, 3, 1]);
-  assert.deepEqual(aging.chartData.datasets[0].data, [
-    1_000_000,
-    2_000_000,
-    3_000_000,
-    4_000_000,
-    5_000_000,
-  ]);
+  assert.deepEqual(
+    aging.map((b) => b.key),
+    DASHBOARD_AGING_BUCKET_KEYS
+  );
+  assert.deepEqual(
+    aging.map((b) => b.amount),
+    [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]
+  );
 
-  const occ = buildOccupancyTrendChartData([
+  const occ = buildOccupancyBarRows([
     { period: '2026-09', occupied: 3, exploitable: 4, occupancy_rate: 75 },
     { period: '2026-10', occupied: 2, exploitable: 4, occupancy_rate: 50 },
   ]);
-  assert.deepEqual(occ.chartData.labels, ['2026-09', '2026-10']);
-  assert.deepEqual(occ.chartData.datasets[0].data, [75, 50]);
-  assert.equal(occ.metaPoints[0].occupied, 3);
-
-  const doughnut = buildApartmentStatusDoughnutData({
-    OCCUPIED: 5,
-    AVAILABLE: 3,
-    RESERVED: 1,
-    MAINTENANCE: 1,
-    BLOCKED: 1,
-    INACTIVE: 2,
-  });
-  assert.deepEqual(doughnut.datasets[0].data, [5, 3, 1, 1, 3]);
+  assert.deepEqual(
+    occ.map((o) => o.occupancy_rate),
+    [75, 50]
+  );
 
   const repAging = buildReportsBuildingAgingChartData([
     {
@@ -167,8 +153,8 @@ test('Task 3 — DashboardPage, ReportsPage, PaymentsPage & StatsCard source int
     path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
     'utf8'
   );
-  assert.ok(dashSrc.includes('BarElement'), 'DashboardPage must register BarElement in ChartJS');
-  assert.ok(dashSrc.includes('<Bar'), 'DashboardPage must render Chart.js <Bar /> charts');
+  assert.ok(dashSrc.includes('ChartContainer'), 'DashboardPage must use Shadcn ChartContainer');
+  assert.ok(dashSrc.includes('<BarChart'), 'DashboardPage must render Recharts <BarChart>');
   assert.ok(dashSrc.includes('<EmptyState'), 'DashboardPage must render EmptyState fallbacks when chart data is zero');
   assert.ok(dashSrc.includes('/admin/payments?tab=aging&bucket='), 'DashboardPage aging chart must drill down to PaymentsPage aging bucket');
 

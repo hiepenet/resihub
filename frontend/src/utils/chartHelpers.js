@@ -142,6 +142,22 @@ export function buildRevenueComparisonBarRows(revenueSeries = []) {
   }));
 }
 
+export const REVENUE_SOURCE_KEYS = [
+  'rent',
+  'electricity',
+  'water',
+  'service',
+  'other',
+];
+
+export function getTopRevenueSourceKey(row = {}) {
+  for (let i = REVENUE_SOURCE_KEYS.length - 1; i >= 0; i -= 1) {
+    const k = REVENUE_SOURCE_KEYS[i];
+    if (Number(row?.[k] || 0) > 0) return k;
+  }
+  return '';
+}
+
 export function buildRevenueSourceBarRows(sourceSeries = []) {
   const rows = Array.isArray(sourceSeries) ? sourceSeries : [];
   return rows.map((r) => {
