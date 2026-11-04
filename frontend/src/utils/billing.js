@@ -246,7 +246,12 @@ export function canActorApproveInvoiceAdjustment(options = {}) {
   } = options || {};
 
   const { id: actorId, roles } = resolveActorInfo(actor);
-  const creatorId = record?.created_by || record?.requested_by || record?.creatorId || null;
+  const creatorId =
+    record?.refund_meta?.requested_by ||
+    record?.created_by ||
+    record?.requested_by ||
+    record?.creatorId ||
+    null;
 
   // 4-eyes check
   if (actorId && creatorId && String(actorId) === String(creatorId)) {

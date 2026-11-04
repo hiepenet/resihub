@@ -959,7 +959,7 @@ export function SettingsPage() {
               <div>
                 <p className="text-slate-500">Ngưỡng cảnh báo sớm</p>
                 <p className="font-semibold text-amber-700 mt-0.5">
-                  {aiConfig.warning_threshold_pct ?? 80}% hạn mức
+                  {aiConfig.warn_percent ?? aiConfig.warning_threshold_pct ?? 80}% hạn mức
                 </p>
               </div>
               <div>

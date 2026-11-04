@@ -104,7 +104,9 @@ export function PaymentsPage() {
 
   // Tab 3: Sổ tín dụng & Hoàn tiền (4 mắt) (FR-040 & Ruling 2)
   const [credits, setCredits] = useState([]);
-  const [creditsLoading, setCreditsLoading] = useState(false);
+  const [creditsLoading, setCreditsLoading] = useState(true);
+  const [paymentsFetchedKey, setPaymentsFetchedKey] = useState(null);
+  const [creditsFetchedKey, setCreditsFetchedKey] = useState(null);
   const [creditStatusFilter, setCreditStatusFilter] = useState(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get('status') || '';
@@ -151,6 +153,7 @@ export function PaymentsPage() {
   const [processingAction, setProcessingAction] = useState(false);
 
   const fetchPayments = useCallback(async () => {
+    const filterKey = `${selectedBuildingId || ''}|${payStatusFilter || ''}`;
     setPaymentsLoading(true);
     try {
       const res = await paymentsService.list({
@@ -163,6 +166,7 @@ export function PaymentsPage() {
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách giao dịch thanh toán.'));
     } finally {
+      setPaymentsFetchedKey(filterKey);
       setPaymentsLoading(false);
     }
   }, [selectedBuildingId, payStatusFilter, payMethodFilter, paySearch, toast]);
@@ -192,6 +196,7 @@ export function PaymentsPage() {
   }, [selectedBuildingId, recStatusFilter, toast]);
 
   const fetchCredits = useCallback(async () => {
+    const filterKey = `${selectedBuildingId || ''}|${creditStatusFilter || ''}`;
     setCreditsLoading(true);
     try {
       const res = await paymentsService.getCredits({
@@ -202,6 +207,7 @@ export function PaymentsPage() {
     } catch {
       setCredits([]);
     } finally {
+      setCreditsFetchedKey(filterKey);
       setCreditsLoading(false);
     }
   }, [selectedBuildingId, creditStatusFilter]);
@@ -252,23 +258,38 @@ export function PaymentsPage() {
 
   useEffect(() => {
     const targetPaymentId = searchParams.get('payment_id');
-    if (!targetPaymentId || paymentsLoading) return;
+    if (!targetPaymentId) return;
     if (payStatusFilter) {
       setPayStatusFilter('');
       return;
     }
+    const expectedKey = `${selectedBuildingId || ''}|`;
+    if (paymentsLoading || paymentsFetchedKey !== expectedKey) return;
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
     setActiveTab('transactions');
     const matched = payments.find((p) => String(p.id) === String(targetPaymentId));
     if (matched) {
       setReviewPayment(matched);
       setConfirmNote(matched.note || '');
+    } else {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
     }
-  }, [searchParams, setSearchParams, paymentsLoading, payStatusFilter, payments]);
+  }, [
+    searchParams,
+    setSearchParams,
+    paymentsLoading,
+    paymentsFetchedKey,
+    selectedBuildingId,
+    payStatusFilter,
+    payments,
+    toast,
+  ]);
 
   useEffect(() => {
     const targetCreditId = searchParams.get('credit_id');
-    if (!targetCreditId || creditsLoading) return;
+    if (!targetCreditId) return;
+    const currentKey = `${selectedBuildingId || ''}|${creditStatusFilter || ''}`;
+    if (creditsLoading || creditsFetchedKey !== currentKey) return;
     const matched = credits.find((c) => String(c.id) === String(targetCreditId));
     if (!matched && creditStatusFilter) {
       setCreditStatusFilter('');
@@ -278,8 +299,19 @@ export function PaymentsPage() {
     setActiveTab('credits');
     if (matched) {
       setReviewCredit(matched);
+    } else {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
     }
-  }, [searchParams, setSearchParams, creditsLoading, creditStatusFilter, credits]);
+  }, [
+    searchParams,
+    setSearchParams,
+    creditsLoading,
+    creditsFetchedKey,
+    selectedBuildingId,
+    creditStatusFilter,
+    credits,
+    toast,
+  ]);
 
   const pendingConfirmList = useMemo(
     () => payments.filter((p) => p.status === 'PENDING_CONFIRMATION'),
@@ -1898,24 +1930,54 @@ export function PaymentsPage() {
               </div>
             </div>
 
-            {reviewCredit.description ? (
+            {reviewCredit.refund_meta?.reason || reviewCredit.description ? (
               <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
                 <p className="font-semibold text-slate-700">Diễn giải / Lý do đề nghị</p>
-                <p className="text-slate-600 whitespace-pre-line">{reviewCredit.description}</p>
+                <p className="text-slate-600 whitespace-pre-line">
+                  {reviewCredit.refund_meta?.reason || reviewCredit.description}
+                </p>
               </div>
             ) : null}
 
-            {reviewCredit.bank_info ? (
+            {reviewCredit.refund_meta?.bank_name ||
+            reviewCredit.refund_meta?.bank_account_number ||
+            reviewCredit.bank_info ? (
               <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 space-y-1">
                 <p className="font-semibold text-sky-900">Thông tin tài khoản nhận hoàn</p>
-                <p className="text-sky-800">{reviewCredit.bank_info}</p>
+                {reviewCredit.refund_meta?.bank_name ||
+                reviewCredit.refund_meta?.bank_account_number ? (
+                  <p className="text-sky-800">
+                    {[
+                      reviewCredit.refund_meta?.bank_name,
+                      reviewCredit.refund_meta?.bank_account_number,
+                      reviewCredit.refund_meta?.bank_account_holder,
+                    ]
+                      .filter(Boolean)
+                      .join(' • ')}
+                  </p>
+                ) : (
+                  <p className="text-sky-800">{reviewCredit.bank_info}</p>
+                )}
               </div>
             ) : null}
 
-            {reviewCredit.rejection_reason ? (
+            {reviewCredit.refund_meta?.proof_image ? (
+              <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-2">
+                <p className="font-semibold text-slate-700">Chứng từ hoàn tiền đính kèm</p>
+                <AuthImage
+                  src={reviewCredit.refund_meta.proof_image}
+                  alt="Chứng từ hoàn tiền tín dụng"
+                  className="max-h-56 w-auto rounded-lg border border-slate-200 object-contain"
+                />
+              </div>
+            ) : null}
+
+            {reviewCredit.refund_meta?.rejection_reason || reviewCredit.rejection_reason ? (
               <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 space-y-1">
                 <p className="font-semibold text-rose-800">Lý do từ chối phê duyệt</p>
-                <p className="text-rose-700">{reviewCredit.rejection_reason}</p>
+                <p className="text-rose-700">
+                  {reviewCredit.refund_meta?.rejection_reason || reviewCredit.rejection_reason}
+                </p>
               </div>
             ) : null}
           </div>

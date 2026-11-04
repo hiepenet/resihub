@@ -78,7 +78,10 @@ import {
   isValidEmail,
   isValidIdNumber,
 } from '../../../utils/validation';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const CONTRACT_STATUS_OPTIONS = [
   { value: 'DRAFT', label: 'Bản nháp (DRAFT)' },
@@ -261,8 +264,11 @@ export function ContractsPage() {
     }
   }, [selectedBuildingId, toast]);
 
+  const [requestsReady, setRequestsReady] = useState(false);
+
   useEffect(() => {
-    fetchData();
+    setRequestsReady(false);
+    Promise.resolve(fetchData()).finally(() => setRequestsReady(true));
   }, [fetchData]);
 
   useEffect(() => {
@@ -272,18 +278,18 @@ export function ContractsPage() {
     }
     const targetReqId = searchParams.get('request_id');
     const modal = searchParams.get('modal');
-    if (loading || (!targetReqId && modal !== 'request')) return;
+    if (loading || !requestsReady || (!targetReqId && modal !== 'request')) return;
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
     setActiveTab('requests');
     setReqStatusFilter('');
-    const matched = targetReqId
-      ? requests.find((r) => String(r.id) === String(targetReqId))
-      : requests[0];
+    const matched = pickDeepLinkTarget(requests, targetReqId);
     if (matched) {
       setReviewRequestTarget(matched);
+    } else {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
     }
-  }, [searchParams, setSearchParams, loading, requests, activeTab]);
+  }, [searchParams, setSearchParams, loading, requestsReady, requests, activeTab, toast]);
 
   // AI-01: Quét hợp đồng giấy/PDF & CCCD khách thuê mới ngay trong modal tạo nháp
   const [contractScanFiles, setContractScanFiles] = useState([]);

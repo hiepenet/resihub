@@ -20,6 +20,7 @@ import {
   toDateOnlyYmd,
 } from '../services/serviceBilling.js';
 import { syncSubscriptionTerminationInvoicesInTx } from '../services/invoiceLifecycle.js';
+import { notifyUser } from '../services/notificationService.js';
 
 export const serviceCatalogRouter = express.Router();
 export const serviceSubscriptionsRouter = express.Router();
@@ -639,6 +640,8 @@ serviceSubscriptionsRouter.patch(
         [req.user.sub, id, JSON.stringify(sub), JSON.stringify(updatedSub)]
       );
 
+      await client.query('COMMIT');
+
       if (sub.requested_by && nextStatus !== sub.status) {
         const msgMap = {
           ACTIVE: `Đăng ký dịch vụ "${sub.service_name}" đã được phê duyệt.`,
@@ -646,15 +649,25 @@ serviceSubscriptionsRouter.patch(
           TERMINATED: `Dịch vụ "${sub.service_name}" đã được xác nhận hủy.`,
         };
         if (msgMap[nextStatus]) {
-          await client.query(
-            `INSERT INTO notification (org_id, user_id, title, content, type, payload)
-             VALUES ($1, $2, 'Cập nhật dịch vụ tiện ích', $3, 'SERVICE_UPDATE', $4)`,
-            [orgId, sub.requested_by, msgMap[nextStatus], JSON.stringify({ subscription_id: id, status: nextStatus })]
-          );
+          const notifType = nextStatus === 'TERMINATED' ? 'SERVICE_TERMINATED' : 'SERVICE_UPDATE';
+          try {
+            await notifyUser(orgId, sub.requested_by, {
+              title: 'Cập nhật dịch vụ tiện ích',
+              content: msgMap[nextStatus],
+              type: notifType,
+              payload: {
+                subscription_id: id,
+                contract_id: updatedSub.contract_id,
+                building_id: updatedSub.building_id,
+                apartment_id: updatedSub.apartment_id,
+                status: nextStatus,
+              },
+            });
+          } catch (notifErr) {
+            console.error('[Services] Failed to emit subscription notification:', notifErr.message);
+          }
         }
       }
-
-      await client.query('COMMIT');
 
       res.json({
         message: 'Cập nhật đăng ký dịch vụ thành công.',

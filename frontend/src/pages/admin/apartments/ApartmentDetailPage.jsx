@@ -49,7 +49,10 @@ import {
   canPayoutReservationCancel,
   computeSuggestedCancelSplit,
 } from '../../../utils/depositUiHelpers';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const APARTMENT_TYPE_OPTIONS = ['Studio', '1PN', '2PN', '3PN', 'Penthouse', 'Duplex'];
 
@@ -698,14 +701,22 @@ export function ApartmentDetailPage() {
   useEffect(() => {
     const targetRsvId = searchParams.get('reservation_id');
     const modal = searchParams.get('modal');
-    if (loading || !apt || (!targetRsvId && modal !== 'reservation')) return;
+    if (
+      loading ||
+      !apt ||
+      String(apt.id) !== String(id) ||
+      (!targetRsvId && modal !== 'reservation')
+    ) {
+      return;
+    }
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
     const list = Array.isArray(apt.reservations) ? apt.reservations : [];
-    const rsv = targetRsvId
-      ? list.find((r) => String(r.id) === String(targetRsvId))
-      : list[0];
-    if (!rsv) return;
+    const rsv = pickDeepLinkTarget(list, targetRsvId);
+    if (!rsv) {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
 
     const allowApproveCancel = canApproveReservationCancel(rsv, {
       isOwner,

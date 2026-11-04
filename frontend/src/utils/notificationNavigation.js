@@ -49,6 +49,21 @@ export function stripNotificationTriggerParams(searchParams) {
   return next;
 }
 
+export function pickDeepLinkTarget(
+  list = [],
+  targetId = null,
+  getId = (item) => item?.id,
+  fallbackList = list
+) {
+  const items = Array.isArray(list) ? list : [];
+  const cleanId = targetId != null ? String(targetId).trim() : '';
+  if (cleanId) {
+    return items.find((item) => String(getId(item)) === cleanId) || null;
+  }
+  const fallbacks = Array.isArray(fallbackList) ? fallbackList : items;
+  return fallbacks[0] || null;
+}
+
 export function syncBuildingFilterBeforeNavigate(
   targetBuildingId,
   { selectedBuildingId, accessibleBuildingIds = [], setSelectedBuildingId } = {}
@@ -93,20 +108,30 @@ export function persistReadOrgNotifIds(userId, ids, storage = globalThis?.localS
 export function mergeOrgNotificationReadState(
   rows = [],
   userId = null,
-  storage = globalThis?.localStorage
+  storage = globalThis?.localStorage,
+  serverUnreadCount = null
 ) {
   const list = Array.isArray(rows) ? rows : [];
   const localReadIds = getReadOrgNotifIds(userId, storage);
   const nowIso = new Date().toISOString();
+  let locallyReadOrgCount = 0;
 
   const notifications = list.map((n) => {
     if (n && n.user_id == null && !n.read_at && localReadIds.has(String(n.id))) {
+      locallyReadOrgCount += 1;
       return { ...n, read_at: nowIso };
     }
     return n;
   });
 
-  const unreadCount = notifications.reduce((acc, n) => acc + (n?.read_at ? 0 : 1), 0);
+  const listUnread = notifications.reduce((acc, n) => acc + (n?.read_at ? 0 : 1), 0);
+  const hasServerCount =
+    serverUnreadCount !== null &&
+    serverUnreadCount !== undefined &&
+    Number.isFinite(Number(serverUnreadCount));
+  const unreadCount = hasServerCount
+    ? Math.max(listUnread, Math.max(0, Number(serverUnreadCount) - locallyReadOrgCount))
+    : listUnread;
   return { notifications, unreadCount };
 }
 

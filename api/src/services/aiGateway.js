@@ -429,9 +429,8 @@ export async function runMeterOcrSuggestion(
   {
     actorId,
     orgId,
-    buildingId = null,
-    apartmentId = null,
-    meterId = null,
+    buildingId,
+    meterId,
     period = currentVietnamPeriod(),
     contractId = null,
     imageBase64,
@@ -448,155 +447,89 @@ export async function runMeterOcrSuggestion(
     });
   }
 
-  async function computeMeterReadingContext(targetMeter) {
-    const histRes = await dbClient.query(
-      `SELECT period, current_reading, consumption, status
-       FROM meter_reading
-       WHERE meter_id = $1 AND period < $2
-       ORDER BY period DESC, current_reading DESC, recorded_at DESC
-       LIMIT 3`,
-      [targetMeter.id, period]
-    );
-    const contractsByApt = await loadApartmentPeriodContractsMap(
-      dbClient,
-      [targetMeter.apartment_id],
-      period
-    );
-    const overlappingContracts = contractsByApt.get(String(targetMeter.apartment_id)) || [];
-    const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
-      dbClient,
-      [targetMeter.id],
-      period,
-      contractsByApt
-    );
-    const samePeriodReadings = samePeriodMap.get(String(targetMeter.id)) || [];
-    const { targetContract, slotIndex } = selectTargetPeriodContract(
-      overlappingContracts,
-      contractId || null
-    );
-    const targetContractId = targetContract ? targetContract.contract_id : null;
-    const existingSlotRow = targetContractId
-      ? samePeriodReadings.find((r) => String(r.contract_id) === String(targetContractId)) ||
-        (slotIndex <= 1 ? samePeriodReadings.find((r) => !r.contract_id && !r.is_billed) : null)
-      : samePeriodReadings.find((r) => !r.contract_id) || null;
+  // Zero-PII query: chỉ lấy thông số đồng hồ & chỉ số lịch sử, tuyệt đối không JOIN tenant/person (PRD 12.3)
+  const meterRes = await dbClient.query(
+    `SELECT m.id, m.org_id, m.building_id, m.apartment_id, m.meter_type, m.meter_code, m.unit, m.initial_reading,
+            a.code AS apartment_code
+     FROM meter m
+     JOIN apartment a ON a.id = m.apartment_id
+     WHERE m.id = $1 AND m.org_id = $2
+     LIMIT 1`,
+    [meterId, orgId]
+  );
 
-    const { previousReading: prevVal } = resolveChainedReadingBounds({
-      priorPeriodReading: histRes.rows[0] || null,
-      samePeriodReadings,
-      nextPeriodReading: null,
-      overlappingContracts,
-      targetContractId,
-      existingReadingId: existingSlotRow?.id || null,
-      initialReading: targetMeter.initial_reading,
+  if (meterRes.rows.length === 0) {
+    throw Object.assign(new Error('Không tìm thấy đồng hồ điện/nước.'), {
+      status: 404,
+      code: 'NOT_FOUND',
     });
-
-    const confirmedConsumptions = histRes.rows
-      .filter((r) => r.status === 'CONFIRMED' && Number(r.consumption) > 0)
-      .map((r) => Number(r.consumption));
-    const avgCons =
-      confirmedConsumptions.length > 0
-        ? confirmedConsumptions.reduce((acc, v) => acc + v, 0) / confirmedConsumptions.length
-        : null;
-
-    return {
-      previousValue: prevVal,
-      baselineAvgConsumption: avgCons,
-    };
   }
+  const meter = meterRes.rows[0];
+  const effectiveBuildingId = buildingId || meter.building_id;
 
+  const histRes = await dbClient.query(
+    `SELECT period, current_reading, consumption, status
+     FROM meter_reading
+     WHERE meter_id = $1 AND period < $2
+     ORDER BY period DESC, current_reading DESC, recorded_at DESC
+     LIMIT 3`,
+    [meter.id, period]
+  );
   const billingCfgRes = await dbClient.query(
     `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'billing_config' LIMIT 1`,
     [orgId]
   );
+  const contractsByApt = await loadApartmentPeriodContractsMap(
+    dbClient,
+    [meter.apartment_id],
+    period
+  );
+
+  const overlappingContracts = contractsByApt.get(String(meter.apartment_id)) || [];
+  const samePeriodMap = await loadMeterPeriodReadingsWithLocks(
+    dbClient,
+    [meter.id],
+    period,
+    contractsByApt
+  );
+  const samePeriodReadings = samePeriodMap.get(String(meter.id)) || [];
+  const { targetContract, slotIndex } = selectTargetPeriodContract(
+    overlappingContracts,
+    contractId || null
+  );
+  const targetContractId = targetContract ? targetContract.contract_id : null;
+  const existingSlotRow = targetContractId
+    ? samePeriodReadings.find((r) => String(r.contract_id) === String(targetContractId)) ||
+      (slotIndex <= 1 ? samePeriodReadings.find((r) => !r.contract_id && !r.is_billed) : null)
+    : samePeriodReadings.find((r) => !r.contract_id) || null;
+
+  const { previousReading: previousValue } = resolveChainedReadingBounds({
+    priorPeriodReading: histRes.rows[0] || null,
+    samePeriodReadings,
+    nextPeriodReading: null,
+    overlappingContracts,
+    targetContractId,
+    existingReadingId: existingSlotRow?.id || null,
+    initialReading: meter.initial_reading,
+  });
+
+  const confirmedConsumptions = histRes.rows
+    .filter((r) => r.status === 'CONFIRMED' && Number(r.consumption) > 0)
+    .map((r) => Number(r.consumption));
+  const baselineAvgConsumption =
+    confirmedConsumptions.length > 0
+      ? confirmedConsumptions.reduce((acc, v) => acc + v, 0) / confirmedConsumptions.length
+      : null;
+
   const anomalyThresholdPct =
     Number(billingCfgRes.rows[0]?.value?.meter_anomaly_threshold_pct) || 30;
-
-  let meter = null;
-  let effectiveBuildingId = buildingId || null;
-  let scopedApartmentCode = null;
-  let aptMeters = [];
-  let previousValue = null;
-  let baselineAvgConsumption = null;
-
-  if (meterId) {
-    // Zero-PII query: chỉ lấy thông số đồng hồ & chỉ số lịch sử, tuyệt đối không JOIN tenant/person (PRD 12.3)
-    const meterRes = await dbClient.query(
-      `SELECT m.id, m.org_id, m.building_id, m.apartment_id, m.meter_type, m.meter_code, m.unit, m.initial_reading,
-              a.code AS apartment_code
-       FROM meter m
-       JOIN apartment a ON a.id = m.apartment_id
-       WHERE m.id = $1 AND m.org_id = $2
-       LIMIT 1`,
-      [meterId, orgId]
-    );
-    if (meterRes.rows.length === 0) {
-      throw Object.assign(new Error('Không tìm thấy đồng hồ điện/nước.'), {
-        status: 404,
-        code: 'NOT_FOUND',
-      });
-    }
-    meter = meterRes.rows[0];
-    effectiveBuildingId = buildingId || meter.building_id;
-    scopedApartmentCode = meter.apartment_code;
-    const meterCtx = await computeMeterReadingContext(meter);
-    previousValue = meterCtx.previousValue;
-    baselineAvgConsumption = meterCtx.baselineAvgConsumption;
-  } else {
-    if (!effectiveBuildingId) {
-      throw Object.assign(
-        new Error('Cần cung cấp mã đồng hồ (meter_id) hoặc mã tòa nhà (building_id).'),
-        { status: 400, code: 'VALIDATION_ERROR' }
-      );
-    }
-
-    const bldgRes = await dbClient.query(
-      `SELECT id FROM building WHERE id = $1 AND org_id = $2 LIMIT 1`,
-      [effectiveBuildingId, orgId]
-    );
-    if (bldgRes.rows.length === 0) {
-      throw Object.assign(new Error('Không tìm thấy tòa nhà.'), {
-        status: 404,
-        code: 'NOT_FOUND',
-      });
-    }
-
-    if (apartmentId) {
-      const aptRes = await dbClient.query(
-        `SELECT a.id, a.code
-         FROM apartment a
-         JOIN building b ON b.id = a.building_id
-         WHERE a.id = $1 AND a.building_id = $2 AND b.org_id = $3
-         LIMIT 1`,
-        [apartmentId, effectiveBuildingId, orgId]
-      );
-      if (aptRes.rows.length === 0) {
-        throw Object.assign(new Error('Không tìm thấy căn hộ trong tòa nhà đã chọn.'), {
-          status: 404,
-          code: 'NOT_FOUND',
-        });
-      }
-      scopedApartmentCode = aptRes.rows[0].code;
-
-      const aptMetersRes = await dbClient.query(
-        `SELECT m.id, m.org_id, m.building_id, m.apartment_id, m.meter_type, m.meter_code, m.unit, m.initial_reading,
-                a.code AS apartment_code
-         FROM meter m
-         JOIN apartment a ON a.id = m.apartment_id
-         WHERE m.apartment_id = $1 AND m.org_id = $2
-         ORDER BY m.created_at ASC`,
-        [apartmentId, orgId]
-      );
-      aptMeters = aptMetersRes.rows;
-    }
-  }
 
   const ctx = await checkGateOrThrow(dbClient, { orgId, taskType: 'METER_OCR' });
   const { systemInstruction, userPrompt, responseSchema } = buildGeminiPromptAndSchema(
     'METER_OCR',
     {
-      meterType: meter?.meter_type || null,
-      meterCode: meter?.meter_code || null,
-      apartmentCode: scopedApartmentCode,
+      meterType: meter.meter_type,
+      meterCode: meter.meter_code,
       previousValue,
     }
   );
@@ -609,37 +542,8 @@ export async function runMeterOcrSuggestion(
     responseSchema,
   });
 
-  // Nếu gửi theo cấp phòng (apartmentId, chưa biết meterId trước khi gọi AI), tự động phân giải công tơ theo detected_meter_type
-  let resolvedMeter = meter;
-  let expectedMeterTypeForValidation = meter?.meter_type || null;
-
-  if (!resolvedMeter && aptMeters.length > 0) {
-    const rawDetType = String(geminiRes.parsedJson?.detected_meter_type || '')
-      .trim()
-      .toUpperCase();
-    const detType =
-      rawDetType === 'ELECTRICITY' || rawDetType === 'WATER' ? rawDetType : null;
-
-    if (detType) {
-      const candidates = aptMeters.filter((m) => m.meter_type === detType);
-      if (candidates.length === 1) {
-        resolvedMeter = candidates[0];
-      }
-    } else if (aptMeters.length === 1) {
-      resolvedMeter = aptMeters[0];
-    }
-
-    if (resolvedMeter) {
-      expectedMeterTypeForValidation = resolvedMeter.meter_type;
-      const resolvedCtx = await computeMeterReadingContext(resolvedMeter);
-      previousValue = resolvedCtx.previousValue;
-      baselineAvgConsumption = resolvedCtx.baselineAvgConsumption;
-    }
-  }
-
   const validated = postValidateMeterOcr({
     rawModelJson: geminiRes.parsedJson,
-    expectedMeterType: expectedMeterTypeForValidation,
     previousValue,
     baselineAvgConsumption,
     anomalyThresholdPct,
@@ -647,28 +551,13 @@ export async function runMeterOcrSuggestion(
   });
 
   const estimatedConsumption =
-    validated.reading !== null &&
-    previousValue !== null &&
-    previousValue !== undefined &&
-    validated.reading >= previousValue
+    validated.reading !== null && validated.reading >= previousValue
       ? Math.round((validated.reading - previousValue) * 100) / 100
       : null;
 
-  const inferredUnit =
-    resolvedMeter?.unit ||
-    (validated.detectedMeterType === 'WATER'
-      ? 'm³'
-      : validated.detectedMeterType === 'ELECTRICITY'
-        ? 'kWh'
-        : null);
-
   const outputPayload = {
     reading: validated.reading,
-    detected_meter_type: validated.detectedMeterType,
-    resolved_meter_id: resolvedMeter?.id || null,
-    resolved_meter_code: resolvedMeter?.meter_code || null,
-    apartment_id: resolvedMeter?.apartment_id || apartmentId || null,
-    unit: inferredUnit,
+    unit: meter.unit,
     previous_value: previousValue,
     estimated_consumption: estimatedConsumption,
     reason: validated.reason,
@@ -698,8 +587,8 @@ export async function runMeterOcrSuggestion(
       orgId,
       effectiveBuildingId,
       JSON.stringify({
-        meter_id: resolvedMeter?.id || null,
-        apartment_id: resolvedMeter?.apartment_id || apartmentId || null,
+        meter_id: meter.id,
+        apartment_id: meter.apartment_id,
         period,
         sha256: parsedImg.sha256Hex,
       }),
@@ -728,9 +617,7 @@ export async function runMeterOcrSuggestion(
       suggestionId,
       JSON.stringify({
         task_type: 'METER_OCR',
-        meter_id: resolvedMeter?.id || null,
-        apartment_id: resolvedMeter?.apartment_id || apartmentId || null,
-        detected_meter_type: validated.detectedMeterType,
+        meter_id: meter.id,
         reading: validated.reading,
         confidence: validated.confidence,
         needs_human_review: validated.needsHumanReview,

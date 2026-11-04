@@ -43,7 +43,10 @@ import {
 } from '../../../utils/billing';
 import { matchVietQrBank } from '../../../utils/vietqrBanks';
 import { extractErrorMessage } from '../../../utils/validation';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const LINE_TYPE_META = {
   RENT: { label: 'Tiền thuê căn hộ', icon: Home, badgeVariant: 'sky' },
@@ -172,7 +175,10 @@ export function InvoicesTab({
     proof_images: [],
   });
 
+  const [loadedContractKey, setLoadedContractKey] = useState(null);
+
   const loadInvoicesAndAccount = useCallback(async () => {
+    const reqKey = String(effectiveContractId || '');
     setLoading(true);
     try {
       const [invRes, bldgRes, settingsRes] = await Promise.allSettled([
@@ -230,6 +236,7 @@ export function InvoicesTab({
 
       setPaymentAccount(resolvedAcc);
     } finally {
+      setLoadedContractKey(reqKey);
       setLoading(false);
     }
   }, [effectiveContractId, contract?.building_id, contract?.payment_account, overview?.payment_account]);
@@ -283,7 +290,7 @@ export function InvoicesTab({
 
   // Deep-link auto-modal từ thông báo: ?invoice_id=...&modal=pay|detail hoặc ?credit_id=...&modal=credit
   useEffect(() => {
-    if (loading) return;
+    if (loading || loadedContractKey !== String(effectiveContractId || '')) return;
     const modal = searchParams.get('modal');
     const invoiceId = searchParams.get('invoice_id');
     const creditId = searchParams.get('credit_id');
@@ -292,15 +299,15 @@ export function InvoicesTab({
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
 
     if (modal === 'credit' || (creditId && !invoiceId)) {
-      const matchedCredit =
-        (creditId && creditBalances.find((c) => String(c.id) === String(creditId))) ||
-        creditBalances[0] ||
-        null;
+      const matchedCredit = pickDeepLinkTarget(creditBalances, creditId);
       if (matchedCredit) {
         setDetailCredit(matchedCredit);
-      } else if (Number(overview?.available_credit_balance || contract?.available_credit_balance || 0) > 0) {
+      } else if (
+        !creditId &&
+        Number(overview?.available_credit_balance || contract?.available_credit_balance || 0) > 0
+      ) {
         setDetailCredit({
-          id: creditId || 'available',
+          id: 'available',
           amount: overview?.available_credit_balance || contract?.available_credit_balance || 0,
           applied_amount: 0,
           available_amount:
@@ -309,18 +316,20 @@ export function InvoicesTab({
           description: 'Số dư tín dụng khả dụng của hợp đồng',
         });
       } else {
-        toast.info('Bản ghi tín dụng liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       }
       return;
     }
 
-    const matchedInv =
-      (invoiceId && invoices.find((i) => String(i.id) === String(invoiceId))) ||
-      (modal === 'pay' ? unpaidInvoices[0] : invoices[0]) ||
-      null;
+    const matchedInv = pickDeepLinkTarget(
+      invoices,
+      invoiceId,
+      (i) => i.id,
+      modal === 'pay' ? unpaidInvoices : invoices
+    );
 
     if (!matchedInv) {
-      toast.info('Bản ghi hóa đơn liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       return;
     }
 
@@ -344,6 +353,8 @@ export function InvoicesTab({
     }
   }, [
     loading,
+    loadedContractKey,
+    effectiveContractId,
     searchParams,
     setSearchParams,
     invoices,

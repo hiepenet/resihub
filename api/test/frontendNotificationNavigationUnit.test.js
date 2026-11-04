@@ -318,4 +318,53 @@ test('Unit: notificationStore org-wide read persistence merges localStorage per 
   const mergedU2 = mergeOrgNotificationReadState(rows, u2, storageAdapter);
   assert.equal(mergedU2.notifications[0].read_at, null, 'org-1 remains unread for u2');
   assert.equal(mergedU2.unreadCount, 2);
+
+  // Preserves >80 server unread_count while subtracting locally-read org rows
+  const mergedOver80 = mergeOrgNotificationReadState(rows, u1, storageAdapter, 125);
+  assert.equal(mergedOver80.unreadCount, 124);
+});
+
+test('Unit: pickDeepLinkTarget never opens wrong list[0] when explicit ID is missing, and canActorApproveCreditRefund blocks refund_meta.requested_by self-approval', async () => {
+  const { pickDeepLinkTarget } = await import(
+    '../../frontend/src/utils/notificationNavigation.js'
+  );
+  const { canActorApproveCreditRefund } = await import('../../frontend/src/utils/billing.js');
+
+  const items = [{ id: 'inv-1' }, { id: 'inv-2' }];
+  assert.deepEqual(pickDeepLinkTarget(items, 'inv-2'), { id: 'inv-2' });
+  assert.equal(
+    pickDeepLinkTarget(items, 'inv-missing'),
+    null,
+    'Explicit missing ID must return null instead of wrong items[0]'
+  );
+  assert.deepEqual(
+    pickDeepLinkTarget(items, ''),
+    { id: 'inv-1' },
+    'Omitted ID falls back to first item'
+  );
+
+  const mgrA = { id: 'mgr-a', roles: ['MANAGER'] };
+  const mgrB = { id: 'mgr-b', roles: ['MANAGER'] };
+  const owner = { id: 'owner-1', roles: ['OWNER'] };
+  const creditRow = {
+    id: 'cr-1',
+    created_by: null, // e.g. generated from overpayment trigger
+    refund_meta: { requested_by: 'mgr-a' },
+  };
+
+  assert.equal(
+    canActorApproveCreditRefund({ actor: mgrA, record: creditRow, buildingHasActiveOwner: true }),
+    false,
+    'Manager who requested credit refund in refund_meta.requested_by must not self-approve'
+  );
+  assert.equal(
+    canActorApproveCreditRefund({ actor: mgrB, record: creditRow, buildingHasActiveOwner: true }),
+    true,
+    'Peer manager can approve when creator differs'
+  );
+  assert.equal(
+    canActorApproveCreditRefund({ actor: owner, record: creditRow, buildingHasActiveOwner: true }),
+    true,
+    'Owner can approve credit refund'
+  );
 });

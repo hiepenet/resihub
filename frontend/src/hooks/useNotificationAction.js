@@ -36,7 +36,7 @@ export function useNotificationAction({ onMarkReadLocal } = {}) {
       if (!notification) return;
 
       if (!notification.read_at) {
-        markAsRead(notification.id);
+        markAsRead(notification.id, notification);
         onMarkReadLocal?.(notification);
       }
 

@@ -503,11 +503,11 @@ export function TenantDetailPage() {
 
   useEffect(() => {
     const modal = searchParams.get('modal');
-    if (modal === 'approval' && !loading && tenant) {
+    if (modal === 'approval' && !loading && tenant && String(tenant.id) === String(id)) {
       setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
       setApplicationReviewOpen(true);
     }
-  }, [searchParams, setSearchParams, loading, tenant]);
+  }, [id, searchParams, setSearchParams, loading, tenant]);
 
   if (loading) {
     return <LoadingSpinner label="Đang tải hồ sơ cư dân..." />;

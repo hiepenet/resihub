@@ -280,7 +280,10 @@ export function SubscriptionsPage() {
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
     setStatusFilter('');
     const matched = subscriptions.find((s) => String(s.id) === String(subId));
-    if (!matched) return;
+    if (!matched) {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
     if (matched.status === 'CANCELLATION_PENDING' && canManageServices) {
       openCancelModal(matched);
     } else {

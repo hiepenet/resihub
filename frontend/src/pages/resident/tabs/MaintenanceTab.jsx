@@ -36,7 +36,10 @@ import { useToast } from '../../../hooks/useToast';
 import { formatDateTime } from '../../../utils/format';
 import { extractErrorMessage } from '../../../utils/validation';
 import { computeSlaBadgeMeta, copyTextToClipboard } from '../../../utils/zaloFormat';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const OPEN_STATUSES = ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'];
 
@@ -145,7 +148,10 @@ export function MaintenanceTab({
   const [ratingNote, setRatingNote] = useState('');
   const [ratingSubmitting, setRatingSubmitting] = useState(false);
 
+  const [loadedContractKey, setLoadedContractKey] = useState(null);
+
   const loadRequests = useCallback(async () => {
+    const reqKey = String(effectiveContractId || '');
     setLoading(true);
     try {
       const res = await residentService.listServiceRequests(effectiveContractId || undefined);
@@ -155,6 +161,7 @@ export function MaintenanceTab({
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách yêu cầu sửa chữa.'));
     } finally {
+      setLoadedContractKey(reqKey);
       setLoading(false);
     }
   }, [effectiveContractId, onRequestsChanged, toast]);
@@ -192,17 +199,16 @@ export function MaintenanceTab({
 
   // Deep-link auto-modal từ thông báo: ?request_id=...&modal=detail
   useEffect(() => {
-    if (loading) return;
+    if (loading || loadedContractKey !== String(effectiveContractId || '')) return;
     const modal = searchParams.get('modal');
     const requestId = searchParams.get('request_id');
     if (!modal && !requestId) return;
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
 
-    const matched =
-      (requestId && requests.find((r) => String(r.id) === String(requestId))) || null;
+    const matched = pickDeepLinkTarget(requests, requestId);
     if (!matched) {
-      toast.info('Bản ghi yêu cầu sửa chữa liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       return;
     }
 
@@ -213,7 +219,7 @@ export function MaintenanceTab({
     } else {
       setDetailRequest(matched);
     }
-  }, [loading, searchParams, setSearchParams, requests, toast]);
+  }, [loading, loadedContractKey, effectiveContractId, searchParams, setSearchParams, requests, toast]);
 
   const openCount = useMemo(
     () => requests.filter((r) => OPEN_STATUSES.includes(r.status)).length,

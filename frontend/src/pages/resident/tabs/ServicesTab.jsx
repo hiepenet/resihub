@@ -43,7 +43,10 @@ import { formatMoney, formatDate, toInputDate } from '../../../utils/format';
 import { formatDateVi, getDateOrderError, maxDateStr, toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { previewSubscriptionProrata } from '../../../utils/billing';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const CATEGORY_META = {
   PARKING: { label: 'Gửi xe & Bãi đỗ', icon: Car, color: 'bg-sky-50 text-sky-600' },
@@ -149,7 +152,10 @@ export function ServicesTab({
     note: '',
   });
 
+  const [loadedContractKey, setLoadedContractKey] = useState(null);
+
   const loadServices = useCallback(async () => {
+    const reqKey = String(effectiveContractId || '');
     setLoading(true);
     try {
       const res = await residentService.listServices(effectiveContractId || undefined);
@@ -158,6 +164,7 @@ export function ServicesTab({
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải thông tin dịch vụ tiện ích.'));
     } finally {
+      setLoadedContractKey(reqKey);
       setLoading(false);
     }
   }, [effectiveContractId, toast]);
@@ -203,19 +210,16 @@ export function ServicesTab({
 
   // Deep-link auto-modal từ thông báo: ?subscription_id=...&modal=detail
   useEffect(() => {
-    if (loading) return;
+    if (loading || loadedContractKey !== String(effectiveContractId || '')) return;
     const modal = searchParams.get('modal');
     const subId = searchParams.get('subscription_id');
     if (!modal && !subId) return;
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
 
-    const matched =
-      (subId && subscriptions.find((s) => String(s.id) === String(subId))) ||
-      subscriptions[0] ||
-      null;
+    const matched = pickDeepLinkTarget(subscriptions, subId);
     if (!matched) {
-      toast.info('Gói dịch vụ liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       return;
     }
 
@@ -223,7 +227,7 @@ export function ServicesTab({
       setShowCancelledHistory(true);
     }
     setDetailSubscription(matched);
-  }, [loading, searchParams, setSearchParams, subscriptions, toast]);
+  }, [loading, loadedContractKey, effectiveContractId, searchParams, setSearchParams, subscriptions, toast]);
 
   const activeSubscriptions = useMemo(
     () =>

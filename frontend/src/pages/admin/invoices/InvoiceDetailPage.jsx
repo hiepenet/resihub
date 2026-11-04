@@ -206,7 +206,13 @@ export function InvoiceDetailPage() {
 
   useEffect(() => {
     const modal = searchParams.get('modal');
-    if (modal === 'auto' && !loading && !adjLoading && invoice) {
+    if (
+      modal === 'auto' &&
+      !loading &&
+      !adjLoading &&
+      invoice &&
+      String(invoice.id) === String(id)
+    ) {
       setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
 
       const pendingAdj = adjustments.find(
@@ -234,7 +240,7 @@ export function InvoiceDetailPage() {
 
       setSummaryModalOpen(true);
     }
-  }, [searchParams, setSearchParams, loading, adjLoading, invoice, adjustments, canManagePayments]);
+  }, [id, searchParams, setSearchParams, loading, adjLoading, invoice, adjustments, canManagePayments]);
 
   // --- 1. DRAFT Line Editor Handlers ---
   const openAddLineModal = () => {

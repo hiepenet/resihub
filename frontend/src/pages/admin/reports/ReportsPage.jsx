@@ -114,6 +114,7 @@ export function ReportsPage() {
   const [exportingLedgerFormat, setExportingLedgerFormat] = useState('');
   const [depositSummaryModalOpen, setDepositSummaryModalOpen] = useState(false);
   const [exportingSummarySection, setExportingSummarySection] = useState('');
+  const [ledgerFetchedRange, setLedgerFetchedRange] = useState({ from: null, to: null });
   const [ledgerData, setLedgerData] = useState({
     period: { from_date: defaultRange.from_date, to_date: defaultRange.to_date },
     summary: {
@@ -146,26 +147,42 @@ export function ReportsPage() {
 
   useEffect(() => {
     const tabParam = searchParams.get('tab');
-    if (tabParam && VALID_REPORT_TABS.includes(tabParam) && tabParam !== activeTab) {
-      setActiveTab(tabParam);
+    if (tabParam && VALID_REPORT_TABS.includes(tabParam)) {
+      setActiveTab((prev) => (prev === tabParam ? prev : tabParam));
     }
     const fromParam = searchParams.get('from_date');
     const toParam = searchParams.get('to_date');
-    if (fromParam && fromParam !== ledgerFromDate) {
-      setLedgerFromDate(fromParam);
+    if (fromParam) {
+      setLedgerFromDate((prev) => (prev === fromParam ? prev : fromParam));
     }
-    if (toParam && toParam !== ledgerToDate) {
-      setLedgerToDate(toParam);
+    if (toParam) {
+      setLedgerToDate((prev) => (prev === toParam ? prev : toParam));
     }
-  }, [searchParams, activeTab, ledgerFromDate, ledgerToDate]);
+  }, [searchParams]);
 
   useEffect(() => {
     const modal = searchParams.get('modal');
-    if (modal === 'summary' && activeTab === 'deposit-ledger' && !ledgerLoading) {
+    const expectedFrom = searchParams.get('from_date') || ledgerFromDate;
+    const expectedTo = searchParams.get('to_date') || ledgerToDate;
+    if (
+      modal === 'summary' &&
+      activeTab === 'deposit-ledger' &&
+      !ledgerLoading &&
+      ledgerFetchedRange.from === expectedFrom &&
+      ledgerFetchedRange.to === expectedTo
+    ) {
       setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
       setDepositSummaryModalOpen(true);
     }
-  }, [searchParams, setSearchParams, activeTab, ledgerLoading]);
+  }, [
+    searchParams,
+    setSearchParams,
+    activeTab,
+    ledgerLoading,
+    ledgerFetchedRange,
+    ledgerFromDate,
+    ledgerToDate,
+  ]);
 
   const handleTabChange = (nextTab) => {
     setActiveTab(nextTab);
@@ -218,6 +235,7 @@ export function ReportsPage() {
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải Báo cáo Sổ cọc (RP-07).'));
     } finally {
+      setLedgerFetchedRange({ from: ledgerFromDate, to: ledgerToDate });
       setLedgerLoading(false);
     }
   }, [selectedBuildingId, ledgerFromDate, ledgerToDate, ledgerStatus, toast]);

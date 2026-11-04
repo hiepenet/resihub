@@ -337,6 +337,38 @@ test('Integration: 4 missing operational handoff notification flows + 2-way 4-ey
       );
       cleanup.notificationIds.push(cancelSubNotifRes.rows[0].id);
 
+      // Manager confirms termination -> SERVICE_TERMINATED with enriched payload to RESIDENT
+      const termSubResp = await fetch(`${baseUrl}/api/v1/services/subscriptions/${subId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${managerToken}`,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          status: 'TERMINATED',
+          end_date: '2099-12-01',
+          note: 'Xác nhận chấm dứt gói dịch vụ',
+        }),
+      });
+      assert.equal(termSubResp.status, 200);
+
+      const termSubNotifRes = await localAdminPool.query(
+        `SELECT * FROM notification
+         WHERE user_id = $1 AND type = 'SERVICE_TERMINATED'
+           AND payload->>'subscription_id' = $2`,
+        [ctx.resident_user_id, subId]
+      );
+      assert.equal(
+        termSubNotifRes.rows.length,
+        1,
+        'Expected SERVICE_TERMINATED notification for RESIDENT'
+      );
+      cleanup.notificationIds.push(termSubNotifRes.rows[0].id);
+      assert.equal(termSubNotifRes.rows[0].payload.contract_id, ctx.contract_id);
+      assert.equal(termSubNotifRes.rows[0].payload.building_id, ctx.building_id);
+      assert.equal(termSubNotifRes.rows[0].payload.apartment_id, ctx.apartment_id);
+
       // FLOW 3: Resident submits contract renewal request -> CONTRACT_REQUEST_SUBMITTED to MANAGER
       const reqResp = await fetch(`${baseUrl}/api/v1/resident/contract-requests`, {
         method: 'POST',

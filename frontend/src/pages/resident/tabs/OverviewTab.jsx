@@ -39,7 +39,10 @@ import { formatMoney, formatDate, formatDateTime, toInputDate } from '../../../u
 import { isValidIdNumber, extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey } from '../../../utils/idempotency';
 import { canResidentUpdateReservationBankInfo } from '../../../utils/depositUiHelpers';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const AMENITY_LABELS = {
   wifi: 'Wi-Fi tốc độ cao',
@@ -668,11 +671,12 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
         ...reservations,
         ...(Array.isArray(overview?.reservation_history) ? overview.reservation_history : []),
       ];
-      const matched =
-        (rsvId &&
-          allRsv.find((r) => String(r.reservation_id || r.id) === String(rsvId))) ||
-        reservations[0] ||
-        null;
+      const matched = pickDeepLinkTarget(
+        allRsv,
+        rsvId,
+        (r) => r.reservation_id || r.id,
+        reservations
+      );
 
       if (matched) {
         const st = matched.reservation_status || 'HELD';
@@ -683,13 +687,13 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
         } else {
           setDetailReservation(matched);
         }
-      } else if (onboardingApplication) {
+      } else if (!rsvId && onboardingApplication) {
         setDetailReservation({
           isApplicationOnly: true,
           application: onboardingApplication,
         });
       } else {
-        toast.info('Phiếu giữ chỗ / hồ sơ liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

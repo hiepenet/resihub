@@ -51,7 +51,10 @@ import {
   getResidentDisputeWindowState,
   canResidentUpdateRefundBankInfo,
 } from '../../../utils/depositUiHelpers';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 const DIFF_FIELD_LABELS = {
   rent_amount: 'Giá thuê hàng tháng',
@@ -201,7 +204,10 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
   const [settlementDetailModalTarget, setSettlementDetailModalTarget] = useState(null);
   const [depositViewModalOpen, setDepositViewModalOpen] = useState(false);
 
+  const [loadedContractKey, setLoadedContractKey] = useState(null);
+
   const loadContractDetails = useCallback(async () => {
+    const reqKey = String(effectiveContractId || '');
     setLoadingExtra(true);
     try {
       const promises = [
@@ -223,6 +229,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
         setOccupants(occRes.value?.data || []);
       }
     } finally {
+      setLoadedContractKey(reqKey);
       setLoadingExtra(false);
     }
   }, [effectiveContractId]);
@@ -565,17 +572,17 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
 
   // Deep-link auto-modal từ thông báo: settlement | bank | renew | contract_view | deposit_view
   useEffect(() => {
-    if (loadingExtra) return;
+    if (loadingExtra || loadedContractKey !== String(effectiveContractId || '')) return;
     const modal = searchParams.get('modal');
     const depositId = searchParams.get('deposit_id');
     if (!modal && !depositId) return;
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
 
-    const targetSd =
-      (depositId && settlementDeposits.find((d) => String(d.deposit_id) === String(depositId))) ||
-      settlementDeposits[0] ||
-      null;
+    const targetSd = pickDeepLinkTarget(settlementDeposits, depositId, (d) => d.deposit_id);
+    const matchesCurrentDeposit =
+      depositData?.deposit &&
+      (!depositId || String(depositData.deposit.id) === String(depositId));
 
     if (modal === 'settlement') {
       if (targetSd) {
@@ -585,10 +592,10 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
         } else {
           setSettlementDetailModalTarget(targetSd);
         }
-      } else if (depositData?.deposit) {
+      } else if (matchesCurrentDeposit) {
         setDepositViewModalOpen(true);
       } else {
-        toast.info('Bản ghi tất toán cọc liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       }
       return;
     }
@@ -601,7 +608,7 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
           setSettlementDetailModalTarget(targetSd);
         }
       } else {
-        toast.info('Bản ghi hoàn cọc liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       }
       return;
     }
@@ -632,14 +639,18 @@ export function ContractTab({ overview, onRefreshOverview, onNavigateTab, target
     }
 
     if (modal === 'deposit_view' || depositId) {
-      if (depositData?.deposit || (depositData?.transactions || []).length > 0 || targetSd) {
+      if (
+        matchesCurrentDeposit ||
+        (!depositId && (depositData?.transactions || []).length > 0) ||
+        targetSd
+      ) {
         setDepositViewModalOpen(true);
       } else {
-        toast.info('Sổ cọc liên quan không còn tồn tại hoặc chưa phát sinh giao dịch.');
+        toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingExtra, searchParams]);
+  }, [loadingExtra, loadedContractKey, effectiveContractId, searchParams]);
 
   const timelineSteps = contract
     ? [

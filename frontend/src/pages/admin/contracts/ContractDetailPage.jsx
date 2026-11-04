@@ -1596,7 +1596,7 @@ export function ContractDetailPage() {
 
   useEffect(() => {
     const modal = searchParams.get('modal');
-    if (modal === 'auto' && !loading && contract) {
+    if (modal === 'auto' && !loading && contract && String(contract.id) === String(id)) {
       setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
       const hasPendingAmend = amendments.some(
         (v) => !v.approved_by && v.diff?.status !== 'REJECTED'
@@ -1606,7 +1606,7 @@ export function ContractDetailPage() {
       }
       setApprovalReviewOpen(true);
     }
-  }, [searchParams, setSearchParams, loading, contract, amendments]);
+  }, [id, searchParams, setSearchParams, loading, contract, amendments]);
 
   if (loading) {
     return <LoadingSpinner label="Đang tải chi tiết hợp đồng..." />;

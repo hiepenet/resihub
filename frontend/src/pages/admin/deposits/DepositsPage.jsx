@@ -57,7 +57,10 @@ import { toDateOnlyStr } from '../../../utils/dateRange';
 import { extractErrorMessage } from '../../../utils/validation';
 import { createIdempotencyKey, canCollectAdditionalDeposit } from '../../../utils/idempotency';
 import { canActorApproveDepositRow } from '../../../utils/depositUiHelpers';
-import { stripNotificationTriggerParams } from '../../../utils/notificationNavigation';
+import {
+  stripNotificationTriggerParams,
+  pickDeepLinkTarget,
+} from '../../../utils/notificationNavigation';
 
 // Khớp 100% với DEDUCT_CATEGORIES trong api/src/services/depositSettlement.js
 const DEDUCT_CATEGORY_OPTIONS = [
@@ -678,10 +681,11 @@ export function DepositsPage() {
     if (loading || (!targetDepId && modal !== 'settlement')) return;
 
     setSearchParams((prev) => stripNotificationTriggerParams(prev), { replace: true });
-    const dep = targetDepId
-      ? deposits.find((d) => String(d.id) === String(targetDepId))
-      : scopedDeposits[0];
-    if (!dep) return;
+    const dep = pickDeepLinkTarget(deposits, targetDepId, (d) => d.id, scopedDeposits);
+    if (!dep) {
+      toast.info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
 
     if (dep.status === 'DISPUTED') {
       setActiveTab('disputed');

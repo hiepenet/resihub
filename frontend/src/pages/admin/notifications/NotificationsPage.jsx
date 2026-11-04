@@ -220,7 +220,12 @@ export function NotificationsPage() {
       ]);
 
       const currentUserId = user?.id || user?.sub || null;
-      const mergedInbox = mergeOrgNotificationReadState(notifRes?.data || [], currentUserId);
+      const mergedInbox = mergeOrgNotificationReadState(
+        notifRes?.data || [],
+        currentUserId,
+        undefined,
+        notifRes?.unread_count
+      );
       setInbox(mergedInbox.notifications);
       setUnreadCount(mergedInbox.unreadCount);
       setAnnouncements(annRes?.data || []);
@@ -679,7 +684,7 @@ export function NotificationsPage() {
 
   const handleMarkAllRead = async () => {
     try {
-      await notificationsService.markAllRead();
+      await useNotificationStore.getState().markAllAsRead(inbox);
       const now = new Date().toISOString();
       setInbox((prev) => prev.map((n) => ({ ...n, read_at: n.read_at || now })));
       setUnreadCount(0);

@@ -180,11 +180,24 @@ export async function enrichNotificationsContext(
       queryFn(
         `SELECT sr.id, sr.building_id, sr.apartment_id, lc.contract_id
          FROM service_request sr
+         LEFT JOIN app_user au ON au.id = sr.created_by
+         LEFT JOIN tenant srt ON srt.person_id = au.person_id
          LEFT JOIN LATERAL (
            SELECT c.id AS contract_id
            FROM contract c
            WHERE c.apartment_id = sr.apartment_id
-           ORDER BY (c.status = 'ACTIVE') DESC, c.created_at DESC
+           ORDER BY (
+             (sr.tenant_id IS NOT NULL AND (
+               c.primary_tenant_id = sr.tenant_id
+               OR EXISTS (SELECT 1 FROM contract_occupant co WHERE co.contract_id = c.id AND co.tenant_id = sr.tenant_id)
+             ))
+             OR (srt.id IS NOT NULL AND (
+               c.primary_tenant_id = srt.id
+               OR EXISTS (SELECT 1 FROM contract_occupant co WHERE co.contract_id = c.id AND co.tenant_id = srt.id)
+             ))
+           ) DESC,
+           (c.status = 'ACTIVE') DESC,
+           c.created_at DESC
            LIMIT 1
          ) lc ON TRUE
          WHERE sr.org_id = $1 AND sr.id = ANY($2::uuid[])`,

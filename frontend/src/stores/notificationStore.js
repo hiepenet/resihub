@@ -23,7 +23,12 @@ export const useNotificationStore = create((set, get) => ({
     try {
       const res = await notificationsService.list();
       const userId = getCurrentUserId();
-      const merged = mergeOrgNotificationReadState(res.data || [], userId);
+      const merged = mergeOrgNotificationReadState(
+        res.data || [],
+        userId,
+        undefined,
+        res.unread_count
+      );
       set({
         notifications: merged.notifications,
         sentHistory: res.sent_history || [],
@@ -35,10 +40,10 @@ export const useNotificationStore = create((set, get) => ({
     }
   },
 
-  markAsRead: async (id) => {
+  markAsRead: async (id, notificationObj = null) => {
     const state = get();
-    const target = state.notifications.find((n) => n.id === id);
-    const wasUnread = target && !target.read_at;
+    const target = state.notifications.find((n) => n.id === id) || notificationObj;
+    const wasUnread = Boolean(target && !target.read_at);
     const now = new Date().toISOString();
 
     if (target && target.user_id == null) {
@@ -62,10 +67,16 @@ export const useNotificationStore = create((set, get) => ({
     }
   },
 
-  markAllAsRead: async () => {
+  markAllAsRead: async (extraRows = []) => {
     const state = get();
     const userId = getCurrentUserId();
-    const orgNotifIds = state.notifications.filter((n) => n.user_id == null).map((n) => String(n.id));
+    const combined = [
+      ...state.notifications,
+      ...(Array.isArray(extraRows) ? extraRows : []),
+    ];
+    const orgNotifIds = combined
+      .filter((n) => n && n.user_id == null && n.id != null)
+      .map((n) => String(n.id));
     if (orgNotifIds.length > 0) {
       const ids = getReadOrgNotifIds(userId);
       orgNotifIds.forEach((id) => ids.add(id));
