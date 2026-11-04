@@ -589,5 +589,77 @@ export function buildContractServiceCodeOptions(catalogItems = [], existingPrice
   return Array.from(map.values());
 }
 
+/**
+ * Kiểm tra dòng công tơ có bị khóa không cho sửa/ghi đè trên bảng hoặc modal (M08 Turnover):
+ * - Khóa khi người dùng không có quyền ghi (`!canWriteMeters`)
+ * - Hoặc khi đợt hợp đồng đang hiển thị đã được lập hóa đơn phát hành / quyết toán (`period_reading_billed === true`).
+ */
+export function isMeterRowLockedForEdit(row, canWriteMeters) {
+  if (!canWriteMeters) return true;
+  return Boolean(row?.period_reading_billed);
+}
+
+/**
+ * Chuẩn hóa nhãn hiển thị hợp đồng & đợt giao ca giữa tháng trên bảng ghi chỉ số đồng hồ.
+ */
+export function resolveMeterTurnoverBadgeMeta(row = {}) {
+  const r = row || {};
+  const contractCode = r.target_contract_code || null;
+  const tenantName = r.target_tenant_name || null;
+  const totalSlots = Number(r.period_total_slots || 0);
+  const slotIndex = Number(r.period_slot_index || 0);
+  const isMultiSlot = totalSlots > 1 && slotIndex > 0;
+  return {
+    showContractTag: Boolean(contractCode || isMultiSlot),
+    isMultiSlot,
+    slotLabel: isMultiSlot ? `Đợt ${slotIndex}/${totalSlots}` : null,
+    contractCode,
+    tenantName,
+  };
+}
+
+/**
+ * Ánh xạ dữ liệu của một đợt hợp đồng (`overlapping_contracts`) lên đối tượng đồng hồ
+ * khi Quản lý chuyển đổi giữa các hợp đồng trong cùng một kỳ tháng ở Modal chi tiết.
+ */
+export function resolveMeterSlotView(meter = {}, selectedContractId = null) {
+  if (!meter || typeof meter !== 'object') return meter;
+  const slots = Array.isArray(meter.overlapping_contracts) ? meter.overlapping_contracts : [];
+  const targetId = selectedContractId || meter.target_contract_id || null;
+  const slot = targetId
+    ? slots.find((s) => String(s.contract_id) === String(targetId))
+    : null;
+  if (!slot) return meter;
+
+  const hasReading = Boolean(slot.reading_id);
+  return {
+    ...meter,
+    target_contract_id: slot.contract_id,
+    target_contract_code: slot.contract_code || null,
+    target_tenant_name: slot.tenant_name || null,
+    period_slot_index: slot.slot_index ?? meter.period_slot_index,
+    period_total_slots: slot.total_slots ?? meter.period_total_slots,
+    period_reading_id: slot.reading_id || null,
+    period_previous_reading: hasReading ? slot.previous_reading : null,
+    period_current_reading: hasReading ? slot.current_reading : null,
+    period_consumption: hasReading ? slot.consumption : null,
+    period_reading_status: hasReading ? slot.reading_status : null,
+    period_is_abnormal: hasReading ? Boolean(slot.is_abnormal) : false,
+    period_abnormal_note: hasReading ? slot.abnormal_note || null : null,
+    period_image_url: hasReading ? slot.image_url || null : null,
+    period_reading_billed: Boolean(slot.is_billed),
+    last_known_reading:
+      slot.previous_reading !== null && slot.previous_reading !== undefined
+        ? Number(slot.previous_reading)
+        : meter.last_known_reading,
+    effective_unit_price:
+      slot.effective_unit_price !== null && slot.effective_unit_price !== undefined
+        ? Number(slot.effective_unit_price)
+        : meter.effective_unit_price,
+    effective_price_source: slot.effective_price_source || meter.effective_price_source,
+  };
+}
+
+
 
 

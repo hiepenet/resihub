@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   RefreshCw,
   Sparkles,
+  Lock,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -42,6 +43,9 @@ import {
   resolveBatchConfirmFeedback,
   resolveAnomalyThresholdPct,
   computeMeterEstimatedAmount,
+  isMeterRowLockedForEdit,
+  resolveMeterTurnoverBadgeMeta,
+  resolveMeterSlotView,
 } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
@@ -155,6 +159,7 @@ export function MeterReadingsPage() {
   // Modal ghi chi tiết 1 đồng hồ + ảnh công tơ + lịch sử
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedMeter, setSelectedMeter] = useState(null);
+  const [selectedSlotContractId, setSelectedSlotContractId] = useState('');
   const [historyList, setHistoryList] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [singleForm, setSingleForm] = useState({
@@ -163,6 +168,12 @@ export function MeterReadingsPage() {
     image: '',
   });
   const [savingSingle, setSavingSingle] = useState(false);
+
+  const activeModalMeter = useMemo(
+    () => (selectedMeter ? resolveMeterSlotView(selectedMeter, selectedSlotContractId) : null),
+    [selectedMeter, selectedSlotContractId]
+  );
+  const isModalSlotLocked = isMeterRowLockedForEdit(activeModalMeter, canWriteMeters);
 
   // Modal khởi tạo đồng hồ mới
   const [createOpen, setCreateOpen] = useState(false);
@@ -233,20 +244,23 @@ export function MeterReadingsPage() {
   const dirtyValidRows = useMemo(() => {
     return meters.filter((m) => {
       const meta = evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct);
-      return meta.isDirty && !meta.isInvalid;
+      return !m.period_reading_billed && meta.isDirty && !meta.isInvalid;
     });
   }, [meters, drafts, anomalyThresholdPct]);
 
   const unconfirmedRows = useMemo(() => {
     return meters.filter(
       (m) =>
+        !m.period_reading_billed &&
         Boolean(m.period_reading_id) &&
         ['DRAFT', 'FLAGGED'].includes(m.period_reading_status || '')
     );
   }, [meters]);
 
   const hasInvalidDrafts = useMemo(() => {
-    return meters.some((m) => evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isInvalid);
+    return meters.some(
+      (m) => !m.period_reading_billed && evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isInvalid
+    );
   }, [meters, drafts, anomalyThresholdPct]);
 
   const stats = useMemo(() => {
@@ -377,6 +391,7 @@ export function MeterReadingsPage() {
         readings: dirtyValidRows.map((m) => ({
           meter_id: m.id,
           period,
+          ...(m.target_contract_id ? { contract_id: m.target_contract_id } : {}),
           status: targetStatus,
           current_reading: Number(drafts[m.id]),
           abnormal_note: notes[m.id]?.trim() || undefined,
@@ -451,17 +466,38 @@ export function MeterReadingsPage() {
     }
   };
 
+  const handleSlotContractChange = (nextContractId) => {
+    setSelectedSlotContractId(nextContractId);
+    if (!selectedMeter) return;
+    const slotView = resolveMeterSlotView(selectedMeter, nextContractId);
+    const isDefaultTarget = String(nextContractId || '') === String(selectedMeter.target_contract_id || '');
+    setSingleForm({
+      current_reading:
+        isDefaultTarget && drafts[selectedMeter.id] !== undefined && drafts[selectedMeter.id] !== ''
+          ? drafts[selectedMeter.id]
+          : slotView.period_current_reading !== null && slotView.period_current_reading !== undefined
+          ? String(Number(slotView.period_current_reading))
+          : '',
+      abnormal_note:
+        (isDefaultTarget ? notes[selectedMeter.id] : '') || slotView.period_abnormal_note || '',
+      image: slotView.period_image_url || '',
+    });
+  };
+
   const openSingleModal = async (meter) => {
+    const initContractId = meter.target_contract_id || '';
+    const slotView = resolveMeterSlotView(meter, initContractId);
     setSelectedMeter(meter);
+    setSelectedSlotContractId(initContractId);
     setSingleForm({
       current_reading:
         drafts[meter.id] !== undefined && drafts[meter.id] !== ''
           ? drafts[meter.id]
-          : meter.period_current_reading !== null && meter.period_current_reading !== undefined
-          ? String(Number(meter.period_current_reading))
+          : slotView.period_current_reading !== null && slotView.period_current_reading !== undefined
+          ? String(Number(slotView.period_current_reading))
           : '',
-      abnormal_note: notes[meter.id] || meter.period_abnormal_note || '',
-      image: meter.period_image_url || '',
+      abnormal_note: notes[meter.id] || slotView.period_abnormal_note || '',
+      image: slotView.period_image_url || '',
     });
     setDetailModalOpen(true);
     setHistoryLoading(true);
@@ -477,8 +513,9 @@ export function MeterReadingsPage() {
 
   const handleSaveSingle = async (e, targetStatus = 'CONFIRMED') => {
     e?.preventDefault();
-    if (!canWriteMeters || !selectedMeter) return;
-    const prev = getPreviousBaseline(selectedMeter);
+    const targetMeter = activeModalMeter || selectedMeter;
+    if (!canWriteMeters || !targetMeter || isModalSlotLocked) return;
+    const prev = getPreviousBaseline(targetMeter);
     const val = Number(singleForm.current_reading);
 
     if (singleForm.current_reading === '' || Number.isNaN(val) || val < prev) {
@@ -489,7 +526,7 @@ export function MeterReadingsPage() {
     const preview = evaluateClientMeterAnomaly({
       prevReading: prev,
       currentReading: val,
-      baselineAvg: resolveRowBaselineAvg(selectedMeter),
+      baselineAvg: resolveRowBaselineAvg(targetMeter),
       thresholdPct: anomalyThresholdPct,
     });
     if (targetStatus === 'CONFIRMED' && preview.isAbnormal && !singleForm.abnormal_note.trim()) {
@@ -503,6 +540,7 @@ export function MeterReadingsPage() {
     try {
       const payload = {
         period,
+        contract_id: selectedSlotContractId || undefined,
         status: targetStatus,
         current_reading: val,
         abnormal_note: singleForm.abnormal_note.trim() || undefined,
@@ -532,14 +570,15 @@ export function MeterReadingsPage() {
   };
 
   const handleConfirmFromModal = async () => {
-    if (!canWriteMeters || !selectedMeter?.period_reading_id) return;
-    if (selectedMeter.period_is_abnormal && !singleForm.abnormal_note.trim()) {
+    const targetMeter = activeModalMeter || selectedMeter;
+    if (!canWriteMeters || !targetMeter?.period_reading_id || isModalSlotLocked) return;
+    if (targetMeter.period_is_abnormal && !singleForm.abnormal_note.trim()) {
       toast.warning('Vui lòng nhập ghi chú giải trình bất thường trước khi xác nhận chốt.');
       return;
     }
     setSavingSingle(true);
     try {
-      const res = await metersService.confirmReading(selectedMeter.period_reading_id, {
+      const res = await metersService.confirmReading(targetMeter.period_reading_id, {
         abnormal_note: singleForm.abnormal_note.trim() || undefined,
       });
       toast.success(res.message || 'Đã xác nhận chốt chỉ số đồng hồ.');
@@ -784,9 +823,11 @@ export function MeterReadingsPage() {
 
                 const estMoney = computeMeterEstimatedAmount(metrics.consumption, row);
                 const appliedPrice = row.effective_unit_price ?? row.unit_price;
+                const rowLocked = isMeterRowLockedForEdit(row, canWriteMeters);
+                const turnoverBadge = resolveMeterTurnoverBadgeMeta(row);
 
                 const canQuickConfirm =
-                  canWriteMeters &&
+                  !rowLocked &&
                   Boolean(row.period_reading_id) &&
                   ['DRAFT', 'FLAGGED'].includes(metrics.readingStatus || '') &&
                   !metrics.isDirty;
@@ -800,9 +841,22 @@ export function MeterReadingsPage() {
                           ({row.building_code})
                         </span>
                       </p>
-                      <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
-                        {row.meter_code}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                          {row.meter_code}
+                        </span>
+                        {turnoverBadge.isMultiSlot ? (
+                          <Badge variant="indigo">{turnoverBadge.slotLabel}</Badge>
+                        ) : null}
+                      </div>
+                      {turnoverBadge.contractCode ? (
+                        <p className="text-[11px] text-slate-500 mt-0.5 whitespace-nowrap">
+                          <span className="font-mono font-semibold text-slate-700">
+                            {turnoverBadge.contractCode}
+                          </span>
+                          {turnoverBadge.tenantName ? ` • ${turnoverBadge.tenantName}` : ''}
+                        </p>
+                      ) : null}
                     </TD>
 
                     <TD>
@@ -882,7 +936,7 @@ export function MeterReadingsPage() {
                           type="number"
                           step="0.01"
                           min={metrics.prevReading}
-                          disabled={!canWriteMeters}
+                          disabled={rowLocked}
                           value={drafts[row.id] ?? ''}
                           onChange={(e) => {
                             const val = e.target.value;
@@ -964,6 +1018,13 @@ export function MeterReadingsPage() {
                         <div>
                           {renderReadingStatusBadge(metrics.readingStatus, anomalyThresholdPct)}
                         </div>
+                        {row.period_reading_billed ? (
+                          <div>
+                            <Badge variant="slate">
+                              <Lock className="w-3 h-3" /> Đã lập HĐ
+                            </Badge>
+                          </div>
+                        ) : null}
                         {metrics.isAbnormal ? (
                           <div>
                             <Badge
@@ -980,7 +1041,7 @@ export function MeterReadingsPage() {
                           </div>
                         ) : null}
                         {metrics.isAbnormal || metrics.readingStatus === 'FLAGGED' ? (
-                          canWriteMeters ? (
+                          !rowLocked ? (
                             <input
                               type="text"
                               value={notes[row.id] ?? ''}
@@ -999,7 +1060,7 @@ export function MeterReadingsPage() {
 
                     <TD className="w-px whitespace-nowrap text-center">
                       <div className="inline-flex items-center gap-1.5">
-                        {canWriteMeters ? (
+                        {!rowLocked ? (
                           <label
                             className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
                               aiOcrByMeter[row.id]?.loading
@@ -1067,8 +1128,8 @@ export function MeterReadingsPage() {
             : 'Chi tiết đồng hồ'
         }
         subtitle={
-          selectedMeter
-            ? `Kỳ chốt: ${period} • Chỉ số đầu kỳ: ${getPreviousBaseline(selectedMeter)} ${selectedMeter.unit}`
+          activeModalMeter
+            ? `Kỳ chốt: ${period} • Chỉ số đầu kỳ: ${getPreviousBaseline(activeModalMeter)} ${activeModalMeter.unit}`
             : ''
         }
         size="lg"
@@ -1082,8 +1143,9 @@ export function MeterReadingsPage() {
               >
                 Đóng
               </Button>
-              {selectedMeter?.period_reading_id &&
-              ['DRAFT', 'FLAGGED'].includes(selectedMeter.period_reading_status || '') ? (
+              {activeModalMeter?.period_reading_id &&
+              !isModalSlotLocked &&
+              ['DRAFT', 'FLAGGED'].includes(activeModalMeter.period_reading_status || '') ? (
                 <Button
                   variant="soft"
                   icon={CheckCircle2}
@@ -1098,6 +1160,7 @@ export function MeterReadingsPage() {
                 icon={Save}
                 onClick={(e) => handleSaveSingle(e, 'DRAFT')}
                 loading={savingSingle}
+                disabled={isModalSlotLocked}
               >
                 Lưu nháp
               </Button>
@@ -1106,6 +1169,7 @@ export function MeterReadingsPage() {
                 icon={CheckCircle2}
                 onClick={(e) => handleSaveSingle(e, 'CONFIRMED')}
                 loading={savingSingle}
+                disabled={isModalSlotLocked}
               >
                 Lưu &amp; Chốt chỉ số
               </Button>
@@ -1117,19 +1181,46 @@ export function MeterReadingsPage() {
           )
         }
       >
-        {selectedMeter ? (
+        {selectedMeter && activeModalMeter ? (
           <div className="space-y-6">
+            {Array.isArray(selectedMeter.overlapping_contracts) &&
+            selectedMeter.overlapping_contracts.length > 1 ? (
+              <Select
+                label="Đợt hợp đồng trong kỳ"
+                value={selectedSlotContractId}
+                onChange={(e) => handleSlotContractChange(e.target.value)}
+                options={selectedMeter.overlapping_contracts.map((slot) => ({
+                  value: slot.contract_id,
+                  label: `Đợt ${slot.slot_index}/${slot.total_slots} • ${slot.contract_code || slot.contract_id}${
+                    slot.tenant_name ? ` (${slot.tenant_name})` : ''
+                  } • ${slot.overlap_start} → ${slot.overlap_end}${
+                    slot.is_billed ? ' [Đã lập HĐ]' : slot.reading_id ? ` [${slot.reading_status}]` : ' [Chưa ghi]'
+                  }`,
+                }))}
+              />
+            ) : null}
+
+            {activeModalMeter.period_reading_billed ? (
+              <div className="p-3 rounded-lg bg-slate-100 border border-slate-200 text-xs text-slate-700 flex items-center gap-2">
+                <Lock className="w-4 h-4 text-slate-600 shrink-0" />
+                <span>
+                  Chỉ số của đợt hợp đồng này đã được lập hóa đơn phát hành (Đã lập HĐ), không thể chỉnh sửa hoặc ghi đè.
+                </span>
+              </div>
+            ) : null}
+
             {canWriteMeters ? (
               <form onSubmit={(e) => handleSaveSingle(e, 'CONFIRMED')} className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <Input
-                    label={`Chỉ số cũ (${selectedMeter.unit})`}
+                    label={`Chỉ số cũ (${activeModalMeter.unit})`}
                     disabled
-                    value={getPreviousBaseline(selectedMeter)}
+                    value={getPreviousBaseline(activeModalMeter)}
                   />
                   <AISuggestionField
                     active={Boolean(
-                      aiOcrByMeter[selectedMeter.id] &&
+                      !isModalSlotLocked &&
+                        aiOcrByMeter[selectedMeter.id] &&
                         aiOcrByMeter[selectedMeter.id].reading !== null &&
                         aiOcrByMeter[selectedMeter.id].reading !== undefined
                     )}
@@ -1159,10 +1250,11 @@ export function MeterReadingsPage() {
                     }
                   >
                     <Input
-                      label={`Chỉ số mới kỳ ${period} (${selectedMeter.unit})`}
+                      label={`Chỉ số mới kỳ ${period} (${activeModalMeter.unit})`}
                       type="number"
                       step="0.01"
                       required
+                      disabled={isModalSlotLocked}
                       value={singleForm.current_reading}
                       onChange={(e) => {
                         const val = e.target.value;
@@ -1203,6 +1295,7 @@ export function MeterReadingsPage() {
                 <Input
                   label="Ghi chú kiểm tra / Giải trình bất thường"
                   placeholder="VD: Cư dân lắp thêm máy sấy, rò rỉ van bồn cầu đã xử lý..."
+                  disabled={isModalSlotLocked}
                   value={singleForm.abnormal_note}
                   onChange={(e) =>
                     setSingleForm((s) => ({ ...s, abnormal_note: e.target.value }))
@@ -1213,10 +1306,13 @@ export function MeterReadingsPage() {
                   <FileUpload
                     label="Ảnh chụp mặt đồng hồ đối chứng"
                     multiple={false}
+                    disabled={isModalSlotLocked}
                     value={singleForm.image}
                     onChange={(img) => setSingleForm((s) => ({ ...s, image: img }))}
                   />
-                  {singleForm.image && singleForm.image.startsWith('data:image/') ? (
+                  {!isModalSlotLocked &&
+                  singleForm.image &&
+                  singleForm.image.startsWith('data:image/') ? (
                     <Button
                       type="button"
                       variant="soft"
@@ -1224,7 +1320,7 @@ export function MeterReadingsPage() {
                       icon={Sparkles}
                       loading={Boolean(aiOcrByMeter[selectedMeter.id]?.loading)}
                       onClick={() =>
-                        handleMeterOcrScan(selectedMeter, singleForm.image, {
+                        handleMeterOcrScan(activeModalMeter, singleForm.image, {
                           intoSingleModal: true,
                         })
                       }
@@ -1234,12 +1330,12 @@ export function MeterReadingsPage() {
                   ) : null}
                 </div>
               </form>
-            ) : selectedMeter.period_image_url ? (
+            ) : activeModalMeter.period_image_url ? (
               <div className="space-y-2">
                 <p className="text-xs font-medium text-slate-600">Ảnh chụp công tơ kỳ {period}</p>
                 <div className="w-48 h-48 rounded-xl border border-slate-200 overflow-hidden">
                   <AuthImage
-                    src={selectedMeter.period_image_url}
+                    src={activeModalMeter.period_image_url}
                     alt="Ảnh công tơ"
                     className="w-full h-full object-cover"
                   />
@@ -1274,7 +1370,12 @@ export function MeterReadingsPage() {
                       {historyList.map((h) => (
                         <tr key={h.id}>
                           <TD className="text-center font-mono font-semibold whitespace-nowrap">
-                            {h.period}
+                            <div>{h.period}</div>
+                            {h.contract_code ? (
+                              <div className="text-[11px] font-normal text-indigo-600">
+                                {h.contract_code}
+                              </div>
+                            ) : null}
                           </TD>
                           <TD className="text-right font-mono tabular-nums whitespace-nowrap">
                             {Number(h.previous_reading)}
