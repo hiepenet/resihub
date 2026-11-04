@@ -554,6 +554,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     await apiFetch(`/api/v1/contracts/${cId}/activate`, manager.token, { method: 'POST' });
 
     const depQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [cId]);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptC.id]);
     const depId = depQ.rows[0].id;
     await apiFetch(`/api/v1/deposits/${depId}/transactions`, manager.token, {
       method: 'POST',
@@ -789,6 +790,7 @@ test('M06 Phase 1 (P0) — Deposit Ceiling, Pre-Payout Notice, Snapshot/Ledger G
     });
     await apiFetch(`/api/v1/contracts/${cDId}/activate`, manager.token, { method: 'POST' });
     const depDQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [cDId]);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptD.id]);
     const depDId = depDQ.rows[0].id;
     await apiFetch(`/api/v1/deposits/${depDId}/transactions`, manager.token, {
       method: 'POST',

@@ -660,6 +660,36 @@ export function resolveMeterSlotView(meter = {}, selectedContractId = null) {
   };
 }
 
+export const METER_CONTRACT_FILTER_OPTIONS = [
+  { value: '', label: 'Tất cả căn hộ' },
+  { value: 'true', label: 'Đang có hợp đồng ACTIVE' },
+  { value: 'false', label: 'Chưa có hợp đồng ACTIVE' },
+];
+
+export function buildMeterListQueryParams({
+  buildingId,
+  meterType,
+  statusFilter,
+  activeContractFilter,
+  period,
+  search,
+} = {}) {
+  const normalizedActive =
+    activeContractFilter === 'true' || activeContractFilter === 'false'
+      ? activeContractFilter
+      : undefined;
+  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
+
+  return {
+    building_id: buildingId || undefined,
+    meter_type: meterType || undefined,
+    status: statusFilter || undefined,
+    active_contract: normalizedActive,
+    period: period || undefined,
+    search: trimmedSearch || undefined,
+  };
+}
+
 
 
 

@@ -46,6 +46,8 @@ import {
   isMeterRowLockedForEdit,
   resolveMeterTurnoverBadgeMeta,
   resolveMeterSlotView,
+  METER_CONTRACT_FILTER_OPTIONS,
+  buildMeterListQueryParams,
 } from '../../../utils/billing';
 import { extractErrorMessage } from '../../../utils/validation';
 
@@ -147,6 +149,7 @@ export function MeterReadingsPage() {
   const [period, setPeriod] = useState(getCurrentPeriod());
   const [meterType, setMeterType] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [activeContractFilter, setActiveContractFilter] = useState('');
   const [abnormalOnly, setAbnormalOnly] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -198,13 +201,16 @@ export function MeterReadingsPage() {
   const fetchMeters = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await metersService.list({
-        building_id: selectedBuildingId || undefined,
-        meter_type: meterType || undefined,
-        status: statusFilter || undefined,
-        period,
-        search: search.trim() || undefined,
-      });
+      const res = await metersService.list(
+        buildMeterListQueryParams({
+          buildingId: selectedBuildingId,
+          meterType,
+          statusFilter,
+          activeContractFilter,
+          period,
+          search,
+        })
+      );
       const list = res.data || [];
       setMeters(list);
       setAnomalyThresholdPct(resolveAnomalyThresholdPct(res.anomaly_threshold_pct));
@@ -226,7 +232,7 @@ export function MeterReadingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, meterType, statusFilter, period, search, toast]);
+  }, [selectedBuildingId, meterType, statusFilter, activeContractFilter, period, search, toast]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -779,7 +785,13 @@ export function MeterReadingsPage() {
             ]}
           />
 
-          <div className="lg:col-span-2">
+          <Select
+            value={activeContractFilter}
+            onChange={(e) => setActiveContractFilter(e.target.value)}
+            options={METER_CONTRACT_FILTER_OPTIONS}
+          />
+
+          <div>
             <SearchBar
               value={search}
               onChange={setSearch}
@@ -812,7 +824,11 @@ export function MeterReadingsPage() {
             description={
               abnormalOnly
                 ? `Không có đồng hồ nào có biến động sản lượng bất thường (>${anomalyThresholdPct}%) trong kỳ này.`
-                : 'Hãy khởi tạo đồng hồ điện/nước cho căn hộ để bắt đầu ghi nhận chỉ số hàng kỳ.'
+                : activeContractFilter === 'true'
+                  ? 'Không có đồng hồ nào thuộc căn hộ đang có hợp đồng ACTIVE khớp điều kiện lọc.'
+                  : activeContractFilter === 'false'
+                    ? 'Không có đồng hồ nào thuộc căn hộ chưa có hợp đồng ACTIVE khớp điều kiện lọc.'
+                    : 'Hãy khởi tạo đồng hồ điện/nước cho căn hộ để bắt đầu ghi nhận chỉ số hàng kỳ.'
             }
             action={
               canWriteMeters && !abnormalOnly ? (

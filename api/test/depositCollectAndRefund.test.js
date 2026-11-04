@@ -458,6 +458,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
     body: JSON.stringify({ terminated_date: todayStr, reason: 'Khách trả phòng kiểm thử tất toán cọc' }),
   });
   assert.equal(term1.status, 200);
+  await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [apt1.id]);
   assert.ok(term1.body.refund_due_date, 'Phải sinh hạn hoàn cọc +5 ngày');
 
   // Ghi nhận biên bản kiểm tra bàn giao phòng kèm hình ảnh (FR-024, R-12) trước khi kiểm tra điều kiện tiên quyết
@@ -745,6 +746,7 @@ test('Deposit Collection & Refund Full Lifecycle Suite', async (t) => {
   const dep2Check = await adminPool.query('SELECT status, refund_due_date FROM deposit WHERE id = $1', [dep2.id]);
   assert.equal(dep2Check.rows[0].status, 'HELD');
   assert.ok(dep2Check.rows[0].refund_due_date, 'Sổ cọc phòng cũ phải có refund_due_date khi transfer_deposit=false');
+  await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [apt2.id]);
 
   // Lập tất toán VƯỢT CỌC trên dep2: cọc 5.000.000, hư hỏng nội thất 6.500.000 => refund = 0, shortfall = 1.500.000 -> sinh RECEIVABLE_AFTER_MOVE_OUT!
   const sfSubmit = await apiFetch(`/api/v1/deposits/${dep2.id}/settlement`, manager.token, {

@@ -255,6 +255,7 @@ test('M06 Phase 2 (Task 4) — Separated Payout Execution, UNC Voucher, Pre-Payo
     });
     assert.equal(act.status, 200);
     const depQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [contractId]);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptId]);
     const depositId = depQ.rows[0].id;
     const col = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrA.token, {
       method: 'POST',

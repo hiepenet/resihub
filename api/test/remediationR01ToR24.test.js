@@ -394,6 +394,7 @@ test('R-01..R-24 Specialized Business Logic Remediation Suite', async (t) => {
     assert.equal(meterRes.status, 201);
     const elMeterId = meterRes.body.data.id;
     cleanup.meterIds.push(elMeterId);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1 AND meter_type = 'WATER'", [aptId]);
 
     // R-06 Pre-condition 1: Chấm dứt HĐ vào ngày 2028-04-10 khi CHƯA ghi công tơ kỳ 2028-04 -> chặn tất toán 409 MISSING_FINAL_METER_READING
     await adminPool.query(

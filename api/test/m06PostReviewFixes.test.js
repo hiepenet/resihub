@@ -424,6 +424,8 @@ test('M06 Post-Review Fixes (3.2, 3.3, 3.4, 3.5.1, 3.5.2)', async (t) => {
     assert.equal(mReadStatus(mRes), 201, JSON.stringify(mRes.body));
     const meterId = mRes.body.data.id;
     cleanup.meterIds.push(meterId);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1 AND meter_type = 'WATER'", [apt1.id]);
+    cleanup.meterIds.push(meterId);
 
     const termRes = await apiFetch(`/api/v1/contracts/${contractId}/terminate`, mgrAuth.token, {
       method: 'POST',

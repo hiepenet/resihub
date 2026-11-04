@@ -440,7 +440,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     // And POST /api/v1/invoices/generate-batch for old contract bills exact 14/30 days
     const genOldRes = await apiFetch(`/api/v1/invoices/generate-batch`, mgr.token, {
       method: 'POST',
-      body: JSON.stringify({ contract_id: oldContract.id, period: '2028-06' }),
+      body: JSON.stringify({ contract_id: oldContract.id, period: '2028-06', allow_missing_meter_readings: true }),
     });
     assert.equal(genOldRes.status, 201, `Generate old failed: ${JSON.stringify(genOldRes.body)}`);
     const invOldJune = genOldRes.body.data[0];
@@ -452,7 +452,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     // Generate batch for new contract for June 2028: bills 16/30 days (15/06–30/06) = 6,400,000
     const genNewRes = await apiFetch(`/api/v1/invoices/generate-batch`, mgr.token, {
       method: 'POST',
-      body: JSON.stringify({ contract_id: newContractId, period: '2028-06' }),
+      body: JSON.stringify({ contract_id: newContractId, period: '2028-06', allow_missing_meter_readings: true }),
     });
     assert.equal(genNewRes.status, 201, `Generate new failed: ${JSON.stringify(genNewRes.body)}`);
     const invNewJune = genNewRes.body.data[0];

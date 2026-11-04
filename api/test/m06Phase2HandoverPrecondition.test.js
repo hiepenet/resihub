@@ -240,6 +240,7 @@ test('M06 Phase 2 (Task 3) — Mandatory Apartment Handover Inspection With Phot
     });
     assert.equal(act.status, 200);
     const depQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [contractId]);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptId]);
     const depositId = depQ.rows[0].id;
     if (collectAmount > 0) {
       const col = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrA.token, {

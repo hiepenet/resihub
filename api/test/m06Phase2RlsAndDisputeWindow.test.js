@@ -458,6 +458,7 @@ test('M06 Phase 2 (Task 1) — Strict PRD 6.2 RLS, Zero adminPool in deposits.js
       body: JSON.stringify({ reason: 'Hết nhu cầu thuê P2-T1' }),
     });
     assert.equal(termRes.status, 200, JSON.stringify(termRes.body));
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [apt.id]);
 
     const subSettle = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgrA.token, {
       method: 'POST',

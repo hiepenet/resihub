@@ -396,6 +396,7 @@ test('M06 Phase 2 (Task 2) — PRD 6.2 Role Matrix (OWNER R+A, MANAGER CRU, SYS_
       body: JSON.stringify({}),
     });
     assert.equal(actRes.status, 200);
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptContract.id]);
 
     const depQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [contractId]);
     const depositId = depQ.rows[0].id;
@@ -614,6 +615,7 @@ test('M06 Phase 2 (Task 2) — PRD 6.2 Role Matrix (OWNER R+A, MANAGER CRU, SYS_
     const depQ = await adminPool.query('SELECT id FROM deposit WHERE contract_id = $1', [contractId]);
     const depositId = depQ.rows[0].id;
 
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptDep.id]);
     const mgrNoOwnCollect = await apiFetch(`/api/v1/deposits/${depositId}/transactions`, mgrA.token, {
       method: 'POST',
       body: JSON.stringify({ type: 'collect', amount: 3000000, method: 'CASH', description: 'Thu cọc tòa chưa gắn chủ' }),

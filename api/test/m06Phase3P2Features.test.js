@@ -570,6 +570,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
         body: JSON.stringify({ note: 'Đã kiểm phòng A3', evidence: [TINY_PNG_B64] }),
       });
       assert.equal(ho4.status, 200, JSON.stringify(ho4.body));
+      await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [apt3.id]);
       const set4 = await apiFetch(`/api/v1/deposits/${dep4Id}/settlement`, mgr1.token, {
         method: 'POST',
         body: JSON.stringify({
@@ -620,6 +621,7 @@ test('M06 Phase 3 (P2) — RP-07/RP-08 Reports, Deposit Audit Timeline & Public 
         body: JSON.stringify({ note: 'Đã kiểm phòng A4', evidence: [TINY_PNG_B64] }),
       });
       assert.equal(ho5.status, 200, JSON.stringify(ho5.body));
+      await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [apt4.id]);
       const set5 = await apiFetch(`/api/v1/deposits/${dep5Id}/settlement`, mgr1.token, {
         method: 'POST',
         body: JSON.stringify({
