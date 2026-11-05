@@ -1,13 +1,18 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  BarChart,
-  Bar,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-  Cell,
-} from 'recharts';
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler,
+} from 'chart.js';
+import { Line, Bar } from 'react-chartjs-2';
 import {
   Building2,
   TrendingUp,
@@ -31,13 +36,6 @@ import { EmptyState } from '../../../components/common/EmptyState';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  ChartLegend,
-  ChartLegendContent,
-} from '../../../components/ui/Chart';
 import { reportsService } from '../../../services/reports.service';
 import { useAuthStore } from '../../../stores/authStore';
 import { useToast } from '../../../hooks/useToast';
@@ -49,22 +47,76 @@ import {
   formatRelativeTime,
 } from '../../../utils/format';
 import {
-  REVENUE_COMPARISON_CHART_CONFIG,
-  REVENUE_SOURCE_CHART_CONFIG,
-  REVENUE_SOURCE_KEYS,
-  AGING_BUCKETS_CHART_CONFIG,
-  OCCUPANCY_BAR_CHART_CONFIG,
+  DASHBOARD_AGING_BUCKET_KEYS,
   hasRevenueChartData,
   hasAgingChartData,
   hasOccupancyChartData,
-  buildRevenueComparisonBarRows,
-  buildRevenueSourceBarRows,
-  getTopRevenueSourceKey,
-  buildReceivablesAgingBarRows,
-  resolveAgingBarBucketKey,
-  buildOccupancyBarRows,
+  buildRevenueTrendChartData,
+  buildRevenueBySourceChartData,
+  buildReceivablesAgingChartData,
+  buildOccupancyTrendChartData,
 } from '../../../utils/chartHelpers';
 import { extractErrorMessage } from '../../../utils/validation';
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  Filler
+);
+
+// Module-level Chart.js options (no closures needed — no navigate/state references)
+const REVENUE_TREND_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: {
+    legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`,
+      },
+    },
+  },
+  scales: {
+    x: { grid: { display: false } },
+    y: {
+      ticks: { callback: (v) => formatCompactMoney(v) },
+      grid: { color: '#f1f5f9' },
+    },
+  },
+};
+
+const REVENUE_SOURCE_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: {
+    legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+    tooltip: {
+      callbacks: {
+        label: (ctx) => `${ctx.dataset.label}: ${formatMoney(ctx.parsed.y)}`,
+        footer: (items) => {
+          const total = items.reduce((s, i) => s + i.parsed.y, 0);
+          return `Tổng phát hành: ${formatMoney(total)}`;
+        },
+      },
+    },
+  },
+  scales: {
+    x: { stacked: true, grid: { display: false } },
+    y: {
+      stacked: true,
+      ticks: { callback: (v) => formatCompactMoney(v) },
+      grid: { color: '#f1f5f9' },
+    },
+  },
+};
 
 export function DashboardPage() {
   const navigate = useNavigate();
@@ -74,7 +126,7 @@ export function DashboardPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [months, setMonths] = useState(12);
-  const [revenueMode, setRevenueMode] = useState('comparison'); // 'comparison' | 'source'
+  const [revenueMode, setRevenueMode] = useState('trend'); // 'trend' | 'source'
 
   const loadDashboard = useCallback(async () => {
     setLoading(true);
@@ -104,28 +156,88 @@ export function DashboardPage() {
   const expiringContracts = data?.expiring_contracts || [];
   const recentRequests = data?.recent_service_requests || [];
 
-  const revenueComparisonRows = useMemo(
-    () => buildRevenueComparisonBarRows(rev12m),
-    [rev12m]
+  const revenueTrendData = useMemo(() => buildRevenueTrendChartData(rev12m), [rev12m]);
+  const revenueSourceData = useMemo(() => buildRevenueBySourceChartData(revBySource), [revBySource]);
+  const agingChart = useMemo(() => buildReceivablesAgingChartData(agingInfo), [agingInfo]);
+  const occupancyTrend = useMemo(() => buildOccupancyTrendChartData(occ12m), [occ12m]);
+
+  const agingOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const amount = formatMoney(ctx.parsed.y);
+              const count = agingChart.counts[ctx.dataIndex] ?? 0;
+              return `${amount} (${count} khoản)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: {
+          ticks: { callback: (v) => formatCompactMoney(v) },
+          grid: { color: '#f1f5f9' },
+        },
+      },
+      onClick: (_evt, elements) => {
+        if (!elements.length) return;
+        const idx = elements[0].index;
+        const bKey = agingChart.bucketKeys[idx] ?? '';
+        if (bKey && DASHBOARD_AGING_BUCKET_KEYS.includes(bKey)) {
+          navigate(`/admin/payments?tab=aging&bucket=${bKey}`);
+        }
+      },
+      onHover: (_evt, elements, chart) => {
+        chart.canvas.style.cursor = elements.length ? 'pointer' : 'default';
+      },
+    }),
+    [agingChart, navigate]
   );
-  const revenueSourceRows = useMemo(
-    () => buildRevenueSourceBarRows(revBySource),
-    [revBySource]
-  );
-  const agingBarRows = useMemo(
-    () => buildReceivablesAgingBarRows(agingInfo),
-    [agingInfo]
-  );
-  const occupancyBarRows = useMemo(
-    () => buildOccupancyBarRows(occ12m),
-    [occ12m]
+
+  const occupancyOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            title: (items) => `Cuối kỳ ${items[0]?.label ?? ''}`,
+            label: (ctx) => {
+              const pt = occupancyTrend.metaPoints[ctx.dataIndex];
+              return `${ctx.parsed.y}% (${pt?.occupied ?? 0}/${pt?.exploitable ?? 0} căn đang khai thác)`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: {
+          min: 0,
+          max: 100,
+          ticks: { callback: (v) => `${v}%` },
+          grid: { color: '#f1f5f9' },
+        },
+      },
+      onClick: () => navigate('/admin/buildings'),
+      onHover: (_evt, elements, chart) => {
+        chart.canvas.style.cursor = elements.length ? 'pointer' : 'default';
+      },
+    }),
+    [occupancyTrend, navigate]
   );
 
   if (loading && !data) {
     return <PageSkeleton />;
   }
 
-  const showRevenueChart = hasRevenueChartData(rev12m, revBySource, revenueMode);
+  const showRevenueChart = hasRevenueChartData(rev12m, revBySource);
   const showAgingChart = hasAgingChartData(agingInfo);
   const showOccupancyChart = hasOccupancyChartData(kpis.total_apartments, occ12m);
 
@@ -328,34 +440,34 @@ export function DashboardPage() {
         </button>
       </div>
 
-      {/* Charts Row 1: (1) Biểu đồ cột Doanh thu & (2) Biểu đồ cột Công nợ theo nhóm tuổi nợ */}
+      {/* Charts Row 1: (1) Biểu đồ Doanh thu & (2) Biểu đồ Công nợ theo nhóm tuổi nợ */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <Card className="lg:col-span-7">
           <CardHeader
             title={`Biểu đồ doanh thu (${months} kỳ gần nhất)`}
             subtitle={
-              revenueMode === 'comparison'
-                ? 'Đối chiếu doanh thu hóa đơn phát hành (ISSUED) và tiền thực thu theo kỳ (PRD 15.1 & 15.3)'
+              revenueMode === 'trend'
+                ? 'Xu hướng doanh thu phát hành (ISSUED), tất toán & thực thu theo kỳ (PRD 15.1 & 15.3)'
                 : 'Cơ cấu doanh thu phát hành theo nguồn: Tiền thuê phòng, Điện, Nước, Dịch vụ & Khác (RP-01)'
             }
             action={
               <div className="flex flex-wrap items-center gap-2">
                 <div
                   role="group"
-                  aria-label="Chế độ xem biểu đồ cột doanh thu"
+                  aria-label="Chế độ xem biểu đồ doanh thu"
                   className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5"
                 >
                   <button
                     type="button"
-                    onClick={() => setRevenueMode('comparison')}
-                    aria-pressed={revenueMode === 'comparison'}
+                    onClick={() => setRevenueMode('trend')}
+                    aria-pressed={revenueMode === 'trend'}
                     className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                      revenueMode === 'comparison'
+                      revenueMode === 'trend'
                         ? 'bg-white text-primary-700 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    Phát hành vs Thực thu
+                    Xu hướng thu
                   </button>
                   <button
                     type="button"
@@ -385,7 +497,7 @@ export function DashboardPage() {
             <EmptyState
               icon={BarChart3}
               title="Chưa phát sinh doanh thu trong giai đoạn này"
-              description="Biểu đồ cột sẽ hiển thị ngay khi có hóa đơn phát hành hoặc giao dịch thanh toán được xác nhận."
+              description="Biểu đồ sẽ hiển thị ngay khi có hóa đơn phát hành hoặc giao dịch thanh toán được xác nhận."
               action={
                 <Button
                   variant="outline"
@@ -397,107 +509,17 @@ export function DashboardPage() {
               }
             />
           ) : (
-            <ChartContainer
-              id="dashboard-revenue"
-              config={
-                revenueMode === 'comparison'
-                  ? REVENUE_COMPARISON_CHART_CONFIG
-                  : REVENUE_SOURCE_CHART_CONFIG
-              }
-              className="h-72 w-full"
-            >
-              <BarChart
-                data={
-                  revenueMode === 'comparison'
-                    ? revenueComparisonRows
-                    : revenueSourceRows
-                }
-                accessibilityLayer
-                margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
-              >
-                <CartesianGrid vertical={false} stroke="#f1f5f9" />
-                <XAxis
-                  dataKey="period"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={8}
+            <div id="dashboard-revenue" className="h-72 px-2 pb-2">
+              {revenueMode === 'trend' ? (
+                <Line data={revenueTrendData} options={REVENUE_TREND_OPTIONS} />
+              ) : (
+                <Bar
+                  data={revenueSourceData}
+                  options={REVENUE_SOURCE_OPTIONS}
+                  onClick={() => navigate('/admin/invoices')}
                 />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  width={72}
-                  tickFormatter={(v) => formatCompactMoney(v)}
-                />
-                <ChartTooltip
-                  cursor={{ fill: 'rgba(241, 245, 249, 0.7)' }}
-                  content={(props) => (
-                    <ChartTooltipContent
-                      {...props}
-                      labelFormatter={(lbl) => `Kỳ hạch toán ${lbl}`}
-                      formatter={(val) => formatMoney(val)}
-                      footerFormatter={(items) => {
-                        const row = items?.[0]?.payload;
-                        if (!row) return null;
-                        if (revenueMode === 'comparison') {
-                          return `Tất toán hóa đơn: ${formatMoney(row.invoice_settled || 0)}`;
-                        }
-                        return `Tổng phát hành kỳ: ${formatMoney(row.total_billed || 0)}`;
-                      }}
-                    />
-                  )}
-                />
-                <ChartLegend
-                  verticalAlign="top"
-                  content={(props) => (
-                    <ChartLegendContent {...props} verticalAlign="top" />
-                  )}
-                />
-                {revenueMode === 'comparison' ? (
-                  <>
-                    <Bar
-                      dataKey="billed"
-                      fill="var(--color-billed)"
-                      radius={[5, 5, 0, 0]}
-                      maxBarSize={36}
-                      className="cursor-pointer"
-                      onClick={() => navigate('/admin/invoices')}
-                    />
-                    <Bar
-                      dataKey="collected"
-                      fill="var(--color-collected)"
-                      radius={[5, 5, 0, 0]}
-                      maxBarSize={36}
-                      className="cursor-pointer"
-                      onClick={() => navigate('/admin/payments')}
-                    />
-                  </>
-                ) : (
-                  REVENUE_SOURCE_KEYS.map((srcKey) => (
-                    <Bar
-                      key={srcKey}
-                      dataKey={srcKey}
-                      stackId="revenue_source"
-                      fill={`var(--color-${srcKey})`}
-                      maxBarSize={42}
-                      className="cursor-pointer"
-                      onClick={() => navigate('/admin/invoices')}
-                    >
-                      {revenueSourceRows.map((entry) => (
-                        <Cell
-                          key={`${srcKey}-${entry.period}`}
-                          fill={`var(--color-${srcKey})`}
-                          radius={
-                            getTopRevenueSourceKey(entry) === srcKey
-                              ? [5, 5, 0, 0]
-                              : [0, 0, 0, 0]
-                          }
-                        />
-                      ))}
-                    </Bar>
-                  ))
-                )}
-              </BarChart>
-            </ChartContainer>
+              )}
+            </div>
           )}
         </Card>
 
@@ -525,70 +547,14 @@ export function DashboardPage() {
               />
             </div>
           ) : (
-            <ChartContainer
-              id="dashboard-aging"
-              config={AGING_BUCKETS_CHART_CONFIG}
-              className="h-72 w-full"
-            >
-              <BarChart
-                data={agingBarRows}
-                accessibilityLayer
-                margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
-              >
-                <CartesianGrid vertical={false} stroke="#f1f5f9" />
-                <XAxis
-                  dataKey="label"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={8}
-                  interval={0}
-                  tick={{ fontSize: 11 }}
-                />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  width={72}
-                  tickFormatter={(v) => formatCompactMoney(v)}
-                />
-                <ChartTooltip
-                  cursor={{ fill: 'rgba(241, 245, 249, 0.7)' }}
-                  content={(props) => (
-                    <ChartTooltipContent
-                      {...props}
-                      formatter={(val, _name, _item, _idx, row) =>
-                        `${formatMoney(val)} (${row?.count || 0} khoản)`
-                      }
-                    />
-                  )}
-                />
-                <Bar
-                  dataKey="amount"
-                  name="Dư nợ chưa thu"
-                  radius={[6, 6, 0, 0]}
-                  maxBarSize={48}
-                  className="cursor-pointer"
-                  onClick={(barItem, idx) => {
-                    const bKey = resolveAgingBarBucketKey(
-                      barItem,
-                      idx,
-                      agingBarRows
-                    );
-                    if (bKey) {
-                      navigate(`/admin/payments?tab=aging&bucket=${bKey}`);
-                    }
-                  }}
-                >
-                  {agingBarRows.map((entry) => (
-                    <Cell key={entry.key} fill={entry.fill} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ChartContainer>
+            <div id="dashboard-aging" className="h-72 px-2 pb-2">
+              <Bar data={agingChart.chartData} options={agingOptions} />
+            </div>
           )}
         </Card>
       </div>
 
-      {/* Charts Row 2: (3) Biểu đồ cột Tỷ lệ lấp đầy theo kỳ (PRD 15.1 & 15.3) */}
+      {/* Charts Row 2: (3) Biểu đồ Đường Tỷ lệ lấp đầy theo kỳ (PRD 15.1 & 15.3) */}
       <Card>
         <CardHeader
           title={`Biểu đồ tỷ lệ lấp đầy (${months} kỳ gần nhất)`}
@@ -620,58 +586,9 @@ export function DashboardPage() {
             }
           />
         ) : (
-          <ChartContainer
-            id="dashboard-occupancy"
-            config={OCCUPANCY_BAR_CHART_CONFIG}
-            className="h-64 w-full"
-          >
-            <BarChart
-              data={occupancyBarRows}
-              accessibilityLayer
-              margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
-            >
-              <CartesianGrid vertical={false} stroke="#f1f5f9" />
-              <XAxis
-                dataKey="period"
-                tickLine={false}
-                axisLine={false}
-                tickMargin={8}
-              />
-              <YAxis
-                domain={[0, 100]}
-                tickLine={false}
-                axisLine={false}
-                width={46}
-                tickFormatter={(v) => `${v}%`}
-              />
-              <ChartTooltip
-                cursor={{ fill: 'rgba(241, 245, 249, 0.7)' }}
-                content={(props) => (
-                  <ChartTooltipContent
-                    {...props}
-                    labelFormatter={(lbl) => `Cuối kỳ ${lbl}`}
-                    formatter={(val, _name, _item, _idx, row) =>
-                      `${val}% (${row?.occupied || 0}/${row?.exploitable || 0} căn đang khai thác)`
-                    }
-                  />
-                )}
-              />
-              <ChartLegend
-                verticalAlign="top"
-                content={(props) => (
-                  <ChartLegendContent {...props} verticalAlign="top" />
-                )}
-              />
-              <Bar
-                dataKey="occupancy_rate"
-                fill="var(--color-occupancy_rate)"
-                radius={[6, 6, 0, 0]}
-                maxBarSize={44}
-                className="cursor-pointer"
-                onClick={() => navigate('/admin/buildings')}
-              />
-            </BarChart>
-          </ChartContainer>
+          <div id="dashboard-occupancy" className="h-64 px-2 pb-2">
+            <Line data={occupancyTrend.chartData} options={occupancyOptions} />
+          </div>
         )}
       </Card>
 

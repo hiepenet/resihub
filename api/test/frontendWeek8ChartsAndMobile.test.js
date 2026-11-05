@@ -47,13 +47,13 @@ test('Task 3 — chartHelpers: empty-state detectors handle all-zero vs positive
   assert.equal(hasOccupancyChartData(4, [{ period: '2026-10', exploitable: 4, occupancy_rate: 0 }]), true);
 });
 
-test('Task 3 — chartHelpers: PRD Recharts bar rows,ReportsPage building aging & Payments URL query builders', async () => {
+test('Task 3 — chartHelpers: PRD Chart.js builders, ReportsPage building aging & Payments URL query builders', async () => {
   const {
     DASHBOARD_AGING_BUCKET_KEYS,
-    buildRevenueComparisonBarRows,
-    buildRevenueSourceBarRows,
-    buildReceivablesAgingBarRows,
-    buildOccupancyBarRows,
+    buildRevenueTrendChartData,
+    buildRevenueBySourceChartData,
+    buildReceivablesAgingChartData,
+    buildOccupancyTrendChartData,
     buildReportsBuildingAgingChartData,
     resolvePaymentsUrlQuery,
   } = await import('../../frontend/src/utils/chartHelpers.js');
@@ -66,14 +66,17 @@ test('Task 3 — chartHelpers: PRD Recharts bar rows,ReportsPage building aging 
     'over_60',
   ]);
 
-  const comp = buildRevenueComparisonBarRows([
+  // Revenue trend: 3 datasets for Line chart
+  const trendData = buildRevenueTrendChartData([
     { period: '2026-10', billed: 10_000_000, invoice_settled: 8_000_000, collected: 7_500_000 },
   ]);
-  assert.equal(comp[0].period, '2026-10');
-  assert.equal(comp[0].billed, 10_000_000);
-  assert.equal(comp[0].collected, 7_500_000);
+  assert.deepEqual(trendData.labels, ['2026-10']);
+  assert.equal(trendData.datasets.length, 3);
+  assert.equal(trendData.datasets[0].data[0], 10_000_000);
+  assert.equal(trendData.datasets[2].data[0], 7_500_000);
 
-  const srcRows = buildRevenueSourceBarRows([
+  // Revenue by source: 5 stacked datasets
+  const sourceData = buildRevenueBySourceChartData([
     {
       period: '2026-10',
       rent: 6_000_000,
@@ -81,12 +84,13 @@ test('Task 3 — chartHelpers: PRD Recharts bar rows,ReportsPage building aging 
       water: 200_000,
       service: 400_000,
       other: 100_000,
-      total_billed: 7_500_000,
     },
   ]);
-  assert.equal(srcRows[0].total_billed, 7_500_000);
+  assert.equal(sourceData.datasets.length, 5);
+  assert.equal(sourceData.datasets[0].data[0], 6_000_000);
 
-  const aging = buildReceivablesAgingBarRows({
+  // Aging: 5 buckets with correct amounts and bucket keys
+  const { bucketKeys, counts, chartData: agingData } = buildReceivablesAgingChartData({
     total_debt: 15_000_000,
     overdue_debt: 14_000_000,
     buckets: [
@@ -97,23 +101,17 @@ test('Task 3 — chartHelpers: PRD Recharts bar rows,ReportsPage building aging 
       { key: 'over_60', label: '>60 ngày', amount: 5_000_000, count: 1 },
     ],
   });
-  assert.deepEqual(
-    aging.map((b) => b.key),
-    DASHBOARD_AGING_BUCKET_KEYS
-  );
-  assert.deepEqual(
-    aging.map((b) => b.amount),
-    [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]
-  );
+  assert.deepEqual(bucketKeys, DASHBOARD_AGING_BUCKET_KEYS);
+  assert.deepEqual(agingData.datasets[0].data, [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]);
+  assert.deepEqual(counts, [1, 2, 1, 3, 1]);
 
-  const occ = buildOccupancyBarRows([
+  // Occupancy: Line chart with rate clamped
+  const { metaPoints, chartData: occData } = buildOccupancyTrendChartData([
     { period: '2026-09', occupied: 3, exploitable: 4, occupancy_rate: 75 },
     { period: '2026-10', occupied: 2, exploitable: 4, occupancy_rate: 50 },
   ]);
-  assert.deepEqual(
-    occ.map((o) => o.occupancy_rate),
-    [75, 50]
-  );
+  assert.deepEqual(occData.datasets[0].data, [75, 50]);
+  assert.deepEqual(metaPoints, [{ occupied: 3, exploitable: 4 }, { occupied: 2, exploitable: 4 }]);
 
   const repAging = buildReportsBuildingAgingChartData([
     {
