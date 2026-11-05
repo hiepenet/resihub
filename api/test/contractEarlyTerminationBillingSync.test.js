@@ -693,14 +693,13 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
       [cBRes.rows[0].id]
     );
 
-    // 4b. Step 7: LATE_FEE append-only & waiver preservation across Day 8 -> Day 9
-    // Due 8 days ago (penalty 8 - 5 = 3 days -> 300,000)
+    // 4b. Step 7 & Step 5: Overdue invoice stays immutable (0 LATE_FEE lines on source), accrues in tracker, and carries to T+1 auto-billed invoice
     const invLateRes = await adminPool.query(
       `INSERT INTO invoice (
          org_id, building_id, apartment_id, contract_id, invoice_code, period, status,
          subtotal_amount, total_amount, paid_amount, due_date
        )
-       VALUES ($1, $2, $3, $4, $5, '2026-01', 'OVERDUE', 5100000, 5100000, 0, (CURRENT_DATE - INTERVAL '8 days')::date)
+       VALUES ($1, $2, $3, $4, $5, '2026-01', 'OVERDUE', 5000000, 5000000, 0, (CURRENT_DATE - INTERVAL '9 days')::date)
        RETURNING id`,
       [orgId, buildingId, cARes.rows[0].apartment_id, cARes.rows[0].id, `INV-LATE-${suffix}`]
     );
@@ -709,16 +708,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
 
     await adminPool.query(
       `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
-       VALUES ($1, 'RENT', 'Tiền thuê', 1, 'tháng', 5000000, 5000000, '{}'::jsonb),
-              ($1, 'LATE_FEE', 'Phạt chậm nộp ngày thứ 8', 3, 'ngày', 100000, 300000, '{}'::jsonb),
-              ($1, 'ADJUSTMENT', 'Miễn giảm phạt chậm (FR-064)', 1, 'lần', -200000, -200000,
-               jsonb_build_object('adjusts_item_type', 'LATE_FEE'))`,
-      [lateInvId]
-    );
-
-    // Now advance due_date to 9 days ago (Day 9 -> expected fee = 4 days = 400,000, delta = 100,000)
-    await adminPool.query(
-      `UPDATE invoice SET due_date = (CURRENT_DATE - INTERVAL '9 days')::date WHERE id = $1`,
+       VALUES ($1, 'RENT', 'Tiền thuê', 1, 'tháng', 5000000, 5000000, '{}'::jsonb)`,
       [lateInvId]
     );
 
@@ -761,18 +751,33 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     );
     assert.equal(autoInvsB.rows.length, 0, 'Contract B (REFUNDED deposit) must be skipped by excludeSettledDeposits');
 
-    // Verification 4b (Step 7):
-    // Preserves -200,000 waiver across Day 8 -> Day 9: deltaFee = 100,000 appended
-    const lateLines = await adminPool.query(
-      `SELECT item_type, amount FROM invoice_line WHERE invoice_id = $1 ORDER BY id ASC`,
+    // Verification 4b (Step 7 + Carry-forward):
+    // LATE_FEE lines appear on the NEXT invoice (autoInvsA), NOT on the original OVERDUE invoice (lateInvId)
+    const lateInvAfter = await adminPool.query(`SELECT total_amount, subtotal_amount FROM invoice WHERE id = $1`, [lateInvId]);
+    assert.equal(Number(lateInvAfter.rows[0].total_amount), 5000000, '4b: original OVERDUE invoice total_amount remains immutable');
+    const overdueLines = await adminPool.query(
+      `SELECT item_type FROM invoice_line WHERE invoice_id = $1 AND item_type = 'LATE_FEE'`,
       [lateInvId]
     );
-    const waiverLine = lateLines.rows.find((l) => l.item_type === 'ADJUSTMENT' && Number(l.amount) === -200000);
-    assert.ok(waiverLine, 'Waiver adjustment line of -200,000 must be preserved');
-    const lateFeeLines = lateLines.rows.filter((l) => l.item_type === 'LATE_FEE');
-    assert.equal(lateFeeLines.length, 2, 'Must have original 300,000 + appended 100,000 late fee line');
-    const totalLateFee = lateFeeLines.reduce((s, l) => s + Number(l.amount), 0);
-    assert.equal(totalLateFee, 400000, 'Total gross late fee = 400,000');
+    assert.equal(overdueLines.rowCount, 0, '4b: no LATE_FEE lines on original OVERDUE invoice');
+
+    const tracker = await adminPool.query(
+      `SELECT accrued_total, carried_to_invoice_id FROM late_fee_accrual_tracker WHERE invoice_id = $1`,
+      [lateInvId]
+    );
+    assert.ok(tracker.rowCount > 0, '4b: tracker row exists for OVERDUE invoice');
+    assert.equal(Number(tracker.rows[0].accrued_total), 400000, '4b: Day 9 (4 chargeable days) accrued 400,000 in tracker');
+    assert.equal(tracker.rows[0].carried_to_invoice_id, autoInvsA.rows[0].id, '4b: tracker carried to auto-generated T+1 invoice');
+
+    const nextLines = await adminPool.query(
+      `SELECT il.amount
+       FROM invoice_line il
+       JOIN invoice i ON i.id = il.invoice_id
+       WHERE i.contract_id = $1 AND il.item_type = 'LATE_FEE' AND i.invoice_type = 'REGULAR'`,
+      [cARes.rows[0].id]
+    );
+    assert.ok(nextLines.rowCount >= 1, '4b: LATE_FEE carry-forward line on T+1 invoice');
+    assert.ok(Number(nextLines.rows[0].amount) >= 400000, '4b: T+1 carry-forward includes 400,000 from lateInvId');
 
     // Verification 4c (Step 8):
     // First run emitted exact 1 PAYMENT_REMINDER notification + 1 SEND_DEBT_REMINDER audit_log per stage
@@ -1025,4 +1030,175 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
       assert.equal(Number(lines.rows[0].total_amount), 7200000, '5c: T+2 total = 7,000,000 rent + 200,000 T+1 late fee');
     });
   }
+
+  // =========================================================================
+  // Tests 6b & 6c: 4-eyes LATE_FEE waiver on T+1 (with credit_offset Bug#2) & LATE_FEE_SETTLEMENT
+  // =========================================================================
+  await t.test('6b: 4-eyes LATE_FEE waiver approved on T+1 invoice correctly adjusts total (Bug#2 fix)', async () => {
+    const res6b = await createResident('T6B');
+    const apt6b = await createApartment('A6B');
+    const cRes = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status
+       )
+       VALUES ($1, $2, $3, '2028-01-01', '2028-12-31', 10000000, 10000000, 'monthly', 1, 5, 'ACTIVE')
+       RETURNING id`,
+      [apt6b.id, buildingId, res6b.tenantId]
+    );
+    const c6bId = cRes.rows[0].id;
+    cleanup.contractIds.push(c6bId);
+
+    const cbRes = await adminPool.query(
+      `INSERT INTO credit_balance (org_id, building_id, contract_id, tenant_id, amount, applied_amount, status, reason_type, description)
+       VALUES ($1, $2, $3, $4, 200000, 200000, 'APPLIED', 'OVERPAYMENT', 'Credit 200k for 6b')
+       RETURNING id`,
+      [orgId, buildingId, c6bId, res6b.tenantId]
+    );
+    const cb6bId = cbRes.rows[0].id;
+
+    // T+1 invoice: subtotal = 10,300,000 (10,000,000 RENT + 300,000 carry LATE_FEE), credit_offset_amount = 200,000 -> total = 10,100,000
+    const invRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, credit_offset_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-07', '2028-07-01', '2028-07-06', 10300000, 0, 200000, 10100000, 0, 'ISSUED')
+       RETURNING id`,
+      [orgId, buildingId, apt6b.id, c6bId, res6b.tenantId, `INV-6B-${suffix}`]
+    );
+    const t1InvoiceId = invRes.rows[0].id;
+    cleanup.invoiceIds.push(t1InvoiceId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, credit_id, formula_meta)
+       VALUES ($1, 'RENT', 'Tiền thuê 2028-07', 1, 'tháng', 10000000, 10000000, NULL, '{}'::jsonb),
+              ($1, 'LATE_FEE', 'Phí phạt kỳ trước dồn sang', 1, 'kỳ', 300000, 300000, NULL, '{"carry_forward": true}'::jsonb),
+              ($1, 'ADJUSTMENT', 'Bù trừ tín dụng 200k', 1, 'lần', -200000, -200000, $2, '{}'::jsonb)`,
+      [t1InvoiceId, cb6bId]
+    );
+    await adminPool.query(
+      `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
+       VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', 10100000, 0, '2028-07-06', 'OPEN', 'Công nợ 6b')`,
+      [orgId, buildingId, c6bId, res6b.tenantId, t1InvoiceId]
+    );
+
+    const createAdj = await apiFetch(`/api/v1/invoices/${t1InvoiceId}/adjust`, mgr.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        adjustment_target: 'LATE_FEE',
+        action_type: 'WAIVE',
+        delta_amount: -300000,
+        reason: 'Miễn giảm toàn bộ 300k phí phạt dồn kỳ cho cư dân',
+      }),
+    });
+    assert.equal(createAdj.status, 201, `6b create adjustment failed: ${JSON.stringify(createAdj.body)}`);
+    const adjId = createAdj.body.data.id;
+
+    const approveAdj = await apiFetch(`/api/v1/invoices/${t1InvoiceId}/adjustments/${adjId}/approve`, owner.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(approveAdj.status, 200, `6b approve adjustment failed: ${JSON.stringify(approveAdj.body)}`);
+
+    const after = await adminPool.query(`SELECT total_amount, credit_offset_amount FROM invoice WHERE id = $1`, [t1InvoiceId]);
+    assert.equal(Number(after.rows[0].total_amount), 9800000, '6b: Bug#2 fix — credit_offset deducted from new total (9,800,000)');
+    assert.equal(Number(after.rows[0].credit_offset_amount), 200000, '6b: credit_offset_amount preserved');
+
+    const afterRec = await adminPool.query(`SELECT amount FROM receivable WHERE invoice_id = $1`, [t1InvoiceId]);
+    assert.equal(Number(afterRec.rows[0].amount), 9800000, '6b: receivable updated to 9,800,000');
+  });
+
+  await t.test('6c: 4-eyes LATE_FEE waiver on LATE_FEE_SETTLEMENT invoice reduces receivable', async () => {
+    const res6c = await createResident('T6C');
+    const apt6c = await createApartment('A6C');
+    const cRes = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status
+       )
+       VALUES ($1, $2, $3, '2028-01-01', '2028-06-30', 8000000, 8000000, 'monthly', 1, 5, 'EXPIRED')
+       RETURNING id`,
+      [apt6c.id, buildingId, res6c.tenantId]
+    );
+    const c6cId = cRes.rows[0].id;
+    cleanup.contractIds.push(c6cId);
+
+    const srcInvRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-06', '2028-06-01', '2028-06-06', 8000000, 0, 8000000, 0, 'OVERDUE')
+       RETURNING id`,
+      [orgId, buildingId, apt6c.id, c6cId, res6c.tenantId, `INV-6CSRC-${suffix}`]
+    );
+    const srcInvId = srcInvRes.rows[0].id;
+    cleanup.invoiceIds.push(srcInvId);
+
+    const trRes = await adminPool.query(
+      `INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+       VALUES ($1, $2, $3, 300000, 3, '2028-06-14')
+       RETURNING id`,
+      [orgId, c6cId, srcInvId]
+    );
+    const trId = trRes.rows[0].id;
+
+    let settlementInvId;
+    const txClient = await adminPool.connect();
+    try {
+      await txClient.query('BEGIN');
+      const sInv = await createLateFeeSettlementInvoiceInTx(txClient, {
+        contractId: c6cId,
+        orgId,
+        buildingId,
+        apartmentId: apt6c.id,
+        tenantId: res6c.tenantId,
+        totalAccrual: 300000,
+        sourceTrackerIds: [trId],
+        effectiveDateYmd: '2028-07-02',
+      });
+      settlementInvId = sInv.id;
+      await txClient.query(
+        `UPDATE late_fee_accrual_tracker SET carried_to_invoice_id = $1, carried_at = NOW() WHERE id = $2`,
+        [settlementInvId, trId]
+      );
+      await txClient.query('COMMIT');
+    } catch (e) {
+      await txClient.query('ROLLBACK');
+      throw e;
+    } finally {
+      txClient.release();
+    }
+    cleanup.invoiceIds.push(settlementInvId);
+
+    const createAdj = await apiFetch(`/api/v1/invoices/${settlementInvId}/adjust`, mgr.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        adjustment_target: 'LATE_FEE',
+        action_type: 'WAIVE',
+        delta_amount: -100000,
+        reason: 'Giảm 100k phí phạt tất toán kỳ cuối',
+      }),
+    });
+    assert.equal(createAdj.status, 201, `6c create adjustment failed: ${JSON.stringify(createAdj.body)}`);
+    const adjId = createAdj.body.data.id;
+
+    const approveAdj = await apiFetch(`/api/v1/invoices/${settlementInvId}/adjustments/${adjId}/approve`, owner.token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(approveAdj.status, 200, `6c approve adjustment failed: ${JSON.stringify(approveAdj.body)}`);
+
+    const afterInv = await adminPool.query(`SELECT total_amount FROM invoice WHERE id = $1`, [settlementInvId]);
+    assert.equal(Number(afterInv.rows[0].total_amount), 200000, '6c: settlement invoice total reduced to 200,000');
+    const afterRec = await adminPool.query(`SELECT amount FROM receivable WHERE invoice_id = $1`, [settlementInvId]);
+    assert.equal(Number(afterRec.rows[0].amount), 200000, '6c: receivable reduced to 200,000');
+    const afterTr = await adminPool.query(`SELECT carried_to_invoice_id FROM late_fee_accrual_tracker WHERE id = $1`, [trId]);
+    assert.equal(afterTr.rows[0].carried_to_invoice_id, settlementInvId, '6c: tracker.carried_to_invoice_id unchanged');
+  });
 });
