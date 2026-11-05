@@ -1217,4 +1217,107 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
     // Clean up contracts created
     await adminPool.query('DELETE FROM contract WHERE id IN ($1, $2, $3)', [ctr4Id, ctr5Id, ctr6Id]);
   });
+
+  await t.test('5. Migration 055: fn_resolve_invoice_adjustment LATE_FEE waiver with credit_offset_amount (Bug #2), fn_apply_deposit_settlement_accounting LATE_FEE (Bug #1), and tracker DDL', async () => {
+    // 5a. Bug #2: invoice subtotal=1,000,000 (700k RENT + 300k LATE_FEE), credit_offset_amount=200,000, total_amount=800,000
+    // Apply LATE_FEE waiver of -300,000 -> expected total = GREATEST(0, 1,000,000 - 300,000 - 200,000) = 500,000
+    const cbBug2 = await adminPool.query(`
+      INSERT INTO credit_balance (
+        org_id, building_id, contract_id, tenant_id, reason_type, amount, applied_amount, status, description
+      )
+      VALUES ($1, $2, $3, $4, 'OVERPAYMENT', 200000, 200000, 'APPLIED', 'Bug2 test credit 200k')
+      RETURNING id
+    `, [orgId, buildingId, contractId, tenantId]);
+    cleanups.credits.push(cbBug2.rows[0].id);
+
+    const invBug2 = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, credit_offset_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2030-01', CURRENT_DATE, CURRENT_DATE + 5, 1000000, 800000, 0, 200000, 'ISSUED')
+      RETURNING id
+    `, [orgId, buildingId, apartmentId, contractId, tenantId, `INV_BUG2_${Date.now()}`]);
+    const testInvoiceId = invBug2.rows[0].id;
+    cleanups.invoices.push(testInvoiceId);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+      VALUES
+        ($1, 'RENT', 'Tiền thuê 700k', 1, 'tháng', 700000, 700000),
+        ($1, 'LATE_FEE', 'Phí phạt chậm kỳ trước dồn sang', 1, 'kỳ', 300000, 300000)
+    `, [testInvoiceId]);
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, credit_id)
+      VALUES ($1, 'ADJUSTMENT', 'Bù trừ số dư tín dụng 200k', 1, 'lần', -200000, -200000, $2)
+    `, [testInvoiceId, cbBug2.rows[0].id]);
+
+    const adjBug2 = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'LATE_FEE', 'ADJUST', -300000, 'Test Bug2 LATE_FEE waiver 300k', $4)
+      RETURNING id
+    `, [orgId, buildingId, testInvoiceId, mgrId]);
+    const testAdjId = adjBug2.rows[0].id;
+    cleanups.adjustments.push(testAdjId);
+
+    await asUserTx(ownerId, async (client) => {
+      await client.query('SELECT fn_resolve_invoice_adjustment($1, \'APPROVE\', NULL) AS result', [testAdjId]);
+    });
+
+    const afterBug2 = await adminPool.query(
+      'SELECT subtotal_amount, adjustment_amount, credit_offset_amount, total_amount FROM invoice WHERE id = $1',
+      [testInvoiceId]
+    );
+    assert.equal(Number(afterBug2.rows[0].credit_offset_amount), 200000, 'credit_offset_amount stays 200,000');
+    assert.equal(Number(afterBug2.rows[0].total_amount), 500000, 'Bug #2: total must deduct credit_offset_amount (500,000 not 700,000)');
+
+    // 5b. Bug #1 SQL: fn_apply_deposit_settlement_accounting counts LATE_FEE line in v_raw_service
+    const availAptBug1 = await adminPool.query(`
+      SELECT id FROM apartment
+      WHERE building_id = $1
+        AND id NOT IN (SELECT apartment_id FROM contract WHERE status IN ('ACTIVE', 'PENDING_APPROVAL', 'RENEWAL_PENDING'))
+      LIMIT 1
+    `, [buildingId]);
+    const aptBug1Id = availAptBug1.rows[0].id;
+    const ctrBug1 = await adminPool.query(`
+      INSERT INTO contract (apartment_id, building_id, primary_tenant_id, start_date, end_date, rent_amount, billing_day, status)
+      VALUES ($1, $2, $3, '2026-01-01', '2026-06-30', 1000000, 1, 'TERMINATED')
+      RETURNING id
+    `, [aptBug1Id, buildingId, tenantId]);
+    const ctrBug1Id = ctrBug1.rows[0].id;
+
+    const depBug1 = await adminPool.query(`
+      INSERT INTO deposit (contract_id, amount_held, status, settlement)
+      VALUES ($1, 1000000, 'APPROVED_PENDING_PAYOUT', '{"refund_amount": 700000}'::jsonb)
+      RETURNING id
+    `, [ctrBug1Id]);
+    cleanups.deposits.push(depBug1.rows[0].id);
+
+    const invBug1 = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, invoice_type, issue_date, due_date, subtotal_amount, total_amount, paid_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, NULL, 'LATE_FEE_SETTLEMENT', CURRENT_DATE, CURRENT_DATE + 7, 300000, 300000, 0, 'ISSUED')
+      RETURNING id
+    `, [orgId, buildingId, aptBug1Id, ctrBug1Id, tenantId, `INV_LF_SET_${Date.now()}`]);
+    cleanups.invoices.push(invBug1.rows[0].id);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+      VALUES ($1, 'LATE_FEE', 'Phí phạt chậm kỳ cuối', 1, 'kỳ', 300000, 300000)
+    `, [invBug1.rows[0].id]);
+
+    await asUserTx(ownerId, async (client) => {
+      await client.query('SELECT fn_apply_deposit_settlement_accounting($1, 300000, 0)', [depBug1.rows[0].id]);
+    });
+
+    const invBug1After = await adminPool.query('SELECT paid_amount, status FROM invoice WHERE id = $1', [invBug1.rows[0].id]);
+    assert.equal(Number(invBug1After.rows[0].paid_amount), 300000, 'Bug #1 SQL: deposit must cover 300,000 LATE_FEE debt');
+    assert.equal(invBug1After.rows[0].status, 'PAID', 'LATE_FEE_SETTLEMENT invoice must become PAID');
+
+    await adminPool.query('DELETE FROM contract WHERE id = $1', [ctrBug1Id]);
+  });
 });
