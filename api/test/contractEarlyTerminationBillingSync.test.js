@@ -28,7 +28,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
   const { default: apartmentsRoute } = await import('../src/routes/apartments.js');
   const { default: contractsRoute } = await import('../src/routes/contracts.js');
   const { default: invoicesRoute } = await import('../src/routes/invoices.js');
-  const { default: depositsRoute } = await import('../src/routes/deposits.js');
+  const { default: depositsRoute, calculateContractOpenDebts } = await import('../src/routes/deposits.js');
   const { default: attachmentsRoute } = await import('../src/routes/attachments.js');
   const { runDailyJobs } = await import('../src/jobs/daily.js');
   const { todayVietnamYmd, currentVietnamPeriod } = await import('../src/services/serviceBilling.js');
@@ -795,5 +795,50 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
 
     assert.equal(notifsAfter.rows[0].cnt, notifsBefore.rows[0].cnt, 'Second run of daily jobs must emit 0 duplicate notifications');
     assert.equal(auditAfter.rows[0].cnt, auditBefore.rows[0].cnt, 'Second run of daily jobs must emit 0 duplicate audit logs');
+  });
+
+  // =========================================================================
+  // Test 5: Bug #1 — calculateContractOpenDebts counts LATE_FEE in serviceDebt
+  // =========================================================================
+  await t.test('5. calculateContractOpenDebts: LATE_FEE lines counted in serviceDebt not rentDebt', async () => {
+    const resident = await createResident('T5LF');
+    const apt5 = await createApartment('A5LF');
+
+    const cRes = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status, created_by
+       )
+       VALUES ($1, $2, $3, '2026-08-01', '2026-10-31', 5000000, 10000000, 'monthly', 1, 5, 'TERMINATED', $4)
+       RETURNING id`,
+      [apt5.id, buildingId, resident.tenantId, mgr.user.sub]
+    );
+    const testContractId = cRes.rows[0].id;
+    cleanup.contractIds.push(testContractId);
+
+    const invRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, status, subtotal_amount, total_amount, paid_amount, due_date
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2026-10', 'OVERDUE', 5300000, 5300000, 0, '2026-10-05')
+       RETURNING id`,
+      [orgId, buildingId, apt5.id, testContractId, resident.tenantId, `INV-LF-BUG1-${suffix}`]
+    );
+    const invId = invRes.rows[0].id;
+    cleanup.invoiceIds.push(invId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê tháng 10', 1, 'tháng', 5000000, 5000000),
+              ($1, 'LATE_FEE', 'Phí phạt chậm thanh toán kỳ trước (dồn sang kỳ này)', 1, 'kỳ', 300000, 300000)`,
+      [invId]
+    );
+
+    const result = await calculateContractOpenDebts(adminPool, testContractId);
+    assert.ok(result.serviceDebt >= 300000, 'LATE_FEE must be counted in serviceDebt');
+    assert.equal(result.serviceDebt, 300000, 'serviceDebt must equal 300,000 LATE_FEE');
+    assert.equal(result.rentDebt, 5000000, 'rentDebt must only count RENT lines');
   });
 });

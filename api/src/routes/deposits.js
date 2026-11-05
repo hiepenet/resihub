@@ -115,7 +115,7 @@ async function canActAsDepositApprover(req, meta, depositId, actionLabel) {
  * - serviceDebt: công nợ dịch vụ / điện / nước / phạt chậm (KHÔNG gồm RENT) -> được đối trừ tự động vào tiền cọc.
  * - rentDebt: công nợ tiền thuê phòng (RENT) -> TUYỆT ĐỐI KHÔNG đối trừ vào tiền cọc.
  */
-async function calculateContractOpenDebts(client, contractId) {
+export async function calculateContractOpenDebts(client, contractId) {
   const invRes = await client.query(
     `SELECT i.id,
             i.invoice_code,
@@ -129,7 +129,7 @@ async function calculateContractOpenDebts(client, contractId) {
                 AND il.credit_id IS NULL
             ), 0)::bigint AS rent_gross,
             COALESCE(SUM(il.amount) FILTER (
-              WHERE (il.item_type IN ('SERVICE', 'ELECTRICITY', 'WATER', 'OTHER')
+              WHERE (il.item_type IN ('SERVICE', 'ELECTRICITY', 'WATER', 'OTHER', 'LATE_FEE')
                  OR (il.item_type = 'ADJUSTMENT' AND (ia.adjustment_target IN ('SERVICE', 'LATE_FEE', 'MANUAL') OR il.formula_meta->>'adjusts_item_type' IN ('SERVICE', 'LATE_FEE') OR (ia.adjustment_target IS NULL AND il.formula_meta->>'adjusts_item_type' IS NULL))))
                 AND il.credit_id IS NULL
             ), 0)::bigint AS non_rent_gross
