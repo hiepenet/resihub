@@ -949,7 +949,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
   let activeContractId = null;
 
   await t.test('2.4 [M05 & M06] Contract Draft -> Scan -> Discounted Four-Eyes Approval -> Amendment -> Overlap Guard', async () => {
-    const startStr = addDaysStr(-10);
+    const startStr = '2026-10-01';
     const endStr = addDaysStr(355);
 
     // Tạo hợp đồng giảm giá > 10% (base_rent = 12.000.000, rent_amount = 10.000.000 < 10.800.000)
