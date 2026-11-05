@@ -7,71 +7,65 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_SRC = path.resolve(__dirname, '../../frontend/src');
 
-test('Task 1 — Shadcn CSS variable generator handles numeric keys (0_15) and rejects unsafe CSS injection', async () => {
+test('Task 1 — Chart.js chartHelpers exports buildRevenueTrendChartData, buildReceivablesAgingChartData, buildOccupancyTrendChartData', async () => {
   const {
-    sanitizeChartKey,
-    buildChartCssVariables,
-    AGING_BUCKETS_CHART_CONFIG,
+    DASHBOARD_AGING_BUCKET_KEYS,
+    DASHBOARD_AGING_BUCKET_META,
+    buildRevenueTrendChartData,
+    buildRevenueBySourceChartData,
+    buildReceivablesAgingChartData,
+    buildOccupancyTrendChartData,
   } = await import('../../frontend/src/utils/chartHelpers.js');
 
-  assert.equal(sanitizeChartKey('0_15'), '0_15');
-  assert.equal(sanitizeChartKey('current_not_due'), 'current_not_due');
-  assert.equal(sanitizeChartKey('bad;key{}<>'), 'badkey');
+  assert.equal(typeof buildRevenueTrendChartData, 'function');
+  assert.equal(typeof buildRevenueBySourceChartData, 'function');
+  assert.equal(typeof buildReceivablesAgingChartData, 'function');
+  assert.equal(typeof buildOccupancyTrendChartData, 'function');
 
-  const css = buildChartCssVariables('chart-aging', AGING_BUCKETS_CHART_CONFIG);
-  assert.ok(css.includes('[data-chart="chart-aging"]'));
-  assert.ok(css.includes('--color-current_not_due: #94a3b8;'));
-  assert.ok(css.includes('--color-0_15: #38bdf8;'));
-  assert.ok(css.includes('--color-over_60: #e11d48;'));
+  // Revenue trend: 3 datasets for Line chart
+  const trendResult = buildRevenueTrendChartData([
+    { period: '2026-10', billed: 1000, collected: 900, invoice_settled: 800 },
+  ]);
+  assert.deepEqual(trendResult.labels, ['2026-10']);
+  assert.equal(trendResult.datasets.length, 3);
+  assert.equal(trendResult.datasets[0].label, 'Phát hành');
+  assert.equal(trendResult.datasets[2].label, 'Thực thu');
+  assert.equal(trendResult.datasets[0].data[0], 1000);
+  assert.equal(trendResult.datasets[2].data[0], 900);
 
-  // Malicious color payload must be stripped/ignored so <style> cannot break out
-  const unsafeCss = buildChartCssVariables('chart-evil"><script>', {
-    hacked: { label: 'Evil', color: 'red; } body { display: none } /*' },
-    valid: { label: 'Safe', color: '#10b981' },
+  // Aging: bucketKeys matches DASHBOARD_AGING_BUCKET_KEYS
+  const agingResult = buildReceivablesAgingChartData({
+    buckets: [{ key: '0_15', amount: 500, count: 1 }],
   });
-  assert.equal(unsafeCss.includes('<script>'), false);
-  assert.equal(unsafeCss.includes('display: none'), false);
-  assert.ok(unsafeCss.includes('--color-valid: #10b981;'));
+  assert.deepEqual(agingResult.bucketKeys, DASHBOARD_AGING_BUCKET_KEYS);
+
+  // Occupancy: metaPoints match per row
+  const occResult = buildOccupancyTrendChartData([
+    { period: '2026-10', occupied: 3, exploitable: 4, occupancy_rate: 75 },
+  ]);
+  assert.deepEqual(occResult.metaPoints[0], { occupied: 3, exploitable: 4 });
+  assert.equal(occResult.chartData.datasets[0].data[0], 75);
+
+  // Unused Recharts exports must NOT exist
+  const mod = await import('../../frontend/src/utils/chartHelpers.js');
+  assert.equal(mod.sanitizeChartKey, undefined, 'sanitizeChartKey must not be exported');
+  assert.equal(mod.buildChartCssVariables, undefined, 'buildChartCssVariables must not be exported');
+  assert.equal(mod.REVENUE_COMPARISON_CHART_CONFIG, undefined, 'REVENUE_COMPARISON_CHART_CONFIG must not be exported');
+  assert.equal(mod.OCCUPANCY_BAR_CHART_CONFIG, undefined, 'OCCUPANCY_BAR_CHART_CONFIG must not be exported');
+  assert.equal(mod.resolveAgingBarBucketKey, undefined, 'resolveAgingBarBucketKey must not be exported');
+  assert.equal(mod.buildReceivablesAgingBarRows, undefined, 'buildReceivablesAgingBarRows must not be exported');
+  assert.equal(mod.buildOccupancyBarRows, undefined, 'buildOccupancyBarRows must not be exported');
+
+  // DASHBOARD_AGING_BUCKET_META still present
+  assert.equal(DASHBOARD_AGING_BUCKET_META.length, 5);
 });
 
-test('Task 1 — Recharts revenue bar builders map PRD 15.3 billed/collected and 5 RP-01 sources safely', async () => {
+test('Task 1 — buildRevenueBySourceChartData maps 5 RP-01 source datasets with stack id', async () => {
   const {
-    REVENUE_COMPARISON_CHART_CONFIG,
-    REVENUE_SOURCE_CHART_CONFIG,
-    buildRevenueComparisonBarRows,
-    buildRevenueSourceBarRows,
+    buildRevenueBySourceChartData,
   } = await import('../../frontend/src/utils/chartHelpers.js');
 
-  assert.ok(REVENUE_COMPARISON_CHART_CONFIG.billed?.color);
-  assert.ok(REVENUE_COMPARISON_CHART_CONFIG.collected?.color);
-  assert.deepEqual(Object.keys(REVENUE_SOURCE_CHART_CONFIG), [
-    'rent',
-    'electricity',
-    'water',
-    'service',
-    'other',
-  ]);
-
-  const compRows = buildRevenueComparisonBarRows([
-    { period: '2026-09', billed: 12_000_000, collected: 10_500_000, invoice_settled: 10_000_000 },
-    { period: '2026-10', billed: NaN, collected: -500, invoice_settled: null },
-  ]);
-  assert.deepEqual(compRows, [
-    {
-      period: '2026-09',
-      billed: 12_000_000,
-      collected: 10_500_000,
-      invoice_settled: 10_000_000,
-    },
-    {
-      period: '2026-10',
-      billed: 0,
-      collected: 0,
-      invoice_settled: 0,
-    },
-  ]);
-
-  const srcRows = buildRevenueSourceBarRows([
+  const result = buildRevenueBySourceChartData([
     {
       period: '2026-10',
       rent: 6_000_000,
@@ -79,45 +73,35 @@ test('Task 1 — Recharts revenue bar builders map PRD 15.3 billed/collected and
       water: 200_000,
       service: 400_000,
       other: 100_000,
-      total_billed: 7_500_000,
-    },
-    {
-      period: '2026-11',
-      rent: -100,
-      electricity: undefined,
-      water: NaN,
-      service: 0,
-      other: 50_000,
     },
   ]);
-  assert.equal(srcRows[0].total_billed, 7_500_000);
-  assert.equal(
-    srcRows[0].rent +
-      srcRows[0].electricity +
-      srcRows[0].water +
-      srcRows[0].service +
-      srcRows[0].other,
-    7_500_000
+  assert.deepEqual(result.labels, ['2026-10']);
+  assert.equal(result.datasets.length, 5);
+  assert.deepEqual(
+    result.datasets.map((d) => d.label),
+    ['Tiền thuê phòng', 'Tiền điện', 'Tiền nước', 'Phí dịch vụ', 'Phí trễ hạn & Khác']
   );
-  assert.deepEqual(srcRows[1], {
-    period: '2026-11',
-    rent: 0,
-    electricity: 0,
-    water: 0,
-    service: 0,
-    other: 50_000,
-    total_billed: 50_000,
+  result.datasets.forEach((ds) => {
+    assert.equal(ds.stack, 'revenue_source', `Dataset "${ds.label}" must have stack: 'revenue_source'`);
   });
+
+  // Negative/NaN clamped to 0
+  const badResult = buildRevenueBySourceChartData([
+    { period: '2026-11', rent: -100, electricity: undefined, water: NaN, service: 0, other: 50_000 },
+  ]);
+  assert.equal(badResult.datasets[0].data[0], 0, 'rent -100 must clamp to 0');
+  assert.equal(badResult.datasets[1].data[0], 0, 'undefined electricity must clamp to 0');
+  assert.equal(badResult.datasets[2].data[0], 0, 'NaN water must clamp to 0');
+  assert.equal(badResult.datasets[4].data[0], 50_000, 'other 50000 must pass through');
 });
 
-test('Task 1 — Recharts aging bar builder maps 5 PRD buckets and resolves Recharts v3 click payloads', async () => {
+test('Task 1 — buildReceivablesAgingChartData maps 5 PRD buckets, colors and counts', async () => {
   const {
     DASHBOARD_AGING_BUCKET_KEYS,
-    buildReceivablesAgingBarRows,
-    resolveAgingBarBucketKey,
+    buildReceivablesAgingChartData,
   } = await import('../../frontend/src/utils/chartHelpers.js');
 
-  const rows = buildReceivablesAgingBarRows({
+  const { bucketKeys, counts, chartData } = buildReceivablesAgingChartData({
     total_debt: 15_000_000,
     overdue_debt: 14_000_000,
     buckets: [
@@ -129,150 +113,94 @@ test('Task 1 — Recharts aging bar builder maps 5 PRD buckets and resolves Rech
     ],
   });
 
-  assert.deepEqual(
-    rows.map((r) => r.key),
-    DASHBOARD_AGING_BUCKET_KEYS
-  );
-  assert.deepEqual(
-    rows.map((r) => r.amount),
-    [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]
-  );
-  assert.deepEqual(
-    rows.map((r) => r.count),
-    [1, 2, 1, 3, 1]
-  );
-  assert.equal(rows[1].fill, 'var(--color-0_15)');
+  assert.deepEqual(bucketKeys, DASHBOARD_AGING_BUCKET_KEYS);
+  assert.deepEqual(chartData.datasets[0].data, [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]);
+  assert.deepEqual(counts, [1, 2, 1, 3, 1]);
+  // Color for index 1 (0_15) must be #38bdf8
+  assert.equal(chartData.datasets[0].backgroundColor[1], '#38bdf8');
 
-  // Recharts v3 BarRectangleItem shape: { payload: row }
-  assert.equal(resolveAgingBarBucketKey({ payload: { key: '16_30' } }, 2, rows), '16_30');
-  // Direct datum shape: { key: 'over_60' }
-  assert.equal(resolveAgingBarBucketKey({ key: 'over_60' }, 4, rows), 'over_60');
-  // Index fallback
-  assert.equal(resolveAgingBarBucketKey(null, 1, rows), '0_15');
-  // Unknown bucket key rejected
-  assert.equal(resolveAgingBarBucketKey({ payload: { key: '999_days' } }, 99, rows), '');
+  // Null/undefined elements inside buckets must not throw TypeError
+  const safeResult = buildReceivablesAgingChartData({
+    total_debt: 2_000_000,
+    buckets: [null, undefined, { key: '0_15', amount: 2_000_000, count: 1 }],
+  });
+  assert.equal(safeResult.chartData.datasets[0].data[1], 2_000_000);
 });
 
-test('Task 1 — Recharts occupancy bar builder clamps occupancy_rate to [0, 100] and UI Chart.jsx exists', async () => {
+test('Task 1 — buildOccupancyTrendChartData clamps rate [0,100] and Chart.jsx is deleted', async () => {
   const {
-    OCCUPANCY_BAR_CHART_CONFIG,
-    buildOccupancyBarRows,
+    buildOccupancyTrendChartData,
   } = await import('../../frontend/src/utils/chartHelpers.js');
 
-  assert.ok(OCCUPANCY_BAR_CHART_CONFIG.occupancy_rate?.color);
-
-  const occRows = buildOccupancyBarRows([
+  const { metaPoints, chartData } = buildOccupancyTrendChartData([
     { period: '2026-08', occupied: 3, exploitable: 4, occupancy_rate: 75 },
     { period: '2026-09', occupied: 5, exploitable: 4, occupancy_rate: 125 },
     { period: '2026-10', occupied: 0, exploitable: 0, occupancy_rate: NaN },
   ]);
 
-  assert.deepEqual(occRows, [
-    { period: '2026-08', occupied: 3, exploitable: 4, occupancy_rate: 75 },
-    { period: '2026-09', occupied: 5, exploitable: 4, occupancy_rate: 100 },
-    { period: '2026-10', occupied: 0, exploitable: 0, occupancy_rate: 0 },
+  assert.deepEqual(chartData.datasets[0].data, [75, 100, 0]);
+  assert.deepEqual(metaPoints, [
+    { occupied: 3, exploitable: 4 },
+    { occupied: 5, exploitable: 4 },
+    { occupied: 0, exploitable: 0 },
   ]);
 
+  // Chart.jsx must NOT exist (deleted in Task 2)
   const chartUiPath = path.join(FRONTEND_SRC, 'components/ui/Chart.jsx');
-  assert.equal(fs.existsSync(chartUiPath), true, 'Shadcn Chart.jsx primitive component must exist');
-  const chartUiSrc = fs.readFileSync(chartUiPath, 'utf8');
-  assert.ok(chartUiSrc.includes('export function ChartContainer'));
-  assert.ok(chartUiSrc.includes('export function ChartTooltipContent'));
-  assert.ok(chartUiSrc.includes('export function ChartLegendContent'));
-  assert.ok(chartUiSrc.includes('ResponsiveContainer'));
+  assert.equal(fs.existsSync(chartUiPath), false, 'Shadcn Chart.jsx must be deleted — no longer used');
 });
 
-test('Task 2 — DashboardPage uses strictly 3 Shadcn Recharts BarCharts aligned with PRD 15.1-15.3 and removes Chart.js & extra charts', () => {
+test('Task 2 — DashboardPage uses strictly Chart.js Line/Bar charts aligned with PRD 15.1-15.3', () => {
   const dashSrc = fs.readFileSync(
     path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
     'utf8'
   );
 
-  // Zero Chart.js or non-bar chart remnants
-  assert.equal(dashSrc.includes('chart.js'), false, 'DashboardPage must not import chart.js');
-  assert.equal(dashSrc.includes('react-chartjs-2'), false, 'DashboardPage must not import react-chartjs-2');
+  // Must NOT use recharts or Shadcn chart primitives
+  assert.equal(dashSrc.includes("from 'recharts'"), false, 'DashboardPage must not import from recharts');
+  assert.equal(dashSrc.includes('ChartContainer'), false, 'DashboardPage must not use Shadcn ChartContainer');
+  assert.equal(dashSrc.includes('<BarChart'), false, 'DashboardPage must not render Recharts <BarChart>');
   assert.equal(dashSrc.includes('Doughnut'), false, 'DashboardPage must not render Doughnut chart');
   assert.equal(dashSrc.includes('PieChart'), false, 'DashboardPage must not render PieChart');
-  assert.equal(dashSrc.includes('LineChart'), false, 'DashboardPage must not render LineChart');
-  assert.equal(/<Line\b/.test(dashSrc), false, 'DashboardPage must not render <Line />');
   assert.equal(
     dashSrc.includes('Cơ cấu trạng thái căn hộ'),
     false,
     'DashboardPage must remove the unrelated Apartment Status Doughnut card'
   );
 
-  // Shadcn Chart primitives + Recharts BarChart
-  assert.ok(dashSrc.includes('ChartContainer'), 'DashboardPage must use Shadcn ChartContainer');
-  assert.ok(dashSrc.includes('ChartTooltip'), 'DashboardPage must use Shadcn ChartTooltip');
-  assert.ok(dashSrc.includes('ChartTooltipContent'), 'DashboardPage must use Shadcn ChartTooltipContent');
-  assert.ok(dashSrc.includes('ChartLegend'), 'DashboardPage must use Shadcn ChartLegend');
-  assert.ok(dashSrc.includes('ChartLegendContent'), 'DashboardPage must use Shadcn ChartLegendContent');
-  assert.ok(dashSrc.includes("from 'recharts'"), 'DashboardPage must import BarChart primitives from recharts');
-  assert.ok(dashSrc.includes('<BarChart'), 'DashboardPage must render Recharts <BarChart>');
-  assert.ok(dashSrc.includes('<Bar'), 'DashboardPage must render Recharts <Bar>');
+  // Must use Chart.js
+  assert.ok(dashSrc.includes("from 'react-chartjs-2'"), 'DashboardPage must import from react-chartjs-2');
+  assert.ok(dashSrc.includes('ChartJS.register'), 'DashboardPage must register Chart.js components');
+  assert.ok(dashSrc.includes('<Line'), 'DashboardPage must render Chart.js <Line>');
+  assert.ok(dashSrc.includes('<Bar'), 'DashboardPage must render Chart.js <Bar>');
 
-  // Strictly 3 ChartContainer instances: Doanh thu, Công nợ, Lấp đầy
-  const chartContainerCount = (dashSrc.match(/<ChartContainer\b/g) || []).length;
-  assert.equal(
-    chartContainerCount,
-    3,
-    `DashboardPage must render strictly 3 Shadcn ChartContainer charts, got ${chartContainerCount}`
-  );
+  // At least 2 Line charts (revenue trend + occupancy)
+  const lineCount = (dashSrc.match(/<Line\b/g) || []).length;
+  assert.ok(lineCount >= 2, `DashboardPage must render at least 2 <Line> charts, got ${lineCount}`);
+
+  // Chart section identifiers
   assert.ok(dashSrc.includes('id="dashboard-revenue"'), 'Must include Revenue chart id');
   assert.ok(dashSrc.includes('id="dashboard-aging"'), 'Must include Debt Aging chart id');
   assert.ok(dashSrc.includes('id="dashboard-occupancy"'), 'Must include Occupancy chart id');
 
-  // PRD 15.3 drill-downs, full VND formatting & EmptyState fallbacks
+  // PRD 15.3 drill-downs
   assert.ok(
     dashSrc.includes('/admin/payments?tab=aging&bucket='),
-    'Aging column chart must drill down to PaymentsPage aging bucket'
+    'Aging chart must drill down to PaymentsPage aging bucket'
   );
-  assert.ok(
-    dashSrc.includes('resolveAgingBarBucketKey'),
-    'Aging column chart must resolve Recharts v3 bar click payload safely'
-  );
-  assert.ok(dashSrc.includes('<EmptyState'), 'DashboardPage must keep PRD 16.2 EmptyState fallbacks');
-  assert.ok(dashSrc.includes('formatMoney('), 'DashboardPage tooltips must format money in full VND per PRD 16.1');
+
+  // EmptyState fallbacks and VND formatting
+  assert.ok(dashSrc.includes('<EmptyState'), 'DashboardPage must keep EmptyState fallbacks');
+  assert.ok(dashSrc.includes('formatMoney('), 'DashboardPage tooltips must format money in full VND');
 });
 
-test('Task 2 Polish — getTopRevenueSourceKey identifies topmost positive stacked segment for rounded top corners', async () => {
-  const { getTopRevenueSourceKey } = await import(
-    '../../frontend/src/utils/chartHelpers.js'
-  );
-
-  assert.equal(
-    getTopRevenueSourceKey({ rent: 500, electricity: 100, water: 50, service: 20, other: 10 }),
-    'other'
-  );
-  assert.equal(
-    getTopRevenueSourceKey({ rent: 500, electricity: 100, water: 50, service: 20, other: 0 }),
-    'service'
-  );
-  assert.equal(
-    getTopRevenueSourceKey({ rent: 500, electricity: 0, water: 0, service: 0, other: 0 }),
-    'rent'
-  );
-  assert.equal(
-    getTopRevenueSourceKey({ rent: 0, electricity: 0, water: 0, service: 0, other: 0 }),
-    ''
-  );
-});
-
-test('Final Review Fix — mode-aware hasRevenueChartData, null-safe aging buckets, and non-duplicated Aging tooltip label', async () => {
+test('Final Review — 2-param hasRevenueChartData, null-safe aging buckets, DashboardPage uses 2-param call', async () => {
   const {
     hasRevenueChartData,
-    buildReceivablesAgingBarRows,
+    buildReceivablesAgingChartData,
   } = await import('../../frontend/src/utils/chartHelpers.js');
 
-  // 1. invoice_settled-only row must NOT trigger blank 0-bar comparison chart
-  assert.equal(
-    hasRevenueChartData(
-      [{ period: '2026-10', billed: 0, collected: 0, invoice_settled: 3_000_000 }],
-      [],
-      'comparison'
-    ),
-    false
-  );
+  // invoice_settled-only row must NOT trigger chart display (billed=0, collected=0)
   assert.equal(
     hasRevenueChartData(
       [{ period: '2026-10', billed: 0, collected: 0, invoice_settled: 3_000_000 }],
@@ -281,37 +209,35 @@ test('Final Review Fix — mode-aware hasRevenueChartData, null-safe aging bucke
     false
   );
 
-  // 2. Mode-aware empty state: arrears collected > 0 with 0 issued sources shows comparison bars, but EmptyState in source mode
-  const arrearsOnlyRev = [{ period: '2026-10', billed: 0, collected: 4_000_000, invoice_settled: 0 }];
-  const zeroSources = [
-    { period: '2026-10', rent: 0, electricity: 0, water: 0, service: 0, other: 0, total_billed: 0 },
-  ];
-  assert.equal(hasRevenueChartData(arrearsOnlyRev, zeroSources, 'comparison'), true);
-  assert.equal(hasRevenueChartData(arrearsOnlyRev, zeroSources, 'source'), false);
+  // collected > 0 with zero sources → hasRevenue = true
+  assert.equal(
+    hasRevenueChartData(
+      [{ period: '2026-10', billed: 0, collected: 4_000_000, invoice_settled: 0 }],
+      [{ period: '2026-10', rent: 0, electricity: 0, water: 0, service: 0, other: 0 }]
+    ),
+    true
+  );
 
-  // 3. Null/undefined elements inside receivablesAging.buckets must not throw TypeError
-  const agingRows = buildReceivablesAgingBarRows({
+  // Both zero → false
+  assert.equal(
+    hasRevenueChartData([], []),
+    false
+  );
+
+  // Null/undefined elements inside receivablesAging.buckets must not throw TypeError
+  const agingRows = buildReceivablesAgingChartData({
     total_debt: 2_000_000,
     buckets: [null, undefined, { key: '0_15', amount: 2_000_000, count: 1 }],
   });
-  assert.equal(agingRows.find((r) => r.key === '0_15')?.amount, 2_000_000);
+  assert.equal(agingRows.chartData.datasets[0].data[1], 2_000_000);
 
-  // 4. DashboardPage passes revenueMode into hasRevenueChartData & ChartTooltipContent does not shadow explicit item.name with payload.key label
+  // DashboardPage must use 2-param call (no revenueMode 3rd arg)
   const dashSrc = fs.readFileSync(
     path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
     'utf8'
   );
   assert.ok(
-    dashSrc.includes('hasRevenueChartData(rev12m, revBySource, revenueMode)'),
-    'DashboardPage must evaluate showRevenueChart per active revenueMode'
-  );
-
-  const chartSrc = fs.readFileSync(
-    path.join(FRONTEND_SRC, 'components/ui/Chart.jsx'),
-    'utf8'
-  );
-  assert.ok(
-    chartSrc.includes('seriesConfig.label || item.name || payloadKeyConfig.label || key'),
-    'ChartTooltipContent must prefer explicit series item.name over payload.key config label to avoid duplicating Aging bucket labels'
+    dashSrc.includes('hasRevenueChartData(rev12m, revBySource)'),
+    'DashboardPage must call hasRevenueChartData with 2 params (rev12m, revBySource)'
   );
 });

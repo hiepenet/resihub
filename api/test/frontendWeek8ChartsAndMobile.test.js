@@ -153,8 +153,8 @@ test('Task 3 — DashboardPage, ReportsPage, PaymentsPage & StatsCard source int
     path.join(FRONTEND_SRC, 'pages/admin/dashboard/DashboardPage.jsx'),
     'utf8'
   );
-  assert.ok(dashSrc.includes('ChartContainer'), 'DashboardPage must use Shadcn ChartContainer');
-  assert.ok(dashSrc.includes('<BarChart'), 'DashboardPage must render Recharts <BarChart>');
+  assert.ok(dashSrc.includes('ChartJS.register'), 'DashboardPage must register Chart.js components');
+  assert.ok(dashSrc.includes('<Line') || dashSrc.includes('<Bar'), 'DashboardPage must render Chart.js Line or Bar');
   assert.ok(dashSrc.includes('<EmptyState'), 'DashboardPage must render EmptyState fallbacks when chart data is zero');
   assert.ok(dashSrc.includes('/admin/payments?tab=aging&bucket='), 'DashboardPage aging chart must drill down to PaymentsPage aging bucket');
 
