@@ -309,22 +309,22 @@ router.get('/overview', authenticateToken, async (req, res) => {
       currentAmountDue = Number(contractDebtRes.rows[0]?.invoice_due || 0);
 
       const latestInvRes = await pool.query(
-        `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
+        `SELECT i.id, i.invoice_code, i.period, i.invoice_type, i.due_date, i.total_amount, i.paid_amount, i.status
          FROM invoice i
          JOIN tenant t ON t.id = i.tenant_id
          WHERE t.person_id = $1 AND i.contract_id = $2 AND i.status NOT IN ('DRAFT', 'VOID')
-         ORDER BY i.period DESC, i.created_at DESC
+         ORDER BY COALESCE(i.period, to_char(COALESCE(i.issue_date::timestamp, i.created_at), 'YYYY-MM')) DESC, i.created_at DESC
          LIMIT 1`,
         [personId, contract.contract_id]
       );
       latestInvoice = latestInvRes.rows[0] || null;
     } else {
       const latestInvRes = await pool.query(
-        `SELECT i.id, i.invoice_code, i.period, i.due_date, i.total_amount, i.paid_amount, i.status
+        `SELECT i.id, i.invoice_code, i.period, i.invoice_type, i.due_date, i.total_amount, i.paid_amount, i.status
          FROM invoice i
          JOIN tenant t ON t.id = i.tenant_id
          WHERE t.person_id = $1 AND i.status NOT IN ('DRAFT', 'VOID')
-         ORDER BY i.period DESC, i.created_at DESC
+         ORDER BY COALESCE(i.period, to_char(COALESCE(i.issue_date::timestamp, i.created_at), 'YYYY-MM')) DESC, i.created_at DESC
          LIMIT 1`,
         [personId]
       );
@@ -1448,7 +1448,7 @@ router.get('/invoices', authenticateToken, async (req, res) => {
        JOIN building b ON b.id = i.building_id
        JOIN tenant t ON t.id = i.tenant_id
        WHERE t.person_id = $1 AND i.status <> 'DRAFT'${contractFilter}
-       ORDER BY i.period DESC, i.created_at DESC`,
+       ORDER BY COALESCE(i.period, to_char(COALESCE(i.issue_date::timestamp, i.created_at), 'YYYY-MM')) DESC, i.created_at DESC`,
       params
     );
 

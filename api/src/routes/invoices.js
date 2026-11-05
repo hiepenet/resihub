@@ -919,7 +919,7 @@ router.get(
       }
       if (period) {
         params.push(period);
-        sql += ` AND i.period = $${params.length}`;
+        sql += ` AND COALESCE(i.period, to_char(COALESCE(i.issue_date::timestamp, i.created_at), 'YYYY-MM')) = $${params.length}`;
       }
       if (status) {
         params.push(status);
@@ -931,7 +931,7 @@ router.get(
         sql += ` AND (i.invoice_code ILIKE $${idx} OR a.code ILIKE $${idx} OR COALESCE(p.full_name, '') ILIKE $${idx})`;
       }
 
-      sql += ` ORDER BY i.period DESC, i.created_at DESC`;
+      sql += ` ORDER BY COALESCE(i.period, to_char(COALESCE(i.issue_date::timestamp, i.created_at), 'YYYY-MM')) DESC, i.created_at DESC`;
 
       const result = await pool.query(sql, params);
       const rows = result.rows;

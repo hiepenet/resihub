@@ -217,7 +217,9 @@ export function InvoicesPage() {
             <span className="font-mono text-xs font-semibold text-primary-700 bg-primary-50 px-2 py-0.5 rounded border border-primary-100">
               {row.invoice_code}
             </span>
-            <p className="text-[11px] text-slate-400 mt-1">Kỳ: {row.period}</p>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Kỳ: {row.period || 'Tất toán kỳ cuối'}
+            </p>
           </div>
         ),
       },
@@ -303,7 +305,16 @@ export function InvoicesPage() {
         label: 'Trạng thái',
         align: 'center',
         sortable: true,
-        render: (row) => <StatusBadge status={row.status} domain="invoice" />,
+        render: (row) => (
+          <div className="inline-flex flex-col items-center gap-1">
+            <StatusBadge status={row.status} domain="invoice" />
+            {row.invoice_type === 'LATE_FEE_SETTLEMENT' ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800">
+                Phí phạt tất toán
+              </span>
+            ) : null}
+          </div>
+        ),
       },
       {
         key: 'actions',
@@ -312,7 +323,7 @@ export function InvoicesPage() {
         className: 'whitespace-nowrap',
         render: (row) => (
           <div className="inline-flex items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-            {canManageInvoices && row.status === 'DRAFT' ? (
+            {canManageInvoices && row.status === 'DRAFT' && row.invoice_type !== 'LATE_FEE_SETTLEMENT' ? (
               <Button
                 size="xs"
                 variant="soft"

@@ -378,7 +378,7 @@ export function InvoiceDetailPage() {
   const openAdjustModal = () => {
     if (!invoice) return;
     setAdjustForm({
-      adjustment_target: 'SERVICE',
+      adjustment_target: invoice.invoice_type === 'LATE_FEE_SETTLEMENT' ? 'LATE_FEE' : 'SERVICE',
       delta_amount: '0',
       reason: '',
       subscription_id: '',
@@ -534,6 +534,9 @@ export function InvoiceDetailPage() {
   const isDraft = invoice.status === 'DRAFT';
   const isVoid = invoice.status === 'VOID';
   const isCancelled = invoice.status === 'CANCELLED';
+  const isSettlement = invoice.invoice_type === 'LATE_FEE_SETTLEMENT';
+  const isRegular = (invoice.invoice_type || 'REGULAR') === 'REGULAR';
+  const periodLabel = invoice.period || 'Tất toán kỳ cuối';
 
   const canRequestAdjust = canManageInvoices && !isDraft && !isVoid && !isCancelled;
   const canVoidInvoice = canManageInvoices && !isDraft && !isVoid && !isCancelled && Number(invoice.paid_amount || 0) === 0;
@@ -547,7 +550,7 @@ export function InvoiceDetailPage() {
           { label: invoice.invoice_code },
         ]}
         title={`Chi tiết Hóa đơn ${invoice.invoice_code}`}
-        subtitle={`Kỳ thanh toán ${invoice.period} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
+        subtitle={`${invoice.period ? `Kỳ thanh toán ${invoice.period}` : 'Phí phạt tất toán kỳ cuối'} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Link to="/admin/invoices">
@@ -560,7 +563,7 @@ export function InvoiceDetailPage() {
               In hóa đơn PDF
             </Button>
 
-            {canManageInvoices && isDraft ? (
+            {canManageInvoices && isDraft && !isSettlement ? (
               <Button
                 variant="primary"
                 icon={Send}
@@ -615,16 +618,27 @@ export function InvoiceDetailPage() {
 
       {activeTab === 'details' ? (
         <div className="space-y-6">
+          {invoice.status === 'OVERDUE' && isRegular ? (
+            <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">
+              ℹ️ Phí phạt chậm thanh toán đang tích lũy và sẽ được đưa vào hóa đơn kỳ kế tiếp.
+            </div>
+          ) : null}
+
           {/* Tờ Hóa Đơn Chuẩn Chuyên Nghiệp (Hỗ trợ in A4 PDF) */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-card p-6 sm:p-8 print-area space-y-8">
             {/* Header Tờ Hóa Đơn */}
             <div className="flex flex-col sm:flex-row justify-between items-start gap-6 border-b border-slate-200 pb-6">
               <div className="space-y-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xl font-bold tracking-tight text-slate-900">
-                    HÓA ĐƠN THU TIỀN KỲ
+                    {isSettlement ? 'HÓA ĐƠN PHÍ PHẠT TẤT TOÁN' : 'HÓA ĐƠN THU TIỀN KỲ'}
                   </span>
                   <StatusBadge status={invoice.status} domain="invoice" />
+                  {isSettlement ? (
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+                      Phí phạt tất toán
+                    </span>
+                  ) : null}
                 </div>
                 <p className="font-mono text-sm font-semibold text-primary-700">
                   Mã số: {invoice.invoice_code}
@@ -636,7 +650,7 @@ export function InvoiceDetailPage() {
 
               <div className="sm:text-right space-y-1 text-xs text-slate-600">
                 <p>
-                  Kỳ đối soát: <strong className="text-slate-900">{invoice.period}</strong>
+                  Kỳ đối soát: <strong className="text-slate-900">{periodLabel}</strong>
                 </p>
                 <p>
                   Hạn thanh toán:{' '}
@@ -682,7 +696,7 @@ export function InvoiceDetailPage() {
                 <h3 className="text-sm font-semibold text-slate-900">
                   Chi tiết các khoản phí trong kỳ
                 </h3>
-                {canManageInvoices && isDraft ? (
+                {canManageInvoices && isDraft && !isSettlement ? (
                   <Button size="xs" variant="outline" icon={Plus} onClick={openAddLineModal}>
                     Thêm dòng phí
                   </Button>
@@ -700,7 +714,7 @@ export function InvoiceDetailPage() {
                       <TH className="text-center">ĐVT</TH>
                       <TH className="text-right">Đơn giá</TH>
                       <TH className="text-right">Thành tiền</TH>
-                      {isDraft && canManageInvoices ? (
+                      {isDraft && !isSettlement && canManageInvoices ? (
                         <TH className="w-20 text-center">Thao tác</TH>
                       ) : null}
                     </tr>
@@ -708,7 +722,7 @@ export function InvoiceDetailPage() {
                   <TBody>
                     {(invoice.lines || []).length === 0 ? (
                       <tr>
-                        <TD colSpan={isDraft ? 8 : 7} className="text-center text-slate-400 py-6">
+                        <TD colSpan={isDraft && !isSettlement ? 8 : 7} className="text-center text-slate-400 py-6">
                           Chưa có dòng chi tiết khoản phí nào.
                         </TD>
                       </tr>
@@ -746,7 +760,7 @@ export function InvoiceDetailPage() {
                               {Number(line.amount) > 0 && line.item_type === 'ADJUSTMENT' ? '+' : ''}
                               {formatMoney(line.amount)}
                             </TD>
-                            {isDraft && canManageInvoices ? (
+                            {isDraft && !isSettlement && canManageInvoices ? (
                               <TD className="text-center">
                                 <div className="inline-flex items-center gap-1">
                                   <button
@@ -1413,7 +1427,7 @@ export function InvoiceDetailPage() {
         open={summaryModalOpen}
         onClose={() => setSummaryModalOpen(false)}
         title={`Tóm tắt Hóa đơn ${invoice.invoice_code}`}
-        subtitle={`Kỳ ${invoice.period} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
+        subtitle={`${invoice.period ? `Kỳ ${invoice.period}` : 'Phí phạt tất toán'} • Căn ${invoice.apartment_code} (${invoice.building_name})`}
         size="md"
         footer={
           <>
@@ -1430,7 +1444,7 @@ export function InvoiceDetailPage() {
             >
               In hóa đơn PDF
             </Button>
-            {canManageInvoices && isDraft ? (
+            {canManageInvoices && isDraft && !isSettlement ? (
               <Button
                 variant="primary"
                 icon={Send}
@@ -1449,8 +1463,13 @@ export function InvoiceDetailPage() {
           <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
             <div>
               <p className="text-slate-500">Trạng thái hóa đơn</p>
-              <div className="mt-1">
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <StatusBadge status={invoice.status} domain="invoice" />
+                {isSettlement ? (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800">
+                    Phí phạt tất toán
+                  </span>
+                ) : null}
               </div>
             </div>
             <div>
