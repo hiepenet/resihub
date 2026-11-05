@@ -27,6 +27,7 @@ import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { EmptyState } from '../../../components/common/EmptyState';
+import { MeterBatchPhotoImportModal } from '../../../components/meters/MeterBatchPhotoImportModal';
 import { metersService } from '../../../services/meters.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { aiService } from '../../../services/ai.service';
@@ -191,6 +192,7 @@ export function MeterReadingsPage() {
 
   // Modal khởi tạo đồng hồ mới
   const [createOpen, setCreateOpen] = useState(false);
+  const [batchPhotoImportOpen, setBatchPhotoImportOpen] = useState(false);
   const [apartments, setApartments] = useState([]);
   const [creating, setCreating] = useState(false);
   const [createForm, setCreateForm] = useState({
@@ -729,6 +731,13 @@ export function MeterReadingsPage() {
             </Button>
             {canWriteMeters ? (
               <>
+                <Button
+                  variant="soft"
+                  icon={Sparkles}
+                  onClick={() => setBatchPhotoImportOpen(true)}
+                >
+                  Import ảnh AI
+                </Button>
                 <Button variant="outline" icon={Plus} onClick={openCreateModal}>
                   Khởi tạo đồng hồ
                 </Button>
@@ -1601,6 +1610,16 @@ export function MeterReadingsPage() {
           </div>
         </form>
       </Modal>
+
+      <MeterBatchPhotoImportModal
+        open={batchPhotoImportOpen}
+        onClose={() => setBatchPhotoImportOpen(false)}
+        initialBuildingId={selectedBuildingId || ''}
+        period={period}
+        anomalyThresholdPct={anomalyThresholdPct}
+        canWriteMeters={canWriteMeters}
+        onSaved={fetchMeters}
+      />
     </div>
   );
 }

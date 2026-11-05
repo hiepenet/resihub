@@ -142,13 +142,48 @@ router.post(
   aiRateLimiter,
   idempotencyGuard(),
   async (req, res) => {
-    const { meter_id, period, contract_id, image_base64 } = req.body || {};
+    const { meter_id, building_id, apartment_id, period, contract_id, image_base64 } =
+      req.body || {};
     const orgId = req.user.org_id;
 
-    if (!meter_id || !UUID_RE.test(String(meter_id))) {
+    const rawMeterId =
+      meter_id !== null && meter_id !== undefined && String(meter_id).trim() !== ''
+        ? String(meter_id).trim()
+        : null;
+    const rawBuildingId =
+      building_id !== null && building_id !== undefined && String(building_id).trim() !== ''
+        ? String(building_id).trim()
+        : null;
+    const rawApartmentId =
+      apartment_id !== null && apartment_id !== undefined && String(apartment_id).trim() !== ''
+        ? String(apartment_id).trim()
+        : null;
+
+    if (!rawMeterId && !rawBuildingId) {
       return res.status(400).json({
         code: 'VALIDATION_ERROR',
-        message: 'Mã đồng hồ (meter_id) là bắt buộc và phải đúng định dạng UUID.',
+        message: 'Cần cung cấp mã đồng hồ (meter_id) hoặc mã tòa nhà (building_id).',
+      });
+    }
+
+    if (rawMeterId && !UUID_RE.test(rawMeterId)) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: 'Mã đồng hồ (meter_id) phải đúng định dạng UUID.',
+      });
+    }
+
+    if (rawBuildingId && !UUID_RE.test(rawBuildingId)) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: 'Mã tòa nhà (building_id) phải đúng định dạng UUID.',
+      });
+    }
+
+    if (rawApartmentId && !UUID_RE.test(rawApartmentId)) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: 'Mã căn hộ (apartment_id) phải đúng định dạng UUID.',
       });
     }
 
@@ -167,21 +202,74 @@ router.post(
     const { client, release } = await getUserClient(req);
     let inTx = false;
     try {
-      const scopeRes = await client.query(
-        `SELECT * FROM fn_get_ops_resource_scope('meter', $1)`,
-        [meter_id]
-      );
-      if (scopeRes.rows.length === 0 || scopeRes.rows[0].org_id !== orgId) {
-        return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy đồng hồ điện/nước.' });
-      }
-      const buildingId = scopeRes.rows[0].building_id;
       const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
-      if (!mgrBuildingIds.includes(buildingId)) {
-        await logAccessDenied(req, 'meter', meter_id, 'MANAGER attempted AI meter OCR outside assigned building');
-        return res.status(403).json({
-          code: 'ACCESS_DENIED',
-          message: 'Bạn không có quyền đọc chỉ số đồng hồ thuộc tòa nhà khác.',
-        });
+      let resolvedBuildingId = rawBuildingId;
+
+      if (rawMeterId) {
+        const scopeRes = await client.query(
+          `SELECT * FROM fn_get_ops_resource_scope('meter', $1)`,
+          [rawMeterId]
+        );
+        if (scopeRes.rows.length === 0 || scopeRes.rows[0].org_id !== orgId) {
+          return res
+            .status(404)
+            .json({ code: 'NOT_FOUND', message: 'Không tìm thấy đồng hồ điện/nước.' });
+        }
+        const meterBuildingId = scopeRes.rows[0].building_id;
+        if (!mgrBuildingIds.includes(meterBuildingId)) {
+          await logAccessDenied(
+            req,
+            'meter',
+            rawMeterId,
+            'MANAGER attempted AI meter OCR outside assigned building'
+          );
+          return res.status(403).json({
+            code: 'ACCESS_DENIED',
+            message: 'Bạn không có quyền đọc chỉ số đồng hồ thuộc tòa nhà khác.',
+          });
+        }
+        if (rawBuildingId && rawBuildingId !== meterBuildingId) {
+          return res.status(404).json({
+            code: 'NOT_FOUND',
+            message: 'Đồng hồ không thuộc tòa nhà đã chọn.',
+          });
+        }
+        resolvedBuildingId = meterBuildingId;
+      } else {
+        const bRes = await adminPool.query(
+          `SELECT id, org_id FROM building WHERE id = $1 LIMIT 1`,
+          [rawBuildingId]
+        );
+        if (bRes.rows.length === 0 || bRes.rows[0].org_id !== orgId) {
+          return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+        }
+        if (!mgrBuildingIds.includes(rawBuildingId)) {
+          await logAccessDenied(
+            req,
+            'building',
+            rawBuildingId,
+            'MANAGER attempted batch AI meter OCR outside assigned building'
+          );
+          return res.status(403).json({
+            code: 'ACCESS_DENIED',
+            message: 'Bạn không có quyền đọc chỉ số đồng hồ thuộc tòa nhà khác.',
+          });
+        }
+        if (rawApartmentId) {
+          const aptCheckRes = await adminPool.query(
+            `SELECT id, building_id FROM apartment WHERE id = $1 LIMIT 1`,
+            [rawApartmentId]
+          );
+          if (
+            aptCheckRes.rows.length === 0 ||
+            aptCheckRes.rows[0].building_id !== rawBuildingId
+          ) {
+            return res.status(404).json({
+              code: 'NOT_FOUND',
+              message: 'Không tìm thấy căn hộ trong tòa nhà đã chọn.',
+            });
+          }
+        }
       }
 
       await client.query('BEGIN');
@@ -189,8 +277,9 @@ router.post(
       const suggestion = await runMeterOcrSuggestion(client, {
         actorId: req.user.sub,
         orgId,
-        buildingId,
-        meterId: meter_id,
+        buildingId: resolvedBuildingId,
+        apartmentId: rawApartmentId,
+        meterId: rawMeterId,
         ...(period ? { period } : {}),
         contractId: validatedContractId,
         imageBase64: image_base64,

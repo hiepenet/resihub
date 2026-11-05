@@ -428,6 +428,7 @@ export function computeFieldAcceptanceDiff({ fieldHashes = {}, finalValues = {} 
 
 export function postValidateMeterOcr({
   rawModelJson = {},
+  expectedMeterType = null,
   previousValue = null,
   baselineAvgConsumption = null,
   anomalyThresholdPct = 30,
@@ -439,6 +440,25 @@ export function postValidateMeterOcr({
     : 0;
   const reason = String(rawModelJson?.reason || '').trim();
   const warnings = [];
+
+  const rawDetectedType = String(rawModelJson?.detected_meter_type || '')
+    .trim()
+    .toUpperCase();
+  const detectedMeterType =
+    rawDetectedType === 'ELECTRICITY' || rawDetectedType === 'WATER'
+      ? rawDetectedType
+      : null;
+
+  const normExpectedType = String(expectedMeterType || '')
+    .trim()
+    .toUpperCase();
+  const validExpectedType =
+    normExpectedType === 'ELECTRICITY' || normExpectedType === 'WATER'
+      ? normExpectedType
+      : null;
+
+  const hasTypeMismatch =
+    Boolean(validExpectedType && detectedMeterType && validExpectedType !== detectedMeterType);
 
   const rawReading = rawModelJson?.reading;
   const parsedReading =
@@ -453,8 +473,12 @@ export function postValidateMeterOcr({
     confidence < confidenceThreshold
   ) {
     warnings.push('LOW_CONFIDENCE_OR_UNREADABLE');
+    if (hasTypeMismatch) {
+      warnings.push('METER_TYPE_MISMATCH');
+    }
     return {
       reading: null,
+      detectedMeterType,
       confidence,
       reason: reason || 'Ảnh đồng hồ mờ/lóa hoặc độ tin cậy dưới ngưỡng cấu hình; vui lòng nhập tay.',
       needsHumanReview: true,
@@ -464,6 +488,11 @@ export function postValidateMeterOcr({
 
   const reading = Math.round(parsedReading * 100) / 100;
   let needsHumanReview = false;
+
+  if (hasTypeMismatch) {
+    warnings.push('METER_TYPE_MISMATCH');
+    needsHumanReview = true;
+  }
 
   if (previousValue !== null && previousValue !== undefined && Number.isFinite(Number(previousValue))) {
     const prev = Number(previousValue);
@@ -487,6 +516,7 @@ export function postValidateMeterOcr({
 
   return {
     reading,
+    detectedMeterType,
     confidence,
     reason: reason || 'Đọc chỉ số thành công, chờ người dùng xác nhận.',
     needsHumanReview,
@@ -656,19 +686,34 @@ export function buildGeminiPromptAndSchema(taskType, context = {}) {
       };
 
     case 'METER_OCR': {
-      const meterLabel = context.meterType === 'WATER' ? 'đồng hồ nước (m³)' : 'đồng hồ điện (kWh)';
+      const meterLabel =
+        context.meterType === 'WATER'
+          ? 'đồng hồ nước (m³)'
+          : context.meterType === 'ELECTRICITY'
+            ? 'đồng hồ điện (kWh)'
+            : 'đồng hồ điện (kWh) hoặc đồng hồ nước (m³)';
+      const targetDesc = context.meterCode
+        ? `của mã đồng hồ ${context.meterCode}`
+        : context.apartmentCode
+          ? `của căn hộ ${context.apartmentCode}`
+          : 'trong tòa nhà';
       const prevHint =
         context.previousValue !== null && context.previousValue !== undefined
           ? `Chỉ số kỳ trước để tham khảo ngữ cảnh là ${context.previousValue}.`
           : '';
       return {
         systemInstruction:
-          'Bạn là bộ đọc chỉ số công tơ điện/nước từ ảnh chụp thực địa. Nếu mặt đồng hồ bị mờ, lóa sáng, che khuất hoặc không đọc chắc chắn các chữ số thì BẮT BUỘC trả reading = null và confidence < 0.5, tuyệt đối không đoán mò con số.',
-        userPrompt: `Đọc chỉ số hiện tại trên ảnh ${meterLabel} của mã đồng hồ ${context.meterCode || 'N/A'}. ${prevHint} Trả về JSON gồm reading (number hoặc null), confidence (0..1) và reason (giải thích ngắn tiếng Việt).`,
+          'Bạn là bộ đọc chỉ số công tơ điện/nước từ ảnh chụp thực địa. Nếu mặt đồng hồ bị mờ, lóa sáng, che khuất hoặc không đọc chắc chắn các chữ số thì BẮT BUỘC trả reading = null và confidence < 0.5, tuyệt đối không đoán mò con số. Đồng thời nhận diện loại công tơ trên mặt đồng hồ vào trường detected_meter_type: "ELECTRICITY" nếu là công tơ điện (kWh) hoặc "WATER" nếu là đồng hồ nước (m³), hoặc null nếu không phân biệt được.',
+        userPrompt: `Đọc chỉ số hiện tại trên ảnh ${meterLabel} ${targetDesc}. ${prevHint} Trả về JSON gồm reading (number hoặc null), detected_meter_type ("ELECTRICITY" | "WATER" | null), confidence (0..1) và reason (giải thích ngắn tiếng Việt).`,
         responseSchema: {
           type: 'OBJECT',
           properties: {
             reading: { type: 'NUMBER', nullable: true },
+            detected_meter_type: {
+              type: 'STRING',
+              enum: ['ELECTRICITY', 'WATER'],
+              nullable: true,
+            },
             confidence: { type: 'NUMBER' },
             reason: { type: 'STRING' },
           },
