@@ -14,87 +14,179 @@ export const DASHBOARD_AGING_BUCKET_META = [
   { key: 'over_60', label: '>60 ngày', color: '#e11d48' },
 ];
 
-export const REVENUE_COMPARISON_CHART_CONFIG = {
-  billed: {
-    label: 'Doanh thu phát hành',
-    color: '#0ea5e9',
-  },
-  collected: {
-    label: 'Tiền thực thu',
-    color: '#10b981',
-  },
-};
-
-export const REVENUE_SOURCE_CHART_CONFIG = {
-  rent: {
-    label: 'Tiền thuê phòng',
-    color: '#0ea5e9',
-  },
-  electricity: {
-    label: 'Tiền điện',
-    color: '#f59e0b',
-  },
-  water: {
-    label: 'Tiền nước',
-    color: '#06b6d4',
-  },
-  service: {
-    label: 'Phí dịch vụ',
-    color: '#10b981',
-  },
-  other: {
-    label: 'Phí trễ hạn & Khác',
-    color: '#8b5cf6',
-  },
-};
-
-export const AGING_BUCKETS_CHART_CONFIG = Object.fromEntries(
-  DASHBOARD_AGING_BUCKET_META.map((m) => [
-    m.key,
-    { label: m.label, color: m.color },
-  ])
-);
-
-export const OCCUPANCY_BAR_CHART_CONFIG = {
-  occupancy_rate: {
-    label: 'Tỷ lệ lấp đầy (%)',
-    color: '#0ea5e9',
-  },
-};
-
-const SAFE_CSS_COLOR_RE =
-  /^(#[0-9a-fA-F]{3,8}|(?:rgb|rgba|hsl|hsla|oklch)\([0-9a-zA-Z.,%\s/-]+\)|var\(--[a-zA-Z0-9_-]+\))$/;
-
-export function sanitizeChartKey(key = '') {
-  return String(key || '').replace(/[^a-zA-Z0-9_-]/g, '');
-}
-
-export function buildChartCssVariables(chartId = '', config = {}) {
-  const safeId = sanitizeChartKey(chartId);
-  if (!safeId || !config || typeof config !== 'object') return '';
-
-  const declarations = [];
-  for (const [rawKey, item] of Object.entries(config)) {
-    const safeKey = sanitizeChartKey(rawKey);
-    const rawColor = typeof item?.color === 'string' ? item.color.trim() : '';
-    if (!safeKey || !rawColor || !SAFE_CSS_COLOR_RE.test(rawColor)) continue;
-    declarations.push(`  --color-${safeKey}: ${rawColor};`);
-  }
-
-  if (declarations.length === 0) return '';
-  return `[data-chart="${safeId}"] {\n${declarations.join('\n')}\n}`;
-}
-
 function toNonNegativeNumber(val) {
   const n = Number(val);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-export function hasRevenueChartData(
-  revenueSeries = [],
-  sourceSeries = [],
-  mode = ''
-) {
+// ─── Revenue ────────────────────────────────────────────────────────────────
+
+/**
+ * Builds Chart.js Line dataset for 12-month revenue trend (PRD §15.1).
+ * Returns 3 datasets: Phát hành (billed), Tất toán HĐ (invoice_settled), Thực thu (collected).
+ *
+ * @param {Array} revenueSeries - Array of { period, billed, collected, invoice_settled }
+ * @returns {{ labels: string[], datasets: object[] }}
+ */
+export function buildRevenueTrendChartData(revenueSeries = []) {
+  const rows = Array.isArray(revenueSeries) ? revenueSeries : [];
+  const labels = rows.map((r) => String(r?.period || r?.month || ''));
+
+  return {
+    labels,
+    datasets: [
+      {
+        label: 'Phát hành',
+        data: rows.map((r) => toNonNegativeNumber(r?.billed)),
+        borderColor: '#0ea5e9',
+        backgroundColor: 'rgba(14,165,233,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+      },
+      {
+        label: 'Tất toán HĐ',
+        data: rows.map((r) => toNonNegativeNumber(r?.invoice_settled)),
+        borderColor: '#8b5cf6',
+        backgroundColor: 'transparent',
+        borderDash: [4, 4],
+        tension: 0.3,
+        pointRadius: 3,
+      },
+      {
+        label: 'Thực thu',
+        data: rows.map((r) => toNonNegativeNumber(r?.collected)),
+        borderColor: '#10b981',
+        backgroundColor: 'rgba(16,185,129,0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+      },
+    ],
+  };
+}
+
+const REVENUE_SOURCE_DEFS = [
+  { key: 'rent', label: 'Tiền thuê phòng', color: '#0ea5e9' },
+  { key: 'electricity', label: 'Tiền điện', color: '#f59e0b' },
+  { key: 'water', label: 'Tiền nước', color: '#06b6d4' },
+  { key: 'service', label: 'Phí dịch vụ', color: '#10b981' },
+  { key: 'other', label: 'Phí trễ hạn & Khác', color: '#8b5cf6' },
+];
+
+/**
+ * Builds Chart.js Stacked Bar dataset for revenue by source (PRD §15.1 RP-01).
+ * Returns 5 datasets: rent, electricity, water, service, other — all with stack: 'revenue_source'.
+ *
+ * @param {Array} sourceSeries - Array of { period, rent, electricity, water, service, other }
+ * @returns {{ labels: string[], datasets: object[] }}
+ */
+export function buildRevenueBySourceChartData(sourceSeries = []) {
+  const rows = Array.isArray(sourceSeries) ? sourceSeries : [];
+  const labels = rows.map((r) => String(r?.period || ''));
+
+  return {
+    labels,
+    datasets: REVENUE_SOURCE_DEFS.map(({ key, label, color }) => ({
+      label,
+      data: rows.map((r) => toNonNegativeNumber(r?.[key])),
+      backgroundColor: color,
+      stack: 'revenue_source',
+      borderRadius: 3,
+      borderSkipped: false,
+    })),
+  };
+}
+
+// ─── Receivables Aging ───────────────────────────────────────────────────────
+
+/**
+ * Builds Chart.js Bar dataset for receivables aging (PRD §15.1 — 5 buckets).
+ * Returns bucketKeys, counts (per-bucket invoice count), and chartData for Chart.js Bar.
+ *
+ * @param {object} receivablesAging - { buckets: [{ key, label, amount, count }], ... }
+ * @returns {{ bucketKeys: string[], counts: number[], chartData: { labels: string[], datasets: object[] } }}
+ */
+export function buildReceivablesAgingChartData(receivablesAging = {}) {
+  const rawBuckets = Array.isArray(receivablesAging?.buckets)
+    ? receivablesAging.buckets
+    : [];
+  const byKey = new Map(
+    rawBuckets
+      .filter((b) => b && typeof b === 'object' && b.key)
+      .map((b) => [b.key, b])
+  );
+
+  const bucketKeys = DASHBOARD_AGING_BUCKET_META.map((m) => m.key);
+  const amounts = DASHBOARD_AGING_BUCKET_META.map((m) =>
+    toNonNegativeNumber(byKey.get(m.key)?.amount)
+  );
+  const counts = DASHBOARD_AGING_BUCKET_META.map((m) =>
+    toNonNegativeNumber(byKey.get(m.key)?.count)
+  );
+
+  return {
+    bucketKeys,
+    counts,
+    chartData: {
+      labels: DASHBOARD_AGING_BUCKET_META.map((m) => m.label),
+      datasets: [
+        {
+          label: 'Dư nợ chưa thu',
+          data: amounts,
+          backgroundColor: DASHBOARD_AGING_BUCKET_META.map((m) => m.color),
+          borderRadius: 4,
+          borderSkipped: false,
+        },
+      ],
+    },
+  };
+}
+
+// ─── Occupancy ───────────────────────────────────────────────────────────────
+
+/**
+ * Builds Chart.js Line dataset for 12-month occupancy trend (PRD §15.1).
+ * Returns metaPoints (occupied/exploitable per period) and chartData for Chart.js Line.
+ *
+ * @param {Array} occupancySeries - Array of { period, occupied, exploitable, occupancy_rate }
+ * @returns {{ metaPoints: { occupied: number, exploitable: number }[], chartData: { labels: string[], datasets: object[] } }}
+ */
+export function buildOccupancyTrendChartData(occupancySeries = []) {
+  const rows = Array.isArray(occupancySeries) ? occupancySeries : [];
+  const labels = rows.map((r) => String(r?.period || ''));
+  const metaPoints = rows.map((r) => ({
+    occupied: toNonNegativeNumber(r?.occupied),
+    exploitable: toNonNegativeNumber(r?.exploitable),
+  }));
+
+  return {
+    metaPoints,
+    chartData: {
+      labels,
+      datasets: [
+        {
+          label: 'Tỷ lệ lấp đầy (%)',
+          data: rows.map((r) => {
+            const rawRate = Number(r?.occupancy_rate);
+            return Number.isFinite(rawRate)
+              ? Math.min(100, Math.max(0, rawRate))
+              : 0;
+          }),
+          borderColor: '#0ea5e9',
+          backgroundColor: 'rgba(14,165,233,0.15)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 4,
+        },
+      ],
+    },
+  };
+}
+
+// ─── Guard helpers ───────────────────────────────────────────────────────────
+
+export function hasRevenueChartData(revenueSeries = [], sourceSeries = []) {
   const revHasPositive =
     Array.isArray(revenueSeries) &&
     revenueSeries.some(
@@ -107,7 +199,6 @@ export function hasRevenueChartData(
     Array.isArray(sourceSeries) &&
     sourceSeries.some(
       (s) =>
-        Number(s?.total_billed || 0) > 0 ||
         Number(s?.rent || 0) > 0 ||
         Number(s?.electricity || 0) > 0 ||
         Number(s?.water || 0) > 0 ||
@@ -115,8 +206,6 @@ export function hasRevenueChartData(
         Number(s?.other || 0) > 0
     );
 
-  if (mode === 'comparison') return revHasPositive;
-  if (mode === 'source') return srcHasPositive;
   return revHasPositive || srcHasPositive;
 }
 
@@ -137,101 +226,7 @@ export function hasOccupancyChartData(totalApartments = 0, occupancySeries = [])
   );
 }
 
-export function buildRevenueComparisonBarRows(revenueSeries = []) {
-  const rows = Array.isArray(revenueSeries) ? revenueSeries : [];
-  return rows.map((r) => ({
-    period: String(r?.period || r?.month || ''),
-    billed: toNonNegativeNumber(r?.billed),
-    collected: toNonNegativeNumber(r?.collected),
-    invoice_settled: toNonNegativeNumber(r?.invoice_settled),
-  }));
-}
-
-export const REVENUE_SOURCE_KEYS = [
-  'rent',
-  'electricity',
-  'water',
-  'service',
-  'other',
-];
-
-export function getTopRevenueSourceKey(row = {}) {
-  for (let i = REVENUE_SOURCE_KEYS.length - 1; i >= 0; i -= 1) {
-    const k = REVENUE_SOURCE_KEYS[i];
-    if (Number(row?.[k] || 0) > 0) return k;
-  }
-  return '';
-}
-
-export function buildRevenueSourceBarRows(sourceSeries = []) {
-  const rows = Array.isArray(sourceSeries) ? sourceSeries : [];
-  return rows.map((r) => {
-    const rent = toNonNegativeNumber(r?.rent);
-    const electricity = toNonNegativeNumber(r?.electricity);
-    const water = toNonNegativeNumber(r?.water);
-    const service = toNonNegativeNumber(r?.service);
-    const other = toNonNegativeNumber(r?.other);
-    const sum = rent + electricity + water + service + other;
-    const explicitTotal = Number(r?.total_billed);
-    return {
-      period: String(r?.period || ''),
-      rent,
-      electricity,
-      water,
-      service,
-      other,
-      total_billed:
-        Number.isFinite(explicitTotal) && explicitTotal > 0 ? explicitTotal : sum,
-    };
-  });
-}
-
-export function buildReceivablesAgingBarRows(receivablesAging = {}) {
-  const rawBuckets = Array.isArray(receivablesAging?.buckets)
-    ? receivablesAging.buckets
-    : [];
-  const byKey = new Map(
-    rawBuckets
-      .filter((b) => b && typeof b === 'object' && b.key)
-      .map((b) => [b.key, b])
-  );
-
-  return DASHBOARD_AGING_BUCKET_META.map((meta) => {
-    const matched = byKey.get(meta.key);
-    const safeKey = sanitizeChartKey(meta.key);
-    return {
-      key: meta.key,
-      label: matched?.label || meta.label,
-      amount: toNonNegativeNumber(matched?.amount),
-      count: toNonNegativeNumber(matched?.count),
-      fill: `var(--color-${safeKey})`,
-    };
-  });
-}
-
-export function resolveAgingBarBucketKey(barItem, index, rows = []) {
-  const candidate =
-    barItem?.payload?.key ??
-    barItem?.key ??
-    (Array.isArray(rows) && Number.isInteger(index) ? rows[index]?.key : '');
-  return DASHBOARD_AGING_BUCKET_KEYS.includes(candidate) ? candidate : '';
-}
-
-export function buildOccupancyBarRows(occupancySeries = []) {
-  const rows = Array.isArray(occupancySeries) ? occupancySeries : [];
-  return rows.map((r) => {
-    const rawRate = Number(r?.occupancy_rate);
-    const clampedRate = Number.isFinite(rawRate)
-      ? Math.min(100, Math.max(0, rawRate))
-      : 0;
-    return {
-      period: String(r?.period || ''),
-      occupied: toNonNegativeNumber(r?.occupied),
-      exploitable: toNonNegativeNumber(r?.exploitable),
-      occupancy_rate: clampedRate,
-    };
-  });
-}
+// ─── Reports (keep for ReportsPage.jsx) ─────────────────────────────────────
 
 export function buildReportsBuildingAgingChartData(agingByBuildingRows = []) {
   const rows = Array.isArray(agingByBuildingRows) ? agingByBuildingRows : [];
@@ -271,6 +266,8 @@ export function buildReportsBuildingAgingChartData(agingByBuildingRows = []) {
     ],
   };
 }
+
+// ─── Payments page (keep for PaymentsPage.jsx) ───────────────────────────────
 
 export function resolvePaymentsUrlQuery(searchStr = '') {
   const params = new URLSearchParams(String(searchStr || ''));
