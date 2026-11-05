@@ -365,6 +365,239 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
   }
   console.log(`[DailyJob] synced apartment statuses: expired->maintenance=${expiredAptIds.size}, other=${otherAffectedAptIds.size}`);
 
+  // 6. R-05: Tự động chuyển hóa đơn quá hạn sang OVERDUE (chạy trước bước 5 auto-billing để kịp tích lũy và carry-forward trong cùng ngày billing_day)
+  const overdueInvoices = await adminPool.query(
+    `UPDATE invoice
+     SET status = 'OVERDUE', updated_at = NOW()
+     WHERE status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
+       AND paid_amount < total_amount
+       AND due_date < $1::date
+       AND ($2::uuid IS NULL OR building_id = $2::uuid)
+     RETURNING id, org_id, total_amount, paid_amount`,
+    [effectiveDateYmd, buildingId]
+  );
+  for (const row of overdueInvoices.rows) {
+    await adminPool.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES (NULL, 'MARK_INVOICE_OVERDUE', 'invoice', $1, NULL, $2)`,
+      [row.id, JSON.stringify({ status: 'OVERDUE', id: row.id, as_of_date: effectiveDateYmd })]
+    );
+  }
+  const overdueMarked = overdueInvoices.rowCount || 0;
+  if (overdueMarked > 0) {
+    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueMarked}`);
+  }
+
+  // Tải cấu hình billing_config theo từng org cho bước 7 (phí phạt chậm) và bước 8 (nhắc nợ)
+  const billingConfigsRes = await adminPool.query(
+    `SELECT org_id, value FROM system_setting WHERE key = 'billing_config'`
+  );
+  const orgBillingConfigMap = new Map();
+  for (const r of billingConfigsRes.rows) {
+    const val = r.value || {};
+    orgBillingConfigMap.set(r.org_id, {
+      graceDays:
+        val.late_fee_grace_days !== undefined && val.late_fee_grace_days !== null
+          ? Math.max(0, Math.trunc(Number(val.late_fee_grace_days)))
+          : 5,
+      feePerDay:
+        val.late_fee_per_day !== undefined && val.late_fee_per_day !== null
+          ? Math.max(0, roundVND(Number(val.late_fee_per_day)))
+          : 100000,
+      lateFeeCap:
+        val.late_fee_cap !== undefined && val.late_fee_cap !== null && Number(val.late_fee_cap) > 0
+          ? roundVND(Number(val.late_fee_cap))
+          : null,
+      reminderDays: Array.isArray(val.reminder_days) ? val.reminder_days.map(Number) : [3, 7, 15],
+    });
+  }
+
+  // 7. R-11 & FR-064 (PRD §13.2 & §13.5): Tích lũy phí phạt chậm vào late_fee_accrual_tracker (KHÔNG sửa total_amount / subtotal_amount trên hóa đơn đã ISSUED)
+  let lateFeeUpdated = 0;
+  const lateCandidates = await adminPool.query(
+    `SELECT i.id, i.org_id
+     FROM invoice i
+     WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
+       AND i.contract_id IS NOT NULL
+       AND COALESCE(i.invoice_type, 'REGULAR') <> 'LATE_FEE_SETTLEMENT'
+       AND i.paid_amount < i.total_amount
+       AND i.due_date < $1::date
+       AND ($2::uuid IS NULL OR i.building_id = $2::uuid)`,
+    [effectiveDateYmd, buildingId]
+  );
+
+  for (const cand of lateCandidates.rows) {
+    const cfg = orgBillingConfigMap.get(cand.org_id) || {
+      graceDays: 5,
+      feePerDay: 100000,
+      lateFeeCap: null,
+    };
+
+    const txClient = await adminPool.connect();
+    try {
+      await txClient.query('BEGIN');
+      const lockedRes = await txClient.query(
+        `SELECT * FROM invoice WHERE id = $1 FOR UPDATE`,
+        [cand.id]
+      );
+      const lockedInv = lockedRes.rows[0];
+      if (
+        !lockedInv ||
+        !lockedInv.contract_id ||
+        lockedInv.invoice_type === 'LATE_FEE_SETTLEMENT' ||
+        !['OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED'].includes(lockedInv.status) ||
+        Number(lockedInv.paid_amount || 0) >= Number(lockedInv.total_amount || 0)
+      ) {
+        await txClient.query('ROLLBACK');
+        continue;
+      }
+
+      const lineAggRes = await txClient.query(
+        `SELECT
+           COUNT(*) FILTER (
+             WHERE il.item_type <> 'LATE_FEE'
+               AND il.credit_id IS NULL
+               AND NOT (
+                 il.item_type = 'ADJUSTMENT'
+                 AND (
+                   ia.adjustment_target = 'LATE_FEE'
+                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+                 )
+               )
+           )::int AS non_lf_line_count,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type <> 'LATE_FEE'
+               AND il.credit_id IS NULL
+               AND NOT (
+                 il.item_type = 'ADJUSTMENT'
+                 AND (
+                   ia.adjustment_target = 'LATE_FEE'
+                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+                 )
+               )
+           ), 0)::bigint AS principal_from_lines,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type = 'LATE_FEE'
+               AND il.amount > 0
+               AND COALESCE((il.formula_meta->>'carry_forward')::boolean, FALSE) = FALSE
+           ), 0)::bigint AS legacy_own_late_fee,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type = 'LATE_FEE' AND il.amount > 0
+           ), 0)::bigint AS all_late_fee_lines,
+           COALESCE(SUM(il.amount) FILTER (
+             WHERE il.item_type = 'ADJUSTMENT'
+               AND il.credit_id IS NULL
+               AND (
+                 ia.adjustment_target = 'LATE_FEE'
+                 OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
+               )
+           ), 0)::bigint AS late_fee_adjustment
+         FROM invoice_line il
+         LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id
+         WHERE il.invoice_id = $1`,
+        [lockedInv.id]
+      );
+      const agg = lineAggRes.rows[0] || {};
+
+      const trackerAggRes = await txClient.query(
+        `SELECT
+           COALESCE(SUM(accrued_total) FILTER (WHERE carried_to_invoice_id IS NOT NULL), 0)::bigint AS carried_accrued,
+           COALESCE(SUM(accrued_total) FILTER (WHERE carried_to_invoice_id IS NULL), 0)::bigint AS open_accrued
+         FROM late_fee_accrual_tracker
+         WHERE invoice_id = $1`,
+        [lockedInv.id]
+      );
+      const trAgg = trackerAggRes.rows[0] || {};
+
+      const legacyOwnLateFee = Number(agg.legacy_own_late_fee || 0);
+      const grossAccruedFee =
+        legacyOwnLateFee +
+        Number(trAgg.carried_accrued || 0) +
+        Number(trAgg.open_accrued || 0);
+
+      let principalAmount;
+      if (Number(agg.non_lf_line_count || 0) > 0) {
+        principalAmount = Math.max(0, Number(agg.principal_from_lines || 0));
+      } else {
+        const nonLateFeeAdj =
+          Number(lockedInv.adjustment_amount || 0) - Number(agg.late_fee_adjustment || 0);
+        principalAmount = Math.max(
+          0,
+          Number(lockedInv.subtotal_amount || 0) -
+            Number(agg.all_late_fee_lines || 0) +
+            nonLateFeeAdj
+        );
+      }
+
+      const accrual = computeLateFeeAccrual({
+        dueDateYmd: lockedInv.due_date,
+        asOfDateYmd: effectiveDateYmd,
+        totalAmount: Number(lockedInv.total_amount || 0),
+        paidAmount: Number(lockedInv.paid_amount || 0),
+        creditOffsetAmount: Number(lockedInv.credit_offset_amount || 0),
+        principalAmount,
+        grossAccruedLateFee: grossAccruedFee,
+        graceDays: cfg.graceDays,
+        lateFeePerDay: cfg.feePerDay,
+        maxLateFeeCap: cfg.lateFeeCap,
+      });
+
+      if (accrual.deltaFee <= 0) {
+        await txClient.query('ROLLBACK');
+        continue;
+      }
+
+      const trackerUpsertRes = await txClient.query(
+        `INSERT INTO late_fee_accrual_tracker (
+           org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date
+         )
+         VALUES ($1, $2, $3, $4, $5, $6::date)
+         ON CONFLICT (invoice_id) WHERE carried_to_invoice_id IS NULL
+         DO UPDATE SET
+           accrued_total = late_fee_accrual_tracker.accrued_total + EXCLUDED.accrued_total,
+           chargeable_days = EXCLUDED.chargeable_days,
+           as_of_date = EXCLUDED.as_of_date,
+           updated_at = NOW()
+         RETURNING id, accrued_total`,
+        [
+          lockedInv.org_id,
+          lockedInv.contract_id,
+          lockedInv.id,
+          accrual.deltaFee,
+          accrual.chargeableDays,
+          effectiveDateYmd,
+        ]
+      );
+      const upsertedTracker = trackerUpsertRes.rows[0];
+
+      await txClient.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         VALUES (NULL, 'ACCRUE_LATE_FEE_TRACKER', 'late_fee_accrual_tracker', $1, NULL, $2::jsonb)`,
+        [
+          upsertedTracker.id,
+          JSON.stringify({
+            invoice_id: lockedInv.id,
+            contract_id: lockedInv.contract_id,
+            delta_fee: accrual.deltaFee,
+            open_accrued_total: Number(upsertedTracker.accrued_total),
+            expected_fee: accrual.expectedTotalLateFee,
+            gross_accrued_fee: grossAccruedFee,
+            penalty_days: accrual.chargeableDays,
+            as_of_date: effectiveDateYmd,
+          }),
+        ]
+      );
+
+      await txClient.query('COMMIT');
+      lateFeeUpdated += 1;
+    } catch (lfErr) {
+      await txClient.query('ROLLBACK').catch(() => {});
+      console.error('[DailyJob] late fee error:', lfErr.message);
+    } finally {
+      txClient.release();
+    }
+  }
+
   // 5. FR-066, R-05 & AC-015.1: Tự động sinh hóa đơn nháp định kỳ theo billing_day (xử lý ngày 29/30/31 vào cuối tháng ngắn)
   let autoCreatedInvoices = 0;
   let skippedMeterContracts = 0;
@@ -465,237 +698,6 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
     console.error('[DailyJob] auto-billing step failed:', autoBillErr.message);
   }
 
-  // 6. R-05: Tự động chuyển hóa đơn quá hạn sang OVERDUE (hỗ trợ cả ADJUSTED khi paid_amount < total_amount)
-  const overdueInvoices = await adminPool.query(
-    `UPDATE invoice
-     SET status = 'OVERDUE', updated_at = NOW()
-     WHERE status IN ('ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
-       AND paid_amount < total_amount
-       AND due_date < $1::date
-       AND ($2::uuid IS NULL OR building_id = $2::uuid)
-     RETURNING id, org_id, total_amount, paid_amount`,
-    [effectiveDateYmd, buildingId]
-  );
-  for (const row of overdueInvoices.rows) {
-    await adminPool.query(
-      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-       VALUES (NULL, 'MARK_INVOICE_OVERDUE', 'invoice', $1, NULL, $2)`,
-      [row.id, JSON.stringify({ status: 'OVERDUE', id: row.id, as_of_date: effectiveDateYmd })]
-    );
-  }
-  const overdueMarked = overdueInvoices.rowCount || 0;
-  if (overdueMarked > 0) {
-    console.log(`[DailyJob] invoices marked OVERDUE: ${overdueMarked}`);
-  }
-
-  // Tải cấu hình billing_config theo từng org cho cả bước 7 (phí phạt chậm) và bước 8 (nhắc nợ)
-  const billingConfigsRes = await adminPool.query(
-    `SELECT org_id, value FROM system_setting WHERE key = 'billing_config'`
-  );
-  const orgBillingConfigMap = new Map();
-  for (const r of billingConfigsRes.rows) {
-    const val = r.value || {};
-    orgBillingConfigMap.set(r.org_id, {
-      graceDays:
-        val.late_fee_grace_days !== undefined && val.late_fee_grace_days !== null
-          ? Math.max(0, Math.trunc(Number(val.late_fee_grace_days)))
-          : 5,
-      feePerDay:
-        val.late_fee_per_day !== undefined && val.late_fee_per_day !== null
-          ? Math.max(0, roundVND(Number(val.late_fee_per_day)))
-          : 100000,
-      lateFeeCap:
-        val.late_fee_cap !== undefined && val.late_fee_cap !== null && Number(val.late_fee_cap) > 0
-          ? roundVND(Number(val.late_fee_cap))
-          : null,
-      reminderDays: Array.isArray(val.reminder_days) ? val.reminder_days.map(Number) : [3, 7, 15],
-    });
-  }
-
-  // 7. R-11 & FR-064: Tự động cộng phí phạt chậm thanh toán append-only có khóa dòng FOR UPDATE
-  // Bảo toàn dòng miễn giảm LATE_FEE, tôn trọng late_fee_cap và dừng cộng khi nợ gốc (principal) đã thanh toán đủ
-  let lateFeeUpdated = 0;
-  const lateCandidates = await adminPool.query(
-    `SELECT i.id, i.org_id
-     FROM invoice i
-     WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
-       AND i.paid_amount < i.total_amount
-       AND i.due_date < $1::date
-       AND ($2::uuid IS NULL OR i.building_id = $2::uuid)`,
-    [effectiveDateYmd, buildingId]
-  );
-
-  for (const cand of lateCandidates.rows) {
-    const cfg = orgBillingConfigMap.get(cand.org_id) || {
-      graceDays: 5,
-      feePerDay: 100000,
-      lateFeeCap: null,
-    };
-
-    const txClient = await adminPool.connect();
-    try {
-      await txClient.query('BEGIN');
-      const lockedRes = await txClient.query(
-        `SELECT * FROM invoice WHERE id = $1 FOR UPDATE`,
-        [cand.id]
-      );
-      const lockedInv = lockedRes.rows[0];
-      if (
-        !lockedInv ||
-        !['OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED'].includes(lockedInv.status) ||
-        Number(lockedInv.paid_amount || 0) >= Number(lockedInv.total_amount || 0)
-      ) {
-        await txClient.query('ROLLBACK');
-        continue;
-      }
-
-      const lineAggRes = await txClient.query(
-        `SELECT
-           COUNT(*) FILTER (
-             WHERE il.item_type <> 'LATE_FEE'
-               AND il.credit_id IS NULL
-               AND NOT (
-                 il.item_type = 'ADJUSTMENT'
-                 AND (
-                   ia.adjustment_target = 'LATE_FEE'
-                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
-                 )
-               )
-           )::int AS non_lf_line_count,
-           COALESCE(SUM(il.amount) FILTER (
-             WHERE il.item_type <> 'LATE_FEE'
-               AND il.credit_id IS NULL
-               AND NOT (
-                 il.item_type = 'ADJUSTMENT'
-                 AND (
-                   ia.adjustment_target = 'LATE_FEE'
-                   OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
-                 )
-               )
-           ), 0)::bigint AS principal_from_lines,
-           COALESCE(SUM(il.amount) FILTER (
-             WHERE il.item_type = 'LATE_FEE' AND il.amount > 0
-           ), 0)::bigint AS gross_accrued_late_fee,
-           COALESCE(SUM(il.amount) FILTER (
-             WHERE il.item_type = 'ADJUSTMENT'
-               AND il.credit_id IS NULL
-               AND (
-                 ia.adjustment_target = 'LATE_FEE'
-                 OR COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE'
-               )
-           ), 0)::bigint AS late_fee_adjustment
-         FROM invoice_line il
-         LEFT JOIN invoice_adjustment ia ON ia.id = il.adjustment_id
-         WHERE il.invoice_id = $1`,
-        [lockedInv.id]
-      );
-      const agg = lineAggRes.rows[0] || {};
-      const grossAccruedFee = Number(agg.gross_accrued_late_fee || 0);
-      let principalAmount;
-      if (Number(agg.non_lf_line_count || 0) > 0) {
-        principalAmount = Math.max(0, Number(agg.principal_from_lines || 0));
-      } else {
-        const nonLateFeeAdj =
-          Number(lockedInv.adjustment_amount || 0) - Number(agg.late_fee_adjustment || 0);
-        principalAmount = Math.max(
-          0,
-          Number(lockedInv.subtotal_amount || 0) -
-            grossAccruedFee +
-            nonLateFeeAdj
-        );
-      }
-
-      const accrual = computeLateFeeAccrual({
-        dueDateYmd: lockedInv.due_date,
-        asOfDateYmd: effectiveDateYmd,
-        totalAmount: Number(lockedInv.total_amount || 0),
-        paidAmount: Number(lockedInv.paid_amount || 0),
-        creditOffsetAmount: Number(lockedInv.credit_offset_amount || 0),
-        principalAmount,
-        grossAccruedLateFee: grossAccruedFee,
-        graceDays: cfg.graceDays,
-        lateFeePerDay: cfg.feePerDay,
-        maxLateFeeCap: cfg.lateFeeCap,
-      });
-
-      if (accrual.deltaFee <= 0) {
-        await txClient.query('ROLLBACK');
-        continue;
-      }
-
-      const deltaDays =
-        cfg.feePerDay > 0
-          ? Math.max(1, Math.round(accrual.deltaFee / cfg.feePerDay))
-          : 1;
-      const formulaMeta = {
-        overdue_days: accrual.overdueDays,
-        grace_days: cfg.graceDays,
-        billable_days: accrual.chargeableDays,
-        fee_per_day: cfg.feePerDay,
-        late_fee_cap: cfg.lateFeeCap,
-        expected_gross_fee: accrual.expectedTotalLateFee,
-        gross_accrued_before: grossAccruedFee,
-        delta_fee: accrual.deltaFee,
-        principal_amount: principalAmount,
-        as_of_date: effectiveDateYmd,
-      };
-
-      await txClient.query(
-        `INSERT INTO invoice_line (
-           invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta
-         )
-         VALUES ($1, 'LATE_FEE', $2, $3, 'ngày', $4, $5, $6::jsonb)`,
-        [
-          lockedInv.id,
-          `Phạt chậm thanh toán (${accrual.chargeableDays} ngày sau ${cfg.graceDays} ngày ân hạn × ${cfg.feePerDay.toLocaleString('vi-VN')} ₫/ngày)`,
-          deltaDays,
-          cfg.feePerDay,
-          accrual.deltaFee,
-          JSON.stringify(formulaMeta),
-        ]
-      );
-      await txClient.query(
-        `UPDATE invoice
-         SET subtotal_amount = subtotal_amount + $1,
-             total_amount = total_amount + $1,
-             status = CASE WHEN status = 'ISSUED' THEN 'OVERDUE' ELSE status END,
-             updated_at = NOW()
-         WHERE id = $2`,
-        [accrual.deltaFee, lockedInv.id]
-      );
-      await txClient.query(
-        `UPDATE receivable
-         SET amount = amount + $1,
-             updated_at = NOW()
-         WHERE invoice_id = $2
-           AND status IN ('OPEN', 'PARTIALLY_PAID')`,
-        [accrual.deltaFee, lockedInv.id]
-      );
-      await txClient.query(
-        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
-         VALUES (NULL, 'ACCRUE_LATE_FEE', 'invoice', $1, NULL, $2::jsonb)`,
-        [
-          lockedInv.id,
-          JSON.stringify({
-            delta_fee: accrual.deltaFee,
-            expected_fee: accrual.expectedTotalLateFee,
-            gross_accrued_fee: grossAccruedFee,
-            penalty_days: accrual.chargeableDays,
-            as_of_date: effectiveDateYmd,
-          }),
-        ]
-      );
-
-      await txClient.query('COMMIT');
-      lateFeeUpdated += 1;
-    } catch (lfErr) {
-      await txClient.query('ROLLBACK').catch(() => {});
-      console.error('[DailyJob] late fee error:', lfErr.message);
-    } finally {
-      txClient.release();
-    }
-  }
-
   // 8. FR-039 & PRD Mục 10.1 & 12.4: Nhắc nợ tự động đa mốc (-3, 0, +3, +7, +15 ngày)
   try {
     const unpaidInvoicesRes = await adminPool.query(
@@ -737,18 +739,19 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
       const remainingAmount = Number(inv.total_amount) - Number(inv.paid_amount);
       const dueDateStr = getTodayVnDateStr(inv.due_date);
 
+      const periodLabel = inv.period ? `kỳ ${inv.period}` : 'tất toán phí phạt';
       if (daysDiff === -3) {
         stageKey = 'PRE_DUE_3D';
         title = `Nhắc thanh toán hóa đơn ${inv.invoice_code} (còn 3 ngày)`;
-        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) sẽ đến hạn vào ngày ${dueDateStr}. Vui lòng thanh toán đúng hạn.`;
+        content = `Hóa đơn ${periodLabel} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) sẽ đến hạn vào ngày ${dueDateStr}. Vui lòng thanh toán đúng hạn.`;
       } else if (daysDiff === 0) {
         stageKey = 'DUE_TODAY';
         title = `Hóa đơn ${inv.invoice_code} đến hạn thanh toán hôm nay`;
-        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đến hạn thanh toán hôm nay (${dueDateStr}). Vui lòng thanh toán để tránh phát sinh phí phạt chậm.`;
+        content = `Hóa đơn ${periodLabel} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đến hạn thanh toán hôm nay (${dueDateStr}). Vui lòng thanh toán để tránh phát sinh phí phạt chậm.`;
       } else if (daysDiff > 0 && reminderDays.includes(daysDiff)) {
         stageKey = `OVERDUE_${daysDiff}D`;
         title = `[QUÁ HẠN] Nhắc nợ hóa đơn ${inv.invoice_code} quá hạn ${daysDiff} ngày`;
-        content = `Hóa đơn kỳ ${inv.period} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đã quá hạn ${daysDiff} ngày. Vui lòng hoàn tất thanh toán để tránh các biện pháp xử lý công nợ tiếp theo.`;
+        content = `Hóa đơn ${periodLabel} căn hộ ${inv.apartment_code} (${remainingAmount.toLocaleString('vi-VN')} ₫) đã quá hạn ${daysDiff} ngày. Vui lòng hoàn tất thanh toán để tránh các biện pháp xử lý công nợ tiếp theo.`;
       }
 
       if (!stageKey) continue;

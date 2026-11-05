@@ -33,7 +33,7 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     tenantIds: [],
     userIds: [],
     personIds: [],
-    runDates: ['2028-02-28', '2028-02-29', '2028-03-15', '2028-03-16', '2028-03-17', '2028-03-18', '2028-05-06', '2028-05-09', '2028-05-10', '2028-05-25', '2028-05-30'],
+    runDates: ['2028-02-28', '2028-02-29', '2028-03-15', '2028-03-16', '2028-03-17', '2028-03-18', '2028-05-06', '2028-05-09', '2028-05-10', '2028-05-25', '2028-05-30', '2028-06-08', '2028-06-12'],
     origBillingConfig: null,
     testStartedAt: new Date().toISOString(),
   };
@@ -72,6 +72,18 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       );
 
       if (cleanup.contractIds.length > 0 || cleanup.invoiceIds.length > 0) {
+        await c.query(
+          `DELETE FROM audit_log
+           WHERE entity = 'late_fee_accrual_tracker'
+             AND (
+               entity_id IN (
+                 SELECT id FROM late_fee_accrual_tracker
+                 WHERE invoice_id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])
+               )
+               OR (after->>'invoice_id') = ANY($3::text[])
+             )`,
+          [cleanup.invoiceIds, cleanup.contractIds, cleanup.invoiceIds.map(String)]
+        );
         await c.query(
           `DELETE FROM audit_log
            WHERE entity = 'invoice'
@@ -420,36 +432,43 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       [orgId, testBuildingId, c31.contractId, c31.tenantId, invId]
     );
 
-    // 4a. asOfDate = 2028-05-06 (overdueDays = 5, within 5 grace days): status -> OVERDUE, late fee = 0
+    // 4a. asOfDate = 2028-05-06 (overdueDays = 5, within 5 grace days): status -> OVERDUE, no tracker row, total_amount immutable
     await runDailyJobs({ asOfDate: '2028-05-06', buildingId: testBuildingId });
     let cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
     assert.equal(cur.status, 'OVERDUE');
-    assert.equal(Number(cur.total_amount), 10000000);
+    assert.equal(Number(cur.total_amount), 10000000, '4a: total_amount immutable');
+    const trackerA = await adminPool.query(`SELECT * FROM late_fee_accrual_tracker WHERE invoice_id = $1`, [invId]);
+    assert.equal(trackerA.rowCount, 0, '4a: no tracker before grace period ends');
 
-    // 4b. asOfDate = 2028-05-09 (overdueDays = 8 -> 3 * 100.000 = 300.000 ₫)
+    // 4b. asOfDate = 2028-05-09 (overdueDays = 8 -> 3 * 100.000 = 300.000 ₫ in tracker; invoice & receivable unchanged; idempotent on re-run)
+    await runDailyJobs({ asOfDate: '2028-05-09', buildingId: testBuildingId });
     await runDailyJobs({ asOfDate: '2028-05-09', buildingId: testBuildingId });
     cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
-    assert.equal(Number(cur.total_amount), 10300000);
+    assert.equal(Number(cur.total_amount), 10000000, '4b: total_amount still immutable');
+    assert.equal(Number(cur.subtotal_amount), 10000000, '4b: subtotal_amount still immutable');
     let rec = (await adminPool.query(`SELECT * FROM receivable WHERE invoice_id = $1`, [invId])).rows[0];
-    assert.equal(Number(rec.amount), 10300000);
-
-    // 4c. Simulate approved -200.000 ₫ LATE_FEE waiver -> total = 10.100.000 ₫; run 2028-05-10 -> deltaFee = 100.000 ₫ -> total = 10.200.000 ₫
-    await adminPool.query(
-      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
-       VALUES ($1, 'ADJUSTMENT', 'Miễn giảm phí phạt chậm', 1, 'lần', -200000, -200000, '{"adjusts_item_type":"LATE_FEE"}'::jsonb)`,
+    assert.equal(Number(rec.amount), 10000000, '4b: source receivable amount unchanged');
+    const lfLinesB = await adminPool.query(`SELECT * FROM invoice_line WHERE invoice_id = $1 AND item_type = 'LATE_FEE'`, [invId]);
+    assert.equal(lfLinesB.rowCount, 0, '4b: no LATE_FEE line inserted on issued invoice');
+    const trackerB = await adminPool.query(
+      `SELECT accrued_total, chargeable_days FROM late_fee_accrual_tracker WHERE invoice_id = $1 ORDER BY as_of_date DESC`,
       [invId]
     );
-    await adminPool.query(
-      `UPDATE invoice SET adjustment_amount = -200000, total_amount = 10100000 WHERE id = $1`,
-      [invId]
-    );
-    await adminPool.query(`UPDATE receivable SET amount = 10100000 WHERE invoice_id = $1`, [invId]);
+    assert.equal(trackerB.rowCount, 1, '4b: exactly 1 open tracker row even after same-day re-run');
+    assert.equal(Number(trackerB.rows[0].accrued_total), 300000, '4b: tracker accrued_total=300000');
+    assert.equal(Number(trackerB.rows[0].chargeable_days), 3, '4b: chargeable_days=3');
 
+    // 4c. Next run on 2028-05-10 (overdueDays = 9 -> 4 chargeable days -> deltaFee = 100.000 ₫ -> tracker = 400.000 ₫)
     await runDailyJobs({ asOfDate: '2028-05-10', buildingId: testBuildingId });
+    const trackerC = await adminPool.query(
+      `SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1 ORDER BY as_of_date DESC LIMIT 1`,
+      [invId]
+    );
+    assert.equal(Number(trackerC.rows[0].accrued_total), 400000, '4c: tracker accrued_total=400000 (day 10)');
     cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
-    assert.equal(Number(cur.total_amount), 10200000, 'Must append only deltaFee = 100.000 ₫, preserving -200.000 ₫ waiver');
+    assert.equal(Number(cur.total_amount), 10000000, '4c: total_amount still immutable');
 
-    // 4d. Set late_fee_cap = 500000, run 2028-05-25 -> gross LATE_FEE caps at 500.000 ₫ (deltaFee = 100.000 ₫ -> total = 10.300.000 ₫)
+    // 4d. Set late_fee_cap = 500000, run 2028-05-25 -> tracker caps at 500.000 ₫
     await adminPool.query(
       `UPDATE system_setting
        SET value = COALESCE(value, '{}'::jsonb) || '{"late_fee_cap": 500000}'::jsonb
@@ -457,12 +476,15 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       [orgId]
     );
     await runDailyJobs({ asOfDate: '2028-05-25', buildingId: testBuildingId });
-    cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
-    assert.equal(Number(cur.total_amount), 10300000, 'Late fee must cap at 500.000 ₫ gross (10.300.000 ₫ net after -200k waiver)');
+    const trackerD = await adminPool.query(
+      `SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1 ORDER BY as_of_date DESC LIMIT 1`,
+      [invId]
+    );
+    assert.equal(Number(trackerD.rows[0].accrued_total), 500000, '4d: tracker capped at 500000');
 
-    // 4e. Tenant pays 10.000.000 ₫ (100% principal settled, 300.000 ₫ net late fee remaining), clear cap, run 2028-05-30 -> deltaFee = 0!
+    // 4e. Tenant pays 10.000.000 ₫ (100% principal settled), clear cap, run 2028-05-30 -> deltaFee = 0, tracker stays 500.000 ₫
     await adminPool.query(
-      `UPDATE invoice SET paid_amount = 10000000, status = 'PARTIALLY_PAID' WHERE id = $1`,
+      `UPDATE invoice SET paid_amount = 10000000, status = 'PAID' WHERE id = $1`,
       [invId]
     );
     await adminPool.query(
@@ -472,8 +494,13 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       [orgId]
     );
     await runDailyJobs({ asOfDate: '2028-05-30', buildingId: testBuildingId });
+    const trackerE = await adminPool.query(
+      `SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1 ORDER BY as_of_date DESC LIMIT 1`,
+      [invId]
+    );
+    assert.equal(Number(trackerE.rows[0].accrued_total), 500000, '4e: tracker stays at cap after principal paid');
     cur = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invId])).rows[0];
-    assert.equal(Number(cur.total_amount), 10300000, 'Must stop accruing late fees once principal is 100% settled (no penalty-on-penalty)');
+    assert.equal(Number(cur.total_amount), 10000000, '4e: total_amount still never changed');
   });
 
   await t.test('5. Credit-offset principal stop condition without double counting (Review Important #1, FR-064)', async () => {
@@ -502,21 +529,24 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       [orgId, testBuildingId, c31.contractId, c31.tenantId, invAId]
     );
 
-    // 2028-06-08 (overdueDays = 7 -> 200.000 ₫ late fee -> total = 8.200.000 ₫)
+    // 2028-06-08 (overdueDays = 7 -> 200.000 ₫ late fee in tracker, invoice total stays 8.000.000 ₫)
     await runDailyJobs({ asOfDate: '2028-06-08', buildingId: testBuildingId });
     let curA = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invAId])).rows[0];
-    assert.equal(Number(curA.total_amount), 8200000);
+    assert.equal(Number(curA.total_amount), 8000000, 'Invoice A total_amount must remain immutable at 8.000.000 ₫');
+    let trA = (await adminPool.query(`SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1`, [invAId])).rows[0];
+    assert.equal(Number(trA.accrued_total), 200000, 'Invoice A tracker must accrue 200.000 ₫');
 
-    // Tenant pays 8.000.000 ₫ cash -> paid_amount (8M) + credit_offset_amount (2M) = 10M >= principal (10M)
+    // Tenant pays 7.900.000 ₫ cash + has 100.000 ₫ carried LATE_FEE or pays 8.000.000 ₫:
+    // Let's also test partial payment where paid_amount (8M) + credit_offset_amount (2M) >= principal (10M) on an invoice with total > 8M or PAID:
     await adminPool.query(
-      `UPDATE invoice SET paid_amount = 8000000, status = 'PARTIALLY_PAID' WHERE id = $1`,
+      `UPDATE invoice SET paid_amount = 8000000, status = 'PAID' WHERE id = $1`,
       [invAId]
     );
     await runDailyJobs({ asOfDate: '2028-06-12', buildingId: testBuildingId });
-    curA = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invAId])).rows[0];
+    trA = (await adminPool.query(`SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1`, [invAId])).rows[0];
     assert.equal(
-      Number(curA.total_amount),
-      8200000,
+      Number(trA.accrued_total),
+      200000,
       'Must recognize paid_amount + credit_offset_amount >= principalAmount and stop accruing late fees'
     );
 
@@ -529,13 +559,14 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     );
     const cbId = cbRes.rows[0].id;
 
+    // Include a 300k carried LATE_FEE line so even when tenant pays 8M cash (8M + 2M credit = 10M principal settled, 300k carried fee remaining < 8.3M total), Step 7 enters computeLateFeeAccrual and stops!
     const invBRes = await adminPool.query(
       `INSERT INTO invoice (
          org_id, building_id, apartment_id, contract_id, tenant_id,
          invoice_code, period, issue_date, due_date,
          subtotal_amount, adjustment_amount, credit_offset_amount, total_amount, paid_amount, status
        )
-       VALUES ($1, $2, $3, $4, $5, $6, '2028-06', '2028-05-26', '2028-06-01', 10000000, 0, 2000000, 8000000, 6000000, 'PARTIALLY_PAID')
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-06', '2028-05-26', '2028-06-01', 10300000, 0, 2000000, 8300000, 6000000, 'PARTIALLY_PAID')
        RETURNING id`,
       [orgId, testBuildingId, c15.aptId, c15.contractId, c15.tenantId, `INV-LF-CRB-${suffix}`]
     );
@@ -543,8 +574,9 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     cleanup.invoiceIds.push(invBId);
 
     await adminPool.query(
-      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
-       VALUES ($1, 'RENT', 'Tiền thuê phòng kỳ 2028-06', 1, 'tháng', 10000000, 10000000)`,
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
+       VALUES ($1, 'RENT', 'Tiền thuê phòng kỳ 2028-06', 1, 'tháng', 10000000, 10000000, '{}'::jsonb),
+              ($1, 'LATE_FEE', 'Phí phạt kỳ trước dồn sang', 1, 'kỳ', 300000, 300000, '{"carry_forward": true}'::jsonb)`,
       [invBId]
     );
     await adminPool.query(
@@ -553,16 +585,18 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
       [invBId, cbId]
     );
 
-    // Tenant paid only 6M cash + 2M credit = 8M < 10M gross principal -> still owes 2M principal, MUST accrue on 2028-06-08 (200k)
+    // Tenant paid only 6M cash + 2M credit = 8M < 10M gross principal -> still owes 2M principal, MUST accrue on 2028-06-08 (200k in tracker)
     await runDailyJobs({ asOfDate: '2028-06-08', buildingId: testBuildingId });
     let curB = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invBId])).rows[0];
-    assert.equal(Number(curB.total_amount), 8200000, 'Must not double-count credit_id line and credit_offset_amount when 2M principal remains unpaid');
+    assert.equal(Number(curB.total_amount), 8300000, 'Invoice B total_amount must stay immutable at 8.300.000 ₫');
+    let trB = (await adminPool.query(`SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1`, [invBId])).rows[0];
+    assert.equal(Number(trB.accrued_total), 200000, 'Must not double-count credit_id line and credit_offset_amount when 2M principal remains unpaid');
 
-    // Now tenant pays remaining 2M principal (paid_amount = 8M) -> 8M + 2M = 10M -> stops accruing on 2028-06-12
+    // Now tenant pays remaining 2M principal (paid_amount = 8M < 8.3M total, leaving 300k carried LATE_FEE unpaid) -> 8M + 2M = 10M >= 10M principal -> stops accruing on 2028-06-12!
     await adminPool.query(`UPDATE invoice SET paid_amount = 8000000 WHERE id = $1`, [invBId]);
     await runDailyJobs({ asOfDate: '2028-06-12', buildingId: testBuildingId });
-    curB = (await adminPool.query(`SELECT * FROM invoice WHERE id = $1`, [invBId])).rows[0];
-    assert.equal(Number(curB.total_amount), 8200000, 'Once 8M cash + 2M credit = 10M gross principal, accrual stops');
+    trB = (await adminPool.query(`SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1`, [invBId])).rows[0];
+    assert.equal(Number(trB.accrued_total), 200000, 'Once 8M cash + 2M credit = 10M gross principal, accrual stops even with 300k carried LATE_FEE remaining');
 
     await adminPool.query(`DELETE FROM invoice_line WHERE credit_id = $1`, [cbId]);
     await adminPool.query(`DELETE FROM credit_balance WHERE id = $1`, [cbId]);
