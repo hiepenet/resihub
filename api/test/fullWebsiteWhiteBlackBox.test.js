@@ -44,6 +44,7 @@ import {
   checkLookupRateLimit,
 } from '../src/utils/piiMask.js';
 import { runDailyJobs } from '../src/jobs/daily.js';
+import { calculateContractOpenDebts } from '../src/routes/deposits.js';
 import { roundVND } from '../src/services/pricing.js';
 import { adminPool as coreAdminPool, appPool as coreAppPool } from '../src/db/client.js';
 
@@ -341,6 +342,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
         await adminPool.query('DELETE FROM payment WHERE id = $1', [payId]).catch(() => {});
       }
       for (const invId of cleanup.invoiceIds) {
+        await adminPool.query("DELETE FROM notification WHERE payload->>'invoice_id' = $1", [invId]).catch(() => {});
         await adminPool.query('DELETE FROM payment WHERE invoice_id = $1', [invId]).catch(() => {});
         await adminPool.query('DELETE FROM receivable WHERE invoice_id = $1', [invId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice_line WHERE invoice_id = $1', [invId]).catch(() => {});
@@ -350,6 +352,7 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
         await adminPool.query('DELETE FROM service_subscription WHERE id = $1', [subId]).catch(() => {});
       }
       for (const cId of cleanup.contractIds) {
+        await adminPool.query("DELETE FROM notification WHERE (payload->>'invoice_id') IN (SELECT id::text FROM invoice WHERE contract_id = $1)", [cId]).catch(() => {});
         await adminPool.query('DELETE FROM payment WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM receivable WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
@@ -1843,10 +1846,47 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
 
     await runDailyJobs();
 
-    // R-11: finalInvId có due_date = CURRENT_DATE - 7 days (quá 5 ngày ân hạn 2 ngày) -> tự sang OVERDUE và cộng dòng LATE_FEE 2 × 100.000 = 200.000 ₫
+    // R-11 & FR-064: finalInvId có due_date = CURRENT_DATE - 7 days (quá 5 ngày ân hạn 2 ngày) -> tự sang OVERDUE, giữ nguyên total_amount = 5.500.000 ₫ bất biến và tích lũy 200.000 ₫ vào late_fee_accrual_tracker
     const overdueCheck = await adminPool.query('SELECT status, total_amount FROM invoice WHERE id = $1', [finalInvId]);
     assert.equal(overdueCheck.rows[0].status, 'OVERDUE', 'R-11: Hóa đơn quá hạn > 5 ngày phải sang OVERDUE');
-    assert.equal(Number(overdueCheck.rows[0].total_amount), 5700000, 'R-11: Phải tự động cộng phạt chậm thanh toán 2 ngày × 100.000 ₫/ngày = 200.000 ₫');
+    assert.equal(Number(overdueCheck.rows[0].total_amount), 5500000, 'R-11: total_amount bất biến (không cộng phạt trực tiếp vào hóa đơn gốc đã phát hành)');
+    const tracker = await adminPool.query(
+      'SELECT accrued_total FROM late_fee_accrual_tracker WHERE invoice_id = $1 ORDER BY as_of_date DESC LIMIT 1',
+      [finalInvId]
+    );
+    assert.ok(tracker.rowCount > 0, 'R-11: tracker row created');
+    assert.equal(Number(tracker.rows[0].accrued_total), 200000, 'R-11: tracker.accrued_total = 2 ngày × 100.000 ₫');
+
+    // 7b: Deposit settlement — LATE_FEE in invoice counted as serviceDebt (Bug #1 fix)
+    const lf7bContractIns = await adminPool.query(
+      `INSERT INTO contract (building_id, apartment_id, primary_tenant_id, start_date, end_date, rent_amount, billing_day, deposit_amount, status)
+       VALUES ($1, $2, $3, CURRENT_DATE - INTERVAL '120 days', CURRENT_DATE - INTERVAL '90 days', 5000000, 5, 10000000, 'TERMINATED')
+       RETURNING id`,
+      [vopAId, testApt2Id, primaryTenantId]
+    );
+    const lf7bContractId = lf7bContractIns.rows[0].id;
+    cleanup.contractIds.push(lf7bContractId);
+
+    const lf7bInvIns = await adminPool.query(
+      `INSERT INTO invoice (org_id, building_id, apartment_id, contract_id, tenant_id, invoice_code, period, status, subtotal_amount, total_amount, paid_amount, due_date)
+       VALUES ($1, $2, $3, $4, $5, $6, '2026-08', 'OVERDUE', 5300000, 5300000, 0, CURRENT_DATE - INTERVAL '85 days')
+       RETURNING id`,
+      [orgId, vopAId, testApt2Id, lf7bContractId, primaryTenantId, `INV-7B-${suffix}`]
+    );
+    const lf7bInvId = lf7bInvIns.rows[0].id;
+    cleanup.invoiceIds.push(lf7bInvId);
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES
+         ($1, 'RENT', 'Tiền thuê tháng 08', 1, 'kỳ', 5000000, 5000000),
+         ($1, 'LATE_FEE', 'Phí phạt chậm thanh toán kỳ trước (dồn sang kỳ này)', 1, 'kỳ', 300000, 300000)`,
+      [lf7bInvId]
+    );
+
+    const debts7b = await calculateContractOpenDebts(adminPool, lf7bContractId);
+    assert.equal(debts7b.rentDebt, 5000000, '7b: rentDebt = RENT only');
+    assert.ok(debts7b.serviceDebt >= 300000, '7b: serviceDebt includes LATE_FEE');
+    assert.equal(debts7b.serviceDebt, 300000, '7b: serviceDebt = 300,000 LATE_FEE');
 
     const expCtrAfter = await adminPool.query('SELECT status FROM contract WHERE id = $1', [expCtrId]);
     assert.equal(expCtrAfter.rows[0].status, 'EXPIRED', 'DailyJob phải tự chuyển HĐ hết hạn sang EXPIRED');
