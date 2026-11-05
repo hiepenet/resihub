@@ -30,6 +30,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
   const { default: invoicesRoute, generateInvoicesCore, issueDraftInvoiceInTx, createLateFeeSettlementInvoiceInTx } = await import('../src/routes/invoices.js');
   const { default: depositsRoute, calculateContractOpenDebts } = await import('../src/routes/deposits.js');
   const { default: attachmentsRoute } = await import('../src/routes/attachments.js');
+  const { default: reportsRoute } = await import('../src/routes/reports.js');
   const { runDailyJobs } = await import('../src/jobs/daily.js');
   const { todayVietnamYmd, currentVietnamPeriod } = await import('../src/services/serviceBilling.js');
 
@@ -42,6 +43,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
   app.use('/api/v1/invoices', invoicesRoute);
   app.use('/api/v1/deposits', depositsRoute);
   app.use('/api/v1/attachments', attachmentsRoute);
+  app.use('/api/v1/reports', reportsRoute);
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -108,6 +110,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
       ).catch(() => {});
     }
     for (const invId of cleanup.invoiceIds) {
+      await adminPool.query(`DELETE FROM notification WHERE payload->>'invoice_id' = $1`, [String(invId)]).catch(() => {});
       await adminPool.query('DELETE FROM invoice_adjustment WHERE invoice_id = $1', [invId]).catch(() => {});
       await adminPool.query('DELETE FROM invoice_line WHERE invoice_id = $1', [invId]).catch(() => {});
       await adminPool.query('DELETE FROM receivable WHERE invoice_id = $1', [invId]).catch(() => {});
@@ -1139,6 +1142,11 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     );
     const srcInvId = srcInvRes.rows[0].id;
     cleanup.invoiceIds.push(srcInvId);
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê 2028-06', 1, 'tháng', 8000000, 8000000)`,
+      [srcInvId]
+    );
 
     const trRes = await adminPool.query(
       `INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
@@ -1200,5 +1208,151 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     assert.equal(Number(afterRec.rows[0].amount), 200000, '6c: receivable reduced to 200,000');
     const afterTr = await adminPool.query(`SELECT carried_to_invoice_id FROM late_fee_accrual_tracker WHERE id = $1`, [trId]);
     assert.equal(afterTr.rows[0].carried_to_invoice_id, settlementInvId, '6c: tracker.carried_to_invoice_id unchanged');
+    const debts6c = await calculateContractOpenDebts(adminPool, c6cId);
+    assert.equal(debts6c.serviceDebt, 200000, '6c (RF3): calculateContractOpenDebts reflects post-waiver settlement total');
+  });
+
+  await t.test('11. Review Fixes: DRAFT VOID tracker release (Critical #1), DRAFT LATE_FEE line readonly (Critical #3), and Reports null-period billing (Important #6)', async () => {
+    const resRf = await createResident('TRF');
+    const aptRf = await createApartment('ARF');
+    const curPeriod = currentVietnamPeriod();
+
+    const cRfIns = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status
+       )
+       VALUES ($1, $2, $3, '2026-01-01', '2028-12-31', 5000000, 5000000, 'monthly', 1, 5, 'ACTIVE')
+       RETURNING id`,
+      [aptRf.id, buildingId, resRf.tenantId]
+    );
+    const cRfId = cRfIns.rows[0].id;
+    cleanup.contractIds.push(cRfId);
+
+    // Source overdue invoice T with open tracker 250,000 ₫
+    const srcRfIns = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2026-01', '2026-01-01', '2026-01-06', 5000000, 5000000, 0, 'OVERDUE')
+       RETURNING id`,
+      [orgId, buildingId, aptRf.id, cRfId, resRf.tenantId, `INV-RF-SRC-${suffix}`]
+    );
+    const srcRfId = srcRfIns.rows[0].id;
+    cleanup.invoiceIds.push(srcRfId);
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê T', 1, 'tháng', 5000000, 5000000)`,
+      [srcRfId]
+    );
+    const trRfIns = await adminPool.query(
+      `INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+       VALUES ($1, $2, $3, 250000, 3, '2026-01-15')
+       RETURNING id`,
+      [orgId, cRfId, srcRfId]
+    );
+    const trRfId = trRfIns.rows[0].id;
+
+    // Generate DRAFT T+1 carrying tracker
+    const genDraftRes = await apiFetch('/api/v1/invoices/generate-batch', mgr.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        building_id: buildingId,
+        contract_id: cRfId,
+        period: '2028-09',
+        auto_issue: false,
+        allow_missing_meter_readings: true,
+      }),
+    });
+    assert.equal(genDraftRes.status, 201, `RF generate draft failed: ${JSON.stringify(genDraftRes.body)}`);
+    const draftInvId = genDraftRes.body.data[0].id;
+    cleanup.invoiceIds.push(draftInvId);
+
+    // Critical #3: 1-eye MANAGER edit/delete on carried LATE_FEE line in DRAFT must be blocked with 409
+    const lfLinesRes = await adminPool.query(
+      `SELECT id FROM invoice_line WHERE invoice_id = $1 AND item_type = 'LATE_FEE'`,
+      [draftInvId]
+    );
+    assert.equal(lfLinesRes.rowCount, 1);
+    const lfLineId = lfLinesRes.rows[0].id;
+
+    const postLfLine = await apiFetch(`/api/v1/invoices/${draftInvId}/lines`, mgr.token, {
+      method: 'POST',
+      body: JSON.stringify({
+        item_type: 'LATE_FEE',
+        description: 'Manual late fee line bypass attempt',
+        quantity: 1,
+        unit: 'lần',
+        unit_price: 100000,
+      }),
+    });
+    assert.equal(postLfLine.status, 409, 'Critical #3: POST manual LATE_FEE line on DRAFT must be blocked (409)');
+
+    const patchLfLine = await apiFetch(`/api/v1/invoices/${draftInvId}/lines/${lfLineId}`, mgr.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ unit_price: 0, amount: 0 }),
+    });
+    assert.equal(patchLfLine.status, 409, 'Critical #3: PATCH on DRAFT LATE_FEE line must be blocked (409)');
+
+    const delLfLine = await apiFetch(`/api/v1/invoices/${draftInvId}/lines/${lfLineId}`, mgr.token, {
+      method: 'DELETE',
+    });
+    assert.equal(delLfLine.status, 409, 'Critical #3: DELETE on DRAFT LATE_FEE line must be blocked (409)');
+
+    // Critical #1: Voiding DRAFT via PATCH /:id/status releases carried tracker back to NULL
+    const voidDraftRes = await apiFetch(`/api/v1/invoices/${draftInvId}/status`, mgr.token, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'VOID' }),
+    });
+    assert.equal(voidDraftRes.status, 200, `Void draft failed: ${JSON.stringify(voidDraftRes.body)}`);
+
+    const trAfterVoid = await adminPool.query(
+      `SELECT carried_to_invoice_id, accrued_total FROM late_fee_accrual_tracker WHERE id = $1`,
+      [trRfId]
+    );
+    assert.equal(trAfterVoid.rows[0].carried_to_invoice_id, null, 'Critical #1: voiding DRAFT must release carried_to_invoice_id to NULL');
+    assert.equal(Number(trAfterVoid.rows[0].accrued_total), 250000, 'Critical #1: accrued_total preserved after DRAFT void');
+
+    // Important #6: Null-period LATE_FEE_SETTLEMENT included in /reports/dashboard and /reports/summary billed for current month
+    const baseDash = await apiFetch(`/api/v1/reports/dashboard?building_id=${buildingId}`, owner.token);
+    assert.equal(baseDash.status, 200);
+    const baseRevRow = (baseDash.body.data.revenue_12m || []).find((r) => r.period === curPeriod);
+    const baseBilled = Number(baseRevRow?.billed || 0);
+
+    const txRep = await adminPool.connect();
+    let repSettleInv;
+    try {
+      await txRep.query('BEGIN');
+      repSettleInv = await createLateFeeSettlementInvoiceInTx(txRep, {
+        contractId: cRfId,
+        orgId,
+        buildingId,
+        apartmentId: aptRf.id,
+        tenantId: resRf.tenantId,
+        totalAccrual: 400000,
+        sourceTrackerIds: [],
+        effectiveDateYmd: todayVietnamYmd(),
+      });
+      await txRep.query('COMMIT');
+    } catch (e) {
+      await txRep.query('ROLLBACK');
+      throw e;
+    } finally {
+      txRep.release();
+    }
+    cleanup.invoiceIds.push(repSettleInv.id);
+
+    const afterDash = await apiFetch(`/api/v1/reports/dashboard?building_id=${buildingId}`, owner.token);
+    assert.equal(afterDash.status, 200);
+    const afterRevRow = (afterDash.body.data.revenue_12m || []).find((r) => r.period === curPeriod);
+    assert.equal(Number(afterRevRow?.billed || 0), baseBilled + 400000, 'Important #6: /reports/dashboard must include null-period LATE_FEE_SETTLEMENT in billed');
+
+    const afterSum = await apiFetch(`/api/v1/reports/summary?building_id=${buildingId}`, owner.token);
+    assert.equal(afterSum.status, 200);
+    const sumRow = (afterSum.body.data.revenue_12m || []).find((r) => r.period === curPeriod);
+    assert.ok(Number(sumRow?.billed || 0) >= baseBilled + 400000, 'Important #6: /reports/summary must include null-period LATE_FEE_SETTLEMENT in billed');
   });
 });

@@ -1320,4 +1320,123 @@ test('Migration 048 Schema, FORCE RLS, 4-Eyes & 4-Pass Settlement RPCs Integrati
 
     await adminPool.query('DELETE FROM contract WHERE id = $1', [ctrBug1Id]);
   });
+
+  await t.test('6. Review Fix Critical #2: source VOID/zero-principal cancels open tracker; destination T+1 zero-principal preserves carried LATE_FEE', async () => {
+    // 6a. Source T 4-eyes VOID cancels open late_fee_accrual_tracker row
+    const invSrcVoid = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2030-02', CURRENT_DATE - 20, CURRENT_DATE - 15, 5000000, 5000000, 0, 'OVERDUE')
+      RETURNING id
+    `, [orgId, buildingId, apartmentId, contractId, tenantId, `INV_SRCVOID_${Date.now()}`]);
+    const srcVoidId = invSrcVoid.rows[0].id;
+    cleanups.invoices.push(srcVoidId);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+      VALUES ($1, 'RENT', 'Tiền thuê T', 1, 'tháng', 5000000, 5000000)
+    `, [srcVoidId]);
+
+    await adminPool.query(`
+      INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+      VALUES ($1, $2, $3, 300000, 3, CURRENT_DATE)
+    `, [orgId, contractId, srcVoidId]);
+
+    const adjSrcVoid = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, action_type, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'VOID', 'Hủy hóa đơn T gốc', $4)
+      RETURNING id
+    `, [orgId, buildingId, srcVoidId, mgrId]);
+    cleanups.adjustments.push(adjSrcVoid.rows[0].id);
+
+    await asUserTx(ownerId, async (client) => {
+      await client.query(`SELECT fn_resolve_invoice_adjustment($1, 'APPROVE', NULL)`, [adjSrcVoid.rows[0].id]);
+    });
+
+    const trAfterSrcVoid = await adminPool.query(
+      `SELECT * FROM late_fee_accrual_tracker WHERE invoice_id = $1 AND carried_to_invoice_id IS NULL`,
+      [srcVoidId]
+    );
+    assert.equal(trAfterSrcVoid.rowCount, 0, 'Critical #2a: 4-eyes VOID on source invoice T must cancel its open tracker');
+
+    // 6b. Source T2 zero-principal adjustment cancels open late_fee_accrual_tracker row
+    const invSrcZero = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2030-03', CURRENT_DATE - 20, CURRENT_DATE - 15, 4000000, 4000000, 0, 'OVERDUE')
+      RETURNING id
+    `, [orgId, buildingId, apartmentId, contractId, tenantId, `INV_SRCZERO_${Date.now()}`]);
+    const srcZeroId = invSrcZero.rows[0].id;
+    cleanups.invoices.push(srcZeroId);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+      VALUES ($1, 'RENT', 'Tiền thuê T2', 1, 'tháng', 4000000, 4000000)
+    `, [srcZeroId]);
+
+    await adminPool.query(`
+      INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+      VALUES ($1, $2, $3, 200000, 2, CURRENT_DATE)
+    `, [orgId, contractId, srcZeroId]);
+
+    const adjSrcZero = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'RENT', 'ADJUST', -4000000, 'Miễn 100% tiền thuê T2', $4)
+      RETURNING id
+    `, [orgId, buildingId, srcZeroId, mgrId]);
+    cleanups.adjustments.push(adjSrcZero.rows[0].id);
+
+    await asUserTx(ownerId, async (client) => {
+      await client.query(`SELECT fn_resolve_invoice_adjustment($1, 'APPROVE', NULL)`, [adjSrcZero.rows[0].id]);
+    });
+
+    const trAfterSrcZero = await adminPool.query(
+      `SELECT * FROM late_fee_accrual_tracker WHERE invoice_id = $1 AND carried_to_invoice_id IS NULL`,
+      [srcZeroId]
+    );
+    assert.equal(trAfterSrcZero.rowCount, 0, 'Critical #2b: zero-principal adjustment on unpaid source invoice must cancel its open tracker');
+
+    // 6c. Destination T+1 zero-principal adjustment preserves carried_forward LATE_FEE from T
+    const invDestZero = await adminPool.query(`
+      INSERT INTO invoice (
+        org_id, building_id, apartment_id, contract_id, tenant_id,
+        invoice_code, period, issue_date, due_date, subtotal_amount, total_amount, paid_amount, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, '2030-04', CURRENT_DATE, CURRENT_DATE + 5, 5300000, 5300000, 0, 'ISSUED')
+      RETURNING id
+    `, [orgId, buildingId, apartmentId, contractId, tenantId, `INV_DESTZERO_${Date.now()}`]);
+    const destZeroId = invDestZero.rows[0].id;
+    cleanups.invoices.push(destZeroId);
+
+    await adminPool.query(`
+      INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta)
+      VALUES
+        ($1, 'RENT', 'Tiền thuê T+1', 1, 'tháng', 5000000, 5000000, '{}'::jsonb),
+        ($1, 'LATE_FEE', 'Phí phạt kỳ T dồn sang', 1, 'kỳ', 300000, 300000, '{"carry_forward": true}'::jsonb)
+    `, [destZeroId]);
+
+    const adjDestZero = await adminPool.query(`
+      INSERT INTO invoice_adjustment (
+        org_id, building_id, invoice_id, adjustment_target, action_type, delta_amount, reason, created_by
+      )
+      VALUES ($1, $2, $3, 'RENT', 'ADJUST', -5000000, 'Miễn tiền thuê kỳ T+1 nhưng không miễn phạt kỳ T', $4)
+      RETURNING id
+    `, [orgId, buildingId, destZeroId, mgrId]);
+    cleanups.adjustments.push(adjDestZero.rows[0].id);
+
+    await asUserTx(ownerId, async (client) => {
+      await client.query(`SELECT fn_resolve_invoice_adjustment($1, 'APPROVE', NULL)`, [adjDestZero.rows[0].id]);
+    });
+
+    const destAfter = await adminPool.query('SELECT total_amount FROM invoice WHERE id = $1', [destZeroId]);
+    assert.equal(Number(destAfter.rows[0].total_amount), 300000, 'Critical #2c: zeroing T+1 own principal must NOT auto-erase carried-forward LATE_FEE from T');
+  });
 });

@@ -161,7 +161,7 @@ export async function createLateFeeSettlementInvoiceInTx(
   const issueDateStr = effectiveDateYmd || todayVietnamYmd();
   const dueDateStr = addDaysYmd(issueDateStr, 7);
   const amt = roundVND(Number(totalAccrual || 0));
-  const invCode = `LF-${String(contractId).slice(0, 8).toUpperCase()}-${issueDateStr.replace(/-/g, '')}`;
+  const invCode = `LF-${String(contractId).slice(0, 8).toUpperCase()}-${issueDateStr.replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
 
   const invIns = await client.query(
     `INSERT INTO invoice (
@@ -654,11 +654,12 @@ export async function generateInvoicesCore(
 
     // Carry-forward: inject pending late fee accruals from prior overdue invoices of this contract (FR-064)
     const pendingTrackerRes = await client.query(
-      `SELECT COALESCE(SUM(accrued_total), 0)::bigint AS total_accrual,
-              ARRAY_AGG(id) AS tracker_ids
-       FROM late_fee_accrual_tracker
-       WHERE contract_id = $1
-         AND (carried_to_invoice_id IS NULL OR carried_to_invoice_id = $2::uuid)`,
+      `SELECT COALESCE(SUM(lft.accrued_total), 0)::bigint AS total_accrual,
+              ARRAY_AGG(lft.id) AS tracker_ids
+       FROM late_fee_accrual_tracker lft
+       JOIN invoice src_i ON src_i.id = lft.invoice_id AND src_i.status <> 'VOID'
+       WHERE lft.contract_id = $1
+         AND (lft.carried_to_invoice_id IS NULL OR lft.carried_to_invoice_id = $2::uuid)`,
       [c.id, existingDraft ? existingDraft.id : null]
     );
     const totalAccrual = roundVND(Number(pendingTrackerRes.rows[0]?.total_accrual || 0));
@@ -1183,6 +1184,12 @@ router.post(
     if (!description?.trim()) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Vui lòng nhập mô tả dòng chi tiết.' });
     }
+    if (String(item_type || '').toUpperCase() === 'LATE_FEE') {
+      return res.status(409).json({
+        code: 'LATE_FEE_LINE_READONLY',
+        message: 'Phí phạt chậm thanh toán do hệ thống tự động tính và chỉ được miễn giảm qua phê duyệt 4 mắt.',
+      });
+    }
 
     const numQty = Number(quantity || 1);
     const numPrice = Math.round(Number(unit_price || 0));
@@ -1294,6 +1301,13 @@ router.patch(
         await client.query('ROLLBACK');
         return res.status(409).json({ code: 'CREDIT_LINE_READONLY', message: 'Không thể chỉnh sửa trực tiếp dòng bù trừ số dư tín dụng.' });
       }
+      if (line.item_type === 'LATE_FEE' || String(item_type || '').toUpperCase() === 'LATE_FEE') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'LATE_FEE_LINE_READONLY',
+          message: 'Không thể chỉnh sửa trực tiếp dòng phí phạt chậm thanh toán; vui lòng phát hành hóa đơn và tạo đề nghị miễn giảm 4 mắt.',
+        });
+      }
 
       const nextQty = quantity !== undefined ? Number(quantity) : line.quantity;
       const nextPrice = unit_price !== undefined ? Math.round(Number(unit_price)) : line.unit_price;
@@ -1381,6 +1395,13 @@ router.delete(
       if (line.credit_id) {
         await client.query('ROLLBACK');
         return res.status(409).json({ code: 'CREDIT_LINE_READONLY', message: 'Không thể xóa trực tiếp dòng bù trừ số dư tín dụng.' });
+      }
+      if (line.item_type === 'LATE_FEE') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'LATE_FEE_LINE_READONLY',
+          message: 'Không thể xóa trực tiếp dòng phí phạt chậm thanh toán; vui lòng phát hành hóa đơn và tạo đề nghị miễn giảm 4 mắt.',
+        });
       }
 
       await client.query('DELETE FROM invoice_line WHERE id = $1', [lineId]);
@@ -1546,6 +1567,7 @@ router.patch(
           }
 
           await releaseInvoiceCreditsInTx(client, { invoiceId: id, actorId: req.user.sub });
+          await client.query('SELECT fn_sync_late_fee_trackers_on_invoice_void($1)', [id]);
 
           const voidedRes = await client.query(
             `UPDATE invoice

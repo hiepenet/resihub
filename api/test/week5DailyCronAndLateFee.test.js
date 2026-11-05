@@ -672,13 +672,45 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     );
     assert.equal(tracker.rows[0].carried_to_invoice_id, settlement.rows[0].id, '4f: tracker.carried_to_invoice_id set');
 
-    // Idempotent on next cron run (2028-06-16): no second LATE_FEE_SETTLEMENT invoice created
+    // Idempotent on next cron run (2028-06-16): no second LATE_FEE_SETTLEMENT invoice created AND no orphan open tracker accrued
     await runDailyJobs({ asOfDate: '2028-06-16', buildingId: testBuildingId });
     const settlement2 = await adminPool.query(
       `SELECT * FROM invoice WHERE contract_id = $1 AND invoice_type = 'LATE_FEE_SETTLEMENT'`,
       [expiredContractId]
     );
     assert.equal(settlement2.rowCount, 1, '4f: idempotent — only 1 settlement invoice');
+    const orphanTrackers = await adminPool.query(
+      `SELECT * FROM late_fee_accrual_tracker WHERE contract_id = $1 AND carried_to_invoice_id IS NULL`,
+      [expiredContractId]
+    );
+    assert.equal(orphanTrackers.rowCount, 0, 'Important #4: ended contract with active LATE_FEE_SETTLEMENT must NOT accrue unbillable orphan tracker rows');
+
+    // 4h: Important #5 — createLateFeeSettlementInvoiceInTx regenerated on same date after VOID does not collide on invoice_code (23505)
+    const { createLateFeeSettlementInvoiceInTx } = await import('../src/routes/invoices.js');
+    await adminPool.query(`UPDATE invoice SET status = 'VOID' WHERE id = $1`, [settlement.rows[0].id]);
+    const txRe = await adminPool.connect();
+    let regenInv;
+    try {
+      await txRe.query('BEGIN');
+      regenInv = await createLateFeeSettlementInvoiceInTx(txRe, {
+        contractId: expiredContractId,
+        orgId,
+        buildingId: testBuildingId,
+        apartmentId: aptExpId,
+        tenantId: c31.tenantId,
+        totalAccrual: 300000,
+        sourceTrackerIds: [],
+        effectiveDateYmd: '2028-06-15',
+      });
+      await txRe.query('COMMIT');
+    } catch (e) {
+      await txRe.query('ROLLBACK');
+      throw e;
+    } finally {
+      txRe.release();
+    }
+    cleanup.invoiceIds.push(regenInv.id);
+    assert.equal(regenInv.status, 'ISSUED', 'Important #5: regenerated settlement invoice on same date must succeed without 23505');
   });
 });
 

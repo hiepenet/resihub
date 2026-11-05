@@ -420,12 +420,22 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
   const lateCandidates = await adminPool.query(
     `SELECT i.id, i.org_id
      FROM invoice i
+     JOIN contract c ON c.id = i.contract_id
      WHERE i.status IN ('OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED')
        AND i.contract_id IS NOT NULL
        AND COALESCE(i.invoice_type, 'REGULAR') <> 'LATE_FEE_SETTLEMENT'
        AND i.paid_amount < i.total_amount
        AND i.due_date < $1::date
-       AND ($2::uuid IS NULL OR i.building_id = $2::uuid)`,
+       AND ($2::uuid IS NULL OR i.building_id = $2::uuid)
+       AND NOT (
+         c.status IN ('EXPIRED', 'TERMINATED')
+         AND EXISTS (
+           SELECT 1 FROM invoice i_s
+           WHERE i_s.contract_id = i.contract_id
+             AND i_s.invoice_type = 'LATE_FEE_SETTLEMENT'
+             AND i_s.status <> 'VOID'
+         )
+       )`,
     [effectiveDateYmd, buildingId]
   );
 
@@ -440,7 +450,17 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
     try {
       await txClient.query('BEGIN');
       const lockedRes = await txClient.query(
-        `SELECT * FROM invoice WHERE id = $1 FOR UPDATE`,
+        `SELECT i.*, c.status AS contract_status,
+                EXISTS (
+                  SELECT 1 FROM invoice i_s
+                  WHERE i_s.contract_id = i.contract_id
+                    AND i_s.invoice_type = 'LATE_FEE_SETTLEMENT'
+                    AND i_s.status <> 'VOID'
+                ) AS has_active_settlement
+         FROM invoice i
+         LEFT JOIN contract c ON c.id = i.contract_id
+         WHERE i.id = $1
+         FOR UPDATE OF i`,
         [cand.id]
       );
       const lockedInv = lockedRes.rows[0];
@@ -448,6 +468,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
         !lockedInv ||
         !lockedInv.contract_id ||
         lockedInv.invoice_type === 'LATE_FEE_SETTLEMENT' ||
+        (['EXPIRED', 'TERMINATED'].includes(lockedInv.contract_status) && lockedInv.has_active_settlement) ||
         !['OVERDUE', 'ISSUED', 'PARTIALLY_PAID', 'ADJUSTED'].includes(lockedInv.status) ||
         Number(lockedInv.paid_amount || 0) >= Number(lockedInv.total_amount || 0)
       ) {
@@ -713,6 +734,7 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
               c.apartment_id,
               c.primary_tenant_id AS tenant_id
        FROM late_fee_accrual_tracker lft
+       JOIN invoice src_i ON src_i.id = lft.invoice_id AND src_i.status <> 'VOID'
        JOIN contract c ON c.id = lft.contract_id
        WHERE lft.carried_to_invoice_id IS NULL
          AND c.status IN ('EXPIRED', 'TERMINATED')
