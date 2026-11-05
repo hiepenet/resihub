@@ -1527,7 +1527,9 @@ router.get('/invoices', authenticateToken, async (req, res) => {
     const creditRes = await pool.query(
       `SELECT cb.id, cb.contract_id, cb.building_id, cb.reason_type, cb.amount, cb.applied_amount,
               (cb.amount - cb.applied_amount) AS available_amount,
-              cb.status, cb.description, cb.refund_method, cb.refund_meta, cb.created_at, cb.updated_at,
+              cb.status, cb.description,
+              COALESCE(cb.refund_meta->>'refund_method', 'BANK_TRANSFER') AS refund_method,
+              cb.refund_meta, cb.created_at, cb.updated_at,
               a.code AS apartment_code, b.name AS building_name
        FROM credit_balance cb
        JOIN tenant t ON t.id = cb.tenant_id

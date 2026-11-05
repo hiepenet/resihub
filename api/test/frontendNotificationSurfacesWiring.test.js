@@ -85,3 +85,4 @@ test('Wiring Contract: NotificationBell, TopBar, NotificationsPage, and Notifica
   assert.match(resTabSrc, /useNotificationAction/);
   assert.match(resTabSrc, /NotificationDetailModal/);
 });
+

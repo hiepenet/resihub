@@ -67,3 +67,4 @@ test('DepositsPage, MeterReadingsPage, ReportsPage, and SettingsPage consume dee
   assert.match(setSrc, /systemAlertModal/, 'SettingsPage must render AI Budget / Cron Health Detail Modal');
   assert.match(setSrc, /replace:\s*true/, 'SettingsPage must clean URL with replace: true');
 });
+

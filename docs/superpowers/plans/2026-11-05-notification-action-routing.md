@@ -365,3 +365,4 @@ Expected: All tests PASS (0 failures) and Vite production build exits 0.
 - [ ] **Step 5: Commit**
 
 Stage Task 7 files cleanly and commit with `feat(m13-admin): auto-open contract, apartment reservation, and tenant approval modals`.
+

@@ -93,10 +93,14 @@ test('Integration — Tạo hợp đồng trực tiếp cho cư dân mới (inli
 
     const mgr = await login('manager.vop.a@resihub.vn', 'Demo@123456');
 
-    // Lấy 1 căn hộ AVAILABLE không có hợp đồng tương lai ở VOP-A
-    const aptsRes = await apiFetch('/api/v1/apartments?status=AVAILABLE&limit=20', mgr.token);
+    // Lấy 1 căn hộ AVAILABLE không có hợp đồng tương lai / nháp ở VOP-A
+    const aptsRes = await apiFetch('/api/v1/apartments?status=AVAILABLE&limit=50', mgr.token);
     assert.equal(aptsRes.status, 200);
-    const targetApt = aptsRes.body.data[0];
+    const busyRes = await adminPool.query(
+      `SELECT DISTINCT apartment_id FROM contract WHERE status NOT IN ('TERMINATED', 'EXPIRED', 'CANCELLED')`
+    );
+    const busyIds = new Set(busyRes.rows.map((r) => r.apartment_id));
+    const targetApt = (aptsRes.body.data || []).find((a) => !busyIds.has(a.id)) || aptsRes.body.data[0];
     assert.ok(targetApt, 'Cần ít nhất 1 căn AVAILABLE tại VOP-A');
 
     // 1. Tạo hợp đồng nháp kèm thông tin cư dân mới trong 1 bước duy nhất

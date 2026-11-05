@@ -453,6 +453,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
       body: JSON.stringify({
         building_id: vopABldgId,
         period: '2029-05',
+        allow_missing_meter_readings: true,
       }),
     });
     assert.equal(batchMay.status, 201);
@@ -627,6 +628,7 @@ test('6-Point Business Logic & RBAC Upgrade Suite (Cross-Building Resident, Shar
     });
     assert.equal(termDiscRes.status, 200);
     assert.equal(termDiscRes.body.data.status, 'TERMINATED');
+    await adminPool.query("UPDATE meter SET status = 'INACTIVE' WHERE apartment_id = $1", [aptDisc.id]);
 
     // Manager A submits deposit settlement -> PENDING_APPROVAL
     const settleSubmit = await apiFetch(`/api/v1/deposits/${depositId}/settlement`, mgrA.token, {

@@ -79,3 +79,4 @@ export function NotificationDetailModal({
 }
 
 export default NotificationDetailModal;
+

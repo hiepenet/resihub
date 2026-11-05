@@ -878,6 +878,7 @@ router.post(
       }
 
       const refundMeta = {
+        refund_method: refund_method || 'BANK_TRANSFER',
         bank_name: bank_name?.trim(),
         bank_account_number: bank_account_number?.trim(),
         bank_account_holder: bank_account_holder?.trim()?.toUpperCase(),
