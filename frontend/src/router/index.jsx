@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { createBrowserRouter, Navigate, useParams } from 'react-router-dom';
 import { AdminLayout } from '../components/layout/AdminLayout';
 import { PageSkeleton } from '../components/ui/Skeleton';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
@@ -7,45 +7,53 @@ import { AccessDenied } from '../components/common/AccessDenied';
 import { useAuthStore } from '../stores/authStore';
 import { ROLES, ADMIN_PORTAL_ROLES } from '../constants/roles';
 
-// Lazy-loaded pages (Sprint 6 optimization)
-const PublicExplorePage = lazy(() => import('../pages/public/PublicExplorePage'));
-const LoginPage = lazy(() => import('../pages/auth/LoginPage'));
-const ForgotPasswordPage = lazy(() => import('../pages/auth/ForgotPasswordPage'));
+import { routeImporters } from './routePreloaders';
 
-const DashboardPage = lazy(() => import('../pages/admin/dashboard/DashboardPage'));
-const BuildingsPage = lazy(() => import('../pages/admin/buildings/BuildingsPage'));
-const BuildingDetailPage = lazy(() => import('../pages/admin/buildings/BuildingDetailPage'));
-const ZoneDetailPage = lazy(() => import('../pages/admin/buildings/ZoneDetailPage'));
-const FloorPlanPage = lazy(() => import('../pages/admin/buildings/FloorPlanPage'));
-const ApartmentDetailPage = lazy(() => import('../pages/admin/apartments/ApartmentDetailPage'));
+// Lazy-loaded pages (shared with routePreloaders for hover/idle warmup)
+const PublicExplorePage = lazy(routeImporters.publicExplore);
+const LoginPage = lazy(routeImporters.login);
+const ForgotPasswordPage = lazy(routeImporters.forgotPassword);
 
-const TenantsPage = lazy(() => import('../pages/admin/tenants/TenantsPage'));
-const TenantDetailPage = lazy(() => import('../pages/admin/tenants/TenantDetailPage'));
+const DashboardPage = lazy(routeImporters.dashboard);
+const BuildingsPage = lazy(routeImporters.buildings);
+const BuildingDetailPage = lazy(routeImporters.buildingDetail);
+const ZoneDetailPage = lazy(routeImporters.zoneDetail);
+const FloorPlanPage = lazy(routeImporters.floorPlan);
+const ApartmentDetailPage = lazy(routeImporters.apartmentDetail);
 
-const ContractsPage = lazy(() => import('../pages/admin/contracts/ContractsPage'));
-const ContractDetailPage = lazy(() => import('../pages/admin/contracts/ContractDetailPage'));
+const TenantsPage = lazy(routeImporters.tenants);
+const TenantDetailPage = lazy(routeImporters.tenantDetail);
 
-const DepositsPage = lazy(() => import('../pages/admin/deposits/DepositsPage'));
+const ContractsPage = lazy(routeImporters.contracts);
+const ContractDetailPage = lazy(routeImporters.contractDetail);
 
-const ServiceCatalogPage = lazy(() => import('../pages/admin/services/ServiceCatalogPage'));
-const SubscriptionsPage = lazy(() => import('../pages/admin/services/SubscriptionsPage'));
-const MeterReadingsPage = lazy(() => import('../pages/admin/meters/MeterReadingsPage'));
-const InvoicesPage = lazy(() => import('../pages/admin/invoices/InvoicesPage'));
-const InvoiceDetailPage = lazy(() => import('../pages/admin/invoices/InvoiceDetailPage'));
-const PaymentsPage = lazy(() => import('../pages/admin/payments/PaymentsPage'));
-const ServiceRequestsPage = lazy(() => import('../pages/admin/maintenance/ServiceRequestsPage'));
-const NotificationsPage = lazy(() => import('../pages/admin/notifications/NotificationsPage'));
-const ReportsPage = lazy(() => import('../pages/admin/reports/ReportsPage'));
-const UsersPage = lazy(() => import('../pages/admin/users/UsersPage'));
-const SettingsPage = lazy(() => import('../pages/admin/settings/SettingsPage'));
-const AuditLogsPage = lazy(() => import('../pages/admin/audit/AuditLogsPage'));
+const DepositsPage = lazy(routeImporters.deposits);
 
-const ResidentPortalPage = lazy(() => import('../pages/resident/ResidentPortalPage'));
+const ServiceCatalogPage = lazy(routeImporters.services);
+const SubscriptionsPage = lazy(routeImporters.subscriptions);
+const MeterReadingsPage = lazy(routeImporters.meters);
+const InvoicesPage = lazy(routeImporters.invoices);
+const InvoiceDetailPage = lazy(routeImporters.invoiceDetail);
+const PaymentsPage = lazy(routeImporters.payments);
+const ServiceRequestsPage = lazy(routeImporters.maintenance);
+const NotificationsPage = lazy(routeImporters.notifications);
+const ReportsPage = lazy(routeImporters.reports);
+const UsersPage = lazy(routeImporters.users);
+const SettingsPage = lazy(routeImporters.settings);
+const AuditLogsPage = lazy(routeImporters.auditLogs);
+
+const ResidentPortalPage = lazy(routeImporters.residentPortal);
+
+function RouteKeyWrapper({ Component }) {
+  const { id, zoneId } = useParams();
+  const routeKey = zoneId ? `${id || ''}:${zoneId}` : id || 'static';
+  return React.createElement(Component, { key: routeKey });
+}
 
 function withSuspense(Component, fullScreen = false) {
   return (
     <Suspense fallback={fullScreen ? <LoadingSpinner fullScreen /> : <PageSkeleton />}>
-      <Component />
+      <RouteKeyWrapper Component={Component} />
     </Suspense>
   );
 }

@@ -331,123 +331,140 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
     const isOwner = userRoles.includes('OWNER');
     const isManager = userRoles.includes('MANAGER');
 
+    const rawBuildingId = typeof req.query.building_id === 'string' ? req.query.building_id.trim() : '';
+    if (
+      rawBuildingId &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawBuildingId)
+    ) {
+      return res.json({ data: [] });
+    }
+
+    let scopedBuildingIds = null;
+    let mgrBuildingIds = null;
+
+    if (isSysAdmin) {
+      if (rawBuildingId) {
+        scopedBuildingIds = [rawBuildingId];
+      }
+    } else if (isOwner) {
+      const ownedBuildingIds = await getOwnerBuildingIds(req.user.sub, orgId);
+      if (ownedBuildingIds.length === 0 || (rawBuildingId && !ownedBuildingIds.includes(rawBuildingId))) {
+        return res.json({ data: [] });
+      }
+      scopedBuildingIds = rawBuildingId ? [rawBuildingId] : ownedBuildingIds;
+    } else if (isManager) {
+      mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
+      if (mgrBuildingIds.length === 0 || (rawBuildingId && !mgrBuildingIds.includes(rawBuildingId))) {
+        return res.json({ data: [] });
+      }
+      scopedBuildingIds = rawBuildingId ? [rawBuildingId] : mgrBuildingIds;
+    }
+
     let sql = `
+      WITH tenant_contract_links AS (
+        SELECT c.primary_tenant_id AS tenant_id, c.id AS contract_id, 0 AS role_rank
+        FROM contract c
+        JOIN building b_org ON b_org.id = c.building_id
+        WHERE b_org.org_id = $1
+        UNION ALL
+        SELECT co.tenant_id, co.contract_id, 1 AS role_rank
+        FROM contract_occupant co
+        JOIN contract c ON c.id = co.contract_id
+        JOIN building b_org ON b_org.id = c.building_id
+        WHERE b_org.org_id = $1
+      ),
+      active_contracts AS (
+        SELECT DISTINCT ON (tcl.tenant_id)
+          tcl.tenant_id,
+          json_build_object(
+            'contract_id', c.id,
+            'apartment_id', a.id,
+            'apartment_code', a.code,
+            'building_id', b.id,
+            'building_name', b.name,
+            'rent_amount', c.rent_amount,
+            'end_date', c.end_date,
+            'status', c.status,
+            'member_role', CASE WHEN tcl.role_rank = 0 THEN 'primary' ELSE 'occupant' END
+          ) AS active_contract
+        FROM tenant_contract_links tcl
+        JOIN contract c ON c.id = tcl.contract_id
+        JOIN apartment a ON a.id = c.apartment_id
+        JOIN building b ON b.id = c.building_id
+        WHERE c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
+        ORDER BY tcl.tenant_id, tcl.role_rank ASC, c.created_at DESC
+      ),
+      past_contracts AS (
+        SELECT DISTINCT tcl.tenant_id
+        FROM tenant_contract_links tcl
+        JOIN contract cp ON cp.id = tcl.contract_id
+        WHERE cp.status IN ('EXPIRED', 'TERMINATED')
+      )
       SELECT t.*, p.full_name, p.phone, p.email, p.dob, p.id_number, p.address, p.nationality, p.avatar_url,
              p.privacy_consent_at, p.privacy_policy_version,
              da.code AS desired_apartment_code,
              db.name AS desired_building_name,
-             (
-               SELECT json_build_object(
-                 'contract_id', c.id,
-                 'apartment_id', a.id,
-                 'apartment_code', a.code,
-                 'building_id', b.id,
-                 'building_name', b.name,
-                 'rent_amount', c.rent_amount,
-                 'end_date', c.end_date,
-                 'status', c.status,
-                 'member_role', CASE WHEN c.primary_tenant_id = t.id THEN 'primary' ELSE 'occupant' END
-               )
-               FROM contract c
-               JOIN apartment a ON a.id = c.apartment_id
-               JOIN building b ON b.id = c.building_id
-               WHERE (
-                 c.primary_tenant_id = t.id
-                 OR EXISTS (
-                   SELECT 1 FROM contract_occupant co
-                   WHERE co.contract_id = c.id AND co.tenant_id = t.id
-                 )
-               )
-               AND c.status IN ('ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING')
-               ORDER BY (CASE WHEN c.primary_tenant_id = t.id THEN 0 ELSE 1 END) ASC, c.created_at DESC
-               LIMIT 1
-             ) AS active_contract,
-             EXISTS (
-               SELECT 1 FROM contract cp
-               WHERE (
-                 cp.primary_tenant_id = t.id
-                 OR EXISTS (
-                   SELECT 1 FROM contract_occupant cop
-                   WHERE cop.contract_id = cp.id AND cop.tenant_id = t.id
-                 )
-               )
-               AND cp.status IN ('EXPIRED', 'TERMINATED')
-             ) AS has_past_contract
+             ac.active_contract,
+             (pc.tenant_id IS NOT NULL) AS has_past_contract
       FROM tenant t
       JOIN person p ON p.id = t.person_id
       LEFT JOIN apartment da ON da.id = t.desired_apartment_id
       LEFT JOIN building db ON db.id = t.desired_building_id
+      LEFT JOIN active_contracts ac ON ac.tenant_id = t.id
+      LEFT JOIN past_contracts pc ON pc.tenant_id = t.id
       WHERE t.org_id = $1
     `;
     const params = [orgId];
 
-    if (isSysAdmin) {
-      // SYS_ADMIN: Toàn bộ cư dân trong tổ chức
-    } else if (isOwner) {
-      const ownedBuildingIds = await getOwnerBuildingIds(req.user.sub, orgId);
-      if (ownedBuildingIds.length === 0) {
-        return res.json({ data: [] });
-      }
-      params.push(ownedBuildingIds);
-      sql += ` AND (
-        t.id IN (
-          SELECT c.primary_tenant_id FROM contract c
-          WHERE c.building_id = ANY($${params.length}::uuid[])
-        )
-        OR t.id IN (
-          SELECT co.tenant_id FROM contract_occupant co
-          JOIN contract c ON c.id = co.contract_id
-          WHERE c.building_id = ANY($${params.length}::uuid[])
-        )
-        OR t.id IN (
-          SELECT t2.id FROM tenant t2
-          JOIN person p2 ON p2.id = t2.person_id
-          JOIN reservation r ON r.phone = p2.phone
-          WHERE r.building_id = ANY($${params.length}::uuid[])
-        )
-        OR t.desired_building_id = ANY($${params.length}::uuid[])
-      )`;
-    } else if (isManager) {
-      const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
-      if (mgrBuildingIds.length === 0) {
-        return res.json({ data: [] });
-      }
-      params.push(mgrBuildingIds);
+    if (scopedBuildingIds !== null) {
+      params.push(scopedBuildingIds);
       const idx = params.length;
-      params.push(req.user.sub);
-      const actorIdx = params.length;
+
+      let uncontractedManagerClause = '';
+      if (isManager && !isSysAdmin && !rawBuildingId) {
+        params.push(req.user.sub);
+        const actorIdx = params.length;
+        uncontractedManagerClause = `
+          OR (
+            -- Hồ sơ cư dân chưa lên hợp đồng: CHỈ hiển thị hồ sơ do chính MANAGER này khởi tạo (không lộ sang tòa khác)
+            (t.created_by = $${actorIdx}::uuid OR p.created_by = $${actorIdx}::uuid)
+            AND NOT EXISTS (
+              SELECT 1 FROM contract c_other
+              WHERE c_other.primary_tenant_id = t.id
+                AND NOT (c_other.building_id = ANY($${idx}::uuid[]))
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM contract_occupant co_other
+              JOIN contract c_occ ON c_occ.id = co_other.contract_id
+              WHERE co_other.tenant_id = t.id
+                AND NOT (c_occ.building_id = ANY($${idx}::uuid[]))
+            )
+          )
+        `;
+      }
+
       sql += ` AND (
-        t.id IN (
-          SELECT c.primary_tenant_id FROM contract c
-          WHERE c.building_id = ANY($${idx}::uuid[])
+        EXISTS (
+          SELECT 1 FROM contract c
+          WHERE c.primary_tenant_id = t.id
+            AND c.building_id = ANY($${idx}::uuid[])
         )
-        OR t.id IN (
-          SELECT co.tenant_id FROM contract_occupant co
+        OR EXISTS (
+          SELECT 1 FROM contract_occupant co
           JOIN contract c ON c.id = co.contract_id
-          WHERE c.building_id = ANY($${idx}::uuid[])
+          WHERE co.tenant_id = t.id
+            AND c.building_id = ANY($${idx}::uuid[])
         )
-        OR t.id IN (
-          SELECT t2.id FROM tenant t2
-          JOIN person p2 ON p2.id = t2.person_id
-          JOIN reservation r ON r.phone = p2.phone
-          WHERE r.building_id = ANY($${idx}::uuid[])
+        OR (
+          p.phone IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM reservation r
+            WHERE r.phone = p.phone
+              AND r.building_id = ANY($${idx}::uuid[])
+          )
         )
         OR t.desired_building_id = ANY($${idx}::uuid[])
-        OR (
-          -- Hồ sơ cư dân chưa lên hợp đồng: CHỈ hiển thị hồ sơ do chính MANAGER này khởi tạo (không lộ sang tòa khác)
-          (t.created_by = $${actorIdx}::uuid OR p.created_by = $${actorIdx}::uuid)
-          AND NOT EXISTS (
-            SELECT 1 FROM contract c_other
-            WHERE c_other.primary_tenant_id = t.id
-              AND NOT (c_other.building_id = ANY($${idx}::uuid[]))
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM contract_occupant co_other
-            JOIN contract c_occ ON c_occ.id = co_other.contract_id
-            WHERE co_other.tenant_id = t.id
-              AND NOT (c_occ.building_id = ANY($${idx}::uuid[]))
-          )
-        )
+        ${uncontractedManagerClause}
       )`;
     }
 
@@ -457,7 +474,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
     let rows = result.rows;
 
     if (!isSysAdmin && isManager && rows.length > 0) {
-      const mgrBuildingIds = await getManagerBuildingIds(req.user.sub, orgId);
+      const effectiveMgrBuildingIds = mgrBuildingIds || (await getManagerBuildingIds(req.user.sub, orgId));
       const personIds = Array.from(new Set(rows.map((r) => r.person_id).filter(Boolean)));
       if (personIds.length > 0) {
         const sharedRes = await adminPool.query(
@@ -479,7 +496,7 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
                    AND NOT (c.building_id = ANY($2::uuid[]))
                )
              )`,
-          [personIds, mgrBuildingIds]
+          [personIds, effectiveMgrBuildingIds]
         );
         const sharedSet = new Set(sharedRes.rows.map((r) => r.person_id));
         rows = rows.map((r) => ({ ...r, is_shared_profile: sharedSet.has(r.person_id) }));

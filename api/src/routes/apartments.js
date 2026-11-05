@@ -203,7 +203,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
     }
     const apartment = aptRes.rows[0];
 
-    const [contractsRes, reservationsRes, metersRes, requestsRes] = await Promise.all([
+    const [contractsRes, reservationsRes, metersRes, requestsRes, zonesRes] = await Promise.all([
       pool.query(
         `SELECT c.*, p.full_name AS tenant_name, p.phone AS tenant_phone
          FROM contract c
@@ -238,6 +238,11 @@ router.get('/:id', authenticateToken, async (req, res) => {
          ORDER BY created_at DESC LIMIT 10`,
         [id]
       ),
+      pool.query(
+        `SELECT z.*, (SELECT COUNT(*) FROM apartment a WHERE a.zone_id = z.id) AS apartment_count
+         FROM zone z WHERE z.building_id = $1 ORDER BY z.code ASC`,
+        [apartment.building_id]
+      ),
     ]);
 
     res.json({
@@ -248,6 +253,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
         reservations: reservationsRes.rows,
         meters: metersRes.rows,
         service_requests: requestsRes.rows,
+        zones: zonesRes.rows,
       },
     });
   } catch (err) {

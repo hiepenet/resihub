@@ -7,6 +7,7 @@ import {
   isAdminPortalUser,
 } from '../utils/permissions';
 import { ROLE_LABELS, ROLES } from '../constants/roles';
+import { clearQueryCache } from '../services/queryCache';
 
 function safeParseUser() {
   try {
@@ -25,6 +26,7 @@ export const useAuthStore = create((set, get) => ({
   selectedBuildingId: localStorage.getItem('resihub_selected_building_id') || '',
 
   setAuthData: (accessToken, refreshToken, user) => {
+    clearQueryCache();
     localStorage.setItem('accessToken', accessToken);
     if (refreshToken) localStorage.setItem('refreshToken', refreshToken);
     localStorage.setItem('user', JSON.stringify(user));
@@ -80,6 +82,7 @@ export const useAuthStore = create((set, get) => ({
   getAssignedBuildings: () => getAssignedBuildingIds(get().user),
 
   clearSession: () => {
+    clearQueryCache();
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');
     localStorage.removeItem('user');

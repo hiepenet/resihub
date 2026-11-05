@@ -33,7 +33,7 @@ const VALID_BILLING_TYPES = ['FIXED', 'METERED', 'QUANTITY'];
  * GET /api/v1/service-catalog (hoặc /api/v1/services/catalog)
  */
 serviceCatalogRouter.get('/', authenticateToken, async (req, res) => {
-  const { active_only } = req.query;
+  const { active_only, is_active } = req.query;
   try {
     const params = [req.user.org_id];
     let sql = `
@@ -42,7 +42,7 @@ serviceCatalogRouter.get('/', authenticateToken, async (req, res) => {
       FROM service_catalog sc
       WHERE sc.org_id = $1
     `;
-    if (active_only === 'true') {
+    if (active_only === 'true' || is_active === 'true') {
       sql += ` AND sc.is_active = TRUE`;
     }
     sql += ` ORDER BY sc.is_active DESC, sc.category ASC, sc.name ASC`;

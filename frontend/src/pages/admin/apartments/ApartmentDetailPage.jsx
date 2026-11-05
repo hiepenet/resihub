@@ -66,22 +66,36 @@ export function ApartmentDetailPage() {
   const currentUserId = user?.id || user?.sub;
   const todayStr = toDateOnlyStr(new Date());
 
-  const [apt, setApt] = useState(null);
-  const [zones, setZones] = useState([]);
+  const cachedApt = buildingsService.peekApartment(id)?.data || null;
+  const cachedSettings = usersService.peekSettings()?.data || null;
+
+  const [apt, setApt] = useState(cachedApt);
+  const [zones, setZones] = useState(() =>
+    Array.isArray(cachedApt?.zones)
+      ? cachedApt.zones
+      : buildingsService.peekZones(cachedApt?.building_id)?.data || []
+  );
   const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
-  const [allowSelfApproval, setAllowSelfApproval] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [allowSelfApproval, setAllowSelfApproval] = useState(() =>
+    Boolean(cachedSettings?.approval_config?.allow_self_approval)
+  );
+  const [loading, setLoading] = useState(() => !cachedApt);
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    zone_id: '',
-    type: '1PN',
-    bedrooms: 1,
-    area_m2: 0,
-    base_rent: 0,
-    note: '',
-    amenitiesText: '',
-  });
+  const [form, setForm] = useState(() => ({
+    zone_id: cachedApt?.zone_id || '',
+    type: cachedApt?.type || '1PN',
+    bedrooms: cachedApt?.bedrooms ?? 1,
+    area_m2: cachedApt?.area_m2 || 0,
+    base_rent: cachedApt?.base_rent || 0,
+    note: cachedApt?.note || '',
+    amenitiesText:
+      cachedApt?.amenities && typeof cachedApt.amenities === 'object'
+        ? Object.keys(cachedApt.amenities)
+            .filter((k) => cachedApt.amenities[k])
+            .join(', ')
+        : '',
+  }));
 
   useEffect(() => {
     buildingsService
@@ -100,14 +114,19 @@ export function ApartmentDetailPage() {
       .catch(() => {});
   }, []);
 
-  const loadApartment = useCallback(async () => {
-    setLoading(true);
+  const loadApartment = useCallback(async (opts = {}) => {
+    const force = Boolean(opts?.force);
+    if (!buildingsService.peekApartment(id)?.data) {
+      setLoading(true);
+    }
     try {
-      const res = await buildingsService.getApartment(id);
+      const res = await buildingsService.getApartment(id, { force });
       const d = res.data;
       setApt(d);
-      if (d?.building_id) {
-        const zRes = await buildingsService.listZones(d.building_id).catch(() => ({ data: [] }));
+      if (Array.isArray(d?.zones)) {
+        setZones(d.zones);
+      } else if (d?.building_id) {
+        const zRes = await buildingsService.listZones(d.building_id, { force }).catch(() => ({ data: [] }));
         setZones(zRes.data || []);
       }
       const am =

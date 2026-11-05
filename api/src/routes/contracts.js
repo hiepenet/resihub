@@ -104,6 +104,8 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
   if (!contract?.id) {
     return {
       service_subscriptions: [],
+      service_prices: [],
+      catalog_services: [],
       invoice_schedule: [],
       available_credit_balance: 0,
       credit_balances: [],
@@ -145,10 +147,10 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
       [contract.id]
     ),
     adminPool.query(
-      `SELECT service_code, unit_price, effective_from
+      `SELECT *
        FROM contract_service_price
        WHERE contract_id = $1
-       ORDER BY effective_from DESC`,
+       ORDER BY service_code, effective_from DESC`,
       [contract.id]
     ),
     adminPool.query(
@@ -173,10 +175,12 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
       [contract.id]
     ),
     adminPool.query(
-      `SELECT id, building_id, code, category, unit_price, is_active
-       FROM service_catalog
-       WHERE org_id = (SELECT org_id FROM building WHERE id = $1)
-         AND is_active = TRUE`,
+      `SELECT sc.*,
+              (SELECT COUNT(*)::int FROM service_subscription ss WHERE ss.service_id = sc.id AND ss.status = 'ACTIVE') AS active_subscriptions_count
+       FROM service_catalog sc
+       WHERE sc.org_id = (SELECT org_id FROM building WHERE id = $1)
+         AND sc.is_active = TRUE
+       ORDER BY sc.is_active DESC, sc.category ASC, sc.name ASC`,
       [contract.building_id]
     ),
   ]);
@@ -196,6 +200,8 @@ async function loadContractSubscriptionsAndSchedule(contract, options = {}) {
 
   return {
     service_subscriptions: subsRes.rows,
+    service_prices: pricesRes.rows,
+    catalog_services: catalogRes.rows,
     invoice_schedule,
     available_credit_balance: availableCreditBalance,
     credit_balances: creditRes.rows,
@@ -1316,11 +1322,24 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
         [id]
       );
 
+      const versionsRes = await client.query(
+        `SELECT cv.*, 
+                p.email as approved_by_email,
+                p.full_name as approved_by_name
+         FROM contract_version cv
+         LEFT JOIN app_user u ON u.id = cv.approved_by
+         LEFT JOIN person p ON p.id = u.person_id
+         WHERE cv.contract_id = $1
+         ORDER BY cv.version_no DESC`,
+        [id]
+      );
+
       const isResident = getUserRoleCodes(req).includes('RESIDENT') &&
         !getUserRoleCodes(req).some(r => ['SYS_ADMIN', 'OWNER', 'MANAGER'].includes(r));
-      const [ownerUserIds, scheduleBundle] = await Promise.all([
+      const [ownerUserIds, scheduleBundle, occupants] = await Promise.all([
         getBuildingActiveOwnerUserIds(result.rows[0].building_id),
         loadContractSubscriptionsAndSchedule(result.rows[0], { isResident }),
+        fetchContractOccupantsForViewer(id, req),
       ]);
 
       res.json({
@@ -1329,7 +1348,11 @@ router.get('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGE
           has_building_owner: ownerUserIds.length > 0,
           related_contracts: chainRes.rows,
           attachments: attRes.rows,
+          occupants,
+          amendments: versionsRes.rows,
           service_subscriptions: scheduleBundle.service_subscriptions,
+          service_prices: scheduleBundle.service_prices,
+          catalog_services: scheduleBundle.catalog_services,
           invoice_schedule: scheduleBundle.invoice_schedule,
           available_credit_balance: scheduleBundle.available_credit_balance,
           credit_balances: scheduleBundle.credit_balances,
@@ -2051,41 +2074,46 @@ async function attachOccupantInTx(client, { contractId, orgId, actorId, occupant
  * - OWNER (không kiêm MANAGER/SYS_ADMIN): che id_number của mọi thành viên.
  * - RESIDENT (không kiêm MANAGER/SYS_ADMIN): chỉ thấy đầy đủ id_number của chính mình, che các thành viên khác.
  */
+async function fetchContractOccupantsForViewer(contractId, req) {
+  const userRoles = getUserRoleCodes(req);
+  const isFullPiiRole = userRoles.includes('SYS_ADMIN') || userRoles.includes('MANAGER');
+  const isOwnerOnly = userRoles.includes('OWNER') && !isFullPiiRole;
+  const isResidentOnly = userRoles.includes('RESIDENT') && !isFullPiiRole;
+
+  const result = await adminPool.query(
+    `SELECT t.id AS tenant_id, t.status, p.id AS person_id, p.full_name, p.phone, p.email, p.id_number, co.relationship
+     FROM contract_occupant co
+     JOIN tenant t ON t.id = co.tenant_id
+     JOIN person p ON p.id = t.person_id
+     WHERE co.contract_id = $1
+     ORDER BY co.created_at ASC`,
+    [contractId]
+  );
+  return result.rows.map((row) => {
+    const shouldMaskId =
+      isOwnerOnly ||
+      (isResidentOnly && String(row.person_id) !== String(req.user.person_id || ''));
+    return {
+      tenant_id: row.tenant_id,
+      status: row.status,
+      full_name: row.full_name,
+      phone: row.phone,
+      email: row.email,
+      id_number: shouldMaskId && row.id_number ? maskIdNumber(row.id_number) : row.id_number,
+      relationship: row.relationship,
+    };
+  });
+}
+
 router.get('/:id/occupants', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER', 'RESIDENT']), async (req, res) => {
   const { id } = req.params;
   const access = await checkContractAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json(access.body);
   }
-  const userRoles = getUserRoleCodes(req);
-  const isFullPiiRole = userRoles.includes('SYS_ADMIN') || userRoles.includes('MANAGER');
-  const isOwnerOnly = userRoles.includes('OWNER') && !isFullPiiRole;
-  const isResidentOnly = userRoles.includes('RESIDENT') && !isFullPiiRole;
 
   try {
-    const result = await adminPool.query(
-      `SELECT t.id AS tenant_id, t.status, p.id AS person_id, p.full_name, p.phone, p.email, p.id_number, co.relationship
-       FROM contract_occupant co
-       JOIN tenant t ON t.id = co.tenant_id
-       JOIN person p ON p.id = t.person_id
-       WHERE co.contract_id = $1
-       ORDER BY co.created_at ASC`,
-      [id]
-    );
-    const rows = result.rows.map((row) => {
-      const shouldMaskId =
-        isOwnerOnly ||
-        (isResidentOnly && String(row.person_id) !== String(req.user.person_id || ''));
-      return {
-        tenant_id: row.tenant_id,
-        status: row.status,
-        full_name: row.full_name,
-        phone: row.phone,
-        email: row.email,
-        id_number: shouldMaskId && row.id_number ? maskIdNumber(row.id_number) : row.id_number,
-        relationship: row.relationship,
-      };
-    });
+    const rows = await fetchContractOccupantsForViewer(id, req);
     res.json({ data: rows });
   } catch (err) {
     console.error('[List Occupants Error]:', err);

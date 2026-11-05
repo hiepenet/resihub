@@ -44,8 +44,9 @@ export function BuildingsPage() {
   const toast = useToast();
   const { canCreateBuildings, canManageBuildings, canEditRealEstate } = usePermission();
 
-  const [buildings, setBuildings] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const initialBuildings = buildingsService.peekList()?.data;
+  const [buildings, setBuildings] = useState(() => (Array.isArray(initialBuildings) ? initialBuildings : []));
+  const [loading, setLoading] = useState(() => !Array.isArray(initialBuildings));
   const [search, setSearch] = useState('');
   const { banks } = useVietQrBanks();
 
@@ -74,10 +75,12 @@ export function BuildingsPage() {
     account_holder: '',
   });
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (opts = {}) => {
+    if (!Array.isArray(buildingsService.peekList()?.data)) {
+      setLoading(true);
+    }
     try {
-      const bRes = await buildingsService.list();
+      const bRes = await buildingsService.list({ force: Boolean(opts?.force) });
       setBuildings(bRes.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err));

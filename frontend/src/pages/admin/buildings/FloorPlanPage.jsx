@@ -69,19 +69,38 @@ export function FloorPlanView({
   embedded = false,
   highlightPendingConfirm = false,
   buildingSelector = null,
+  initialBuilding = null,
+  initialZones = null,
 }) {
   const navigate = useNavigate();
   const toast = useToast();
   const { canEditRealEstate, isManager } = usePermission();
 
-  const [building, setBuilding] = useState(null);
-  const [floorMap, setFloorMap] = useState([]);
-  const [zones, setZones] = useState([]);
-  const [pendingConfirms, setPendingConfirms] = useState([]);
+  const isMatchingInitial = Boolean(
+    initialBuilding && String(initialBuilding.id) === String(buildingId)
+  );
+  const cachedBld =
+    (isMatchingInitial ? initialBuilding : null) ||
+    buildingsService.peekById(buildingId)?.data ||
+    null;
+  const cachedFloorMap = buildingsService.peekFloorMap(buildingId)?.data;
+  const cachedZones =
+    (isMatchingInitial && Array.isArray(initialZones) ? initialZones : null) ||
+    buildingsService.peekZones(buildingId)?.data;
+  const cachedPending = buildingsService.peekReservations({
+    building_id: buildingId,
+    status: 'PENDING_CONFIRM',
+    limit: 50,
+  })?.data;
+
+  const [building, setBuilding] = useState(cachedBld);
+  const [floorMap, setFloorMap] = useState(() => (Array.isArray(cachedFloorMap) ? cachedFloorMap : []));
+  const [zones, setZones] = useState(() => (Array.isArray(cachedZones) ? cachedZones : []));
+  const [pendingConfirms, setPendingConfirms] = useState(() => (Array.isArray(cachedPending) ? cachedPending : []));
   const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [zoneFilter, setZoneFilter] = useState('ALL');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !Array.isArray(cachedFloorMap));
 
   // Slide-over apartment detail
   const [selectedApt, setSelectedApt] = useState(null);
@@ -135,16 +154,29 @@ export function FloorPlanView({
       .catch(() => {});
   }, []);
 
-  const loadFloorPlan = useCallback(async () => {
+  const loadFloorPlan = useCallback(async (opts = {}) => {
     if (!buildingId) return;
-    setLoading(true);
+    const force = Boolean(opts?.force);
+    const matchesInitial = Boolean(
+      initialBuilding && String(initialBuilding.id) === String(buildingId)
+    );
+    if (!Array.isArray(buildingsService.peekFloorMap(buildingId)?.data)) {
+      setLoading(true);
+    }
     try {
       const [bRes, fmRes, zRes, pendRes] = await Promise.all([
-        buildingsService.getById(buildingId),
-        buildingsService.getFloorMap(buildingId),
-        buildingsService.listZones(buildingId).catch(() => ({ data: [] })),
+        !force && matchesInitial
+          ? Promise.resolve({ data: initialBuilding })
+          : buildingsService.getById(buildingId, { force }),
+        buildingsService.getFloorMap(buildingId, { force }),
+        !force && matchesInitial && Array.isArray(initialZones)
+          ? Promise.resolve({ data: initialZones })
+          : buildingsService.listZones(buildingId, { force }).catch(() => ({ data: [] })),
         buildingsService
-          .listReservations({ building_id: buildingId, status: 'PENDING_CONFIRM', limit: 50 })
+          .listReservations(
+            { building_id: buildingId, status: 'PENDING_CONFIRM', limit: 50 },
+            { force }
+          )
           .catch(() => ({ data: [] })),
       ]);
       setBuilding(bRes.data);
@@ -156,7 +188,7 @@ export function FloorPlanView({
     } finally {
       setLoading(false);
     }
-  }, [buildingId, toast]);
+  }, [buildingId, initialBuilding, initialZones, toast]);
 
   useEffect(() => {
     loadFloorPlan();
@@ -1357,6 +1389,7 @@ export function FloorPlanPage() {
 
   return (
     <FloorPlanView
+      key={selectedBuildingId}
       buildingId={selectedBuildingId}
       embedded={false}
       highlightPendingConfirm={highlightPendingConfirm}

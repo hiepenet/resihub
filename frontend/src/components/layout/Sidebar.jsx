@@ -21,6 +21,7 @@ import {
 import { ADMIN_NAV_GROUPS } from '../../constants/navigation';
 import { useAuthStore } from '../../stores/authStore';
 import { ROLE_LABELS } from '../../constants/roles';
+import { preloadRouteChunk } from '../../router/routePreloaders';
 
 const ICON_MAP = {
   LayoutDashboard,
@@ -87,6 +88,8 @@ export function Sidebar({ mobileOpen, onCloseMobile }) {
                     key={item.path}
                     to={item.path}
                     onClick={onCloseMobile}
+                    onMouseEnter={() => preloadRouteChunk(item.path)}
+                    onFocus={() => preloadRouteChunk(item.path)}
                     className={({ isActive }) =>
                       `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
                         isActive

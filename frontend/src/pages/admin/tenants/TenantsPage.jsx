@@ -107,8 +107,9 @@ export function TenantsPage() {
   const { canManageTenants, isSysAdmin } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [tenants, setTenants] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const initialTenants = tenantsService.peekList()?.data;
+  const [tenants, setTenants] = useState(() => (Array.isArray(initialTenants) ? initialTenants : []));
+  const [loading, setLoading] = useState(() => !Array.isArray(initialTenants));
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -143,10 +144,12 @@ export function TenantsPage() {
   });
   const [submittingMerge, setSubmittingMerge] = useState(false);
 
-  const fetchTenants = useCallback(async () => {
-    setLoading(true);
+  const fetchTenants = useCallback(async (opts = {}) => {
+    if (!Array.isArray(tenantsService.peekList()?.data)) {
+      setLoading(true);
+    }
     try {
-      const res = await tenantsService.list();
+      const res = await tenantsService.list(undefined, { force: Boolean(opts?.force) });
       setTenants(Array.isArray(res?.data) ? res.data : []);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách cư dân.'));

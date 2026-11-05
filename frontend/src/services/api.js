@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '../stores/authStore';
 import { createIdempotencyKey } from '../utils/idempotency';
+import { invalidateRelatedNamespacesForUrl } from './queryCache';
 
 const api = axios.create({
   baseURL: '',
@@ -9,7 +10,7 @@ const api = axios.create({
   },
 });
 
-const MUTATING_METHODS = new Set(['POST', 'PATCH', 'DELETE']);
+const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 const IDEMPOTENT_FINANCIAL_ENDPOINTS = [
   '/api/v1/invoices',
   '/api/v1/payments',
@@ -44,7 +45,13 @@ api.interceptors.request.use(
 let refreshPromise = null;
 
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const method = String(response?.config?.method || 'get').toUpperCase();
+    if (MUTATING_METHODS.has(method)) {
+      invalidateRelatedNamespacesForUrl(response?.config?.url);
+    }
+    return response;
+  },
   async (error) => {
     const originalRequest = error.config;
     const isAuthEndpoint = originalRequest?.url?.includes('/api/v1/auth/login') ||

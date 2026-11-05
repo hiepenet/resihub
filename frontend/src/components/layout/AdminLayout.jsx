@@ -1,10 +1,15 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
+import { preloadCoreAdminNavigationChunks } from '../../router/routePreloaders';
 
 export function AdminLayout() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    preloadCoreAdminNavigationChunks();
+  }, []);
 
   return (
     <div className="min-h-screen flex bg-surface-muted text-slate-800">

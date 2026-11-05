@@ -263,11 +263,22 @@ export function ContractDetailPage() {
   const currentUserId = user?.id || user?.sub;
   const canManageOps = isManager;
 
-  const [contract, setContract] = useState(null);
-  const [occupants, setOccupants] = useState([]);
-  const [amendments, setAmendments] = useState([]);
-  const [servicePrices, setServicePrices] = useState([]);
-  const [catalogServices, setCatalogServices] = useState([]);
+  const cachedContract = contractsService.peekById(id)?.data || null;
+  const cachedSettings = usersService.peekSettings()?.data || null;
+
+  const [contract, setContract] = useState(cachedContract);
+  const [occupants, setOccupants] = useState(() =>
+    Array.isArray(cachedContract?.occupants) ? cachedContract.occupants : []
+  );
+  const [amendments, setAmendments] = useState(() =>
+    Array.isArray(cachedContract?.amendments) ? cachedContract.amendments : []
+  );
+  const [servicePrices, setServicePrices] = useState(() =>
+    Array.isArray(cachedContract?.service_prices) ? cachedContract.service_prices : []
+  );
+  const [catalogServices, setCatalogServices] = useState(() =>
+    Array.isArray(cachedContract?.catalog_services) ? cachedContract.catalog_services : []
+  );
   const contractBuildingId = contract?.building_id || null;
   const serviceCodeOptions = useMemo(() => {
     const scopedCatalog = contractBuildingId
@@ -277,7 +288,7 @@ export function ContractDetailPage() {
       : catalogServices;
     return buildContractServiceCodeOptions(scopedCatalog, servicePrices);
   }, [catalogServices, contractBuildingId, servicePrices]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !cachedContract);
   const [activeTab, setActiveTab] = useState('overview');
 
   // Direct Credit Refund State (FR-040)
@@ -392,7 +403,9 @@ export function ContractDetailPage() {
   const [submittingRejectTerm, setSubmittingRejectTerm] = useState(false);
 
   // Reject PENDING_APPROVAL contract (return to DRAFT) + Four-eyes self-approval setting
-  const [allowSelfApproval, setAllowSelfApproval] = useState(false);
+  const [allowSelfApproval, setAllowSelfApproval] = useState(() =>
+    Boolean(cachedSettings?.approval_config?.allow_self_approval)
+  );
   const [rejectPriceOpen, setRejectPriceOpen] = useState(false);
   const [rejectPriceReason, setRejectPriceReason] = useState('');
   const [submittingRejectPrice, setSubmittingRejectPrice] = useState(false);
@@ -568,24 +581,29 @@ export function ContractDetailPage() {
     }
   };
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (opts = {}) => {
     if (!id) return;
-    setLoading(true);
+    const force = Boolean(opts?.force);
+    if (!contractsService.peekById(id)?.data) {
+      setLoading(true);
+    }
     try {
-      const [cRes, oRes, aRes, spRes, settingsRes] = await Promise.all([
-        contractsService.getById(id),
-        contractsService.listOccupants(id).catch(() => ({ data: [] })),
-        contractsService.listAmendments(id).catch(() => ({ data: [] })),
-        contractsService.listServicePrices(id).catch(() => ({ data: [] })),
+      const [cRes, settingsRes] = await Promise.all([
+        contractsService.getById(id, { force }),
         usersService.getSettings().catch(() => null),
       ]);
-      setContract(cRes?.data || null);
-      setOccupants(Array.isArray(oRes?.data) ? oRes.data : []);
-      setAmendments(Array.isArray(aRes?.data) ? aRes.data : []);
-      setServicePrices(Array.isArray(spRes?.data) ? spRes.data : []);
+      const cData = cRes?.data || null;
+      setContract(cData);
+      setOccupants(Array.isArray(cData?.occupants) ? cData.occupants : []);
+      setAmendments(Array.isArray(cData?.amendments) ? cData.amendments : []);
+      setServicePrices(Array.isArray(cData?.service_prices) ? cData.service_prices : []);
       setAllowSelfApproval(Boolean(settingsRes?.data?.approval_config?.allow_self_approval));
-      const catRes = await servicesService.listCatalog({ is_active: true }).catch(() => ({ data: [] }));
-      setCatalogServices(Array.isArray(catRes?.data) ? catRes.data : []);
+      if (Array.isArray(cData?.catalog_services)) {
+        setCatalogServices(cData.catalog_services);
+      } else {
+        const catRes = await servicesService.listCatalog({ is_active: true }, { force }).catch(() => ({ data: [] }));
+        setCatalogServices(Array.isArray(catRes?.data) ? catRes.data : []);
+      }
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải thông tin chi tiết hợp đồng.'));
     } finally {

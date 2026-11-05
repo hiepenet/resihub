@@ -177,10 +177,14 @@ export function ContractsPage() {
   const { canCreateContracts, canApproveContracts } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
+  const initialParams = selectedBuildingId ? { building_id: selectedBuildingId } : {};
+  const initialContracts = contractsService.peekList(initialParams)?.data;
+  const initialRequests = contractsService.peekRequests(initialParams)?.data;
+
   const [activeTab, setActiveTab] = useState('list');
-  const [contracts, setContracts] = useState([]);
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [contracts, setContracts] = useState(() => (Array.isArray(initialContracts) ? initialContracts : []));
+  const [requests, setRequests] = useState(() => (Array.isArray(initialRequests) ? initialRequests : []));
+  const [loading, setLoading] = useState(() => !Array.isArray(initialContracts));
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -245,15 +249,17 @@ export function ContractsPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [processingReq, setProcessingReq] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  const fetchData = useCallback(async (opts = {}) => {
+    const force = Boolean(opts?.force);
+    const queryParams = {};
+    if (selectedBuildingId) queryParams.building_id = selectedBuildingId;
+    if (!Array.isArray(contractsService.peekList(queryParams)?.data)) {
+      setLoading(true);
+    }
     try {
-      const queryParams = {};
-      if (selectedBuildingId) queryParams.building_id = selectedBuildingId;
-
       const [cRes, rRes] = await Promise.all([
-        contractsService.list(queryParams),
-        contractsService.listRequests(queryParams).catch(() => ({ data: [] })),
+        contractsService.list(queryParams, { force }),
+        contractsService.listRequests(queryParams, { force }).catch(() => ({ data: [] })),
       ]);
       setContracts(Array.isArray(cRes?.data) ? cRes.data : []);
       setRequests(Array.isArray(rRes?.data) ? rRes.data : []);

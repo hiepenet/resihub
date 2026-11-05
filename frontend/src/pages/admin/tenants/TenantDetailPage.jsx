@@ -81,23 +81,31 @@ export function TenantDetailPage() {
   const toast = useToast();
   const { canManageTenants, isSysAdmin } = usePermission();
 
-  const [tenant, setTenant] = useState(null);
-  const [idImages, setIdImages] = useState([]);
-  const [idImagesMeta, setIdImagesMeta] = useState({ maskedForOwner: false, hasIdImages: false });
-  const [loading, setLoading] = useState(true);
+  const cachedTenant = tenantsService.peekById(id)?.data || null;
+  const cachedImgRes = tenantsService.peekIdImages(id);
+
+  const [tenant, setTenant] = useState(cachedTenant);
+  const [idImages, setIdImages] = useState(() =>
+    Array.isArray(cachedImgRes?.data) ? cachedImgRes.data : []
+  );
+  const [idImagesMeta, setIdImagesMeta] = useState(() => ({
+    maskedForOwner: Boolean(cachedImgRes?.masked_for_owner),
+    hasIdImages: Boolean(cachedImgRes?.has_id_images),
+  }));
+  const [loading, setLoading] = useState(() => !cachedTenant);
   const [activeTab, setActiveTab] = useState('profile');
 
   // Edit profile state
   const [isEditing, setIsEditing] = useState(false);
-  const [form, setForm] = useState({
-    full_name: '',
-    phone: '',
-    email: '',
-    id_number: '',
-    dob: '',
-    nationality: 'Việt Nam',
-    address: '',
-  });
+  const [form, setForm] = useState(() => ({
+    full_name: cachedTenant?.full_name || '',
+    phone: cachedTenant?.phone || '',
+    email: cachedTenant?.email || '',
+    id_number: cachedTenant?.id_number || '',
+    dob: cachedTenant?.dob ? toInputDate(cachedTenant.dob) : '',
+    nationality: cachedTenant?.nationality || 'Việt Nam',
+    address: cachedTenant?.address || '',
+  }));
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
 
@@ -115,13 +123,16 @@ export function TenantDetailPage() {
   const [approvalDialog, setApprovalDialog] = useState({ open: false, action: 'approve', reason: '', error: '' });
   const [processingApproval, setProcessingApproval] = useState(false);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (opts = {}) => {
     if (!id) return;
-    setLoading(true);
+    const force = Boolean(opts?.force);
+    if (!tenantsService.peekById(id)?.data) {
+      setLoading(true);
+    }
     try {
       const [detailRes, imgRes] = await Promise.all([
-        tenantsService.getById(id),
-        tenantsService.getIdImages(id).catch(() => ({ data: [] })),
+        tenantsService.getById(id, { force }),
+        tenantsService.getIdImages(id, { force }).catch(() => ({ data: [] })),
       ]);
       const data = detailRes?.data || null;
       setTenant(data);

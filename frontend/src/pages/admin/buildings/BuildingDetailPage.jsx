@@ -38,13 +38,23 @@ export function BuildingDetailPage() {
   const toast = useToast();
   const { canEditRealEstate, canManageBuildings } = usePermission();
 
+  const cachedBld = buildingsService.peekById(id)?.data || null;
+  const cachedZones = buildingsService.peekZones(id)?.data;
+  const cachedFloors = buildingsService.peekFloors(id)?.data;
+  const cachedContracts = contractsService.peekList({ building_id: id })?.data;
+  const cachedTenants = tenantsService.peekList({ building_id: id })?.data;
+
   const [tab, setTab] = useState('overview');
-  const [building, setBuilding] = useState(null);
-  const [zones, setZones] = useState([]);
-  const [floors, setFloors] = useState([]);
-  const [contracts, setContracts] = useState([]);
-  const [tenants, setTenants] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [building, setBuilding] = useState(cachedBld);
+  const [zones, setZones] = useState(() => (Array.isArray(cachedZones) ? cachedZones : []));
+  const [floors, setFloors] = useState(() => (Array.isArray(cachedFloors) ? cachedFloors : []));
+  const [contracts, setContracts] = useState(() => (Array.isArray(cachedContracts) ? cachedContracts : []));
+  const [contractsLoaded, setContractsLoaded] = useState(() => Array.isArray(cachedContracts));
+  const [contractsLoading, setContractsLoading] = useState(false);
+  const [tenants, setTenants] = useState(() => (Array.isArray(cachedTenants) ? cachedTenants : []));
+  const [tenantsLoaded, setTenantsLoaded] = useState(() => Array.isArray(cachedTenants));
+  const [tenantsLoading, setTenantsLoading] = useState(false);
+  const [loading, setLoading] = useState(() => !cachedBld);
 
   const [zoneModalOpen, setZoneModalOpen] = useState(false);
   const [zoneForm, setZoneForm] = useState({ code: '', name: '' });
@@ -52,21 +62,22 @@ export function BuildingDetailPage() {
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
 
-  const loadBuildingData = useCallback(async () => {
-    setLoading(true);
+  const loadBuildingData = useCallback(async (opts = {}) => {
+    const force = Boolean(opts?.force);
+    if (!buildingsService.peekById(id)?.data) {
+      setLoading(true);
+    }
+    // Warm floor-map cache concurrently so embedded FloorPlanView renders in one network wave
+    buildingsService.getFloorMap(id, { force }).catch(() => {});
     try {
-      const [bRes, zRes, fRes, cRes, tRes] = await Promise.all([
-        buildingsService.getById(id),
-        buildingsService.listZones(id).catch(() => ({ data: [] })),
-        buildingsService.listFloors(id).catch(() => ({ data: [] })),
-        contractsService.list({ building_id: id }).catch(() => ({ data: [] })),
-        tenantsService.list({ building_id: id }).catch(() => ({ data: [] })),
+      const [bRes, zRes, fRes] = await Promise.all([
+        buildingsService.getById(id, { force }),
+        buildingsService.listZones(id, { force }).catch(() => ({ data: [] })),
+        buildingsService.listFloors(id, { force }).catch(() => ({ data: [] })),
       ]);
       setBuilding(bRes.data);
       setZones(zRes.data || []);
       setFloors(fRes.data || []);
-      setContracts(cRes.data || []);
-      setTenants(tRes.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err));
     } finally {
@@ -75,8 +86,38 @@ export function BuildingDetailPage() {
   }, [id, toast]);
 
   useEffect(() => {
+    setContractsLoaded(Array.isArray(contractsService.peekList({ building_id: id })?.data));
+    setTenantsLoaded(Array.isArray(tenantsService.peekList({ building_id: id })?.data));
     loadBuildingData();
-  }, [loadBuildingData]);
+  }, [id, loadBuildingData]);
+
+  useEffect(() => {
+    if (tab !== 'tenants' || !id) return;
+    const hasCached = Array.isArray(tenantsService.peekList({ building_id: id })?.data);
+    if (!hasCached) setTenantsLoading(true);
+    tenantsService
+      .list({ building_id: id })
+      .then((res) => {
+        setTenants(Array.isArray(res?.data) ? res.data : []);
+        setTenantsLoaded(true);
+      })
+      .catch(() => {})
+      .finally(() => setTenantsLoading(false));
+  }, [tab, id]);
+
+  useEffect(() => {
+    if (tab !== 'contracts' || !id) return;
+    const hasCached = Array.isArray(contractsService.peekList({ building_id: id })?.data);
+    if (!hasCached) setContractsLoading(true);
+    contractsService
+      .list({ building_id: id })
+      .then((res) => {
+        setContracts(Array.isArray(res?.data) ? res.data : []);
+        setContractsLoaded(true);
+      })
+      .catch(() => {})
+      .finally(() => setContractsLoading(false));
+  }, [tab, id]);
 
   const handleCreateZone = async (e) => {
     e.preventDefault();
@@ -179,8 +220,8 @@ export function BuildingDetailPage() {
         tabs={[
           { id: 'overview', label: 'Sơ đồ tòa & Tổng quan', icon: LayoutGrid },
           { id: 'zones', label: 'Danh sách Khu', icon: Layers, count: zones.length },
-          { id: 'tenants', label: 'Cư dân', icon: Users, count: tenants.length },
-          { id: 'contracts', label: 'Hợp đồng', icon: FileSignature, count: contracts.length },
+          { id: 'tenants', label: 'Cư dân', icon: Users, count: tenantsLoaded ? tenants.length : undefined },
+          { id: 'contracts', label: 'Hợp đồng', icon: FileSignature, count: contractsLoaded ? contracts.length : undefined },
         ]}
         activeTab={tab}
         onChange={setTab}
@@ -264,7 +305,7 @@ export function BuildingDetailPage() {
             </Card>
           </div>
 
-          <FloorPlanView buildingId={id} embedded />
+          <FloorPlanView buildingId={id} embedded initialBuilding={building} initialZones={zones} />
         </div>
       ) : null}
 
@@ -338,6 +379,7 @@ export function BuildingDetailPage() {
 
       {tab === 'tenants' ? (
         <DataTable
+          loading={tenantsLoading}
           data={tenants}
           onRowClick={(t) => navigate(`/admin/tenants/${t.id}`)}
           emptyTitle="Chưa có cư dân tại tòa nhà này"
@@ -353,6 +395,7 @@ export function BuildingDetailPage() {
 
       {tab === 'contracts' ? (
         <DataTable
+          loading={contractsLoading}
           data={contracts}
           onRowClick={(c) => navigate(`/admin/contracts/${c.id}`)}
           emptyTitle="Chưa có hợp đồng thuê nào"
