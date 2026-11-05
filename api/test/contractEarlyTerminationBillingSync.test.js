@@ -27,7 +27,7 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
   const { default: authRoute } = await import('../src/routes/auth.js');
   const { default: apartmentsRoute } = await import('../src/routes/apartments.js');
   const { default: contractsRoute } = await import('../src/routes/contracts.js');
-  const { default: invoicesRoute } = await import('../src/routes/invoices.js');
+  const { default: invoicesRoute, generateInvoicesCore, issueDraftInvoiceInTx, createLateFeeSettlementInvoiceInTx } = await import('../src/routes/invoices.js');
   const { default: depositsRoute, calculateContractOpenDebts } = await import('../src/routes/deposits.js');
   const { default: attachmentsRoute } = await import('../src/routes/attachments.js');
   const { runDailyJobs } = await import('../src/jobs/daily.js');
@@ -88,6 +88,25 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
 
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
+    if (cleanup.invoiceIds.length > 0 || cleanup.contractIds.length > 0) {
+      await adminPool.query(
+        `DELETE FROM audit_log
+         WHERE entity = 'late_fee_accrual_tracker'
+           AND (
+             entity_id IN (
+               SELECT id FROM late_fee_accrual_tracker
+               WHERE invoice_id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])
+             )
+             OR (after->>'invoice_id') = ANY($3::text[])
+           )`,
+        [cleanup.invoiceIds, cleanup.contractIds, cleanup.invoiceIds.map(String)]
+      ).catch(() => {});
+      await adminPool.query(
+        `DELETE FROM late_fee_accrual_tracker
+         WHERE invoice_id = ANY($1::uuid[]) OR contract_id = ANY($2::uuid[])`,
+        [cleanup.invoiceIds, cleanup.contractIds]
+      ).catch(() => {});
+    }
     for (const invId of cleanup.invoiceIds) {
       await adminPool.query('DELETE FROM invoice_adjustment WHERE invoice_id = $1', [invId]).catch(() => {});
       await adminPool.query('DELETE FROM invoice_line WHERE invoice_id = $1', [invId]).catch(() => {});
@@ -841,4 +860,169 @@ test('Task 6: Contract 6A Sync, Future Room-Transfer Cutoff, Renewal Credit Carr
     assert.equal(result.serviceDebt, 300000, 'serviceDebt must equal 300,000 LATE_FEE');
     assert.equal(result.rentDebt, 5000000, 'rentDebt must only count RENT lines');
   });
+
+  // =========================================================================
+  // Tests 5a–5c: Carry-Forward LATE_FEE Lines into New DRAFT in generateInvoicesCore (FR-064)
+  // =========================================================================
+  {
+    const cfResident = await createResident('T5CF');
+    const cfApt = await createApartment('A5CF');
+    const cfCRes = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status
+       )
+       VALUES ($1, $2, $3, '2028-01-01', '2028-12-31', 7000000, 7000000, 'monthly', 1, 5, 'ACTIVE')
+       RETURNING id`,
+      [cfApt.id, buildingId, cfResident.tenantId]
+    );
+    const cfContractId = cfCRes.rows[0].id;
+    cleanup.contractIds.push(cfContractId);
+
+    const invTRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-04', '2028-04-01', '2028-04-06', 7000000, 0, 7000000, 0, 'OVERDUE')
+       RETURNING id`,
+      [orgId, buildingId, cfApt.id, cfContractId, cfResident.tenantId, `INV-202804-${suffix}`]
+    );
+    const invTId = invTRes.rows[0].id;
+    cleanup.invoiceIds.push(invTId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê kỳ 2028-04', 1, 'tháng', 7000000, 7000000)`,
+      [invTId]
+    );
+    await adminPool.query(
+      `INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+       VALUES ($1, $2, $3, 300000, 3, '2028-04-14')`,
+      [orgId, cfContractId, invTId]
+    );
+
+    let invT1Id = null;
+
+    await t.test('5a: generateInvoicesCore carries pending late_fee_accrual_tracker into new DRAFT', async () => {
+      const client = await adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await generateInvoicesCore(client, {
+          orgId,
+          contractId: cfContractId,
+          targetPeriod: '2028-05',
+          issueDateYmd: '2028-05-01',
+          allowMissingMeterReadings: true,
+        });
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      const invRes = await adminPool.query(
+        `SELECT id, total_amount, subtotal_amount, status FROM invoice WHERE contract_id = $1 AND period = '2028-05'`,
+        [cfContractId]
+      );
+      assert.equal(invRes.rowCount, 1, '5a: 2028-05 DRAFT created');
+      invT1Id = invRes.rows[0].id;
+      cleanup.invoiceIds.push(invT1Id);
+      assert.equal(Number(invRes.rows[0].total_amount), 7300000, '5a: total_amount = 7,000,000 rent + 300,000 carry LATE_FEE');
+
+      const lines = await adminPool.query(
+        `SELECT item_type, amount FROM invoice_line il JOIN invoice i ON i.id = il.invoice_id
+         WHERE i.contract_id = $1 AND i.period = '2028-05' AND il.item_type = 'LATE_FEE'`,
+        [cfContractId]
+      );
+      assert.equal(lines.rowCount, 1, '5a: carry-forward LATE_FEE line created in T+1');
+      assert.equal(Number(lines.rows[0].amount), 300000, '5a: carry-forward amount = tracker accrued_total');
+
+      const tracker = await adminPool.query(
+        `SELECT carried_to_invoice_id FROM late_fee_accrual_tracker WHERE contract_id = $1 AND carried_to_invoice_id IS NOT NULL`,
+        [cfContractId]
+      );
+      assert.equal(tracker.rowCount, 1, '5a: tracker.carried_to_invoice_id set');
+      assert.equal(tracker.rows[0].carried_to_invoice_id, invT1Id, '5a: carried_to_invoice_id points to T+1 invoice');
+    });
+
+    await t.test('5b: generateInvoicesCore does not carry again if tracker already carried', async () => {
+      const client = await adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await generateInvoicesCore(client, {
+          orgId,
+          buildingId,
+          targetPeriod: '2028-05',
+          issueDateYmd: '2028-05-01',
+          allowMissingMeterReadings: true,
+        });
+        await generateInvoicesCore(client, {
+          orgId,
+          contractId: cfContractId,
+          targetPeriod: '2028-05',
+          issueDateYmd: '2028-05-01',
+          allowMissingMeterReadings: true,
+        });
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      const lines = await adminPool.query(
+        `SELECT COUNT(*)::int AS cnt, COALESCE(SUM(il.amount), 0)::bigint AS sum_amt
+         FROM invoice_line il JOIN invoice i ON i.id = il.invoice_id
+         WHERE i.contract_id = $1 AND i.period = '2028-05' AND il.item_type = 'LATE_FEE'`,
+        [cfContractId]
+      );
+      assert.equal(Number(lines.rows[0].cnt), 1, '5b: no duplicate LATE_FEE line on re-run');
+      assert.equal(Number(lines.rows[0].sum_amt), 300000, '5b: carried LATE_FEE remains 300,000');
+    });
+
+    await t.test('5c: rolling carry-forward — T+2 invoice gets T+1 accrual (not T, already carried)', async () => {
+      const client = await adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await issueDraftInvoiceInTx(client, { invoiceId: invT1Id, dueDate: '2028-05-06' });
+        await client.query(`UPDATE invoice SET status = 'OVERDUE' WHERE id = $1`, [invT1Id]);
+        await client.query(
+          `INSERT INTO late_fee_accrual_tracker (org_id, contract_id, invoice_id, accrued_total, chargeable_days, as_of_date)
+           VALUES ($1, $2, $3, 200000, 2, '2028-05-13')`,
+          [orgId, cfContractId, invT1Id]
+        );
+
+        await generateInvoicesCore(client, {
+          orgId,
+          contractId: cfContractId,
+          targetPeriod: '2028-06',
+          issueDateYmd: '2028-06-01',
+          allowMissingMeterReadings: true,
+        });
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      const lines = await adminPool.query(
+        `SELECT il.amount, i.id AS inv_id, i.total_amount
+         FROM invoice_line il JOIN invoice i ON i.id = il.invoice_id
+         WHERE i.contract_id = $1 AND i.period = '2028-06' AND il.item_type = 'LATE_FEE'`,
+        [cfContractId]
+      );
+      assert.equal(lines.rowCount, 1, '5c: T+2 has LATE_FEE carry from T+1 only');
+      cleanup.invoiceIds.push(lines.rows[0].inv_id);
+      assert.equal(Number(lines.rows[0].amount), 200000, '5c: amount = T+1 tracker accrued (not T, already carried)');
+      assert.equal(Number(lines.rows[0].total_amount), 7200000, '5c: T+2 total = 7,000,000 rent + 200,000 T+1 late fee');
+    });
+  }
 });

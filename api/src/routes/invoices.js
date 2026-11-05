@@ -350,12 +350,14 @@ export async function generateInvoicesCore(
          SELECT 1 FROM invoice inv
          WHERE inv.contract_id = c.id
            AND inv.period = $2
+           AND COALESCE(inv.invoice_type, 'REGULAR') = 'REGULAR'
            AND inv.status NOT IN ('VOID', 'CANCELLED', 'DRAFT')
        )`
     : `NOT EXISTS (
          SELECT 1 FROM invoice inv
          WHERE inv.contract_id = c.id
            AND inv.period = $2
+           AND COALESCE(inv.invoice_type, 'REGULAR') = 'REGULAR'
            AND inv.status NOT IN ('VOID', 'CANCELLED')
        )`;
 
@@ -638,6 +640,45 @@ export async function generateInvoicesCore(
       }
     }
 
+    // Existing DRAFT lookup (trước khi tổng hợp dòng để bảo toàn carry-forward LATE_FEE khi làm mới DRAFT)
+    const existingDraftRes = await client.query(
+      `SELECT * FROM invoice
+       WHERE contract_id = $1
+         AND period = $2
+         AND COALESCE(invoice_type, 'REGULAR') = 'REGULAR'
+         AND status = 'DRAFT'
+       FOR UPDATE`,
+      [c.id, targetPeriod]
+    );
+    const existingDraft = existingDraftRes.rows[0] || null;
+
+    // Carry-forward: inject pending late fee accruals from prior overdue invoices of this contract (FR-064)
+    const pendingTrackerRes = await client.query(
+      `SELECT COALESCE(SUM(accrued_total), 0)::bigint AS total_accrual,
+              ARRAY_AGG(id) AS tracker_ids
+       FROM late_fee_accrual_tracker
+       WHERE contract_id = $1
+         AND (carried_to_invoice_id IS NULL OR carried_to_invoice_id = $2::uuid)`,
+      [c.id, existingDraft ? existingDraft.id : null]
+    );
+    const totalAccrual = roundVND(Number(pendingTrackerRes.rows[0]?.total_accrual || 0));
+    const trackerIdsToCarry =
+      totalAccrual > 0 ? pendingTrackerRes.rows[0]?.tracker_ids || [] : [];
+    if (totalAccrual > 0 && trackerIdsToCarry.length > 0) {
+      lines.push({
+        item_type: 'LATE_FEE',
+        description: 'Phí phạt chậm thanh toán kỳ trước (dồn sang kỳ này)',
+        quantity: 1,
+        unit: 'kỳ',
+        unit_price: totalAccrual,
+        amount: totalAccrual,
+        formula_meta: {
+          carry_forward: true,
+          source_tracker_ids: trackerIdsToCarry,
+        },
+      });
+    }
+
     const grossSubtotal = roundVND(lines.reduce((s, l) => s + Number(l.amount || 0), 0));
 
     // Billable check: AC-015.1
@@ -653,14 +694,7 @@ export async function generateInvoicesCore(
     }
 
     // Existing DRAFT in-place refresh
-    const existingDraftRes = await client.query(
-      `SELECT * FROM invoice WHERE contract_id = $1 AND period = $2 AND status = 'DRAFT' FOR UPDATE`,
-      [c.id, targetPeriod]
-    );
-
-    if (existingDraftRes.rows.length > 0) {
-      const existingDraft = existingDraftRes.rows[0];
-
+    if (existingDraft) {
       await releaseInvoiceCreditsInTx(client, { invoiceId: existingDraft.id, actorId });
 
       await client.query(
@@ -686,6 +720,17 @@ export async function generateInvoicesCore(
             l.subscription_id || null,
             JSON.stringify(l.formula_meta || {}),
           ]
+        );
+      }
+
+      if (trackerIdsToCarry.length > 0) {
+        await client.query(
+          `UPDATE late_fee_accrual_tracker
+           SET carried_to_invoice_id = $1,
+               carried_at = COALESCE(carried_at, NOW()),
+               updated_at = NOW()
+           WHERE id = ANY($2::uuid[])`,
+          [existingDraft.id, trackerIdsToCarry]
         );
       }
 
@@ -757,6 +802,17 @@ export async function generateInvoicesCore(
             l.subscription_id || null,
             JSON.stringify(l.formula_meta || {}),
           ]
+        );
+      }
+
+      if (trackerIdsToCarry.length > 0) {
+        await client.query(
+          `UPDATE late_fee_accrual_tracker
+           SET carried_to_invoice_id = $1,
+               carried_at = NOW(),
+               updated_at = NOW()
+           WHERE id = ANY($2::uuid[])`,
+          [inv.id, trackerIdsToCarry]
         );
       }
 
