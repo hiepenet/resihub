@@ -9,7 +9,10 @@
 import { adminPool } from '../db/client.js';
 import { syncApartmentStatus } from '../services/apartmentStatus.js';
 import { refundDeadline, getOrgDepositRefundDays } from '../services/deadlines.js';
-import { generateInvoicesCore } from '../routes/invoices.js';
+import {
+  generateInvoicesCore,
+  createLateFeeSettlementInvoiceInTx,
+} from '../routes/invoices.js';
 import { roundVND } from '../services/pricing.js';
 import { getTodayVnDateStr } from '../services/depositSettlement.js';
 import {
@@ -696,6 +699,125 @@ async function executeDailySteps({ effectiveDateYmd, buildingId = null }) {
     }
   } catch (autoBillErr) {
     console.error('[DailyJob] auto-billing step failed:', autoBillErr.message);
+  }
+
+  // 7b. Spec §4.4: Sinh hóa đơn LATE_FEE_SETTLEMENT tự động cho hợp đồng đã kết thúc (EXPIRED / TERMINATED) còn tracker chưa carry
+  let lateFeeSettlementsCreated = 0;
+  try {
+    const finalContracts = await adminPool.query(
+      `SELECT lft.contract_id,
+              lft.org_id,
+              SUM(lft.accrued_total)::bigint AS total_pending,
+              ARRAY_AGG(lft.id) AS tracker_ids,
+              c.building_id,
+              c.apartment_id,
+              c.primary_tenant_id AS tenant_id
+       FROM late_fee_accrual_tracker lft
+       JOIN contract c ON c.id = lft.contract_id
+       WHERE lft.carried_to_invoice_id IS NULL
+         AND c.status IN ('EXPIRED', 'TERMINATED')
+         AND ($1::uuid IS NULL OR c.building_id = $1::uuid)
+         AND NOT EXISTS (
+           SELECT 1 FROM invoice i_s
+           WHERE i_s.contract_id = c.id
+             AND i_s.invoice_type = 'LATE_FEE_SETTLEMENT'
+             AND i_s.status <> 'VOID'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM invoice i_d
+           WHERE i_d.contract_id = c.id
+             AND COALESCE(i_d.invoice_type, 'REGULAR') = 'REGULAR'
+             AND i_d.status = 'DRAFT'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM deposit d
+           WHERE d.contract_id = c.id
+             AND d.status IN (
+               'PENDING_APPROVAL',
+               'APPROVED_PENDING_PAYOUT',
+               'RETURNED',
+               'REFUNDED',
+               'PARTIALLY_REFUNDED',
+               'DEDUCTED_FULL',
+               'TRANSFERRED',
+               'DISPUTED'
+             )
+         )
+       GROUP BY lft.contract_id, lft.org_id, c.building_id, c.apartment_id, c.primary_tenant_id
+       HAVING SUM(lft.accrued_total) > 0`,
+      [buildingId]
+    );
+
+    for (const fc of finalContracts.rows) {
+      const txClient = await adminPool.connect();
+      try {
+        await txClient.query('BEGIN');
+        const existing = await txClient.query(
+          `SELECT id FROM invoice
+           WHERE contract_id = $1
+             AND invoice_type = 'LATE_FEE_SETTLEMENT'
+             AND status <> 'VOID'
+           LIMIT 1`,
+          [fc.contract_id]
+        );
+        if (existing.rowCount > 0) {
+          await txClient.query('ROLLBACK');
+          continue;
+        }
+
+        const lockedTrackers = await txClient.query(
+          `SELECT id, accrued_total
+           FROM late_fee_accrual_tracker
+           WHERE id = ANY($1::uuid[])
+             AND carried_to_invoice_id IS NULL
+           FOR UPDATE`,
+          [fc.tracker_ids]
+        );
+        const lockedSum = lockedTrackers.rows.reduce(
+          (sum, r) => sum + Number(r.accrued_total || 0),
+          0
+        );
+        if (lockedTrackers.rowCount === 0 || lockedSum <= 0) {
+          await txClient.query('ROLLBACK');
+          continue;
+        }
+        const lockedIds = lockedTrackers.rows.map((r) => r.id);
+
+        const newInv = await createLateFeeSettlementInvoiceInTx(txClient, {
+          contractId: fc.contract_id,
+          orgId: fc.org_id,
+          buildingId: fc.building_id,
+          apartmentId: fc.apartment_id,
+          tenantId: fc.tenant_id,
+          totalAccrual: lockedSum,
+          sourceTrackerIds: lockedIds,
+          effectiveDateYmd,
+        });
+
+        await txClient.query(
+          `UPDATE late_fee_accrual_tracker
+           SET carried_to_invoice_id = $1,
+               carried_at = NOW(),
+               updated_at = NOW()
+           WHERE id = ANY($2::uuid[])`,
+          [newInv.id, lockedIds]
+        );
+
+        await txClient.query('COMMIT');
+        lateFeeSettlementsCreated += 1;
+      } catch (e) {
+        await txClient.query('ROLLBACK').catch(() => {});
+        console.error('[DailyJob] Step7b LATE_FEE_SETTLEMENT error:', e.message);
+      } finally {
+        txClient.release();
+      }
+    }
+
+    if (lateFeeSettlementsCreated > 0) {
+      console.log(`[DailyJob] created LATE_FEE_SETTLEMENT invoices: ${lateFeeSettlementsCreated}`);
+    }
+  } catch (step7bErr) {
+    console.error('[DailyJob] Step7b outer error:', step7bErr.message);
   }
 
   // 8. FR-039 & PRD Mục 10.1 & 12.4: Nhắc nợ tự động đa mốc (-3, 0, +3, +7, +15 ngày)

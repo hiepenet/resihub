@@ -71,6 +71,7 @@ export async function issueDraftInvoiceInTx(
 
   // If totalAmount > 0, insert receivable and send notification
   if (totalAmount > 0) {
+    const periodLabel = inv.period ? `kỳ ${inv.period}` : 'tất toán phí phạt';
     const recExist = await client.query('SELECT id FROM receivable WHERE invoice_id = $1 LIMIT 1', [invoiceId]);
     if (recExist.rows.length === 0) {
       await client.query(
@@ -84,7 +85,7 @@ export async function issueDraftInvoiceInTx(
           invoiceId,
           totalAmount,
           effectiveDueDate,
-          `Công nợ hóa đơn ${inv.invoice_code} kỳ ${inv.period}`,
+          `Công nợ hóa đơn ${inv.invoice_code} ${periodLabel}`,
         ]
       );
     }
@@ -102,7 +103,7 @@ export async function issueDraftInvoiceInTx(
             inv.org_id,
             uRes.rows[0].id,
             `Phát hành hóa đơn ${inv.invoice_code}`,
-            `Hóa đơn kỳ ${inv.period} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
+            `Hóa đơn ${periodLabel} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
             JSON.stringify({
               invoice_id: invoiceId,
               invoice_code: inv.invoice_code,
@@ -123,6 +124,96 @@ export async function issueDraftInvoiceInTx(
   );
 
   return updatedInv;
+}
+
+/**
+ * Tạo và phát hành ngay hóa đơn tất toán phí phạt kỳ cuối (LATE_FEE_SETTLEMENT) cho hợp đồng đã kết thúc (Spec §4.4, FR-064, FR-024)
+ */
+export async function createLateFeeSettlementInvoiceInTx(
+  client,
+  {
+    contractId,
+    orgId,
+    buildingId = null,
+    apartmentId = null,
+    tenantId = null,
+    totalAccrual,
+    sourceTrackerIds = [],
+    effectiveDateYmd = null,
+  }
+) {
+  let resolvedBuildingId = buildingId;
+  let resolvedApartmentId = apartmentId;
+  let resolvedTenantId = tenantId;
+
+  if (!resolvedBuildingId || !resolvedApartmentId || !resolvedTenantId) {
+    const cRes = await client.query(
+      `SELECT building_id, apartment_id, primary_tenant_id FROM contract WHERE id = $1 LIMIT 1`,
+      [contractId]
+    );
+    if (cRes.rows[0]) {
+      resolvedBuildingId = resolvedBuildingId || cRes.rows[0].building_id;
+      resolvedApartmentId = resolvedApartmentId || cRes.rows[0].apartment_id;
+      resolvedTenantId = resolvedTenantId || cRes.rows[0].primary_tenant_id;
+    }
+  }
+
+  const issueDateStr = effectiveDateYmd || todayVietnamYmd();
+  const dueDateStr = addDaysYmd(issueDateStr, 7);
+  const amt = roundVND(Number(totalAccrual || 0));
+  const invCode = `LF-${String(contractId).slice(0, 8).toUpperCase()}-${issueDateStr.replace(/-/g, '')}`;
+
+  const invIns = await client.query(
+    `INSERT INTO invoice (
+       org_id, building_id, apartment_id, contract_id, tenant_id,
+       invoice_type, period, invoice_code, issue_date, due_date,
+       status, subtotal_amount, adjustment_amount, total_amount, paid_amount
+     )
+     VALUES ($1, $2, $3, $4, $5, 'LATE_FEE_SETTLEMENT', NULL, $6, $7::date, $8::date, 'DRAFT', $9, 0, $9, 0)
+     RETURNING *`,
+    [
+      orgId,
+      resolvedBuildingId,
+      resolvedApartmentId,
+      contractId,
+      resolvedTenantId,
+      invCode,
+      issueDateStr,
+      dueDateStr,
+      amt,
+    ]
+  );
+  const draftInv = invIns.rows[0];
+
+  await client.query(
+    `INSERT INTO invoice_line (
+       invoice_id, item_type, description, quantity, unit, unit_price, amount, formula_meta
+     )
+     VALUES ($1, 'LATE_FEE', 'Phí phạt chậm thanh toán kỳ cuối (tất toán)', 1, 'kỳ', $2, $2, $3::jsonb)`,
+    [
+      draftInv.id,
+      amt,
+      JSON.stringify({
+        settlement: true,
+        source_tracker_ids: sourceTrackerIds,
+        as_of_date: issueDateStr,
+      }),
+    ]
+  );
+
+  const issuedInv = await issueDraftInvoiceInTx(client, {
+    invoiceId: draftInv.id,
+    actorId: null,
+    dueDate: dueDateStr,
+  });
+
+  await client.query(
+    `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+     VALUES (NULL, 'CREATE_LATE_FEE_SETTLEMENT_INVOICE', 'invoice', $1, NULL, $2::jsonb)`,
+    [issuedInv.id, JSON.stringify(issuedInv)]
+  );
+
+  return issuedInv;
 }
 
 /**

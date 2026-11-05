@@ -33,7 +33,7 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
     tenantIds: [],
     userIds: [],
     personIds: [],
-    runDates: ['2028-02-28', '2028-02-29', '2028-03-15', '2028-03-16', '2028-03-17', '2028-03-18', '2028-05-06', '2028-05-09', '2028-05-10', '2028-05-25', '2028-05-30', '2028-06-08', '2028-06-12'],
+    runDates: ['2028-02-28', '2028-02-29', '2028-03-15', '2028-03-16', '2028-03-17', '2028-03-18', '2028-05-06', '2028-05-09', '2028-05-10', '2028-05-25', '2028-05-30', '2028-06-08', '2028-06-12', '2028-06-15', '2028-06-16'],
     origBillingConfig: null,
     testStartedAt: new Date().toISOString(),
   };
@@ -600,6 +600,85 @@ test('Week 5 Daily Cron Scheduler (FR-066), Advisory Lock + 3x Retry (PRD 14.5) 
 
     await adminPool.query(`DELETE FROM invoice_line WHERE credit_id = $1`, [cbId]);
     await adminPool.query(`DELETE FROM credit_balance WHERE id = $1`, [cbId]);
+  });
+
+  await t.test('4f: Step 7b creates LATE_FEE_SETTLEMENT invoice for ended contract with pending tracker', async () => {
+    // Create an isolated apartment + EXPIRED contract with an OVERDUE final-period invoice
+    const aptExpRes = await adminPool.query(
+      `INSERT INTO apartment (floor_id, building_id, code, base_rent, status)
+       VALUES ($1, $2, $3, 8000000, 'MAINTENANCE') RETURNING id`,
+      [cleanup.floorIds[0], testBuildingId, `W5-EXP-${suffix}`]
+    );
+    const aptExpId = aptExpRes.rows[0].id;
+    cleanup.apartmentIds.push(aptExpId);
+
+    const expContractRes = await adminPool.query(
+      `INSERT INTO contract (
+         apartment_id, building_id, primary_tenant_id,
+         start_date, end_date, rent_amount, deposit_amount,
+         billing_cycle, billing_day, payment_due_days, status
+       )
+       VALUES ($1, $2, $3, '2028-01-01', '2028-05-31', 8000000, 8000000, 'monthly', 1, 5, 'EXPIRED')
+       RETURNING id`,
+      [aptExpId, testBuildingId, c31.tenantId]
+    );
+    const expiredContractId = expContractRes.rows[0].id;
+    cleanup.contractIds.push(expiredContractId);
+
+    // Final regular invoice due 2028-06-07 -> on 2028-06-15 overdueDays = 8 -> 3 chargeable days -> 300,000 ₫
+    const overdueInvRes = await adminPool.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, total_amount, paid_amount, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, '2028-05', '2028-06-02', '2028-06-07', 8000000, 0, 8000000, 0, 'OVERDUE')
+       RETURNING id`,
+      [orgId, testBuildingId, aptExpId, expiredContractId, c31.tenantId, `INV-LF-EXP-${suffix}`]
+    );
+    const overdueInvId = overdueInvRes.rows[0].id;
+    cleanup.invoiceIds.push(overdueInvId);
+
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'RENT', 'Tiền thuê kỳ cuối 2028-05', 1, 'tháng', 8000000, 8000000)`,
+      [overdueInvId]
+    );
+
+    // Run cron on 2028-06-15: Step 7 accrues 300,000 ₫ in tracker, Step 7b auto-creates & issues LATE_FEE_SETTLEMENT!
+    await runDailyJobs({ asOfDate: '2028-06-15', buildingId: testBuildingId });
+
+    const settlement = await adminPool.query(
+      `SELECT * FROM invoice WHERE contract_id = $1 AND invoice_type = 'LATE_FEE_SETTLEMENT'`,
+      [expiredContractId]
+    );
+    assert.equal(settlement.rowCount, 1, '4f: settlement invoice created');
+    cleanup.invoiceIds.push(settlement.rows[0].id);
+    assert.equal(settlement.rows[0].status, 'ISSUED', '4f: auto-issued');
+    assert.equal(settlement.rows[0].period, null, '4f: settlement invoice period is NULL');
+    assert.equal(Number(settlement.rows[0].total_amount), 300000, '4f: total = accrued tracker amount');
+
+    const srcAfter = await adminPool.query(`SELECT total_amount FROM invoice WHERE id = $1`, [overdueInvId]);
+    assert.equal(Number(srcAfter.rows[0].total_amount), 8000000, '4f: source final invoice remains immutable');
+
+    const rec = await adminPool.query(`SELECT * FROM receivable WHERE invoice_id = $1`, [settlement.rows[0].id]);
+    assert.equal(rec.rowCount, 1, '4f: receivable created for settlement invoice');
+    assert.equal(rec.rows[0].status, 'OPEN', '4f: receivable OPEN');
+    assert.equal(Number(rec.rows[0].amount), 300000, '4f: receivable amount = 300,000');
+
+    const tracker = await adminPool.query(
+      `SELECT carried_to_invoice_id FROM late_fee_accrual_tracker WHERE invoice_id = $1`,
+      [overdueInvId]
+    );
+    assert.equal(tracker.rows[0].carried_to_invoice_id, settlement.rows[0].id, '4f: tracker.carried_to_invoice_id set');
+
+    // Idempotent on next cron run (2028-06-16): no second LATE_FEE_SETTLEMENT invoice created
+    await runDailyJobs({ asOfDate: '2028-06-16', buildingId: testBuildingId });
+    const settlement2 = await adminPool.query(
+      `SELECT * FROM invoice WHERE contract_id = $1 AND invoice_type = 'LATE_FEE_SETTLEMENT'`,
+      [expiredContractId]
+    );
+    assert.equal(settlement2.rowCount, 1, '4f: idempotent — only 1 settlement invoice');
   });
 });
 
