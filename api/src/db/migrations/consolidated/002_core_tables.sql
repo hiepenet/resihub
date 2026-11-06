@@ -163,8 +163,8 @@ CREATE TABLE IF NOT EXISTS reservation (
   hold_until       DATE,
   status           TEXT NOT NULL DEFAULT 'HELD'
                    CHECK (status IN (
-                     'PENDING_CONFIRM','HELD','CONVERTED','FORFEITED',
-                     'REFUNDED','PARTIALLY_REFUNDED','EXPIRED','REJECTED'
+                     'PENDING_CONFIRM','HELD','CANCEL_PENDING_APPROVAL','APPROVED_PENDING_PAYOUT',
+                     'CONVERTED','FORFEITED','REFUNDED','PARTIALLY_REFUNDED','EXPIRED','REJECTED'
                    )),
   source           TEXT NOT NULL DEFAULT 'INTERNAL' CHECK (source IN ('INTERNAL', 'PUBLIC')),
   method           TEXT DEFAULT 'BANK_TRANSFER',
@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS reservation (
   refund_method    TEXT CHECK (refund_method IS NULL OR refund_method IN ('BANK_TRANSFER', 'CASH')),
   refund_bank_info JSONB,
   refund_evidence  TEXT[] NOT NULL DEFAULT '{}',
+  cancel_settlement JSONB,
   note             TEXT,
   created_by       UUID REFERENCES app_user(id) ON DELETE SET NULL,
   created_at       TIMESTAMPTZ DEFAULT NOW(),
