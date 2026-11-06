@@ -26,5 +26,12 @@ BEGIN
 END $$;
 
 -- 3. Optimization
--- Disable JIT compilation overhead for the session (ALTER DATABASE omitted as migrations run inside transactions)
+DO $$
+BEGIN
+  BEGIN
+    EXECUTE format('ALTER DATABASE %I SET jit = off', current_database());
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
+END $$;
 SET jit = off;
