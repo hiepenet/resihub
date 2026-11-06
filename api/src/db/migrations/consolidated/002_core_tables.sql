@@ -280,17 +280,20 @@ CREATE TABLE IF NOT EXISTS deposit (
 );
 
 CREATE TABLE IF NOT EXISTS deposit_transaction (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  deposit_id  UUID REFERENCES deposit(id) ON DELETE CASCADE,
-  type        TEXT NOT NULL CHECK (type IN ('collect','deduct','refund','transfer')),
-  category    TEXT,
-  amount      BIGINT NOT NULL,
-  description TEXT,
-  evidence    TEXT[] DEFAULT '{}',
-  approved_by UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  approved_at TIMESTAMPTZ,
-  created_by  UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  created_at  TIMESTAMPTZ DEFAULT NOW()
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deposit_id     UUID REFERENCES deposit(id) ON DELETE CASCADE,
+  type           TEXT NOT NULL CHECK (type IN ('collect', 'deduct', 'refund', 'transfer', 'refund_reversal')),
+  category       TEXT,
+  method         TEXT,
+  amount         BIGINT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'APPROVED' CHECK (status IN ('PENDING_APPROVAL', 'APPROVED', 'REJECTED')),
+  description    TEXT,
+  evidence       TEXT[] DEFAULT '{}',
+  reference_code TEXT,
+  approved_by    UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  approved_at    TIMESTAMPTZ,
+  created_by     UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 5. Audit Log & Attachments
