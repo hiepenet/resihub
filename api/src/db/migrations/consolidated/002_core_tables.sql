@@ -398,17 +398,23 @@ CREATE TABLE IF NOT EXISTS ai_suggestion (
   total_fields_count    INT NOT NULL DEFAULT 0 CHECK (total_fields_count >= 0),
   model                 TEXT NOT NULL,
   prompt_version        TEXT NOT NULL,
-  input_tokens          INT NOT NULL DEFAULT 0,
-  output_tokens         INT NOT NULL DEFAULT 0,
-  duration_ms           INT NOT NULL DEFAULT 0,
+  input_tokens          INT NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+  output_tokens         INT NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+  estimated_cost_vnd    BIGINT NOT NULL DEFAULT 0 CHECK (estimated_cost_vnd >= 0),
+  latency_ms            INT CHECK (latency_ms IS NULL OR latency_ms >= 0),
   status                TEXT NOT NULL DEFAULT 'PENDING'
-                        CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'SUPERSEDED', 'ERROR')),
+                        CHECK (status IN ('PENDING', 'ACCEPTED', 'EDITED_ACCEPTED', 'REJECTED', 'EXPIRED', 'FAILED')),
+  error_code            TEXT,
+  created_by            UUID REFERENCES app_user(id) ON DELETE SET NULL,
   reviewed_by           UUID REFERENCES app_user(id) ON DELETE SET NULL,
   reviewed_at           TIMESTAMPTZ,
-  expires_at            TIMESTAMPTZ,
-  created_by            UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  expires_at            TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '72 hours'),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT chk_ai_suggestion_building_scope CHECK (
+    (task_type IN ('CCCD_EXTRACT', 'CONTRACT_EXTRACT'))
+    OR (building_id IS NOT NULL)
+  )
 );
 
 -- 8. Service Requests & Operations
@@ -416,13 +422,16 @@ CREATE TABLE IF NOT EXISTS service_request (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id                   UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   building_id              UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  apartment_id             UUID REFERENCES apartment(id) ON DELETE RESTRICT,
+  apartment_id             UUID NOT NULL REFERENCES apartment(id) ON DELETE CASCADE,
   tenant_id                UUID REFERENCES tenant(id) ON DELETE SET NULL,
+  tracking_code            TEXT NOT NULL UNIQUE,
   title                    TEXT NOT NULL,
   description              TEXT,
-  category                 TEXT NOT NULL DEFAULT 'OTHER',
+  category                 TEXT NOT NULL DEFAULT 'OTHER'
+                           CHECK (category IN ('PLUMBING', 'ELECTRICAL', 'APPLIANCE', 'STRUCTURAL', 'OTHER')),
   priority                 TEXT NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW','NORMAL','HIGH','URGENT')),
-  status                   TEXT NOT NULL DEFAULT 'PENDING',
+  status                   TEXT NOT NULL DEFAULT 'NEW'
+                           CHECK (status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'RESOLVED', 'REOPENED', 'CLOSED', 'CANCELLED')),
   photos                   TEXT[] DEFAULT '{}',
   assigned_to              UUID REFERENCES app_user(id) ON DELETE SET NULL,
   assigned_at              TIMESTAMPTZ,
@@ -449,7 +458,7 @@ CREATE TABLE IF NOT EXISTS service_request (
   reopen_count             INT NOT NULL DEFAULT 0,
   cancelled_reason         TEXT,
   ai_suggestion_id         UUID REFERENCES ai_suggestion(id) ON DELETE SET NULL,
-  ai_triage_status         TEXT,
+  ai_triage_status         TEXT CHECK (ai_triage_status IS NULL OR ai_triage_status IN ('SUGGESTED', 'ACCEPTED', 'OVERRIDDEN')),
   ai_summary               TEXT,
   ai_suggested_category    TEXT,
   ai_suggested_priority    TEXT,
@@ -463,34 +472,37 @@ CREATE TABLE IF NOT EXISTS service_request (
 -- 9. Utility Meters & Meter Readings
 CREATE TABLE IF NOT EXISTS meter (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id          UUID NOT NULL REFERENCES organization(id),
+  org_id          UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   building_id     UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  apartment_id    UUID REFERENCES apartment(id) ON DELETE SET NULL,
-  contract_id     UUID REFERENCES contract(id) ON DELETE SET NULL,
-  code            TEXT NOT NULL,
-  type            TEXT NOT NULL CHECK (type IN ('ELECTRICITY','WATER','GAS','OTHER')),
+  apartment_id    UUID NOT NULL REFERENCES apartment(id) ON DELETE CASCADE,
+  meter_type      TEXT NOT NULL CHECK (meter_type IN ('ELECTRICITY', 'WATER')),
+  meter_code      TEXT NOT NULL,
   unit            TEXT NOT NULL DEFAULT 'kWh',
+  unit_price      BIGINT NOT NULL DEFAULT 3500,
   initial_reading NUMERIC(12,2) NOT NULL DEFAULT 0,
-  status          TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
-  note            TEXT,
+  status          TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE')),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (building_id, code)
+  UNIQUE (building_id, meter_code),
+  UNIQUE (apartment_id, meter_type)
 );
 
 CREATE TABLE IF NOT EXISTS meter_reading (
   id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id                   UUID NOT NULL REFERENCES organization(id),
+  org_id                   UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   building_id              UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  apartment_id             UUID REFERENCES apartment(id) ON DELETE SET NULL,
   meter_id                 UUID NOT NULL REFERENCES meter(id) ON DELETE CASCADE,
+  apartment_id             UUID NOT NULL REFERENCES apartment(id) ON DELETE CASCADE,
   contract_id              UUID REFERENCES contract(id) ON DELETE SET NULL,
   period                   TEXT NOT NULL,
-  reading_value            NUMERIC(12,2) NOT NULL,
-  previous_value           NUMERIC(12,2) NOT NULL DEFAULT 0,
-  consumption              NUMERIC(12,2) GENERATED ALWAYS AS (reading_value - previous_value) STORED,
+  previous_reading         NUMERIC(12,2) NOT NULL DEFAULT 0,
+  current_reading          NUMERIC(12,2) NOT NULL,
+  consumption              NUMERIC(12,2) NOT NULL DEFAULT 0,
+  is_abnormal              BOOLEAN NOT NULL DEFAULT FALSE,
+  abnormal_note            TEXT,
+  image_url                TEXT,
   status                   TEXT NOT NULL DEFAULT 'CONFIRMED'
-                           CHECK (status IN ('DRAFT','CONFIRMED','FLAGGED')),
+                           CHECK (status IN ('DRAFT', 'CONFIRMED', 'FLAGGED')),
   confirmed_by             UUID REFERENCES app_user(id) ON DELETE SET NULL,
   confirmed_at             TIMESTAMPTZ,
   baseline_avg_consumption NUMERIC(12,2),
@@ -498,8 +510,9 @@ CREATE TABLE IF NOT EXISTS meter_reading (
   ai_suggestion_id         UUID REFERENCES ai_suggestion(id) ON DELETE SET NULL,
   recorded_by              UUID REFERENCES app_user(id) ON DELETE SET NULL,
   recorded_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  note                     TEXT,
-  UNIQUE (meter_id, period)
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (current_reading >= previous_reading)
 );
 
 -- 10. Services Catalog & Subscriptions
@@ -516,8 +529,7 @@ CREATE TABLE IF NOT EXISTS service_catalog (
   description  TEXT,
   status       TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (org_id, code)
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS service_subscription (
@@ -542,7 +554,7 @@ CREATE TABLE IF NOT EXISTS service_subscription (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 11. Invoicing, Payments & Receivables
+-- 11. Invoicing, Payments, Adjustments & Credits
 CREATE TABLE IF NOT EXISTS invoice (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id               UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
@@ -564,77 +576,42 @@ CREATE TABLE IF NOT EXISTS invoice (
   invoice_type         TEXT NOT NULL DEFAULT 'REGULAR'
                        CHECK (invoice_type IN ('REGULAR', 'LATE_FEE_SETTLEMENT')),
   status               TEXT NOT NULL DEFAULT 'DRAFT'
-                       CHECK (status IN ('DRAFT','ISSUED','PARTIALLY_PAID','PAID','OVERDUE','CANCELLED')),
+                       CHECK (status IN ('DRAFT','ISSUED','PARTIALLY_PAID','PAID','OVERDUE','CANCELLED','VOID')),
   immutable_at         TIMESTAMPTZ,
   note                 TEXT,
   created_by           UUID REFERENCES app_user(id) ON DELETE SET NULL,
   issued_by            UUID REFERENCES app_user(id) ON DELETE SET NULL,
   issued_at            TIMESTAMPTZ,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS invoice_line (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  invoice_id  UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
-  item_type   TEXT NOT NULL CHECK (item_type IN ('RENT','ELECTRICITY','WATER','SERVICE','ADJUSTMENT','LATE_FEE','OTHER')),
-  description TEXT NOT NULL,
-  quantity    NUMERIC(12,2) NOT NULL DEFAULT 1,
-  unit        TEXT NOT NULL DEFAULT 'tháng',
-  unit_price  BIGINT NOT NULL DEFAULT 0,
-  amount      BIGINT NOT NULL DEFAULT 0,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT invoice_paid_lte_total_check CHECK (paid_amount <= total_amount)
 );
 
 CREATE TABLE IF NOT EXISTS invoice_adjustment (
-  id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id                  UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-  building_id             UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  invoice_id              UUID REFERENCES invoice(id) ON DELETE CASCADE,
-  contract_id             UUID REFERENCES contract(id) ON DELETE SET NULL,
-  tenant_id               UUID REFERENCES tenant(id) ON DELETE SET NULL,
-  service_subscription_id UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
-  type                    TEXT NOT NULL CHECK (type IN ('PRORATED_SERVICE_REFUND','DISCOUNT','DISPUTE_CORRECTION','OTHER')),
-  amount                  BIGINT NOT NULL,
-  reason                  TEXT,
-  approved_by             UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  approved_at             TIMESTAMPTZ,
-  created_by              UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS credit_balance (
-  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id                   UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-  building_id              UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  contract_id              UUID REFERENCES contract(id) ON DELETE CASCADE,
-  tenant_id                UUID REFERENCES tenant(id) ON DELETE SET NULL,
-  invoice_adjustment_id    UUID REFERENCES invoice_adjustment(id) ON DELETE SET NULL,
-  amount                   BIGINT NOT NULL,
-  applied_amount           BIGINT NOT NULL DEFAULT 0,
-  status                   TEXT NOT NULL DEFAULT 'AVAILABLE'
-                           CHECK (status IN ('AVAILABLE','PARTIALLY_APPLIED','APPLIED','PENDING_SETTLEMENT_PAYOUT','REFUNDED_IN_SETTLEMENT','CANCELLED')),
-  settlement_deposit_id    UUID REFERENCES deposit(id) ON DELETE SET NULL,
-  settlement_refund_amount BIGINT NOT NULL DEFAULT 0,
-  refund_meta              JSONB DEFAULT '{}'::jsonb,
-  refunded_at              TIMESTAMPTZ,
-  note                     TEXT,
-  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS late_fee_accrual_tracker (
-  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  contract_id           UUID NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
-  invoice_id            UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
-  accrued_amount        BIGINT NOT NULL DEFAULT 0 CHECK (accrued_amount >= 0),
-  daily_rate_applied    BIGINT NOT NULL DEFAULT 0 CHECK (daily_rate_applied >= 0),
-  as_of_date            DATE NOT NULL,
-  overdue_days          INT NOT NULL DEFAULT 0 CHECK (overdue_days >= 0),
-  carried_to_invoice_id UUID REFERENCES invoice(id) ON DELETE SET NULL,
-  carried_at            TIMESTAMPTZ,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id            UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  building_id       UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
+  invoice_id        UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
+  subscription_id   UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
+  adjustment_target TEXT NOT NULL DEFAULT 'MANUAL'
+                    CHECK (adjustment_target IN ('SERVICE', 'RENT', 'LATE_FEE', 'MANUAL')),
+  action_type       TEXT NOT NULL CHECK (action_type IN ('ADJUST', 'VOID')),
+  delta_amount      BIGINT NOT NULL DEFAULT 0,
+  reason            TEXT NOT NULL,
+  formula_meta      JSONB,
+  status            TEXT NOT NULL DEFAULT 'PENDING_APPROVAL'
+                    CHECK (status IN ('PENDING_APPROVAL', 'APPROVED', 'REJECTED')),
+  rejection_reason  TEXT,
+  created_by        UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  updated_by        UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  approved_by       UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  approved_at       TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (
+    (action_type = 'VOID' AND delta_amount = 0)
+    OR (action_type = 'ADJUST' AND delta_amount <> 0)
+  )
 );
 
 CREATE TABLE IF NOT EXISTS payment (
@@ -659,6 +636,82 @@ CREATE TABLE IF NOT EXISTS payment (
   confirmed_by       UUID REFERENCES app_user(id) ON DELETE SET NULL,
   confirmed_at       TIMESTAMPTZ,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS credit_balance (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id                   UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  building_id              UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
+  contract_id              UUID NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  tenant_id                UUID REFERENCES tenant(id) ON DELETE SET NULL,
+  subscription_id          UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
+  source_invoice_id        UUID REFERENCES invoice(id) ON DELETE SET NULL,
+  source_adjustment_id     UUID REFERENCES invoice_adjustment(id) ON DELETE SET NULL,
+  source_payment_id        UUID REFERENCES payment(id) ON DELETE SET NULL,
+  parent_credit_id         UUID REFERENCES credit_balance(id) ON DELETE SET NULL,
+  settlement_deposit_id    UUID REFERENCES deposit(id) ON DELETE SET NULL,
+  settlement_refund_amount BIGINT NOT NULL DEFAULT 0
+                           CHECK (settlement_refund_amount >= 0 AND settlement_refund_amount <= amount),
+  refund_meta              JSONB,
+  refunded_at              TIMESTAMPTZ,
+  reason_type              TEXT NOT NULL CHECK (reason_type IN (
+                             'SERVICE_TERMINATION',
+                             'CONTRACT_TERMINATION_RENT',
+                             'INVOICE_ADJUSTMENT',
+                             'OVERPAYMENT',
+                             'TRANSFERRED_IN'
+                           )),
+  amount                   BIGINT NOT NULL CHECK (amount > 0),
+  applied_amount           BIGINT NOT NULL DEFAULT 0
+                           CHECK (applied_amount >= 0 AND applied_amount <= amount),
+  status                   TEXT NOT NULL DEFAULT 'AVAILABLE'
+                           CHECK (status IN (
+                             'AVAILABLE',
+                             'PARTIALLY_APPLIED',
+                             'APPLIED',
+                             'PENDING_DIRECT_REFUND',
+                             'REFUNDED_DIRECT',
+                             'PENDING_SETTLEMENT_PAYOUT',
+                             'REFUNDED_IN_SETTLEMENT',
+                             'TRANSFERRED',
+                             'VOID'
+                           )),
+  description              TEXT NOT NULL,
+  created_by               UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  updated_by               UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (applied_amount + settlement_refund_amount <= amount)
+);
+
+CREATE TABLE IF NOT EXISTS invoice_line (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_id      UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
+  subscription_id UUID REFERENCES service_subscription(id) ON DELETE SET NULL,
+  credit_id       UUID REFERENCES credit_balance(id) ON DELETE SET NULL,
+  adjustment_id   UUID REFERENCES invoice_adjustment(id) ON DELETE SET NULL,
+  item_type       TEXT NOT NULL CHECK (item_type IN ('RENT','ELECTRICITY','WATER','SERVICE','ADJUSTMENT','LATE_FEE','OTHER')),
+  description     TEXT NOT NULL,
+  quantity        NUMERIC(12,2) NOT NULL DEFAULT 1,
+  unit            TEXT NOT NULL DEFAULT 'tháng',
+  unit_price      BIGINT NOT NULL DEFAULT 0,
+  amount          BIGINT NOT NULL DEFAULT 0,
+  formula_meta    JSONB,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS late_fee_accrual_tracker (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id                UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  contract_id           UUID NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  invoice_id            UUID NOT NULL REFERENCES invoice(id) ON DELETE CASCADE,
+  accrued_total         BIGINT NOT NULL DEFAULT 0 CHECK (accrued_total >= 0),
+  chargeable_days       INT NOT NULL DEFAULT 0 CHECK (chargeable_days >= 0),
+  as_of_date            DATE NOT NULL,
+  carried_to_invoice_id UUID REFERENCES invoice(id) ON DELETE SET NULL,
+  carried_at            TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS receivable (
