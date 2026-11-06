@@ -2183,6 +2183,91 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off;
 
 -- Function: fn_resolve_invoice_adjustment
+CREATE OR REPLACE FUNCTION fn_sync_late_fee_trackers_on_invoice_void(
+  p_invoice_id UUID
+)
+RETURNS VOID AS $$
+DECLARE
+  v_actor_id UUID;
+  v_caller_org UUID;
+  v_inv_target RECORD;
+  v_authorized BOOLEAN := FALSE;
+  v_cr RECORD;
+BEGIN
+  IF p_invoice_id IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT id, org_id, building_id
+  INTO v_inv_target
+  FROM invoice
+  WHERE id = p_invoice_id;
+
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+
+  -- Nếu gọi từ kết nối ứng dụng resihub_app, kiểm tra quyền trên tòa nhà của hóa đơn
+  IF session_user = 'resihub_app' THEN
+    v_actor_id := get_current_user_id();
+    v_caller_org := get_current_user_org_id();
+
+    IF v_actor_id IS NULL OR v_caller_org IS NULL OR v_caller_org <> v_inv_target.org_id THEN
+      RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
+    END IF;
+
+    IF (is_manager() AND v_inv_target.building_id IN (SELECT building_id FROM get_manager_building_ids()))
+       OR (is_owner() AND v_inv_target.building_id IN (SELECT building_id FROM get_owner_building_ids()))
+       OR (is_org_admin() AND NOT building_has_active_owner(v_inv_target.building_id)) THEN
+      v_authorized := TRUE;
+    END IF;
+
+    IF NOT v_authorized THEN
+      RAISE EXCEPTION 'FORBIDDEN' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  -- 1) Giải phóng các dòng tracker đã carry sang hóa đơn đích vừa bị VOID (hợp nhất nếu hóa đơn nguồn đã có dòng mở mới)
+  FOR v_cr IN
+    SELECT id, invoice_id, accrued_total, chargeable_days, as_of_date
+    FROM late_fee_accrual_tracker
+    WHERE carried_to_invoice_id = p_invoice_id
+    FOR UPDATE
+  LOOP
+    IF EXISTS (
+      SELECT 1 FROM late_fee_accrual_tracker
+      WHERE invoice_id = v_cr.invoice_id
+        AND carried_to_invoice_id IS NULL
+        AND id <> v_cr.id
+    ) THEN
+      UPDATE late_fee_accrual_tracker
+      SET accrued_total = accrued_total + v_cr.accrued_total,
+          chargeable_days = chargeable_days + v_cr.chargeable_days,
+          as_of_date = GREATEST(as_of_date, v_cr.as_of_date),
+          updated_at = NOW()
+      WHERE invoice_id = v_cr.invoice_id
+        AND carried_to_invoice_id IS NULL
+        AND id <> v_cr.id;
+
+      DELETE FROM late_fee_accrual_tracker WHERE id = v_cr.id;
+    ELSE
+      UPDATE late_fee_accrual_tracker
+      SET carried_to_invoice_id = NULL,
+          carried_at = NULL,
+          updated_at = NOW()
+      WHERE id = v_cr.id;
+    END IF;
+  END LOOP;
+
+  -- 2) Hủy dòng tracker mở chưa carry của chính hóa đơn nguồn vừa bị VOID
+  DELETE FROM late_fee_accrual_tracker
+  WHERE invoice_id = p_invoice_id
+    AND carried_to_invoice_id IS NULL;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off;
+
+GRANT EXECUTE ON FUNCTION fn_sync_late_fee_trackers_on_invoice_void(UUID) TO resihub_app;
+
 CREATE OR REPLACE FUNCTION fn_resolve_invoice_adjustment(
   p_adjustment_id UUID,
   p_decision TEXT,
@@ -2354,37 +2439,8 @@ BEGIN
       END LOOP;
     END IF;
 
-    -- Giải phóng tracker phí phạt đã carry sang hóa đơn này (hợp nhất vào dòng mở nếu đã có)
-    FOR v_cr IN
-      SELECT id, invoice_id, accrued_total, chargeable_days, as_of_date
-      FROM late_fee_accrual_tracker
-      WHERE carried_to_invoice_id = v_inv.id
-      FOR UPDATE
-    LOOP
-      IF EXISTS (
-        SELECT 1 FROM late_fee_accrual_tracker
-        WHERE invoice_id = v_cr.invoice_id
-          AND carried_to_invoice_id IS NULL
-          AND id <> v_cr.id
-      ) THEN
-        UPDATE late_fee_accrual_tracker
-        SET accrued_total = accrued_total + v_cr.accrued_total,
-            chargeable_days = GREATEST(chargeable_days, v_cr.chargeable_days),
-            as_of_date = GREATEST(as_of_date, v_cr.as_of_date),
-            updated_at = NOW()
-        WHERE invoice_id = v_cr.invoice_id
-          AND carried_to_invoice_id IS NULL
-          AND id <> v_cr.id;
-
-        DELETE FROM late_fee_accrual_tracker WHERE id = v_cr.id;
-      ELSE
-        UPDATE late_fee_accrual_tracker
-        SET carried_to_invoice_id = NULL,
-            carried_at = NULL,
-            updated_at = NOW()
-        WHERE id = v_cr.id;
-      END IF;
-    END LOOP;
+    -- Đồng bộ tracker phí phạt: giải phóng dòng đã carry sang hóa đơn này và xóa tracker mở nếu đây là hóa đơn nguồn
+    PERFORM fn_sync_late_fee_trackers_on_invoice_void(v_inv.id);
 
     UPDATE invoice
     SET status = 'VOID',
@@ -2456,12 +2512,18 @@ BEGIN
       );
 
     IF v_principal <= 0 THEN
+      -- Hủy dòng tích lũy phạt mở của chính hóa đơn nguồn này khi nợ gốc về <= 0
+      DELETE FROM late_fee_accrual_tracker
+      WHERE invoice_id = v_inv.id
+        AND carried_to_invoice_id IS NULL;
+
+      -- Chỉ triệt tiêu dòng LATE_FEE nội tại legacy trên chính hóa đơn này; bảo toàn phí phạt kỳ trước dồn sang (carry_forward = true)
       SELECT COALESCE(SUM(il.amount), 0)
       INTO v_net_late_fee
       FROM invoice_line il
       WHERE il.invoice_id = v_inv.id
         AND (
-          il.item_type = 'LATE_FEE'
+          (il.item_type = 'LATE_FEE' AND COALESCE((il.formula_meta->>'carry_forward')::boolean, FALSE) = FALSE)
           OR (il.item_type = 'ADJUSTMENT' AND COALESCE(il.formula_meta->>'adjusts_item_type', '') = 'LATE_FEE')
         );
 
@@ -2644,6 +2706,8 @@ BEGIN
   );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off;
+
+GRANT EXECUTE ON FUNCTION fn_resolve_invoice_adjustment(UUID, TEXT, TEXT) TO resihub_app;
 
 -- Function: fn_apply_deposit_settlement_accounting
 CREATE OR REPLACE FUNCTION fn_apply_deposit_settlement_accounting(

@@ -762,24 +762,28 @@ export function InvoiceDetailPage() {
                             </TD>
                             {isDraft && !isSettlement && canManageInvoices ? (
                               <TD className="text-center">
-                                <div className="inline-flex items-center gap-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => openEditLineModal(line)}
-                                    className="p-1 rounded text-slate-500 hover:text-primary-600 hover:bg-slate-100"
-                                    title="Sửa dòng"
-                                  >
-                                    <Edit3 className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleDeleteLine(line)}
-                                    className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50"
-                                    title="Xóa dòng"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
+                                {line.item_type === 'LATE_FEE' || Boolean(line.credit_id) ? (
+                                  <span className="text-[11px] text-slate-400">Tự động</span>
+                                ) : (
+                                  <div className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditLineModal(line)}
+                                      className="p-1 rounded text-slate-500 hover:text-primary-600 hover:bg-slate-100"
+                                      title="Sửa dòng"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteLine(line)}
+                                      className="p-1 rounded text-slate-500 hover:text-rose-600 hover:bg-rose-50"
+                                      title="Xóa dòng"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                )}
                               </TD>
                             ) : null}
                           </tr>
@@ -1019,10 +1023,12 @@ export function InvoiceDetailPage() {
             label="Loại khoản phí"
             value={lineForm.item_type}
             onChange={(e) => setLineForm((s) => ({ ...s, item_type: e.target.value }))}
-            options={Object.entries(LINE_TYPE_LABELS).map(([value, info]) => ({
-              value,
-              label: info.label,
-            }))}
+            options={Object.entries(LINE_TYPE_LABELS)
+              .filter(([value]) => value !== 'LATE_FEE')
+              .map(([value, info]) => ({
+                value,
+                label: info.label,
+              }))}
           />
           <Input
             label="Diễn giải chi tiết"

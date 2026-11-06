@@ -536,7 +536,7 @@ export function PaymentsPage() {
               onClick={(e) => e.stopPropagation()}
               className="font-mono text-xs font-medium text-primary-600 hover:underline whitespace-nowrap"
             >
-              {row.invoice_code} ({row.invoice_period})
+              {row.invoice_code} ({row.invoice_period || 'Tất toán'})
             </Link>
           ) : (
             <span className="text-xs text-slate-400 whitespace-nowrap">Thu công nợ lẻ</span>

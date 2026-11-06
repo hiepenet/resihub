@@ -1301,7 +1301,7 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
             <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
               <span className="text-xs text-slate-500 leading-snug break-words">
                 {currentAmountDue > 0 && latestInvoice && !['DRAFT', 'VOID'].includes(latestInvoice.status)
-                  ? `Kỳ ${latestInvoice.period} • Hạn ${formatDate(latestInvoice.due_date)}`
+                  ? `${latestInvoice.period ? `Kỳ ${latestInvoice.period}` : 'Phí phạt tất toán'} • Hạn ${formatDate(latestInvoice.due_date)}`
                   : 'Không có dư nợ quá hạn'}
               </span>
               <button
@@ -1495,7 +1495,9 @@ export function OverviewTab({ overview, openRequestsCount = 0, onRefreshOverview
                     <span className="text-sm font-bold text-slate-900">
                       {latestInvoice.invoice_code}
                     </span>
-                    <Badge variant="sky">Kỳ {latestInvoice.period}</Badge>
+                    <Badge variant={latestInvoice.invoice_type === 'LATE_FEE_SETTLEMENT' || !latestInvoice.period ? 'amber' : 'sky'}>
+                      {latestInvoice.period ? `Kỳ ${latestInvoice.period}` : 'Phí phạt tất toán'}
+                    </Badge>
                     <StatusBadge status={latestInvoice.status} domain="invoice" />
                   </div>
                   <p className="text-xs text-slate-500">

@@ -356,6 +356,8 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
         await adminPool.query('DELETE FROM payment WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM receivable WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice_line WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
+        await adminPool.query('DELETE FROM invoice_adjustment WHERE invoice_id IN (SELECT id FROM invoice WHERE contract_id = $1)', [cId]).catch(() => {});
+        await adminPool.query('DELETE FROM credit_balance WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM invoice WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query('DELETE FROM service_subscription WHERE contract_id = $1', [cId]).catch(() => {});
         await adminPool.query("DELETE FROM notification WHERE payload->>'contract_id' = $1", [cId]).catch(() => {});
@@ -1883,10 +1885,22 @@ test('WB+BB-02 [Full Website Integration] M01..M14 End-to-End White-Box DB/RLS/J
       [lf7bInvId]
     );
 
+    const lf7bSettleIns = await adminPool.query(
+      `INSERT INTO invoice (org_id, building_id, apartment_id, contract_id, tenant_id, invoice_type, invoice_code, period, status, subtotal_amount, total_amount, paid_amount, due_date)
+       VALUES ($1, $2, $3, $4, $5, 'LATE_FEE_SETTLEMENT', $6, NULL, 'ISSUED', 200000, 200000, 0, CURRENT_DATE - INTERVAL '80 days')
+       RETURNING id`,
+      [orgId, vopAId, testApt2Id, lf7bContractId, primaryTenantId, `INV-7B-LFS-${suffix}`]
+    );
+    cleanup.invoiceIds.push(lf7bSettleIns.rows[0].id);
+    await adminPool.query(
+      `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount)
+       VALUES ($1, 'LATE_FEE', 'Phí phạt chậm thanh toán kỳ cuối (tất toán)', 1, 'kỳ', 200000, 200000)`,
+      [lf7bSettleIns.rows[0].id]
+    );
+
     const debts7b = await calculateContractOpenDebts(adminPool, lf7bContractId);
-    assert.equal(debts7b.rentDebt, 5000000, '7b: rentDebt = RENT only');
-    assert.ok(debts7b.serviceDebt >= 300000, '7b: serviceDebt includes LATE_FEE');
-    assert.equal(debts7b.serviceDebt, 300000, '7b: serviceDebt = 300,000 LATE_FEE');
+    assert.equal(debts7b.rentDebt, 5000000, '7b (RF4): rentDebt = RENT only');
+    assert.equal(debts7b.serviceDebt, 500000, '7b (RF4): serviceDebt = 300,000 (REGULAR LATE_FEE) + 200,000 (LATE_FEE_SETTLEMENT)');
 
     const expCtrAfter = await adminPool.query('SELECT status FROM contract WHERE id = $1', [expCtrId]);
     assert.equal(expCtrAfter.rows[0].status, 'EXPIRED', 'DailyJob phải tự chuyển HĐ hết hạn sang EXPIRED');

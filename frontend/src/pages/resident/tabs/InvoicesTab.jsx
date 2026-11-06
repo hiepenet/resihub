@@ -678,7 +678,7 @@ export function InvoicesTab({
                       <div className="space-y-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-bold text-slate-900">
-                            Kỳ {inv.period}
+                            {inv.period ? `Kỳ ${inv.period}` : 'Phí phạt tất toán'}
                           </span>
                           <span className="text-xs font-mono text-slate-500">
                             #{inv.invoice_code}
@@ -1050,7 +1050,7 @@ export function InvoicesTab({
               );
               return {
                 value: inv.id,
-                label: `Kỳ ${inv.period} (${inv.invoice_code}) — Còn nợ: ${formatMoney(rem)}`,
+                label: `${inv.period ? `Kỳ ${inv.period}` : 'Phí phạt tất toán'} (${inv.invoice_code}) — Còn nợ: ${formatMoney(rem)}`,
               };
             })}
           />
@@ -1116,7 +1116,7 @@ export function InvoicesTab({
         onClose={() => setDetailInvoice(null)}
         title={
           detailInvoice
-            ? `Chi tiết hóa đơn #${detailInvoice.invoice_code || ''} — Kỳ ${detailInvoice.period || ''}`
+            ? `Chi tiết hóa đơn #${detailInvoice.invoice_code || ''} — ${detailInvoice.period ? `Kỳ ${detailInvoice.period}` : 'Phí phạt tất toán'}`
             : 'Chi tiết hóa đơn'
         }
         subtitle={

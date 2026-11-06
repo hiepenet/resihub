@@ -2538,7 +2538,7 @@ export function DepositsPage() {
                               onClick={() => setSettlementOpen(false)}
                               className="font-mono font-semibold text-primary-600 hover:underline"
                             >
-                              {inv.invoice_code} (Kỳ {inv.period})
+                              {inv.invoice_code} ({inv.period ? `Kỳ ${inv.period}` : 'Phí phạt tất toán'})
                             </Link>
                             <p className="text-slate-500">
                               Dịch vụ: {formatMoney(inv.service_unpaid)} • Thuê: {formatMoney(inv.rent_unpaid)}
@@ -2794,7 +2794,7 @@ export function DepositsPage() {
                           onClick={() => setSettlementOpen(false)}
                           className="font-mono font-semibold text-primary-700 hover:underline"
                         >
-                          {inv.invoice_code} (Kỳ {inv.period})
+                          {inv.invoice_code} ({inv.period ? `Kỳ ${inv.period}` : 'Phí phạt tất toán'})
                         </Link>
                         <span>
                           Dịch vụ: <strong>{formatMoney(inv.service_unpaid)}</strong> • Thuê:{' '}

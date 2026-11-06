@@ -318,6 +318,8 @@ export async function recalculateDraftInvoiceTotalsInTx(
       finalCreditOffset = relAll.remainingCreditOffset;
     }
 
+    await client.query('SELECT fn_sync_late_fee_trackers_on_invoice_void($1)', [invoiceId]);
+
     await client.query(
       `UPDATE invoice
        SET status = 'VOID',

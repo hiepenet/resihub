@@ -104,16 +104,17 @@ router.get(
         revParams.push(building_id);
         revFilter = ` AND i.building_id = $${revParams.length}`;
       }
+      const invPeriodExpr = `COALESCE(i.period, to_char(i.issue_date, 'YYYY-MM'), to_char(i.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM'))`;
       const revRes = await client.query(
-        `SELECT i.period,
+        `SELECT ${invPeriodExpr} AS period,
                 COALESCE(SUM(i.total_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS billed,
                 COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS inv_paid,
                 COALESCE(SUM(i.paid_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS invoice_settled
          FROM invoice i
          WHERE i.org_id = $1
-           AND i.period = ANY($2::text[])
+           AND ${invPeriodExpr} = ANY($2::text[])
            ${revScope} ${revFilter}
-         GROUP BY i.period`,
+         GROUP BY 1`,
         revParams
       );
 
@@ -203,13 +204,13 @@ router.get(
       }
       const invSrcRes = await client.query(
         `SELECT i.id,
-                i.period,
+                ${invPeriodExpr} AS period,
                 i.status,
                 i.total_amount,
                 COALESCE(i.credit_offset_amount, 0)::bigint AS credit_offset_amount
          FROM invoice i
          WHERE i.org_id = $1
-           AND i.period = ANY($2::text[])
+           AND ${invPeriodExpr} = ANY($2::text[])
            AND i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')
            ${srcScope} ${srcFilter}`,
         srcParams
@@ -928,16 +929,17 @@ router.get(
         revParams.push(building_id);
         revFilter = ` AND i.building_id = $${revParams.length}`;
       }
+      const sumInvPeriodExpr = `COALESCE(i.period, to_char(i.issue_date, 'YYYY-MM'), to_char(i.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh', 'YYYY-MM'))`;
       const revRes = await client.query(
-        `SELECT i.period,
+        `SELECT ${sumInvPeriodExpr} AS period,
                 COUNT(i.id)::int AS invoice_count,
                 COALESCE(SUM(i.total_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS billed,
                 COALESCE(SUM(i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS collected,
                 COALESCE(SUM(i.paid_amount + COALESCE(i.credit_offset_amount, 0)) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID')), 0)::bigint AS invoice_settled,
                 COALESCE(SUM(i.total_amount - i.paid_amount) FILTER (WHERE i.status NOT IN ('CANCELLED', 'DRAFT', 'VOID', 'PAID')), 0)::bigint AS outstanding
          FROM invoice i
-         WHERE i.org_id = $1 AND i.period = ANY($2::text[]) ${revScope} ${revFilter}
-         GROUP BY i.period`,
+         WHERE i.org_id = $1 AND ${sumInvPeriodExpr} = ANY($2::text[]) ${revScope} ${revFilter}
+         GROUP BY 1`,
         revParams
       );
       const revMap = new Map(revRes.rows.map((r) => [r.period, {
