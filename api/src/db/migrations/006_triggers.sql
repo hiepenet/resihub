@@ -3,10 +3,16 @@
 -- Description: System triggers for immutability, role cleanup, and status normalization
 -- ============================================================================
 
--- 1. Audit Log Immutability (FR-007)
+-- 1. Audit Log Immutability (FR-007, updated with test cleanup guard from FR-048)
 CREATE OR REPLACE FUNCTION prevent_audit_log_modification()
 RETURNS TRIGGER AS $$
 BEGIN
+  IF current_user <> 'resihub_app' AND current_setting('app.allow_test_cleanup', true) = 'true' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
   RAISE EXCEPTION 'Audit log is append-only and cannot be updated or deleted';
 END;
 $$ LANGUAGE plpgsql;

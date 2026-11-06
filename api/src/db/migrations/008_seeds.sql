@@ -3,15 +3,12 @@
 -- Description: Standard seed data, service catalog, and system settings
 -- ============================================================================
 
--- 1. Standard Roles (STAFF, ACCOUNTANT for operational staff)
-INSERT INTO role (org_id, code, name, scope)
-SELECT o.id, r.code, r.name, r.scope
-FROM organization o
-CROSS JOIN (VALUES
-  ('STAFF',      'Nhân viên kỹ thuật / Vận hành', 'building'),
-  ('ACCOUNTANT', 'Kế toán tòa nhà',               'building')
-) AS r(code, name, scope)
-ON CONFLICT (org_id, code) DO NOTHING;
+-- 1. Standard 4-Role Model Enforcement (FR-036: SYS_ADMIN, OWNER, MANAGER, RESIDENT)
+DELETE FROM user_role
+WHERE role_id IN (SELECT id FROM role WHERE code IN ('ACCOUNTANT', 'STAFF'));
+
+DELETE FROM role
+WHERE code IN ('ACCOUNTANT', 'STAFF');
 
 -- 2. Standard Service Catalog
 INSERT INTO service_catalog (org_id, code, name, category, billing_type, unit, unit_price, description)
@@ -41,7 +38,7 @@ SELECT
 FROM organization o
 CROSS JOIN (VALUES
   ('billing_config', '{"billing_day": 1, "payment_due_days": 5, "due_date_offset_days": 5, "late_fee_grace_days": 5, "late_fee_per_day": 100000, "late_fee_cap": null, "meter_anomaly_threshold_pct": 30, "reminder_days": [3, 7, 15], "late_fee_percent": 0, "electricity_default_price": 3800, "water_default_price": 22000}', 'Cấu hình chu kỳ chốt chỉ số, phát hành hóa đơn và nhắc nợ (FR-005, FR-030..FR-036)'),
-  ('sla_config', '{"response_hours": 2, "normal_resolve_hours": 24, "urgent_resolve_hours": 4, "deposit_refund_days": 5}', 'Cam kết thời gian xử lý sự cố (SLA) và tất toán cọc'),
+  ('sla_config', '{"response_hours": 2, "normal_resolve_hours": 24, "urgent_resolve_hours": 4, "deposit_refund_days": 5, "reopen_window_days": 3}', 'Cam kết thời gian xử lý sự cố (SLA) và tất toán cọc'),
   ('contact_config', '{"working_hours": "08:00 – 18:00 (Thứ 2 – Thứ 7)", "technical_hotline": "1900 6868", "security_hotline": "1900 9119", "emergency_phone": "0909 113 114", "support_email": "support@resihub.vn"}', 'Thông tin liên hệ Ban quản lý, kỹ thuật và khẩn cấp hiển thị trên Cổng cư dân'),
   ('approval_config', '{"allow_self_approval": false}', 'Cấu hình quy tắc phê duyệt 4 mắt (Four-eyes)'),
   ('reservation_cancel_policy', '{"max_hold_days":30,"public_max_hold_days":7,"full_refund_before_days":3,"partial_refund_pct":50,"default_hold_amount":2000000}', 'Chính sách đặt cọc và hủy giữ chỗ (FR-005 / FR-067, làm tròn hàng nghìn VND theo PRD 10.3)'),
@@ -49,6 +46,11 @@ CROSS JOIN (VALUES
 ) AS s(key, val, descr)
 ON CONFLICT (org_id, key) DO UPDATE
 SET value = EXCLUDED.value || COALESCE(system_setting.value, '{}'::jsonb);
+
+-- Merge reopen_window_days into sla_config if missing
+UPDATE system_setting
+SET value = jsonb_build_object('reopen_window_days', 3) || value
+WHERE key = 'sla_config' AND NOT (value ? 'reopen_window_days');
 
 -- 4. Initial System Notifications
 INSERT INTO notification (org_id, title, content, type, payload, created_at)

@@ -15,6 +15,10 @@ BEGIN
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO resihub_app;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO resihub_app;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO resihub_app;
+
+    -- 2-Layer Hardening: Non-destructive immutability on service_request and ai_suggestion (M11, M15)
+    REVOKE DELETE, TRUNCATE ON TABLE service_request FROM resihub_app;
+    REVOKE DELETE, TRUNCATE ON TABLE ai_suggestion FROM resihub_app;
   END IF;
 
   -- 2. Grant execute permissions on public schema routines

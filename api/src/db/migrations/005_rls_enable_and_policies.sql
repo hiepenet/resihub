@@ -144,7 +144,13 @@ CREATE POLICY rls_building_select ON building FOR SELECT USING (
 
 DROP POLICY IF EXISTS rls_building_insert ON building;
 CREATE POLICY rls_building_insert ON building FOR INSERT
-  WITH CHECK (is_org_admin());
+  WITH CHECK (
+    is_org_admin()
+    OR (
+      is_manager()
+      AND org_id = get_current_user_org_id()
+    )
+  );
 
 DROP POLICY IF EXISTS rls_building_update ON building;
 CREATE POLICY rls_building_update ON building FOR UPDATE
@@ -252,24 +258,10 @@ CREATE POLICY rls_apartment_update ON apartment FOR UPDATE
   USING (
     is_org_admin()
     OR building_id IN (SELECT building_id FROM get_manager_building_ids())
-    OR (
-      -- Cho phép cập nhật trạng thái tự động khi OWNER phê duyệt kích hoạt/chấm dứt hợp đồng trên tòa sở hữu
-      is_owner()
-      AND building_id IN (SELECT building_id FROM get_owner_building_ids())
-      AND EXISTS (
-        SELECT 1 FROM contract c
-        WHERE c.apartment_id = apartment.id
-          AND c.status IN ('PENDING_APPROVAL', 'ACTIVE', 'TERMINATION_PENDING', 'TERMINATED')
-      )
-    )
   )
   WITH CHECK (
     is_org_admin()
     OR building_id IN (SELECT building_id FROM get_manager_building_ids())
-    OR (
-      is_owner()
-      AND building_id IN (SELECT building_id FROM get_owner_building_ids())
-    )
   );
 
 DROP POLICY IF EXISTS rls_apartment_delete ON apartment;
