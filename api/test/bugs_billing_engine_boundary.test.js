@@ -11,6 +11,7 @@ import {
   addDaysYmd,
   diffDaysYmd,
   resolveServiceUnitPrice,
+  resolveSubscriptionEffectiveWindow,
   computeSubscriptionPeriodCharge,
   computeContractRentPeriodCharge,
   computeLateFeeAccrual,
@@ -524,5 +525,216 @@ test('BUG-HUNT B7: todayVietnamYmd timezone boundary', async (t) => {
       assert.ok(typeof result === 'string' && result.length === 10,
         'Invalid date phải fallback về today, không throw');
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP B8 — computeSubscriptionPeriodCharge (Mid-month service cancellation pro-rata)
+// KỊCH BẢN NGHIỆP VỤ:
+//   - Sử dụng dịch vụ từ đầu tháng (hoặc trước đó) tới giữa tháng rồi bất ngờ hủy
+//     (status = 'TERMINATED', 'CANCELLED', hoặc 'CANCELLATION_PENDING' có end_date giữa tháng)
+//     → Phải tính đúng activeDays, isProrated = true, và số tiền làm tròn roundVND
+//   - Đăng ký dịch vụ giữa tháng rồi hủy luôn trước cuối tháng (start_date và end_date cùng trong tháng)
+//   - Dịch vụ đã hủy từ tháng trước → tháng này phải 0 ngày, 0 đồng
+//   - Dịch vụ hủy cùng ngày bắt đầu (dùng đúng 1 ngày) → activeDays = 1
+//   - Dịch vụ TERMINATED nhưng thiếu end_date hoặc end_date < start_date → billable = false, amount = 0
+//   - Rút lại yêu cầu hủy (CANCELLATION_PENDING → ACTIVE, xóa end_date) → quay lại tính full tháng
+// ─────────────────────────────────────────────────────────────────────────────
+test('BUG-HUNT B8: computeSubscriptionPeriodCharge mid-month cancellation pro-rata', async (t) => {
+  const { roundVND } = await import('../src/services/pricing.js');
+
+  await t.test('Dùng dịch vụ từ đầu tháng tới giữa tháng (15/11) rồi hủy (TERMINATED) → tính đúng pro-rata 15/30 ngày', () => {
+    // Kỳ 2026-11 (30 ngày), gói Internet 300,000đ/tháng, dùng từ 2026-01-01, hủy ngày 2026-11-15
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'INTERNET_FIBER',
+        service_name: 'Internet Cáp Quang',
+        status: 'TERMINATED',
+        start_date: '2026-01-01',
+        end_date: '2026-11-15',
+        unit_price: 300_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.daysInMonth, 30);
+    assert.equal(r.activeDays, 15, 'Hủy ngày 15/11 phải tính đúng 15 ngày sử dụng (01/11 → 15/11)');
+    assert.equal(r.isProrated, true, 'Hủy giữa tháng phải đánh dấu isProrated = true');
+    assert.equal(r.overlapStart, '2026-11-01');
+    assert.equal(r.overlapEnd, '2026-11-15');
+    assert.equal(r.amount, 150_000, '300,000 * 15 / 30 = 150,000đ');
+    assert.equal(r.formulaMeta.billing_mode, 'PRORATED');
+  });
+
+  await t.test('Status = "CANCELLED" (alias của TERMINATED) hủy ngày 10 trong tháng 31 ngày (quantity=2) → pro-rata chuẩn', () => {
+    // Kỳ 2026-05 (31 ngày), gửi 2 xe máy * 150,000đ = 300,000đ/tháng, hủy ngày 10/05/2026
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'PARKING_MOTO',
+        service_name: 'Gửi xe máy',
+        status: 'CANCELLED',
+        start_date: '2026-03-01',
+        end_date: '2026-05-10',
+        unit_price: 150_000,
+        quantity: 2,
+        is_price_locked: true,
+      },
+      periodYm: '2026-05',
+    });
+
+    const expected = roundVND((150_000 * 2 * 10) / 31); // 96,774.19 -> 97,000
+    assert.equal(r.daysInMonth, 31);
+    assert.equal(r.activeDays, 10);
+    assert.equal(r.isProrated, true);
+    assert.equal(r.amount, expected, `Phải làm tròn chuẩn VND: ${expected}`);
+  });
+
+  await t.test('Cư dân vừa bấm yêu cầu hủy giữa tháng (CANCELLATION_PENDING có end_date=2026-11-18) → preview pro-rata 18/30 ngày', () => {
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'PARKING_CAR',
+        service_name: 'Gửi ô tô',
+        status: 'CANCELLATION_PENDING',
+        start_date: '2026-01-01',
+        end_date: '2026-11-18',
+        unit_price: 1_200_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.activeDays, 18);
+    assert.equal(r.daysInMonth, 30);
+    assert.equal(r.isProrated, true);
+    assert.equal(r.amount, roundVND((1_200_000 * 18) / 30)); // 720,000
+  });
+
+  await t.test('Đăng ký giữa tháng (10/11) rồi bất ngờ hủy luôn giữa tháng (20/11) → tính đúng 11 ngày (10/11 → 20/11)', () => {
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'GYM',
+        service_name: 'Thẻ Gym',
+        status: 'TERMINATED',
+        start_date: '2026-11-10',
+        end_date: '2026-11-20',
+        unit_price: 600_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.activeDays, 11, 'Từ 10/11 đến 20/11 (inclusive) là 11 ngày');
+    assert.equal(r.overlapStart, '2026-11-10');
+    assert.equal(r.overlapEnd, '2026-11-20');
+    assert.equal(r.isProrated, true);
+    assert.equal(r.amount, roundVND((600_000 * 11) / 30)); // 220,000
+  });
+
+  await t.test('Dùng đúng 1 ngày trong tháng rồi hủy ngay (start_date = end_date = 2026-11-15) → activeDays = 1', () => {
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'CLEANING',
+        service_name: 'Dọn phòng định kỳ',
+        status: 'TERMINATED',
+        start_date: '2026-11-15',
+        end_date: '2026-11-15',
+        unit_price: 900_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.activeDays, 1);
+    assert.equal(r.isProrated, true);
+    assert.equal(r.amount, 30_000);
+  });
+
+  await t.test('Hủy giữa tháng trước (2026-10-15) → sang kỳ tháng này (2026-11) không bị tính tiền (amount = 0)', () => {
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'INTERNET_FIBER',
+        status: 'TERMINATED',
+        start_date: '2026-01-01',
+        end_date: '2026-10-15',
+        unit_price: 300_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.activeDays, 0);
+    assert.equal(r.amount, 0, 'Đã hủy từ tháng trước thì kỳ này phải bằng 0');
+    assert.equal(r.isProrated, false);
+  });
+
+  await t.test('Hợp đồng kết thúc sớm (boundEndYmd) trước ngày hủy dịch vụ → bị chặn bởi boundEndYmd', () => {
+    // Dịch vụ hủy ngày 25/11 nhưng hợp đồng đã thanh lý ngày 12/11 (boundEndYmd = 2026-11-12)
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'INTERNET_FIBER',
+        status: 'TERMINATED',
+        start_date: '2026-01-01',
+        end_date: '2026-11-25',
+        unit_price: 300_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+      boundStartYmd: '2026-11-01',
+      boundEndYmd: '2026-11-12',
+    });
+
+    assert.equal(r.activeDays, 12, 'Không được tính vượt quá ngày hiệu lực hợp đồng (boundEndYmd)');
+    assert.equal(r.overlapEnd, '2026-11-12');
+    assert.equal(r.amount, 120_000);
+  });
+
+  await t.test('TERMINATED nhưng thiếu end_date hoặc end_date < start_date → không tính phí (billable=false)', () => {
+    const noEnd = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'INTERNET_FIBER',
+        status: 'TERMINATED',
+        start_date: '2026-11-01',
+        end_date: null,
+        unit_price: 300_000,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+    assert.equal(noEnd.activeDays, 0);
+    assert.equal(noEnd.amount, 0);
+
+    const invalidEnd = resolveSubscriptionEffectiveWindow({
+      status: 'TERMINATED',
+      start_date: '2026-11-15',
+      end_date: '2026-11-10',
+    });
+    assert.equal(invalidEnd.billable, false);
+  });
+
+  await t.test('Rút lại yêu cầu hủy (CANCELLATION_PENDING → ACTIVE, end_date = null) → tính lại full tháng', () => {
+    const r = computeSubscriptionPeriodCharge({
+      subscription: {
+        service_code: 'INTERNET_FIBER',
+        status: 'ACTIVE',
+        start_date: '2026-01-01',
+        end_date: null,
+        unit_price: 300_000,
+        quantity: 1,
+        is_price_locked: true,
+      },
+      periodYm: '2026-11',
+    });
+
+    assert.equal(r.activeDays, 30);
+    assert.equal(r.isProrated, false);
+    assert.equal(r.amount, 300_000);
+    assert.equal(r.formulaMeta.billing_mode, 'FULL');
   });
 });
