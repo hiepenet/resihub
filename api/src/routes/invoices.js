@@ -32,19 +32,86 @@ const router = express.Router();
 const PERIOD_RE = /^\d{4}-\d{2}$/;
 
 /**
+ * Helper to batch-insert invoice_line rows using a single UNNEST query
+ */
+async function batchInsertInvoiceLinesInTx(client, invoiceId, lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return;
+  const invoiceIds = [];
+  const itemTypes = [];
+  const descriptions = [];
+  const quantities = [];
+  const units = [];
+  const unitPrices = [];
+  const amounts = [];
+  const subscriptionIds = [];
+  const formulaMetas = [];
+
+  for (const l of lines) {
+    invoiceIds.push(invoiceId);
+    itemTypes.push(l.item_type);
+    descriptions.push(l.description);
+    quantities.push(Number(l.quantity ?? 1));
+    units.push(l.unit || 'lần');
+    unitPrices.push(Math.round(Number(l.unit_price || 0)));
+    amounts.push(Math.round(Number(l.amount || 0)));
+    subscriptionIds.push(l.subscription_id || null);
+    formulaMetas.push(JSON.stringify(l.formula_meta || {}));
+  }
+
+  await client.query(
+    `INSERT INTO invoice_line (
+       invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta
+     )
+     SELECT * FROM UNNEST(
+       $1::uuid[],
+       $2::text[],
+       $3::text[],
+       $4::numeric[],
+       $5::text[],
+       $6::bigint[],
+       $7::bigint[],
+       $8::uuid[],
+       $9::jsonb[]
+     )`,
+    [
+      invoiceIds,
+      itemTypes,
+      descriptions,
+      quantities,
+      units,
+      unitPrices,
+      amounts,
+      subscriptionIds,
+      formulaMetas,
+    ]
+  );
+}
+
+/**
  * Shared helper to issue a DRAFT invoice in transaction (0 ₫ -> PAID, zero receivable)
  */
 export async function issueDraftInvoiceInTx(
   client,
-  { invoiceId, actorId = null, dueDate = null, note = null }
-) {
-  const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [invoiceId]);
-  if (invRes.rows.length === 0) {
-    const err = new Error('Không tìm thấy hóa đơn.');
-    err.code = 'NOT_FOUND';
-    throw err;
+  {
+    invoiceId,
+    actorId = null,
+    dueDate = null,
+    note = null,
+    prefetchedInvoice = null,
+    skipReceivableExistenceCheck = false,
+    residentUserId = undefined,
   }
-  const inv = invRes.rows[0];
+) {
+  let inv = prefetchedInvoice;
+  if (!inv) {
+    const invRes = await client.query('SELECT * FROM invoice WHERE id = $1 FOR UPDATE', [invoiceId]);
+    if (invRes.rows.length === 0) {
+      const err = new Error('Không tìm thấy hóa đơn.');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+    inv = invRes.rows[0];
+  }
   if (inv.status !== 'DRAFT') {
     const err = new Error('Chỉ có thể phát hành hóa đơn ở trạng thái DRAFT.');
     err.code = 'INVALID_STATUS';
@@ -73,8 +140,12 @@ export async function issueDraftInvoiceInTx(
   // If totalAmount > 0, insert receivable and send notification
   if (totalAmount > 0) {
     const periodLabel = inv.period ? `kỳ ${inv.period}` : 'tất toán phí phạt';
-    const recExist = await client.query('SELECT id FROM receivable WHERE invoice_id = $1 LIMIT 1', [invoiceId]);
-    if (recExist.rows.length === 0) {
+    let shouldInsertReceivable = true;
+    if (!skipReceivableExistenceCheck) {
+      const recExist = await client.query('SELECT id FROM receivable WHERE invoice_id = $1 LIMIT 1', [invoiceId]);
+      shouldInsertReceivable = recExist.rows.length === 0;
+    }
+    if (shouldInsertReceivable) {
       await client.query(
         `INSERT INTO receivable (org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description)
          VALUES ($1, $2, $3, $4, $5, 'INVOICE_DEBT', $6, 0, $7, 'OPEN', $8)`,
@@ -92,17 +163,21 @@ export async function issueDraftInvoiceInTx(
     }
 
     if (inv.tenant_id) {
-      const uRes = await adminPool.query(
-        `SELECT au.id FROM app_user au JOIN tenant t ON t.person_id = au.person_id WHERE t.id = $1 LIMIT 1`,
-        [inv.tenant_id]
-      );
-      if (uRes.rows[0]?.id) {
+      let targetUserId = residentUserId;
+      if (targetUserId === undefined) {
+        const uRes = await adminPool.query(
+          `SELECT au.id FROM app_user au JOIN tenant t ON t.person_id = au.person_id WHERE t.id = $1 LIMIT 1`,
+          [inv.tenant_id]
+        );
+        targetUserId = uRes.rows[0]?.id || null;
+      }
+      if (targetUserId) {
         await adminPool.query(
           `INSERT INTO notification (org_id, user_id, title, content, type, payload)
            VALUES ($1, $2, $3, $4, 'INVOICE_ISSUED', $5)`,
           [
             inv.org_id,
-            uRes.rows[0].id,
+            targetUserId,
             `Phát hành hóa đơn ${inv.invoice_code}`,
             `Hóa đơn ${periodLabel} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
             JSON.stringify({
@@ -364,14 +439,11 @@ export async function generateInvoicesCore(
 
   const contractSql = `
     SELECT c.*, a.code AS apartment_code, b.code AS building_code,
-           au.id AS resident_user_id,
            ((($2 || '-01')::date + INTERVAL '1 month')::date - ($2 || '-01')::date)::int AS days_in_month,
            rt.child_start_date AS room_transfer_child_start_date
     FROM contract c
     JOIN apartment a ON a.id = c.apartment_id
     JOIN building b ON b.id = c.building_id
-    LEFT JOIN tenant t ON t.id = c.primary_tenant_id
-    LEFT JOIN app_user au ON au.person_id = t.person_id
     LEFT JOIN LATERAL (
       SELECT ch.start_date AS child_start_date
       FROM contract ch
@@ -407,7 +479,230 @@ export async function generateInvoicesCore(
   const skippedContracts = [];
   let updatedDraftCount = 0;
 
+  if (contractsRes.rows.length === 0) {
+    return {
+      created_count: 0,
+      updated_draft_count: 0,
+      updatedDraftCount: 0,
+      skipped_contracts: [],
+      skippedContracts: [],
+      warnings: [],
+      data: [],
+      createdInvoices: [],
+      skippedFutureCount,
+    };
+  }
+
+  // Bulk Pre-fetch for all candidate contracts (sequentially on client to avoid pg deprecation warning)
+  const candidateContractIds = contractsRes.rows.map((c) => c.id);
+  const candidateApartmentIds = [...new Set(contractsRes.rows.map((c) => c.apartment_id).filter(Boolean))];
+
+  const bulkCspRes = await client.query(
+    `SELECT contract_id, service_code, unit_price, effective_from::text AS effective_from_ymd
+     FROM contract_service_price
+     WHERE contract_id = ANY($1::uuid[])
+     ORDER BY effective_from DESC`,
+    [candidateContractIds]
+  );
+  const bulkSubRes = await client.query(
+    `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
+     FROM service_subscription ss
+     JOIN service_catalog sc ON sc.id = ss.service_id
+     WHERE ss.contract_id = ANY($1::uuid[])
+       AND sc.billing_type != 'METERED'
+       AND ss.status IN ('ACTIVE', 'CANCELLATION_PENDING', 'CANCELLED', 'TERMINATED')`,
+    [candidateContractIds]
+  );
+  const bulkDraftsRes = await client.query(
+    `SELECT * FROM invoice
+     WHERE contract_id = ANY($1::uuid[])
+       AND period = $2
+       AND COALESCE(invoice_type, 'REGULAR') = 'REGULAR'
+       AND status = 'DRAFT'
+     FOR UPDATE`,
+    [candidateContractIds, targetPeriod]
+  );
+  const bulkTrackersRes = await client.query(
+    `SELECT lft.contract_id, lft.id, lft.accrued_total, lft.carried_to_invoice_id
+     FROM late_fee_accrual_tracker lft
+     JOIN invoice src_i ON src_i.id = lft.invoice_id AND src_i.status <> 'VOID'
+     WHERE lft.contract_id = ANY($1::uuid[])`,
+    [candidateContractIds]
+  );
+  const bulkCreditsRes = await client.query(
+    `SELECT DISTINCT contract_id
+     FROM credit_balance
+     WHERE contract_id = ANY($1::uuid[])
+       AND status IN ('AVAILABLE', 'PARTIALLY_APPLIED')
+       AND (amount - applied_amount) > 0`,
+    [candidateContractIds]
+  );
+  const bulkActiveMetersRes = await client.query(
+    `SELECT m.id, m.apartment_id, m.meter_type, m.meter_code, m.unit, m.unit_price,
+            (m.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date::text AS created_date_ymd
+     FROM meter m
+     WHERE m.apartment_id = ANY($1::uuid[])
+       AND m.status = 'ACTIVE'
+     ORDER BY m.meter_type ASC`,
+    [candidateApartmentIds]
+  );
+  const bulkConfirmedReadingsRes = await client.query(
+    `SELECT mr.id, mr.meter_id, mr.apartment_id, mr.contract_id, mr.consumption,
+            mr.previous_reading, mr.current_reading, mr.image_url, mr.recorded_at,
+            m.meter_type, m.meter_code, m.unit, m.unit_price
+     FROM meter_reading mr
+     JOIN meter m ON m.id = mr.meter_id
+     WHERE mr.apartment_id = ANY($1::uuid[])
+       AND mr.period = $2
+       AND mr.status = 'CONFIRMED'
+       AND m.status = 'ACTIVE'
+     ORDER BY m.id, mr.recorded_at DESC`,
+    [candidateApartmentIds, targetPeriod]
+  );
+  const bulkPeriodInvLinesRes = await client.query(
+    `SELECT i2.id AS invoice_id, i2.apartment_id, i2.contract_id,
+            il2.item_type, (il2.formula_meta->>'reading_id') AS reading_id
+     FROM invoice i2
+     LEFT JOIN invoice_line il2 ON il2.invoice_id = i2.id AND il2.item_type IN ('ELECTRICITY', 'WATER')
+     WHERE i2.apartment_id = ANY($1::uuid[])
+       AND i2.period = $2
+       AND i2.status NOT IN ('VOID', 'CANCELLED')`,
+    [candidateApartmentIds, targetPeriod]
+  );
+
+  const cspByContract = new Map();
+  for (const row of bulkCspRes.rows) {
+    const cid = String(row.contract_id);
+    if (!cspByContract.has(cid)) cspByContract.set(cid, []);
+    cspByContract.get(cid).push(row);
+  }
+
+  const subsByContract = new Map();
+  for (const row of bulkSubRes.rows) {
+    const cid = String(row.contract_id);
+    if (!subsByContract.has(cid)) subsByContract.set(cid, []);
+    subsByContract.get(cid).push(row);
+  }
+
+  const existingDraftByContract = new Map();
+  for (const row of bulkDraftsRes.rows) {
+    existingDraftByContract.set(String(row.contract_id), row);
+  }
+
+  const trackersByContract = new Map();
+  for (const row of bulkTrackersRes.rows) {
+    const cid = String(row.contract_id);
+    if (!trackersByContract.has(cid)) trackersByContract.set(cid, []);
+    trackersByContract.get(cid).push(row);
+  }
+
+  const contractsWithAvailableCredits = new Set(
+    bulkCreditsRes.rows.map((r) => String(r.contract_id))
+  );
+
+  const activeMetersByApt = new Map();
+  for (const row of bulkActiveMetersRes.rows) {
+    const aid = String(row.apartment_id);
+    if (!activeMetersByApt.has(aid)) activeMetersByApt.set(aid, []);
+    activeMetersByApt.get(aid).push(row);
+  }
+
+  const confirmedReadingsByApt = new Map();
+  for (const row of bulkConfirmedReadingsRes.rows) {
+    const aid = String(row.apartment_id);
+    if (!confirmedReadingsByApt.has(aid)) confirmedReadingsByApt.set(aid, []);
+    confirmedReadingsByApt.get(aid).push(row);
+  }
+
+  const periodInvLinesByApt = new Map();
+  for (const row of bulkPeriodInvLinesRes.rows) {
+    const aid = String(row.apartment_id);
+    if (!periodInvLinesByApt.has(aid)) periodInvLinesByApt.set(aid, []);
+    periodInvLinesByApt.get(aid).push(row);
+  }
+
+  // Pre-fetch resident user IDs via adminPool when autoIssue=true
+  const residentUserByTenant = new Map();
+  if (autoIssue) {
+    const tenantIds = [...new Set(contractsRes.rows.map((c) => c.primary_tenant_id).filter(Boolean))];
+    if (tenantIds.length > 0) {
+      const resUsers = await adminPool.query(
+        `SELECT t.id AS tenant_id, au.id AS user_id
+         FROM tenant t
+         JOIN app_user au ON au.person_id = t.person_id
+         WHERE t.id = ANY($1::uuid[])`,
+        [tenantIds]
+      );
+      for (const r of resUsers.rows) {
+        residentUserByTenant.set(String(r.tenant_id), r.user_id);
+      }
+    }
+  }
+
+  // Only inspect prior subscription arrears for subscriptions created AFTER their start_date month end
+  // (mid-month subscriptions registered after that prior period's invoice was already ISSUED/PAID)
+  const subIdsToCheckArrears = [];
+  const contractsWithCandidateArrears = new Set();
+  for (const [cid, subs] of subsByContract.entries()) {
+    const cRow = contractsRes.rows.find((x) => String(x.id) === cid);
+    const cStartPeriod = cRow?.start_date ? toDateOnlyYmd(cRow.start_date).slice(0, 7) : '';
+    for (const sub of subs) {
+      if (!sub || String(sub.billing_type || '').toUpperCase() === 'METERED') continue;
+      const startYmd = sub.start_date ? toDateOnlyYmd(sub.start_date) : '';
+      if (!startYmd) continue;
+      const startPeriod = startYmd.slice(0, 7);
+      if (startPeriod >= targetPeriod) continue;
+      // Subscriptions starting after contract start month or created after start_date may have unbilled prior periods
+      const createdYmd = sub.created_at ? toDateOnlyYmd(sub.created_at) : '';
+      if (startPeriod > cStartPeriod || (createdYmd && createdYmd > startYmd)) {
+        subIdsToCheckArrears.push(sub.id);
+        contractsWithCandidateArrears.add(cid);
+      }
+    }
+  }
+
+  const priorInvoicesByContract = new Map();
+  const existingSubLinesByContract = new Map();
+  if (contractsWithCandidateArrears.size > 0) {
+    const candidateArrearsContractIds = [...contractsWithCandidateArrears];
+    const priorInvRes = await client.query(
+      `SELECT id, contract_id, period, status
+       FROM invoice
+       WHERE contract_id = ANY($1::uuid[])
+         AND status NOT IN ('VOID', 'CANCELLED', 'DRAFT')
+         AND period < $2
+       ORDER BY period ASC`,
+      [candidateArrearsContractIds, targetPeriod]
+    );
+    const existingSubLinesRes = await client.query(
+      `SELECT il.invoice_id, i.contract_id, i.period AS invoice_period, i.status AS invoice_status,
+              il.subscription_id, il.amount, il.formula_meta
+       FROM invoice_line il
+       JOIN invoice i ON i.id = il.invoice_id
+       WHERE il.subscription_id = ANY($1::uuid[])
+         AND i.status NOT IN ('VOID', 'CANCELLED')`,
+      [subIdsToCheckArrears]
+    );
+
+    for (const row of priorInvRes.rows) {
+      const cid = String(row.contract_id);
+      if (!priorInvoicesByContract.has(cid)) priorInvoicesByContract.set(cid, []);
+      priorInvoicesByContract.get(cid).push(row);
+    }
+    for (const row of existingSubLinesRes.rows) {
+      const cid = String(row.contract_id);
+      if (!existingSubLinesByContract.has(cid)) existingSubLinesByContract.set(cid, []);
+      existingSubLinesByContract.get(cid).push(row);
+    }
+  }
+
+  const pendingSimpleNewContracts = [];
+  const pendingTrackersToUpdate = [];
+  const useSingleContractSavepoint = Boolean(contractId);
+
   for (const c of contractsRes.rows) {
+    const cidStr = String(c.id);
+    const aidStr = String(c.apartment_id);
     const lines = [];
 
     // Room transfer cutoff & last active day resolution
@@ -423,51 +718,40 @@ export async function generateInvoicesCore(
         ? resolvedActive.lastActiveDayYmd
         : monthEnd;
 
+    const aptMeters = activeMetersByApt.get(aidStr) || [];
+    const aptReadings = confirmedReadingsByApt.get(aidStr) || [];
+    const aptInvLines = periodInvLinesByApt.get(aidStr) || [];
+
     // AC-015.1: Cổng kiểm tra đồng hồ điện/nước đang hoạt động phải có chỉ số CONFIRMED trong kỳ cho đúng đợt hợp đồng
     if (!allowMissingMeterReadings) {
-      const missingMetersRes = await client.query(
-        `SELECT m.meter_type
-         FROM meter m
-         WHERE m.apartment_id = $1
-           AND m.status = 'ACTIVE'
-           AND (m.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= $2::date
-           AND NOT EXISTS (
-             SELECT 1 FROM meter_reading mr
-             WHERE mr.meter_id = m.id
-               AND mr.period = $3
-               AND mr.status = 'CONFIRMED'
-               AND (
-                 mr.contract_id = $4
-                 OR (
-                   mr.contract_id IS NULL
-                   AND NOT EXISTS (
-                     SELECT 1
-                     FROM invoice i2
-                     WHERE i2.apartment_id = $1
-                       AND i2.period = $3
-                       AND i2.status NOT IN ('VOID', 'CANCELLED')
-                       AND i2.contract_id <> $4
-                       AND (
-                         EXISTS (
-                           SELECT 1 FROM invoice_line il2
-                           WHERE il2.invoice_id = i2.id
-                             AND il2.item_type = m.meter_type
-                             AND (
-                               (il2.formula_meta->>'reading_id') = mr.id::text
-                               OR (il2.formula_meta->>'reading_id') IS NULL
-                             )
-                         )
-                         OR COALESCE(mr.consumption, mr.current_reading - mr.previous_reading, 0) = 0
-                       )
-                   )
-                 )
-               )
-           )
-         ORDER BY m.meter_type ASC`,
-        [c.apartment_id, effectivePeriodEndYmd, targetPeriod, c.id]
-      );
-      if (missingMetersRes.rows.length > 0) {
-        const missingMeterTypes = missingMetersRes.rows.map((r) => r.meter_type);
+      const missingMeterTypes = [];
+      for (const m of aptMeters) {
+        if (m.created_date_ymd > effectivePeriodEndYmd) continue;
+        const hasValidReading = aptReadings.some((mr) => {
+          if (String(mr.meter_id) !== String(m.id)) return false;
+          if (mr.contract_id && String(mr.contract_id) === cidStr) return true;
+          if (!mr.contract_id) {
+            const cons = Number(
+              mr.consumption ?? Number(mr.current_reading || 0) - Number(mr.previous_reading || 0)
+            );
+            const claimedByOtherContract = aptInvLines.some((il) => {
+              if (String(il.contract_id) === cidStr) return false;
+              if (cons === 0) return true;
+              return (
+                il.item_type === m.meter_type &&
+                (il.reading_id === String(mr.id) || il.reading_id === null)
+              );
+            });
+            return !claimedByOtherContract;
+          }
+          return false;
+        });
+        if (!hasValidReading) {
+          missingMeterTypes.push(m.meter_type);
+        }
+      }
+
+      if (missingMeterTypes.length > 0) {
         skippedContracts.push({
           contract_id: c.id,
           contract_code: c.code || c.id,
@@ -504,71 +788,47 @@ export async function generateInvoicesCore(
     }
 
     // FR-065 & R-10: Bảng giá dịch vụ/điện/nước ghi đè theo hợp đồng
-    const cspRes = await client.query(
-      `SELECT service_code, unit_price, effective_from
-       FROM contract_service_price
-       WHERE contract_id = $1
-         AND effective_from <= $2::date
-       ORDER BY effective_from DESC`,
-      [c.id, effectivePeriodEndYmd]
+    const contractCspRows = (cspByContract.get(cidStr) || []).filter(
+      (r) => r.effective_from_ymd <= effectivePeriodEndYmd
     );
 
     // Điện / Nước từ meter_reading đã xác nhận (CONFIRMED) của đúng đợt hợp đồng kỳ này
-    const mrRes = await client.query(
-      `SELECT DISTINCT ON (m.id)
-              mr.id, mr.meter_id, mr.contract_id, mr.consumption, mr.previous_reading, mr.current_reading,
-              mr.image_url,
-              m.meter_type, m.meter_code, m.unit, m.unit_price
-       FROM meter_reading mr
-       JOIN meter m ON m.id = mr.meter_id
-       WHERE mr.apartment_id = $1
-         AND mr.period = $2
-         AND mr.status = 'CONFIRMED'
-         AND m.status = 'ACTIVE'
-         AND (
-           mr.contract_id = $3
-           OR (
-             mr.contract_id IS NULL
-             AND NOT EXISTS (
-               SELECT 1
-               FROM invoice i2
-               JOIN invoice_line il2 ON il2.invoice_id = i2.id
-               WHERE i2.apartment_id = $1
-                 AND i2.period = $2
-                 AND i2.status NOT IN ('VOID', 'CANCELLED')
-                 AND i2.contract_id <> $3
-                 AND il2.item_type = m.meter_type
-                 AND (
-                   (il2.formula_meta->>'reading_id') = mr.id::text
-                   OR (il2.formula_meta->>'reading_id') IS NULL
-                 )
-             )
-           )
-         )
-       ORDER BY m.id,
-                (CASE WHEN mr.contract_id = $3 THEN 0 ELSE 1 END) ASC,
-                mr.recorded_at DESC`,
-      [c.apartment_id, targetPeriod, c.id]
-    );
-    for (const mr of mrRes.rows) {
+    const eligibleReadingsByMeter = new Map();
+    for (const mr of aptReadings) {
+      const isContractMatch = mr.contract_id && String(mr.contract_id) === cidStr;
+      let isNullMatch = false;
+      if (!mr.contract_id) {
+        const claimedLine = aptInvLines.some(
+          (il) =>
+            String(il.contract_id) !== cidStr &&
+            il.item_type === mr.meter_type &&
+            (il.reading_id === String(mr.id) || il.reading_id === null)
+        );
+        isNullMatch = !claimedLine;
+      }
+      if (!isContractMatch && !isNullMatch) continue;
+
+      const midStr = String(mr.meter_id);
+      const currentBest = eligibleReadingsByMeter.get(midStr);
+      if (!currentBest) {
+        eligibleReadingsByMeter.set(midStr, mr);
+      } else {
+        const bestIsExact = currentBest.contract_id && String(currentBest.contract_id) === cidStr;
+        if (isContractMatch && !bestIsExact) {
+          eligibleReadingsByMeter.set(midStr, mr);
+        }
+      }
+    }
+
+    for (const mr of eligibleReadingsByMeter.values()) {
       const itemType = mr.meter_type === 'ELECTRICITY' ? 'ELECTRICITY' : 'WATER';
-      const alreadyBilledRes = await client.query(
-        `SELECT 1
-         FROM invoice i2
-         JOIN invoice_line il2 ON il2.invoice_id = i2.id
-         WHERE i2.apartment_id = $1
-           AND i2.period = $2
-           AND i2.status NOT IN ('VOID', 'CANCELLED')
-           AND i2.contract_id <> $3
-           AND il2.item_type = $4
-           AND (
-             (il2.formula_meta->>'reading_id') = $5
-             OR ($6::uuid IS NULL AND (il2.formula_meta->>'reading_id') IS NULL)
-           )
-         LIMIT 1`,
-        [c.apartment_id, targetPeriod, c.id, itemType, String(mr.id), mr.contract_id || null]
+      const alreadyBilled = aptInvLines.some(
+        (il) =>
+          String(il.contract_id) !== cidStr &&
+          il.item_type === itemType &&
+          (il.reading_id === String(mr.id) || (!mr.contract_id && il.reading_id === null))
       );
-      if (alreadyBilledRes.rows.length > 0) continue;
+      if (alreadyBilled) continue;
 
       const prevReadNum = Number(mr.previous_reading || 0);
       const currReadNum = Number(mr.current_reading || 0);
@@ -578,7 +838,7 @@ export async function generateInvoicesCore(
         meterUnitPrice: mr.unit_price,
         contractBuildingId: c.building_id,
         periodEndYmd: effectivePeriodEndYmd,
-        contractServicePrices: cspRes.rows,
+        contractServicePrices: contractCspRows,
         catalogItems,
       });
       const lineAmt = roundVND(cons * price);
@@ -609,22 +869,14 @@ export async function generateInvoicesCore(
     }
 
     // Dịch vụ tiện ích (service_subscription)
-    const subRes = await client.query(
-      `SELECT ss.*, sc.code AS service_code, sc.category AS service_category, sc.name AS service_name, sc.unit, sc.billing_type
-       FROM service_subscription ss
-       JOIN service_catalog sc ON sc.id = ss.service_id
-       WHERE ss.contract_id = $1
-         AND sc.billing_type != 'METERED'
-         AND ss.status IN ('ACTIVE', 'CANCELLATION_PENDING', 'CANCELLED', 'TERMINATED')`,
-      [c.id]
-    );
-    for (const sub of subRes.rows) {
+    const contractSubs = subsByContract.get(cidStr) || [];
+    for (const sub of contractSubs) {
       const subCharge = computeSubscriptionPeriodCharge({
         subscription: sub,
         periodYm: targetPeriod,
         boundEndYmd: effectivePeriodEndYmd,
         contractBuildingId: c.building_id,
-        contractServicePrices: cspRes.rows,
+        contractServicePrices: contractCspRows,
         catalogItems,
       });
       if (subCharge.amount > 0) {
@@ -642,42 +894,78 @@ export async function generateInvoicesCore(
     }
 
     // Carry-forward arrears for mid-month subscriptions registered after prior period's invoice was already ISSUED/PAID (Phương án A)
-    const subArrearsLines = await collectPriorUnbilledSubscriptionArrearsLinesInTx(client, {
-      contract: c,
-      subscriptions: subRes.rows,
-      targetPeriodYm: targetPeriod,
-      contractServicePrices: cspRes.rows,
-      catalogItems,
-    });
-    for (const arrLine of subArrearsLines) {
-      lines.push(arrLine);
+    const priorInvoices = priorInvoicesByContract.get(cidStr) || [];
+    if (priorInvoices.length > 0 && contractSubs.length > 0) {
+      const existingSubLines = existingSubLinesByContract.get(cidStr) || [];
+      for (const sub of contractSubs) {
+        if (!sub || String(sub.billing_type || '').toUpperCase() === 'METERED') continue;
+        const startYmd = sub.start_date ? toDateOnlyYmd(sub.start_date) : '';
+        if (!startYmd) continue;
+        const startPeriod = startYmd.slice(0, 7);
+        if (startPeriod >= targetPeriod) continue;
+
+        for (const priorInv of priorInvoices) {
+          if (priorInv.period < startPeriod) continue;
+          const billedOnPriorInv = existingSubLines.some(
+            (l) =>
+              String(l.invoice_id) === String(priorInv.id) &&
+              String(l.subscription_id) === String(sub.id) &&
+              !Boolean(l.formula_meta?.carry_forward_arrears)
+          );
+          if (billedOnPriorInv) continue;
+
+          const alreadyCarriedForward = existingSubLines.some(
+            (l) =>
+              String(l.subscription_id) === String(sub.id) &&
+              l.invoice_period !== targetPeriod &&
+              Boolean(l.formula_meta?.carry_forward_arrears) &&
+              l.formula_meta?.arrears_for_period === priorInv.period
+          );
+          if (alreadyCarriedForward) continue;
+
+          const arrearsCharge = computeSubscriptionPeriodCharge({
+            subscription: sub,
+            periodYm: priorInv.period,
+            contractBuildingId: c.building_id,
+            contractServicePrices: contractCspRows,
+            catalogItems,
+          });
+
+          if (arrearsCharge.amount > 0) {
+            lines.push({
+              item_type: 'SERVICE',
+              description: `Truy thu kỳ ${priorInv.period}: ${arrearsCharge.description}`,
+              quantity: arrearsCharge.quantity,
+              unit: sub.unit || 'tháng',
+              unit_price: arrearsCharge.unitPrice,
+              amount: arrearsCharge.amount,
+              subscription_id: sub.id,
+              formula_meta: {
+                ...arrearsCharge.formulaMeta,
+                carry_forward_arrears: true,
+                arrears_for_period: priorInv.period,
+                source_period_invoice_id: priorInv.id,
+              },
+            });
+          }
+        }
+      }
     }
 
     // Existing DRAFT lookup (trước khi tổng hợp dòng để bảo toàn carry-forward LATE_FEE khi làm mới DRAFT)
-    const existingDraftRes = await client.query(
-      `SELECT * FROM invoice
-       WHERE contract_id = $1
-         AND period = $2
-         AND COALESCE(invoice_type, 'REGULAR') = 'REGULAR'
-         AND status = 'DRAFT'
-       FOR UPDATE`,
-      [c.id, targetPeriod]
-    );
-    const existingDraft = existingDraftRes.rows[0] || null;
+    const existingDraft = existingDraftByContract.get(cidStr) || null;
 
     // Carry-forward: inject pending late fee accruals from prior overdue invoices of this contract (FR-064)
-    const pendingTrackerRes = await client.query(
-      `SELECT COALESCE(SUM(lft.accrued_total), 0)::bigint AS total_accrual,
-              ARRAY_AGG(lft.id) AS tracker_ids
-       FROM late_fee_accrual_tracker lft
-       JOIN invoice src_i ON src_i.id = lft.invoice_id AND src_i.status <> 'VOID'
-       WHERE lft.contract_id = $1
-         AND (lft.carried_to_invoice_id IS NULL OR lft.carried_to_invoice_id = $2::uuid)`,
-      [c.id, existingDraft ? existingDraft.id : null]
+    const eligibleTrackers = (trackersByContract.get(cidStr) || []).filter(
+      (t) =>
+        !t.carried_to_invoice_id ||
+        (existingDraft && String(t.carried_to_invoice_id) === String(existingDraft.id))
     );
-    const totalAccrual = roundVND(Number(pendingTrackerRes.rows[0]?.total_accrual || 0));
+    const totalAccrual = roundVND(
+      eligibleTrackers.reduce((s, t) => s + Number(t.accrued_total || 0), 0)
+    );
     const trackerIdsToCarry =
-      totalAccrual > 0 ? pendingTrackerRes.rows[0]?.tracker_ids || [] : [];
+      totalAccrual > 0 ? eligibleTrackers.map((t) => t.id) : [];
     if (totalAccrual > 0 && trackerIdsToCarry.length > 0) {
       lines.push({
         item_type: 'LATE_FEE',
@@ -719,23 +1007,7 @@ export async function generateInvoicesCore(
         [existingDraft.id]
       );
 
-      for (const l of lines) {
-        await client.query(
-          `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            existingDraft.id,
-            l.item_type,
-            l.description,
-            l.quantity,
-            l.unit,
-            l.unit_price,
-            l.amount,
-            l.subscription_id || null,
-            JSON.stringify(l.formula_meta || {}),
-          ]
-        );
-      }
+      await batchInsertInvoiceLinesInTx(client, existingDraft.id, lines);
 
       if (trackerIdsToCarry.length > 0) {
         await client.query(
@@ -748,17 +1020,23 @@ export async function generateInvoicesCore(
         );
       }
 
-      await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: existingDraft.id, actorId });
+      const recalc = await recalculateDraftInvoiceTotalsInTx(client, { invoiceId: existingDraft.id, actorId });
+      let finalDraftInv = recalc.invoice;
 
-      await applyAvailableCreditsInTx(client, {
-        contractId: c.id,
-        invoiceId: existingDraft.id,
-        subtotalAmount: grossSubtotal,
-        actorId,
-      });
+      if (contractsWithAvailableCredits.has(cidStr) || Number(existingDraft.credit_offset_amount || 0) > 0) {
+        const creditRes = await applyAvailableCreditsInTx(client, {
+          contractId: c.id,
+          invoiceId: existingDraft.id,
+          subtotalAmount: grossSubtotal,
+          actorId,
+        });
+        if (creditRes.totalCreditUsed > 0) {
+          const refreshedInv = await client.query('SELECT * FROM invoice WHERE id = $1', [existingDraft.id]);
+          finalDraftInv = refreshedInv.rows[0];
+        }
+      }
 
-      const refreshedInv = await client.query('SELECT * FROM invoice WHERE id = $1', [existingDraft.id]);
-      createdInvoices.push(refreshedInv.rows[0]);
+      createdInvoices.push(finalDraftInv);
       updatedDraftCount++;
       continue;
     }
@@ -772,6 +1050,37 @@ export async function generateInvoicesCore(
 
     const randSuffix = Math.floor(1000 + Math.random() * 9000);
     const invCode = `INV-${targetPeriod.replace('-', '')}-${c.building_code}-${c.apartment_code}-${randSuffix}`;
+
+    const hasCreditsOrTrackers =
+      contractsWithAvailableCredits.has(cidStr) || trackerIdsToCarry.length > 0;
+    const canDeferBatchWrites = !useSingleContractSavepoint && !hasCreditsOrTrackers;
+
+    if (canDeferBatchWrites) {
+      pendingSimpleNewContracts.push({
+        contract: c,
+        cidStr,
+        aidStr,
+        invCode,
+        dueDateStr,
+        grossSubtotal,
+        lines,
+      });
+
+      // Update in-memory periodInvLinesByApt so same-apartment turnover contracts in the same batch see newly billed readings
+      for (const l of lines) {
+        if (l.item_type === 'ELECTRICITY' || l.item_type === 'WATER') {
+          if (!periodInvLinesByApt.has(aidStr)) periodInvLinesByApt.set(aidStr, []);
+          periodInvLinesByApt.get(aidStr).push({
+            invoice_id: null,
+            apartment_id: c.apartment_id,
+            contract_id: c.id,
+            item_type: l.item_type,
+            reading_id: l.formula_meta?.reading_id ? String(l.formula_meta.reading_id) : null,
+          });
+        }
+      }
+      continue;
+    }
 
     let inv;
     await client.query('SAVEPOINT sp_gen_inv');
@@ -801,23 +1110,7 @@ export async function generateInvoicesCore(
       );
       inv = invIns.rows[0];
 
-      for (const l of lines) {
-        await client.query(
-          `INSERT INTO invoice_line (invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            inv.id,
-            l.item_type,
-            l.description,
-            l.quantity,
-            l.unit,
-            l.unit_price,
-            l.amount,
-            l.subscription_id || null,
-            JSON.stringify(l.formula_meta || {}),
-          ]
-        );
-      }
+      await batchInsertInvoiceLinesInTx(client, inv.id, lines);
 
       if (trackerIdsToCarry.length > 0) {
         await client.query(
@@ -830,25 +1123,31 @@ export async function generateInvoicesCore(
         );
       }
 
-      // Apply FIFO credit balance
-      await applyAvailableCreditsInTx(client, {
-        contractId: c.id,
-        invoiceId: inv.id,
-        subtotalAmount: grossSubtotal,
-        actorId,
-      });
-
-      const refreshedNewInv = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
-      inv = refreshedNewInv.rows[0];
+      // Apply FIFO credit balance only when contract has available credits
+      if (contractsWithAvailableCredits.has(cidStr)) {
+        const creditRes = await applyAvailableCreditsInTx(client, {
+          contractId: c.id,
+          invoiceId: inv.id,
+          subtotalAmount: grossSubtotal,
+          actorId,
+        });
+        if (creditRes.totalCreditUsed > 0) {
+          const refreshedNewInv = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
+          inv = refreshedNewInv.rows[0];
+        }
+      }
 
       if (autoIssue) {
-        await issueDraftInvoiceInTx(client, {
+        inv = await issueDraftInvoiceInTx(client, {
           invoiceId: inv.id,
           actorId,
           dueDate: dueDateStr,
+          prefetchedInvoice: inv,
+          skipReceivableExistenceCheck: true,
+          residentUserId: c.primary_tenant_id
+            ? residentUserByTenant.get(String(c.primary_tenant_id)) || null
+            : null,
         });
-        const issuedRow = await client.query('SELECT * FROM invoice WHERE id = $1', [inv.id]);
-        inv = issuedRow.rows[0];
       }
 
       await client.query(
@@ -859,6 +1158,20 @@ export async function generateInvoicesCore(
 
       await client.query('RELEASE SAVEPOINT sp_gen_inv');
       createdInvoices.push(inv);
+
+      // Update in-memory periodInvLinesByApt so same-apartment turnover contracts in the same batch see newly billed readings
+      for (const l of lines) {
+        if (l.item_type === 'ELECTRICITY' || l.item_type === 'WATER') {
+          if (!periodInvLinesByApt.has(aidStr)) periodInvLinesByApt.set(aidStr, []);
+          periodInvLinesByApt.get(aidStr).push({
+            invoice_id: inv.id,
+            apartment_id: c.apartment_id,
+            contract_id: c.id,
+            item_type: l.item_type,
+            reading_id: l.formula_meta?.reading_id ? String(l.formula_meta.reading_id) : null,
+          });
+        }
+      }
     } catch (insertErr) {
       await client.query('ROLLBACK TO SAVEPOINT sp_gen_inv');
       if (insertErr.code === '23505') {
@@ -871,6 +1184,224 @@ export async function generateInvoicesCore(
         continue;
       }
       throw insertErr;
+    }
+  }
+
+  // Flush all deferred simple new invoices, lines, receivables, notifications, and audit logs in bulk UNNEST queries!
+  if (pendingSimpleNewContracts.length > 0) {
+    const bulkInitialStatuses = pendingSimpleNewContracts.map((item) =>
+      autoIssue ? (item.grossSubtotal === 0 ? 'PAID' : 'ISSUED') : 'DRAFT'
+    );
+    const bulkInvRes = await client.query(
+      `INSERT INTO invoice (
+         org_id, building_id, apartment_id, contract_id, tenant_id,
+         invoice_code, period, issue_date, due_date,
+         subtotal_amount, adjustment_amount, total_amount, paid_amount,
+         status, created_by, issued_by, issued_at
+       )
+       SELECT
+         $1::uuid,
+         u.building_id,
+         u.apartment_id,
+         u.contract_id,
+         u.tenant_id,
+         u.invoice_code,
+         $2::text,
+         $3::date,
+         u.due_date,
+         u.subtotal_amount,
+         0,
+         u.subtotal_amount,
+         0,
+         u.status,
+         $4::uuid,
+         CASE WHEN u.status IN ('ISSUED', 'PAID') THEN $4::uuid ELSE NULL END,
+         CASE WHEN u.status IN ('ISSUED', 'PAID') THEN NOW() ELSE NULL END
+       FROM UNNEST(
+         $5::uuid[], $6::uuid[], $7::uuid[], $8::uuid[],
+         $9::text[], $10::date[], $11::bigint[], $12::text[]
+       ) AS u(building_id, apartment_id, contract_id, tenant_id, invoice_code, due_date, subtotal_amount, status)
+       RETURNING *`,
+      [
+        orgId,
+        targetPeriod,
+        effectiveIssueDateYmd,
+        actorId,
+        pendingSimpleNewContracts.map((x) => x.contract.building_id),
+        pendingSimpleNewContracts.map((x) => x.contract.apartment_id),
+        pendingSimpleNewContracts.map((x) => x.contract.id),
+        pendingSimpleNewContracts.map((x) => x.contract.primary_tenant_id),
+        pendingSimpleNewContracts.map((x) => x.invCode),
+        pendingSimpleNewContracts.map((x) => x.dueDateStr),
+        pendingSimpleNewContracts.map((x) => x.grossSubtotal),
+        bulkInitialStatuses,
+      ]
+    );
+
+    const insertedByContractId = new Map(
+      bulkInvRes.rows.map((invRow) => [String(invRow.contract_id), invRow])
+    );
+
+    const pendingLinesToInsert = [];
+    const pendingReceivablesToInsert = [];
+    const pendingNotificationsToInsert = [];
+    const pendingAuditLogsToInsert = [];
+
+    for (const item of pendingSimpleNewContracts) {
+      const inv = insertedByContractId.get(item.cidStr);
+      if (!inv) continue;
+      createdInvoices.push(inv);
+
+      for (const l of item.lines) {
+        pendingLinesToInsert.push({
+          invoice_id: inv.id,
+          item_type: l.item_type,
+          description: l.description,
+          quantity: Number(l.quantity ?? 1),
+          unit: l.unit || 'lần',
+          unit_price: Math.round(Number(l.unit_price || 0)),
+          amount: Math.round(Number(l.amount || 0)),
+          subscription_id: l.subscription_id || null,
+          formula_meta: JSON.stringify(l.formula_meta || {}),
+        });
+      }
+
+      if (autoIssue) {
+        const totalAmount = Number(inv.total_amount || 0);
+        const periodLabel = inv.period ? `kỳ ${inv.period}` : 'tất toán phí phạt';
+        if (totalAmount > 0) {
+          pendingReceivablesToInsert.push({
+            org_id: inv.org_id,
+            building_id: inv.building_id,
+            contract_id: inv.contract_id,
+            tenant_id: inv.tenant_id,
+            invoice_id: inv.id,
+            amount: totalAmount,
+            due_date: item.dueDateStr,
+            description: `Công nợ hóa đơn ${inv.invoice_code} ${periodLabel}`,
+          });
+
+          const targetUserId = item.contract.primary_tenant_id
+            ? residentUserByTenant.get(String(item.contract.primary_tenant_id)) || null
+            : null;
+          if (targetUserId) {
+            pendingNotificationsToInsert.push({
+              org_id: inv.org_id,
+              user_id: targetUserId,
+              title: `Phát hành hóa đơn ${inv.invoice_code}`,
+              content: `Hóa đơn ${periodLabel} với tổng số tiền ${totalAmount.toLocaleString('vi-VN')} ₫ đã được phát hành.`,
+              payload: JSON.stringify({
+                invoice_id: inv.id,
+                invoice_code: inv.invoice_code,
+                contract_id: inv.contract_id,
+                building_id: inv.building_id,
+                apartment_id: inv.apartment_id,
+              }),
+            });
+          }
+        }
+
+        const draftSnapshot = { ...inv, status: 'DRAFT', issued_by: null, issued_at: null };
+        pendingAuditLogsToInsert.push({
+          actor_id: actorId,
+          action: 'UPDATE_INVOICE_STATUS',
+          entity: 'invoice',
+          entity_id: inv.id,
+          before: JSON.stringify(draftSnapshot),
+          after: JSON.stringify(inv),
+        });
+      }
+
+      pendingAuditLogsToInsert.push({
+        actor_id: actorId,
+        action: 'CREATE_INVOICE',
+        entity: 'invoice',
+        entity_id: inv.id,
+        before: null,
+        after: JSON.stringify(inv),
+      });
+    }
+
+    if (pendingLinesToInsert.length > 0) {
+      await client.query(
+        `INSERT INTO invoice_line (
+           invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta
+         )
+         SELECT * FROM UNNEST(
+           $1::uuid[], $2::text[], $3::text[], $4::numeric[], $5::text[],
+           $6::bigint[], $7::bigint[], $8::uuid[], $9::jsonb[]
+         )`,
+        [
+          pendingLinesToInsert.map((x) => x.invoice_id),
+          pendingLinesToInsert.map((x) => x.item_type),
+          pendingLinesToInsert.map((x) => x.description),
+          pendingLinesToInsert.map((x) => x.quantity),
+          pendingLinesToInsert.map((x) => x.unit),
+          pendingLinesToInsert.map((x) => x.unit_price),
+          pendingLinesToInsert.map((x) => x.amount),
+          pendingLinesToInsert.map((x) => x.subscription_id),
+          pendingLinesToInsert.map((x) => x.formula_meta),
+        ]
+      );
+    }
+
+    if (pendingReceivablesToInsert.length > 0) {
+      await client.query(
+        `INSERT INTO receivable (
+           org_id, building_id, contract_id, tenant_id, invoice_id, type, amount, paid_amount, due_date, status, description
+         )
+         SELECT
+           u.org_id, u.building_id, u.contract_id, u.tenant_id, u.invoice_id,
+           'INVOICE_DEBT', u.amount, 0, u.due_date, 'OPEN', u.description
+         FROM UNNEST(
+           $1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::uuid[],
+           $6::bigint[], $7::date[], $8::text[]
+         ) AS u(org_id, building_id, contract_id, tenant_id, invoice_id, amount, due_date, description)`,
+        [
+          pendingReceivablesToInsert.map((x) => x.org_id),
+          pendingReceivablesToInsert.map((x) => x.building_id),
+          pendingReceivablesToInsert.map((x) => x.contract_id),
+          pendingReceivablesToInsert.map((x) => x.tenant_id),
+          pendingReceivablesToInsert.map((x) => x.invoice_id),
+          pendingReceivablesToInsert.map((x) => x.amount),
+          pendingReceivablesToInsert.map((x) => x.due_date),
+          pendingReceivablesToInsert.map((x) => x.description),
+        ]
+      );
+    }
+
+    if (pendingNotificationsToInsert.length > 0) {
+      await adminPool.query(
+        `INSERT INTO notification (org_id, user_id, title, content, type, payload)
+         SELECT u.org_id, u.user_id, u.title, u.content, 'INVOICE_ISSUED', u.payload
+         FROM UNNEST(
+           $1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::jsonb[]
+         ) AS u(org_id, user_id, title, content, payload)`,
+        [
+          pendingNotificationsToInsert.map((x) => x.org_id),
+          pendingNotificationsToInsert.map((x) => x.user_id),
+          pendingNotificationsToInsert.map((x) => x.title),
+          pendingNotificationsToInsert.map((x) => x.content),
+          pendingNotificationsToInsert.map((x) => x.payload),
+        ]
+      );
+    }
+
+    if (pendingAuditLogsToInsert.length > 0) {
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+         SELECT * FROM UNNEST(
+           $1::uuid[], $2::text[], $3::text[], $4::uuid[], $5::jsonb[], $6::jsonb[]
+         )`,
+        [
+          pendingAuditLogsToInsert.map((x) => x.actor_id),
+          pendingAuditLogsToInsert.map((x) => x.action),
+          pendingAuditLogsToInsert.map((x) => x.entity),
+          pendingAuditLogsToInsert.map((x) => x.entity_id),
+          pendingAuditLogsToInsert.map((x) => x.before),
+          pendingAuditLogsToInsert.map((x) => x.after),
+        ]
+      );
     }
   }
 

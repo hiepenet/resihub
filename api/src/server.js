@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import zlib from 'node:zlib';
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
@@ -48,6 +49,33 @@ app.use(morgan('dev'));
 
 // Body parser (hỗ trợ upload ảnh base64 tối đa 5MB/ảnh x 3 ảnh hoặc PDF scan hợp đồng tối đa 10MB)
 app.use(express.json({ limit: '20mb' }));
+
+// HTTP Gzip Compression Middleware for JSON payloads (> 1KB)
+app.use((req, res, next) => {
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (!/\bgzip\b/i.test(acceptEncoding)) {
+    return next();
+  }
+  const origJson = res.json.bind(res);
+  res.json = function compressedJson(body) {
+    if (res.headersSent || res.getHeader('Content-Encoding')) {
+      return origJson(body);
+    }
+    const jsonStr = JSON.stringify(body);
+    if (!jsonStr || Buffer.byteLength(jsonStr, 'utf8') < 1024) {
+      return origJson(body);
+    }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Encoding', 'gzip');
+    res.setHeader('Vary', 'Accept-Encoding');
+    const compressed = zlib.gzipSync(Buffer.from(jsonStr, 'utf8'), {
+      level: zlib.constants.Z_BEST_SPEED,
+    });
+    res.setHeader('Content-Length', compressed.length);
+    return res.send(compressed);
+  };
+  next();
+});
 
 // General Rate Limiter
 app.use('/api/', generalLimiter);

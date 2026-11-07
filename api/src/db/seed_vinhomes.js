@@ -1,17 +1,24 @@
 /**
- * seed_vinhomes.js — Seed dữ liệu test Vinhomes Ocean Park 1, 2, 3 cho ResiHub
+ * seed_vinhomes.js — Seed dữ liệu thực tế Vinhomes Ocean Park 1, 2, 3 cho ResiHub
  *
  * Cấu trúc dữ liệu:
  *   1. Xóa toàn bộ dữ liệu cũ (TRUNCATE CASCADE)
  *   2. Organization, 4 Roles (OWNER, MANAGER, RESIDENT, SYS_ADMIN), System Settings, 7 Service Catalog
  *   3. 1 Owner dùng chung + 3 Tòa nhà (Vinhomes Ocean Park 1, 2, 3) + 3 Manager riêng biệt + 1 SYS_ADMIN
  *   4. Mỗi tòa: 3 Khu (Khu A, Khu B, Khu C), 10 Tầng (Tầng 1..10), 80 căn hộ/tòa (8 căn/tầng) = 240 căn hộ
- *   5. Hồ sơ dân cư (~261 cư dân tên tiếng Việt thực tế, CCCD, SĐT, tài khoản RESIDENT)
- *   6. Hợp đồng thuê nhà (~260 hợp đồng từ 01/01/2025 -> 06/11/2026, kiểm tra chồng lấn kỳ hạn, chọn dịch vụ)
- *      + Sổ cọc & giao dịch thu/hoàn cọc (cọc không cấn trừ vào tiền thuê, hoàn trong 3-5 ngày sau chấm dứt)
- *   7. Đồng hồ điện/nước & chỉ số hàng tháng đến hết tháng 10/2026 (CONFIRMED)
- *   8. Hóa đơn hàng tháng từ tháng 01/2025 đến hết tháng 10/2026 (tính pro-rata chính xác theo ngày)
- *      — Chưa sinh hóa đơn tháng 11/2026 để người dùng tự click Sinh hóa đơn hàng loạt tháng 11 trên UI.
+ *      — Tỷ lệ lấp đầy khác nhau tự nhiên giữa 3 tòa (VOP-1 ~80%, VOP-2 ~71.3%, VOP-3 ~62.5%)
+ *      — Có đầy đủ trạng thái OCCUPIED, AVAILABLE, RESERVED, MAINTENANCE
+ *   5. Hồ sơ dân cư (~270 cư dân tên tiếng Việt thực tế, CCCD, SĐT, tài khoản RESIDENT)
+ *   6. Hợp đồng thuê nhà (~245 hợp đồng trải dài 2025 -> 2027, không chồng lấn kỳ hạn):
+ *      — Toàn bộ hợp đồng ACTIVE có end_date random ngày & tháng trong năm 2027
+ *      — Lịch sử ký mới / hết hạn / chấm dứt sớm phân bổ tự nhiên qua các tháng giúp biểu đồ lấp đầy 12 kỳ uốn lượn chân thực
+ *      — Sổ cọc & giao dịch thu/hoàn cọc (hoàn trong 3-5 ngày sau chấm dứt, không cấn trừ tiền thuê)
+ *   7. Đồng hồ điện/nước & chỉ số hàng tháng biến thiên theo mùa (đông thấp, hè cao điểm) đến hết 10/2026 & 11/2026 (CONFIRMED)
+ *   8. Hóa đơn hàng tháng từ 01/2025 đến hết 10/2026 (tính đúng công thức + pro-rata chính xác theo ngày):
+ *      — Có độ trễ thanh toán thực tế giữa Phát hành, Tất toán HĐ và Thực thu
+ *      — Công nợ phân bổ đầy đủ cả 5 nhóm tuổi nợ (Chưa đến hạn, 1-15 ngày, 16-30 ngày, 31-60 ngày, >60 ngày)
+ *      — Chưa sinh hóa đơn tháng 11/2026 để người dùng tự click Sinh hóa đơn hàng loạt tháng 11 trên UI
+ *      — Kèm dữ liệu Phiếu giữ chỗ (reservation) & Yêu cầu bảo trì SLA (service_request) chân thực
  */
 
 import pg from 'pg';
@@ -68,8 +75,8 @@ export function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-// Deterministic pseudo-random helper for reproducible test data
-let rngState = 20261106;
+// Deterministic pseudo-random helper for reproducible, organic test data
+let rngState = 20261107;
 export function seededRandom() {
   rngState = (rngState * 1664525 + 1013904223) % 4294967296;
   return rngState / 4294967296;
@@ -77,6 +84,16 @@ export function seededRandom() {
 
 export function randomInt(a, b) {
   return Math.floor(seededRandom() * (b - a + 1)) + a;
+}
+
+/**
+ * Sinh ngày kết thúc hợp đồng ACTIVE ngẫu nhiên trong năm 2027 (random tháng 01..12, random ngày 01..28)
+ */
+export function randomActiveEndDate2027() {
+  const month = randomInt(1, 12);
+  const maxDay = getDaysInMonth(2027, month);
+  const day = randomInt(1, maxDay);
+  return `2027-${pad2(month)}-${pad2(day)}`;
 }
 
 export function eachMonth(startYmd, endYm) {
@@ -92,6 +109,47 @@ export function eachMonth(startYmd, endYm) {
     }
   }
   return months;
+}
+
+/**
+ * Hệ số thời tiết miền Bắc (Hà Nội / Hưng Yên) cho tiêu thụ Điện & Nước
+ * Giúp biểu đồ doanh thu có nhịp điệu mùa vụ tự nhiên (Đông thấp - Hè nắng nóng cao điểm)
+ */
+export function getSeasonalMultipliers(year, month) {
+  const elByMonth = {
+    1: 0.78,
+    2: 0.74,
+    3: 0.86,
+    4: 0.98,
+    5: 1.28,
+    6: 1.56,
+    7: 1.62,
+    8: 1.48,
+    9: 1.24,
+    10: 0.96,
+    11: 0.85,
+    12: 0.80,
+  };
+  const wtByMonth = {
+    1: 0.88,
+    2: 0.84,
+    3: 0.92,
+    4: 1.00,
+    5: 1.15,
+    6: 1.28,
+    7: 1.32,
+    8: 1.25,
+    9: 1.12,
+    10: 0.98,
+    11: 0.92,
+    12: 0.90,
+  };
+  // Năm 2026 nhu cầu sinh hoạt tăng nhẹ ~4% so với 2025
+  const yearFactor = year >= 2026 ? 1.04 : 1.0;
+  return {
+    elFactor: (elByMonth[month] || 1.0) * yearFactor,
+    wtFactor: (wtByMonth[month] || 1.0) * yearFactor,
+  };
 }
 
 /**
@@ -132,7 +190,7 @@ export async function seed() {
   const client = await pool.connect();
   try {
     console.log('══════════════════════════════════════════════════════════════════');
-    console.log('  ResiHub — Vinhomes Ocean Park 1, 2, 3 Full Test Data Seed');
+    console.log('  ResiHub — Vinhomes Ocean Park 1, 2, 3 Realistic Data Seed');
     console.log('══════════════════════════════════════════════════════════════════');
 
     await client.query('BEGIN');
@@ -284,9 +342,9 @@ export async function seed() {
 
     // 3. 3 Tòa nhà Vinhomes Ocean Park 1, 2, 3 & 3 Manager riêng biệt
     const buildingsMeta = [
-      { id: '33333333-3333-4333-8333-000000000001', mgPersonId: '22222222-2222-4222-9222-000000000011', mgUserId: '22222222-2222-4222-8222-000000000011', code: 'VOP-1', name: 'Vinhomes Ocean Park 1', address: 'Đại đô thị Vinhomes Ocean Park 1, Đa Tốn, Gia Lâm, Hà Nội', num: 1, mgName: 'Nguyễn Minh Quản Lý VOP1', mgEmail: 'manager.vop1@resihub.vn', mgPhone: phone(5000011), mgIdNo: idNumber(5000011) },
-      { id: '33333333-3333-4333-8333-000000000002', mgPersonId: '22222222-2222-4222-9222-000000000012', mgUserId: '22222222-2222-4222-8222-000000000012', code: 'VOP-2', name: 'Vinhomes Ocean Park 2', address: 'Đại đô thị Vinhomes Ocean Park 2 - The Empire, Văn Giang, Hưng Yên', num: 2, mgName: 'Trần Hoàng Quản Lý VOP2', mgEmail: 'manager.vop2@resihub.vn', mgPhone: phone(5000012), mgIdNo: idNumber(5000012) },
-      { id: '33333333-3333-4333-8333-000000000003', mgPersonId: '22222222-2222-4222-9222-000000000013', mgUserId: '22222222-2222-4222-8222-000000000013', code: 'VOP-3', name: 'Vinhomes Ocean Park 3', address: 'Đại đô thị Vinhomes Ocean Park 3 - The Crown, Văn Lâm, Hưng Yên', num: 3, mgName: 'Lê Thanh Quản Lý VOP3', mgEmail: 'manager.vop3@resihub.vn', mgPhone: phone(5000013), mgIdNo: idNumber(5000013) },
+      { id: '33333333-3333-4333-8333-000000000001', mgPersonId: '22222222-2222-4222-9222-000000000011', mgUserId: '22222222-2222-4222-8222-000000000011', code: 'VOP-1', name: 'Vinhomes Ocean Park 1', address: 'Đại đô thị Vinhomes Ocean Park 1, Đa Tốn, Gia Lâm, Hà Nội', num: 1, rentPremium: 400000, mgName: 'Nguyễn Minh Quản Lý VOP1', mgEmail: 'manager.vop1@resihub.vn', mgPhone: phone(5000011), mgIdNo: idNumber(5000011) },
+      { id: '33333333-3333-4333-8333-000000000002', mgPersonId: '22222222-2222-4222-9222-000000000012', mgUserId: '22222222-2222-4222-8222-000000000012', code: 'VOP-2', name: 'Vinhomes Ocean Park 2', address: 'Đại đô thị Vinhomes Ocean Park 2 - The Empire, Văn Giang, Hưng Yên', num: 2, rentPremium: 100000, mgName: 'Trần Hoàng Quản Lý VOP2', mgEmail: 'manager.vop2@resihub.vn', mgPhone: phone(5000012), mgIdNo: idNumber(5000012) },
+      { id: '33333333-3333-4333-8333-000000000003', mgPersonId: '22222222-2222-4222-9222-000000000013', mgUserId: '22222222-2222-4222-8222-000000000013', code: 'VOP-3', name: 'Vinhomes Ocean Park 3', address: 'Đại đô thị Vinhomes Ocean Park 3 - The Crown, Văn Lâm, Hưng Yên', num: 3, rentPremium: -200000, mgName: 'Lê Thanh Quản Lý VOP3', mgEmail: 'manager.vop3@resihub.vn', mgPhone: phone(5000013), mgIdNo: idNumber(5000013) },
     ];
 
     const buildings = [];
@@ -319,7 +377,7 @@ export async function seed() {
         [mgUser.id, roleIdMap.MANAGER, bldg.id]
       );
 
-      buildings.push({ id: bldg.id, code: bm.code, name: bm.name, num: bm.num });
+      buildings.push({ id: bldg.id, code: bm.code, name: bm.name, num: bm.num, rentPremium: bm.rentPremium });
       managerByBuilding[bldg.id] = mgUser.id;
       console.log(`   ✓ [${bm.code}] ${bm.name} — Owner: owner.vop@resihub.vn | Manager: ${bm.mgEmail}`);
     }
@@ -333,14 +391,14 @@ export async function seed() {
       { code: 'C', name: 'Khu C' },
     ];
     const aptLayoutPerFloor = [
-      { zone: 'A', no: 1, bedrooms: 1, area: 42, rentBase: 7000000 },
-      { zone: 'A', no: 2, bedrooms: 2, area: 58, rentBase: 9500000 },
-      { zone: 'A', no: 3, bedrooms: 1, area: 40, rentBase: 6800000 },
-      { zone: 'B', no: 1, bedrooms: 2, area: 65, rentBase: 10500000 },
-      { zone: 'B', no: 2, bedrooms: 3, area: 85, rentBase: 14000000 },
-      { zone: 'B', no: 3, bedrooms: 2, area: 60, rentBase: 9800000 },
-      { zone: 'C', no: 1, bedrooms: 1, area: 45, rentBase: 7500000 },
-      { zone: 'C', no: 2, bedrooms: 2, area: 70, rentBase: 11000000 },
+      { zone: 'A', no: 1, bedrooms: 1, area: 43, rentBase: 6900000 },
+      { zone: 'A', no: 2, bedrooms: 2, area: 59, rentBase: 9600000 },
+      { zone: 'A', no: 3, bedrooms: 1, area: 40, rentBase: 6600000 },
+      { zone: 'B', no: 1, bedrooms: 2, area: 66, rentBase: 10800000 },
+      { zone: 'B', no: 2, bedrooms: 3, area: 88, rentBase: 14500000 },
+      { zone: 'B', no: 3, bedrooms: 2, area: 62, rentBase: 9900000 },
+      { zone: 'C', no: 1, bedrooms: 1, area: 46, rentBase: 7400000 },
+      { zone: 'C', no: 2, bedrooms: 2, area: 72, rentBase: 11400000 },
     ];
 
     const zonesMap = {};
@@ -375,7 +433,10 @@ export async function seed() {
         for (const spec of aptLayoutPerFloor) {
           const aptCode = `${bldg.num}${floor.level}${spec.zone}${pad2(spec.no)}`;
           const zoneId = zonesMap[bldg.id][spec.zone];
-          const baseRent = spec.rentBase + floor.level * 100000;
+          // Giá thuê biến thiên tự nhiên theo tòa, tầng, view hồ/nội thất (làm tròn 100.000đ)
+          const viewBonus = (floor.level >= 6 && (spec.no === 1 || spec.no === 2)) ? 300000 : 0;
+          const furnitureVar = ((floor.level + spec.no + bldg.num) % 3 - 1) * 100000;
+          const baseRent = spec.rentBase + bldg.rentPremium + floor.level * 100000 + viewBonus + furnitureVar;
 
           const { rows: [aptRec] } = await client.query(
             `INSERT INTO apartment (
@@ -416,13 +477,12 @@ export async function seed() {
     let tenantIdx = 1;
     const tenantsByBuilding = {};
 
-    // Mỗi tòa cần: 18 tenant cho HĐ lịch sử (đã kết thúc trong 2025) + 52 tenant cho HĐ đang ACTIVE = 70 tenant/tòa (tổng 210)
-    // Tạo 87 tenant/tòa = 261 cư dân (bao gồm cả cư dân dự phòng / occupant)
+    // Tạo 92 tenant/tòa = 276 cư dân để đủ gán cho tất cả hợp đồng lịch sử & đang hiệu lực
     for (const bldg of buildings) {
       tenantsByBuilding[bldg.id] = [];
       const mgUserId = managerByBuilding[bldg.id];
 
-      for (let i = 0; i < 87; i++) {
+      for (let i = 0; i < 92; i++) {
         const fullName = randomName(tenantIdx);
         const tPhone = phone(phoneCounter++);
         const tIdNo = idNumber(idNoCounter++);
@@ -480,49 +540,97 @@ export async function seed() {
     const totalTenants = Object.values(tenantsByBuilding).reduce((s, arr) => s + arr.length, 0);
     console.log(`   ✓ Đã tạo ${totalTenants} hồ sơ dân cư (tenant1..tenant${tenantIdx - 1}@resihub.vn).`);
 
-    // ── TASK 6: Hợp đồng thuê (>150 HĐ, 01/01/2025 -> 06/11/2026) + Deposits + Subscriptions ─
-    console.log('\n[6/8] Tạo Hợp đồng thuê (>150 HĐ), Sổ cọc (thu/hoàn 3-5 ngày) & Đăng ký dịch vụ...');
+    // ── TASK 6: Hợp đồng thuê (2025 -> 2027) + Deposits + Subscriptions + Reservations ─
+    console.log('\n[6/8] Tạo Hợp đồng thuê (ACTIVE kết thúc random trong 2027), Sổ cọc & Đăng ký dịch vụ...');
 
     const existingContracts = [];
     const contractList = [];
     let overlapCheckedCount = 0;
     let contractCounter = 0;
 
-    // Chọn các mốc ngày bắt đầu đa dạng (cả ngày mùng 1 và ngày lẻ giữa tháng để kiểm chứng pro-rata)
-    const lote1StartDates = [
-      '2025-01-01', '2025-01-10', '2025-01-15', '2025-02-01', '2025-02-12',
-      '2025-03-01', '2025-03-15', '2025-04-01', '2025-04-10', '2025-05-01',
-      '2025-05-20', '2025-06-01',
+    // Cấu hình số lượng căn hộ theo kịch bản riêng cho từng tòa để tỷ lệ lấp đầy khác nhau tự nhiên:
+    // - VOP-1: 64 căn OCCUPIED (80.0%), 3 RESERVED, 2 MAINTENANCE, 11 AVAILABLE
+    // - VOP-2: 57 căn OCCUPIED (71.3%), 2 RESERVED, 2 MAINTENANCE, 19 AVAILABLE
+    // - VOP-3: 50 căn OCCUPIED (62.5%), 3 RESERVED, 1 MAINTENANCE, 26 AVAILABLE
+    const buildingScenarioConfig = {
+      1: { longTermCount: 24, rolloverCount: 16, rampUp2026Count: 24, vacated2026Count: 7, reservedCount: 3, maintenanceCount: 2 },
+      2: { longTermCount: 20, rolloverCount: 15, rampUp2026Count: 22, vacated2026Count: 8, reservedCount: 2, maintenanceCount: 2 },
+      3: { longTermCount: 16, rolloverCount: 14, rampUp2026Count: 20, vacated2026Count: 8, reservedCount: 3, maintenanceCount: 1 },
+    };
+
+    const longTermStarts = [
+      '2025-01-01', '2025-01-08', '2025-01-15', '2025-02-01', '2025-02-10',
+      '2025-03-01', '2025-03-18', '2025-04-01', '2025-04-12', '2025-05-01',
+      '2025-05-15', '2025-06-01', '2025-06-20', '2025-07-01', '2025-08-01',
+      '2025-08-15', '2025-09-01', '2025-09-10', '2025-10-01', '2025-10-15',
+      '2025-11-01', '2025-11-12', '2025-12-01', '2025-12-10',
     ];
-    const lote2StartDates = [
-      '2025-01-01', '2025-01-05', '2025-01-15', '2025-02-01',
+
+    // Kịch bản nối tiếp 2 HĐ (có khoảng trống 10-45 ngày hoặc nối tiếp, trải từ giữa 2025 sang 2026)
+    const rolloverSpecs = [
+      { start1: '2025-01-01', end1: '2025-07-01', last1: '2025-06-30', start2: '2025-07-15' },
+      { start1: '2025-01-10', end1: '2025-08-01', last1: '2025-07-31', start2: '2025-08-01' },
+      { start1: '2025-02-01', end1: '2025-08-16', last1: '2025-08-15', start2: '2025-09-01' },
+      { start1: '2025-02-15', end1: '2025-09-01', last1: '2025-08-31', start2: '2025-10-01' },
+      { start1: '2025-03-01', end1: '2025-10-01', last1: '2025-09-30', start2: '2025-10-15' },
+      { start1: '2025-03-12', end1: '2025-11-01', last1: '2025-10-31', start2: '2025-12-01' },
+      { start1: '2025-04-01', end1: '2025-12-16', last1: '2025-12-15', start2: '2026-01-10' },
+      { start1: '2025-04-15', end1: '2026-01-20', last1: '2026-01-19', start2: '2026-03-01' },
+      { start1: '2025-05-01', end1: '2026-02-01', last1: '2026-01-31', start2: '2026-03-10' },
+      { start1: '2025-05-10', end1: '2026-02-15', last1: '2026-02-14', start2: '2026-04-01' },
+      { start1: '2025-06-01', end1: '2026-02-20', last1: '2026-02-19', start2: '2026-04-12' },
+      { start1: '2025-06-15', end1: '2026-03-01', last1: '2026-02-28', start2: '2026-05-01' },
+      { start1: '2025-07-01', end1: '2026-04-01', last1: '2026-03-31', start2: '2026-05-15' },
+      { start1: '2025-07-15', end1: '2026-05-01', last1: '2026-04-30', start2: '2026-06-01' },
+      { start1: '2025-08-01', end1: '2026-06-16', last1: '2026-06-15', start2: '2026-07-01' },
+      { start1: '2025-09-01', end1: '2026-07-01', last1: '2026-06-30', start2: '2026-08-05' },
     ];
-    const lote2EndDates = [
-      { endDate: '2025-07-01', lastActiveDay: '2025-06-30', nextStartDate: '2025-07-01' },
-      { endDate: '2025-07-16', lastActiveDay: '2025-07-15', nextStartDate: '2025-07-16' },
-      { endDate: '2025-08-01', lastActiveDay: '2025-07-31', nextStartDate: '2025-08-01' },
-      { endDate: '2025-09-01', lastActiveDay: '2025-08-31', nextStartDate: '2025-09-01' },
+
+    // Kịch bản các căn mới lấp đầy dần qua các tháng của năm 2026 (tạo đường cong tăng trưởng tự nhiên)
+    const rampUp2026Starts = [
+      '2026-01-01', '2026-01-15', '2026-02-05', '2026-03-01', '2026-03-12',
+      '2026-03-20', '2026-04-01', '2026-04-10', '2026-04-18', '2026-05-01',
+      '2026-05-12', '2026-05-22', '2026-06-01', '2026-06-10', '2026-06-18',
+      '2026-07-01', '2026-07-14', '2026-08-01', '2026-08-16', '2026-09-01',
+      '2026-09-12', '2026-10-05', '2026-10-18', '2026-11-01',
+    ];
+
+    // Kịch bản các căn có HĐ lịch sử đã trả phòng trong 2026 (tạo nhịp giảm nhẹ ở một vài tháng như tháng 2 Tết, tháng 8 & tháng 10)
+    const vacated2026Specs = [
+      { start: '2025-02-01', end: '2026-02-01', last: '2026-01-31' },
+      { start: '2025-03-01', end: '2026-02-15', last: '2026-02-14' },
+      { start: '2025-04-10', end: '2026-04-10', last: '2026-04-09' },
+      { start: '2025-05-01', end: '2026-05-01', last: '2026-04-30' },
+      { start: '2025-07-01', end: '2026-07-20', last: '2026-07-19' },
+      { start: '2025-08-01', end: '2026-08-15', last: '2026-08-14' },
+      { start: '2025-09-01', end: '2026-09-25', last: '2026-09-24' },
+      { start: '2025-10-01', end: '2026-10-20', last: '2026-10-19' },
     ];
 
     let heldDepositCount = 0;
     let refundedDepositCount = 0;
     let subscriptionCount = 0;
     let overridePriceCount = 0;
+    const reservedApts = [];
+    const maintenanceApts = [];
 
     for (const bldg of buildings) {
       const apts = aptsByBuilding[bldg.id];
       const bTenants = tenantsByBuilding[bldg.id];
       const mgUserId = managerByBuilding[bldg.id];
+      const cfg = buildingScenarioConfig[bldg.num];
       let bTenantCursor = 0;
+      let aptCursor = 0;
 
-      // Nhóm A (Căn 0..33 = 34 căn/tòa): 1 Hợp đồng ACTIVE xuyên suốt từ đầu/giữa 2025 -> 2026-11-06
-      for (let i = 0; i < 34; i++) {
-        const apt = apts[i];
+      // 1. Nhóm HĐ ổn định dài hạn (2025 -> 2027)
+      for (let i = 0; i < cfg.longTermCount; i++) {
+        const apt = apts[aptCursor++];
         const tenant = bTenants[bTenantCursor++];
-        const startDate = lote1StartDates[i % lote1StartDates.length];
-        const endDate = '2026-11-06';
-        const effectiveEndDate = '2026-11-05';
-        const billingDay = (i % 10) + 1;
+        const startDate = longTermStarts[i % longTermStarts.length];
+        const endDate = randomActiveEndDate2027();
+        const effectiveEndDate = addDays(endDate, -1);
+        const billingDay = ((i * 3) % 28) + 1;
+        const paymentDueDays = billingDay >= 23 ? 15 : 5;
 
         overlapCheckedCount++;
         if (hasOverlap(existingContracts, apt.id, startDate, effectiveEndDate)) {
@@ -538,40 +646,31 @@ export async function seed() {
           endDate,
           effectiveEndDate,
           billingDay,
+          paymentDueDays,
           status: 'ACTIVE',
           contractIndex: ++contractCounter,
           serviceCatalogMap,
         });
 
-        existingContracts.push({
-          apartmentId: apt.id,
-          startDate,
-          endDate,
-          effectiveEndDate,
-        });
+        existingContracts.push({ apartmentId: apt.id, startDate, endDate, effectiveEndDate });
         contractList.push(created);
         heldDepositCount++;
         subscriptionCount += created.subscriptions.length;
         overridePriceCount += created.servicePrices.length;
       }
 
-      // Nhóm B (Căn 34..51 = 18 căn/tòa):
-      //   - Đợt 1: Hợp đồng lịch sử trong năm 2025 (EXPIRED / TERMINATED) -> đã hoàn cọc trong 3-5 ngày
-      //   - Đợt 2: Hợp đồng ACTIVE nối tiếp từ 2025 -> 2026-11-06 (không chồng lấn kỳ hạn)
-      for (let i = 34; i < 52; i++) {
-        const apt = apts[i];
-        const splitSpec = lote2EndDates[i % lote2EndDates.length];
-        const start1 = lote2StartDates[i % lote2StartDates.length];
-        const end1 = splitSpec.endDate;
-        const lastActive1 = splitSpec.lastActiveDay;
+      // 2. Nhóm căn hộ có 2 đời hợp đồng (HĐ 1 đã kết thúc + HĐ 2 đang ACTIVE đến 2027)
+      for (let i = 0; i < cfg.rolloverCount; i++) {
+        const apt = apts[aptCursor++];
+        const spec = rolloverSpecs[i % rolloverSpecs.length];
         const isTerminatedEarly = i % 3 === 0;
         const status1 = isTerminatedEarly ? 'TERMINATED' : 'EXPIRED';
-        const terminatedAt1 = isTerminatedEarly ? lastActive1 : null;
+        const terminatedAt1 = isTerminatedEarly ? spec.last1 : null;
         const tenant1 = bTenants[bTenantCursor++];
-        const billingDay1 = (i % 8) + 1;
+        const billingDay1 = ((i * 2) % 20) + 1;
 
         overlapCheckedCount++;
-        if (hasOverlap(existingContracts, apt.id, start1, lastActive1)) {
+        if (hasOverlap(existingContracts, apt.id, spec.start1, spec.last1)) {
           throw new Error(`Phát hiện chồng lấn kỳ hạn hợp đồng đợt 1 trên căn hộ ${apt.code}`);
         }
 
@@ -580,37 +679,32 @@ export async function seed() {
           apt,
           tenant: tenant1,
           managerId: mgUserId,
-          startDate: start1,
-          endDate: end1,
-          effectiveEndDate: lastActive1,
+          startDate: spec.start1,
+          endDate: spec.end1,
+          effectiveEndDate: spec.last1,
           terminatedAt: terminatedAt1,
           terminationReason: isTerminatedEarly ? 'Khách thuê chuyển công tác, thỏa thuận chấm dứt hợp đồng' : null,
           billingDay: billingDay1,
+          paymentDueDays: 5,
           status: status1,
           contractIndex: ++contractCounter,
           serviceCatalogMap,
         });
 
-        // Cập nhật trạng thái tenant cũ sang MOVED_OUT
         await client.query(`UPDATE tenant SET status = 'MOVED_OUT' WHERE id = $1`, [tenant1.tenantId]);
-
-        existingContracts.push({
-          apartmentId: apt.id,
-          startDate: start1,
-          endDate: end1,
-          effectiveEndDate: lastActive1,
-        });
+        existingContracts.push({ apartmentId: apt.id, startDate: spec.start1, endDate: spec.end1, effectiveEndDate: spec.last1 });
         contractList.push(created1);
         refundedDepositCount++;
         subscriptionCount += created1.subscriptions.length;
         overridePriceCount += created1.servicePrices.length;
 
-        // Đợt 2: Hợp đồng ACTIVE kế tiếp trên cùng căn hộ
-        const start2 = splitSpec.nextStartDate;
-        const end2 = '2026-11-06';
-        const lastActive2 = '2026-11-05';
+        // Đợt 2: Hợp đồng ACTIVE sang năm 2027
+        const start2 = spec.start2;
+        const end2 = randomActiveEndDate2027();
+        const lastActive2 = addDays(end2, -1);
         const tenant2 = bTenants[bTenantCursor++];
-        const billingDay2 = ((i + 3) % 10) + 1;
+        const billingDay2 = ((i * 5 + 3) % 28) + 1;
+        const paymentDueDays2 = billingDay2 >= 25 ? 14 : 5;
 
         overlapCheckedCount++;
         if (hasOverlap(existingContracts, apt.id, start2, lastActive2)) {
@@ -626,24 +720,97 @@ export async function seed() {
           endDate: end2,
           effectiveEndDate: lastActive2,
           billingDay: billingDay2,
+          paymentDueDays: paymentDueDays2,
           status: 'ACTIVE',
           contractIndex: ++contractCounter,
           serviceCatalogMap,
         });
 
-        existingContracts.push({
-          apartmentId: apt.id,
-          startDate: start2,
-          endDate: end2,
-          effectiveEndDate: lastActive2,
-        });
+        existingContracts.push({ apartmentId: apt.id, startDate: start2, endDate: end2, effectiveEndDate: lastActive2 });
         contractList.push(created2);
         heldDepositCount++;
         subscriptionCount += created2.subscriptions.length;
         overridePriceCount += created2.servicePrices.length;
       }
 
-      // Cập nhật trạng thái căn hộ có hợp đồng ACTIVE sang OCCUPIED
+      // 3. Nhóm căn hộ mới lấp đầy dần trong năm 2026 (ACTIVE sang năm 2027)
+      for (let i = 0; i < cfg.rampUp2026Count; i++) {
+        const apt = apts[aptCursor++];
+        const tenant = bTenants[bTenantCursor++];
+        const startDate = rampUp2026Starts[i % rampUp2026Starts.length];
+        const endDate = randomActiveEndDate2027();
+        const effectiveEndDate = addDays(endDate, -1);
+        const billingDay = ((i * 4 + bldg.num) % 28) + 1;
+        const paymentDueDays = billingDay >= 24 ? 12 : 5;
+
+        overlapCheckedCount++;
+        if (hasOverlap(existingContracts, apt.id, startDate, effectiveEndDate)) {
+          throw new Error(`Phát hiện chồng lấn kỳ hạn hợp đồng ramp-up trên căn hộ ${apt.code}`);
+        }
+
+        const created = await insertContractWithDepositAndServices(client, {
+          orgId,
+          apt,
+          tenant,
+          managerId: mgUserId,
+          startDate,
+          endDate,
+          effectiveEndDate,
+          billingDay,
+          paymentDueDays,
+          status: 'ACTIVE',
+          contractIndex: ++contractCounter,
+          serviceCatalogMap,
+        });
+
+        existingContracts.push({ apartmentId: apt.id, startDate, endDate, effectiveEndDate });
+        contractList.push(created);
+        heldDepositCount++;
+        subscriptionCount += created.subscriptions.length;
+        overridePriceCount += created.servicePrices.length;
+      }
+
+      // 4. Nhóm căn hộ đã có khách ở năm 2025 - giữa 2026 nhưng hiện đã trả phòng
+      for (let i = 0; i < cfg.vacated2026Count; i++) {
+        const apt = apts[aptCursor++];
+        const spec = vacated2026Specs[i % vacated2026Specs.length];
+        const isTerminatedEarly = i % 2 === 1;
+        const status1 = isTerminatedEarly ? 'TERMINATED' : 'EXPIRED';
+        const terminatedAt1 = isTerminatedEarly ? spec.last : null;
+        const tenant1 = bTenants[bTenantCursor++];
+        const billingDay1 = ((i * 3 + 2) % 20) + 1;
+
+        overlapCheckedCount++;
+        if (hasOverlap(existingContracts, apt.id, spec.start, spec.last)) {
+          throw new Error(`Phát hiện chồng lấn kỳ hạn hợp đồng vacated trên căn hộ ${apt.code}`);
+        }
+
+        const created1 = await insertContractWithDepositAndServices(client, {
+          orgId,
+          apt,
+          tenant: tenant1,
+          managerId: mgUserId,
+          startDate: spec.start,
+          endDate: spec.end,
+          effectiveEndDate: spec.last,
+          terminatedAt: terminatedAt1,
+          terminationReason: isTerminatedEarly ? 'Khách hoàn tất dự án công tác, bàn giao căn hộ trước hạn' : null,
+          billingDay: billingDay1,
+          paymentDueDays: 5,
+          status: status1,
+          contractIndex: ++contractCounter,
+          serviceCatalogMap,
+        });
+
+        await client.query(`UPDATE tenant SET status = 'MOVED_OUT' WHERE id = $1`, [tenant1.tenantId]);
+        existingContracts.push({ apartmentId: apt.id, startDate: spec.start, endDate: spec.end, effectiveEndDate: spec.last });
+        contractList.push(created1);
+        refundedDepositCount++;
+        subscriptionCount += created1.subscriptions.length;
+        overridePriceCount += created1.servicePrices.length;
+      }
+
+      // 5. Cập nhật trạng thái căn hộ OCCUPIED cho các căn có HĐ ACTIVE
       await client.query(
         `UPDATE apartment a
          SET status = 'OCCUPIED', updated_at = NOW()
@@ -654,24 +821,64 @@ export async function seed() {
            );`,
         [bldg.id]
       );
+
+      // 6. Đánh dấu một số căn trống sang RESERVED (có phiếu đặt cọc giữ chỗ) và MAINTENANCE (đang bảo trì)
+      for (let i = 0; i < cfg.reservedCount; i++) {
+        const apt = apts[aptCursor++];
+        await client.query(`UPDATE apartment SET status = 'RESERVED', updated_at = NOW() WHERE id = $1`, [apt.id]);
+        reservedApts.push({ apt, managerId: mgUserId, tenant: bTenants[bTenantCursor++] });
+      }
+      for (let i = 0; i < cfg.maintenanceCount; i++) {
+        const apt = apts[aptCursor++];
+        await client.query(`UPDATE apartment SET status = 'MAINTENANCE', updated_at = NOW() WHERE id = $1`, [apt.id]);
+        maintenanceApts.push({ apt, managerId: mgUserId });
+      }
+    }
+
+    // Tạo phiếu giữ chỗ (Reservation) cho các căn RESERVED + một vài phiếu lịch sử
+    for (let i = 0; i < reservedApts.length; i++) {
+      const { apt, managerId, tenant } = reservedApts[i];
+      const holdAmount = 2000000 + (i % 3) * 1000000;
+      const holdFrom = `2026-11-0${(i % 5) + 1}`;
+      const holdUntil = addDays(holdFrom, 14);
+      const rsvStatus = i % 4 === 3 ? 'PENDING_CONFIRM' : 'HELD';
+      await client.query(
+        `INSERT INTO reservation (
+           org_id, building_id, apartment_id, prospect_name, phone, hold_amount,
+           hold_from, hold_until, status, source, method, confirmed_by, confirmed_at, note, created_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8::date, $9, 'INTERNAL', 'BANK_TRANSFER', $10, NOW(), $11, $10)`,
+        [
+          orgId,
+          apt.buildingId,
+          apt.id,
+          tenant.name,
+          tenant.phone,
+          holdAmount,
+          holdFrom,
+          holdUntil,
+          rsvStatus,
+          rsvStatus === 'HELD' ? managerId : null,
+          `Khách đặt cọc giữ chỗ căn ${apt.code} hẹn ký hợp đồng trong tháng 11/2026`,
+        ]
+      );
     }
 
     const activeContractsCount = contractList.filter((c) => c.status === 'ACTIVE').length;
     const endedContractsCount = contractList.length - activeContractsCount;
     console.log(
-      `   ✓ Đã tạo ${contractList.length} hợp đồng (ACTIVE: ${activeContractsCount}, EXPIRED/TERMINATED: ${endedContractsCount}) — Kiểm tra chống chồng lấn: ${overlapCheckedCount} lần (0 xung đột).`
+      `   ✓ Đã tạo ${contractList.length} hợp đồng (ACTIVE sang 2027: ${activeContractsCount}, EXPIRED/TERMINATED: ${endedContractsCount}) — Kiểm tra chống chồng lấn: ${overlapCheckedCount} lần (0 xung đột).`
     );
     console.log(
-      `   ✓ Sổ cọc: ${heldDepositCount} HELD, ${refundedDepositCount} REFUNDED (hoàn trong 3-5 ngày, không cấn trừ tiền thuê).`
+      `   ✓ Sổ cọc: ${heldDepositCount} HELD, ${refundedDepositCount} REFUNDED | Giữ chỗ: ${reservedApts.length} căn RESERVED | Bảo trì: ${maintenanceApts.length} căn MAINTENANCE.`
     );
     console.log(
       `   ✓ Dịch vụ đăng ký: ${subscriptionCount} gói | Giá ghi đè cấp HĐ: ${overridePriceCount} mục.`
     );
 
-    // ── TASK 7: Đồng hồ Điện/Nước & Chỉ số hàng tháng đến hết tháng 10/2026 ─
-    console.log('\n[7/8] Tạo Đồng hồ Điện/Nước & Chỉ số hàng tháng (đến hết tháng 10/2026)...');
+    // ── TASK 7: Đồng hồ Điện/Nước & Chỉ số hàng tháng theo mùa đến 10/2026 & 11/2026 ─
+    console.log('\n[7/8] Tạo Đồng hồ Điện/Nước & Chỉ số hàng tháng biến thiên theo mùa (đến hết tháng 10 & 11/2026)...');
 
-    // Nhóm hợp đồng theo căn hộ theo thứ tự thời gian để chuỗi chỉ số (previous -> current) liên tục
     const contractsByApt = new Map();
     for (const c of contractList) {
       if (!contractsByApt.has(c.apartmentId)) contractsByApt.set(c.apartmentId, []);
@@ -682,7 +889,6 @@ export async function seed() {
     }
 
     const meterByApt = {};
-    // Key: `${contractId}_${period}` -> { elReading, wtReading }
     const readingsByContractPeriod = {};
     let meterCount = 0;
     let readingCount = 0;
@@ -713,12 +919,11 @@ export async function seed() {
       meterByApt[aptId] = { elMeter, wtMeter };
       meterCount += 2;
 
-      let elPrev = randomInt(500, 1500);
-      let wtPrev = randomInt(40, 120);
+      let elPrev = randomInt(450, 1600);
+      let wtPrev = randomInt(35, 130);
+      const bedrooms = sampleContract.bedrooms || 2;
 
       for (const c of aptContracts) {
-        // Ghi chỉ số đến hết tháng 10/2026 cho hợp đồng kết thúc trước 11/2026,
-        // và ghi sẵn chỉ số kỳ 2026-11 (CONFIRMED) cho các hợp đồng ACTIVE để người dùng có thể click Sinh hóa đơn hàng loạt tháng 11 trên UI ngay!
         const lastPeriod =
           c.status === 'ACTIVE'
             ? '2026-11'
@@ -732,8 +937,19 @@ export async function seed() {
           const recordedDay = period === '2026-11' ? 5 : Math.min(28, dim);
           const recordedAt = `${period}-${pad2(recordedDay)}T10:00:00+07:00`;
 
-          const elCons = randomInt(110, 240);
-          const wtCons = randomInt(6, 16);
+          // Mức tiêu thụ cơ sở theo số phòng ngủ + biến thiên mùa vụ miền Bắc + tỷ lệ số ngày ở trong tháng
+          const { monthStart, monthEnd } = getMonthBoundsYmd(period);
+          const activeStart = c.startDate > monthStart ? c.startDate : monthStart;
+          const activeEnd = c.effectiveEndDate < monthEnd ? c.effectiveEndDate : monthEnd;
+          const activeDays = Math.max(1, diffDaysYmd(activeStart, activeEnd) + 1);
+          const stayRatio = Math.min(1, activeDays / dim);
+
+          const { elFactor, wtFactor } = getSeasonalMultipliers(year, month);
+          const baseEl = bedrooms === 1 ? randomInt(115, 175) : bedrooms === 2 ? randomInt(185, 275) : randomInt(260, 380);
+          const baseWt = bedrooms === 1 ? randomInt(6, 11) : bedrooms === 2 ? randomInt(10, 17) : randomInt(15, 24);
+
+          const elCons = Math.max(18, Math.round(baseEl * elFactor * stayRatio));
+          const wtCons = Math.max(2, Math.round(baseWt * wtFactor * stayRatio));
           const elCurr = elPrev + elCons;
           const wtCurr = wtPrev + wtCons;
 
@@ -825,7 +1041,7 @@ export async function seed() {
       }
     }
 
-    // Tạo đồng hồ cho cả các căn hộ đang trống (AVAILABLE) để tổng đồng hồ đủ 480 công tơ (240 căn x 2)
+    // Tạo đồng hồ cho cả các căn hộ chưa có lịch sử hợp đồng để đủ 480 công tơ (240 căn x 2)
     for (const bldg of buildings) {
       for (const apt of aptsByBuilding[bldg.id]) {
         if (meterByApt[apt.id]) continue;
@@ -855,13 +1071,14 @@ export async function seed() {
 
     console.log(`   ✓ Đã tạo ${meterCount} đồng hồ điện/nước & ${readingCount} bản ghi chỉ số CONFIRMED (đến hết kỳ 2026-10 & 2026-11).`);
 
-    // ── TASK 8: Hóa đơn hàng tháng (01/2025 -> 10/2026, Pro-rata chính xác) ─
-    console.log('\n[8/8] Tạo Hóa đơn hàng tháng (01/2025 -> 10/2026, tính Pro-rata theo ngày) & Thanh toán...');
+    // ── TASK 8: Hóa đơn hàng tháng (01/2025 -> 10/2026, Pro-rata chính xác) + Công nợ 5 nhóm + Bảo trì SLA ─
+    console.log('\n[8/8] Tạo Hóa đơn hàng tháng (01/2025 -> 10/2026, tính Pro-rata theo ngày), Công nợ 5 nhóm & Yêu cầu SLA...');
     console.log('      (Không sinh hóa đơn tháng 11/2026 để người dùng tự click Sinh hóa đơn hàng loạt trên UI)');
 
     let invoiceSeq = 1;
     let paidInvoiceCount = 0;
-    let issuedInvoiceCount = 0;
+    let partialInvoiceCount = 0;
+    let unpaidInvoiceCount = 0;
     let invoiceLineCount = 0;
     let paymentCount = 0;
     let receivableCount = 0;
@@ -986,15 +1203,78 @@ export async function seed() {
           period === c.startDate.slice(0, 7) && rawIssueDate < c.startDate
             ? c.startDate
             : rawIssueDate;
-        const dueDate = addDays(issueDate, 5);
+        const dueDate = addDays(issueDate, c.paymentDueDays || 5);
         const invCode = `INV-${period.replace('-', '')}-${c.buildingCode}-${c.apartmentCode}-${String(invoiceSeq++).padStart(4, '0')}`;
 
-        // Tất cả các kỳ lịch sử (< 2026-10) và hầu hết kỳ 2026-10 đã thanh toán PAID;
-        // Để lại một số hóa đơn kỳ 2026-10 của HĐ ACTIVE ở trạng thái ISSUED (còn công nợ OPEN) để báo cáo công nợ sinh động
-        const isUnpaidOct2026 =
-          period === '2026-10' && c.status === 'ACTIVE' && c.contractIndex % 9 === 0;
-        const invStatus = isUnpaidOct2026 ? 'ISSUED' : 'PAID';
-        const paidAmount = isUnpaidOct2026 ? 0 : subtotal;
+        // Phân bổ trạng thái thanh toán & công nợ chân thực qua cả 5 nhóm tuổi nợ (tính tại mốc 2026-11-07):
+        // - >60 ngày (due_date < 2026-09-08): một vài HĐ ACTIVE kỳ 2026-08 còn nợ / trả 1 phần
+        // - 31-60 ngày (due_date 2026-09-08 .. 2026-10-07): một số HĐ ACTIVE kỳ 2026-09 còn nợ / trả 1 phần
+        // - 16-30 ngày (due_date 2026-10-08 .. 2026-10-22): HĐ ACTIVE kỳ 2026-10 có billingDay 3..17
+        // - 1-15 ngày (due_date 2026-10-23 .. 2026-11-06): HĐ ACTIVE kỳ 2026-10 có billingDay 18..24
+        // - Chưa đến hạn (due_date >= 2026-11-07): HĐ ACTIVE kỳ 2026-10 có billingDay >= 25 & paymentDueDays 12..14
+        let invStatus = 'PAID';
+        let paidAmount = subtotal;
+        let rcvStatus = 'PAID';
+
+        if (c.status === 'ACTIVE') {
+          if (period === '2026-08' && c.contractIndex % 37 === 0 && dueDate < '2026-09-08') {
+            // Nhóm >60 ngày
+            if (c.contractIndex % 2 === 0) {
+              invStatus = 'PARTIALLY_PAID';
+              paidAmount = roundVND(subtotal * 0.5);
+              rcvStatus = 'PARTIALLY_PAID';
+            } else {
+              invStatus = 'OVERDUE';
+              paidAmount = 0;
+              rcvStatus = 'OPEN';
+            }
+          } else if (period === '2026-09' && c.contractIndex % 19 === 0 && dueDate >= '2026-09-08' && dueDate <= '2026-10-07') {
+            // Nhóm 31-60 ngày
+            if (c.contractIndex % 3 === 0) {
+              invStatus = 'PARTIALLY_PAID';
+              paidAmount = roundVND(subtotal * 0.4);
+              rcvStatus = 'PARTIALLY_PAID';
+            } else {
+              invStatus = 'OVERDUE';
+              paidAmount = 0;
+              rcvStatus = 'OPEN';
+            }
+          } else if (period === '2026-10') {
+            if (dueDate >= '2026-11-07' && c.contractIndex % 2 === 0) {
+              // Nhóm Chưa đến hạn (due_date >= 2026-11-07)
+              invStatus = 'ISSUED';
+              paidAmount = 0;
+              rcvStatus = 'OPEN';
+            } else if (dueDate >= '2026-10-23' && dueDate <= '2026-11-06' && c.contractIndex % 5 === 0) {
+              // Nhóm 1-15 ngày
+              if (c.contractIndex % 10 === 0) {
+                invStatus = 'PARTIALLY_PAID';
+                paidAmount = roundVND(subtotal * 0.6);
+                rcvStatus = 'PARTIALLY_PAID';
+              } else {
+                invStatus = 'OVERDUE';
+                paidAmount = 0;
+                rcvStatus = 'OPEN';
+              }
+            } else if (dueDate >= '2026-10-08' && dueDate <= '2026-10-22' && c.contractIndex % 7 === 0) {
+              // Nhóm 16-30 ngày
+              if (c.contractIndex % 14 === 0) {
+                invStatus = 'PARTIALLY_PAID';
+                paidAmount = roundVND(subtotal * 0.5);
+                rcvStatus = 'PARTIALLY_PAID';
+              } else {
+                invStatus = 'OVERDUE';
+                paidAmount = 0;
+                rcvStatus = 'OPEN';
+              }
+            } else if (dueDate <= '2026-10-07' && c.contractIndex % 11 === 0) {
+              // Bổ sung thêm vào nhóm 31-60 ngày từ đầu tháng 10
+              invStatus = 'OVERDUE';
+              paidAmount = 0;
+              rcvStatus = 'OPEN';
+            }
+          }
+        }
 
         const { rows: [invRow] } = await client.query(
           `INSERT INTO invoice (
@@ -1048,8 +1328,15 @@ export async function seed() {
           invoiceLineCount++;
         }
 
-        if (invStatus === 'PAID') {
-          const paidDate = addDays(issueDate, 2);
+        if (paidAmount > 0) {
+          // Tạo độ trễ ngày thực thu tự nhiên: một số HĐ chốt cuối tháng thanh toán sang đầu tháng kế tiếp
+          const payDelayDays =
+            c.status === 'ACTIVE' && period < '2026-10' && c.contractIndex % 6 === 0
+              ? randomInt(6, 12)
+              : randomInt(1, 4);
+          const rawPaidDate = addDays(issueDate, payDelayDays);
+          const paidDate = rawPaidDate > '2026-11-06' ? '2026-11-05' : rawPaidDate;
+
           await client.query(
             `INSERT INTO payment (
                org_id, building_id, invoice_id, contract_id, tenant_id,
@@ -1059,7 +1346,7 @@ export async function seed() {
              VALUES (
                $1, $2, $3, $4, $5,
                $6, $7, 'BANK_TRANSFER', $8, 'CONFIRMED',
-               ($9::date)::timestamptz, 'Thanh toán hóa đơn kỳ ' || $10, $11, $11, ($9::date)::timestamptz, ($9::date)::timestamptz
+               ($9::date)::timestamptz, $10, $11, $11, ($9::date)::timestamptz, ($9::date)::timestamptz
              );`,
             [
               orgId,
@@ -1068,68 +1355,168 @@ export async function seed() {
               c.contractId,
               c.tenantId,
               `PAY-${invCode}`,
-              subtotal,
+              paidAmount,
               `VCB${period.replace('-', '')}${String(invoiceSeq).padStart(5, '0')}`,
               paidDate,
-              period,
+              invStatus === 'PARTIALLY_PAID'
+                ? `Thanh toán một phần hóa đơn kỳ ${period}`
+                : `Thanh toán hóa đơn kỳ ${period}`,
               c.managerId,
             ]
           );
-          await client.query(
-            `INSERT INTO receivable (
-               org_id, building_id, contract_id, tenant_id, invoice_id,
-               type, amount, paid_amount, due_date, status, description, created_at, updated_at
-             )
-             VALUES (
-               $1, $2, $3, $4, $5,
-               'INVOICE_DEBT', $6, $6, $7::date, 'PAID', $8, ($7::date)::timestamptz, ($7::date)::timestamptz
-             );`,
-            [
-              orgId,
-              c.buildingId,
-              c.contractId,
-              c.tenantId,
-              invRow.id,
-              subtotal,
-              dueDate,
-              `Công nợ hóa đơn ${invCode} kỳ ${period}`,
-            ]
-          );
-          paidInvoiceCount++;
           paymentCount++;
-          receivableCount++;
-        } else {
+        }
+
+        await client.query(
+          `INSERT INTO receivable (
+             org_id, building_id, contract_id, tenant_id, invoice_id,
+             type, amount, paid_amount, due_date, status, description, created_at, updated_at
+           )
+           VALUES (
+             $1, $2, $3, $4, $5,
+             'INVOICE_DEBT', $6, $7, $8::date, $9, $10, ($8::date)::timestamptz, ($8::date)::timestamptz
+           );`,
+          [
+            orgId,
+            c.buildingId,
+            c.contractId,
+            c.tenantId,
+            invRow.id,
+            subtotal,
+            paidAmount,
+            dueDate,
+            rcvStatus,
+            `Công nợ hóa đơn ${invCode} kỳ ${period}`,
+          ]
+        );
+        receivableCount++;
+
+        if (invStatus === 'PAID') paidInvoiceCount++;
+        else if (invStatus === 'PARTIALLY_PAID') partialInvoiceCount++;
+        else unpaidInvoiceCount++;
+      }
+    }
+
+    // Tạo dữ liệu Yêu cầu bảo trì / báo hỏng (service_request) cho cả 3 tòa để bảng SLA và Dashboard sống động
+    const srTemplates = [
+      { category: 'HVAC',       priority: 'HIGH',   title: 'Điều hòa phòng khách làm mát yếu, cần vệ sinh nạp gas', desc: 'Điều hòa bật 20 độ nhưng gió thổi ra không mát, nhờ kỹ thuật kiểm tra.', resolveHours: 6.5, rating: 5 },
+      { category: 'PLUMBING',   priority: 'URGENT', title: 'Rò rỉ nước dưới bồn rửa bát khu bếp', desc: 'Ống xả chữ P dưới chậu rửa bị rỉ nước khi xả mạnh.', resolveHours: 2.8, rating: 5 },
+      { category: 'ELECTRICAL', priority: 'NORMAL', title: 'Đèn âm trần hànhlang nhấp nháy', desc: 'Bóng LED downlight gần cửa ra vào bị chập chờn.', resolveHours: 14.0, rating: 4 },
+      { category: 'APPLIANCE',  priority: 'NORMAL', title: 'Bình nóng lạnh phòng tắm chính báo lỗi đèn đỏ', desc: 'Bật công tắc bình nóng lạnh 15 phút nhưng nước không ấm.', resolveHours: 18.5, rating: 5 },
+      { category: 'FURNITURE',  priority: 'LOW',    title: 'Bản lề tủ quần áo phòng ngủ bị xệ', desc: 'Cánh tủ bên phải đóng mở hơi kẹt, cần chỉnh lại bản lề giảm chấn.', resolveHours: 28.0, rating: 4, breached: true },
+      { category: 'CLEANING',   priority: 'LOW',    title: 'Đăng ký tổng vệ sinh ban công và kính mặt ngoài', desc: 'Nhờ đội vệ sinh hỗ trợ làm sạch khe cửa lùa ban công.', resolveHours: 12.0, rating: 5 },
+      { category: 'PLUMBING',   priority: 'NORMAL', title: 'Vòi sen tắm áp lực nước yếu', desc: 'Nước chảy yếu vào giờ cao điểm buổi tối, cần vệ sinh lưới lọc.', resolveHours: 9.5, rating: 5 },
+      { category: 'ELECTRICAL', priority: 'HIGH',   title: 'Ổ cắm khu vực bàn làm việc mất nguồn', desc: 'Aptomat nhánh ổ cắm phòng ngủ nhỏ bị nhảy.', resolveHours: 3.2, rating: 5 },
+      { category: 'HVAC',       priority: 'NORMAL', title: 'Bảo dưỡng định kỳ điều hòa Multi 2 chiều', desc: 'Vệ sinh lưới lọc bụi và kiểm tra đường ống thoát nước ngưng.', openStatus: 'IN_PROGRESS' },
+      { category: 'APPLIANCE',  priority: 'HIGH',   title: 'Bếp từ đôi báo lỗi E2 khi đun nấu', desc: 'Quạt tản nhiệt dưới đáy bếp từ không quay.', openStatus: 'ASSIGNED' },
+      { category: 'PLUMBING',   priority: 'NORMAL', title: 'Thay phao cơ bồn cầu phòng vệ sinh phụ', desc: 'Phao ngắt nước chậm gây tiếng ồn nhỏ.', openStatus: 'NEW' },
+    ];
+
+    let srSeq = 1001;
+    const activeContractsByBldg = {};
+    for (const c of contractList.filter((x) => x.status === 'ACTIVE')) {
+      if (!activeContractsByBldg[c.buildingId]) activeContractsByBldg[c.buildingId] = [];
+      activeContractsByBldg[c.buildingId].push(c);
+    }
+
+    for (const bldg of buildings) {
+      const bContracts = activeContractsByBldg[bldg.id] || [];
+      const mgUserId = managerByBuilding[bldg.id];
+      for (let i = 0; i < srTemplates.length; i++) {
+        const tpl = srTemplates[i];
+        const sampleC = bContracts[i % bContracts.length];
+        if (!sampleC) continue;
+
+        const createdDaysAgo = tpl.openStatus ? randomInt(0, 2) : randomInt(4, 45);
+        const createdDateStr = addDays('2026-11-07', -createdDaysAgo);
+        const createdAt = `${createdDateStr}T09:${pad2((i * 7) % 50)}:00+07:00`;
+        const trackingCode = `SR-202611-${srSeq++}`;
+        const slaHours = tpl.priority === 'URGENT' ? 4 : 24;
+
+        if (tpl.openStatus) {
           await client.query(
-            `INSERT INTO receivable (
-               org_id, building_id, contract_id, tenant_id, invoice_id,
-               type, amount, paid_amount, due_date, status, description, created_at, updated_at
+            `INSERT INTO service_request (
+               org_id, building_id, apartment_id, created_by, assigned_to,
+               title, category, description, location_detail, preferred_slot,
+               priority, status, tracking_code,
+               sla_response_due_at, sla_due_at, created_at, updated_at
              )
              VALUES (
                $1, $2, $3, $4, $5,
-               'INVOICE_DEBT', $6, 0, $7::date, 'OPEN', $8, ($7::date)::timestamptz, ($7::date)::timestamptz
-             );`,
+               $6, $7, $8, 'Trong căn hộ', 'MORNING',
+               $9, $10, $11,
+               ($12::timestamptz + INTERVAL '2 hours'),
+               ($12::timestamptz + ($13 || ' hours')::interval),
+               $12::timestamptz, NOW()
+             )`,
             [
               orgId,
-              c.buildingId,
-              c.contractId,
-              c.tenantId,
-              invRow.id,
-              subtotal,
-              dueDate,
-              `Công nợ hóa đơn ${invCode} kỳ ${period}`,
+              bldg.id,
+              sampleC.apartmentId,
+              mgUserId,
+              tpl.openStatus === 'NEW' ? null : mgUserId,
+              tpl.title,
+              tpl.category,
+              tpl.desc,
+              tpl.priority,
+              tpl.openStatus,
+              trackingCode,
+              createdAt,
+              String(slaHours),
             ]
           );
-          issuedInvoiceCount++;
-          receivableCount++;
+        } else {
+          const resolveHours = tpl.resolveHours + (bldg.num - 1) * 1.2;
+          const status = i % 2 === 0 ? 'CLOSED' : 'RESOLVED';
+          await client.query(
+            `INSERT INTO service_request (
+               org_id, building_id, apartment_id, created_by, assigned_to, resolved_by,
+               title, category, description, location_detail, preferred_slot,
+               priority, status, tracking_code,
+               sla_response_due_at, sla_due_at, sla_breached_at,
+               resolved_at, rating, resolution_note, created_at, updated_at
+             )
+             VALUES (
+               $1, $2, $3, $4, $4, $4,
+               $5, $6, $7, 'Trong căn hộ', 'AFTERNOON',
+               $8, $9, $10,
+               ($11::timestamptz + INTERVAL '2 hours'),
+               ($11::timestamptz + ($12 || ' hours')::interval),
+               CASE WHEN $13::boolean THEN ($11::timestamptz + ($12 || ' hours')::interval) ELSE NULL END,
+               ($11::timestamptz + ($14 || ' hours')::interval),
+               $15, 'Đã kiểm tra, thay thế linh kiện và bàn giao nghiệm thu ổn định.',
+               $11::timestamptz, ($11::timestamptz + ($14 || ' hours')::interval)
+             )`,
+            [
+              orgId,
+              bldg.id,
+              sampleC.apartmentId,
+              mgUserId,
+              tpl.title,
+              tpl.category,
+              tpl.desc,
+              tpl.priority,
+              status,
+              trackingCode,
+              createdAt,
+              String(slaHours),
+              Boolean(tpl.breached),
+              String(resolveHours.toFixed(1)),
+              tpl.rating,
+            ]
+          );
         }
       }
     }
 
     console.log(
-      `   ✓ Đã tạo ${paidInvoiceCount + issuedInvoiceCount} hóa đơn (PAID: ${paidInvoiceCount}, ISSUED kỳ 10/2026: ${issuedInvoiceCount}, Pro-rata: ${proratedInvoiceCount} kỳ).`
+      `   ✓ Đã tạo ${paidInvoiceCount + partialInvoiceCount + unpaidInvoiceCount} hóa đơn (PAID: ${paidInvoiceCount}, PARTIALLY_PAID: ${partialInvoiceCount}, UNPAID: ${unpaidInvoiceCount}, Pro-rata: ${proratedInvoiceCount} kỳ).`
     );
     console.log(
       `   ✓ Chi tiết dòng hóa đơn: ${invoiceLineCount} | Giao dịch thanh toán: ${paymentCount} | Khoản phải thu: ${receivableCount}.`
+    );
+    console.log(
+      `   ✓ Đã tạo ${srTemplates.length * buildings.length} yêu cầu bảo trì / báo hỏng (service_request) có đầy đủ SLA & đánh giá.`
     );
 
     // Đánh dấu cron_job_run SUCCEEDED cho hôm nay để startDailyJobs() khi boot server không tự chạy catch-up làm thay đổi dữ liệu vừa seed
@@ -1137,14 +1524,13 @@ export async function seed() {
       INSERT INTO cron_job_run (job_name, run_date, status, attempt_count, started_at, finished_at)
       VALUES
         ('DAILY_BILLING_SYNC', '2026-11-06'::date, 'SUCCEEDED', 1, NOW(), NOW()),
-        ('DAILY_BILLING_SYNC', '2026-11-07'::date, 'SUCCEEDED', 1, NOW(), NOW()),
         ('DAILY_BILLING_SYNC', (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date, 'SUCCEEDED', 1, NOW(), NOW());
     `);
 
     await client.query('COMMIT');
 
     console.log('\n══════════════════════════════════════════════════════════════════');
-    console.log('  ✅ SEED HOÀN TẤT — SẴN SÀNG TEST SINH HÓA ĐƠN HÀNG LOẠT THÁNG 11');
+    console.log('  ✅ SEED HOÀN TẤT — DỮ LIỆU CHÂN THỰC & SẴN SÀNG TEST THÁNG 11');
     console.log('══════════════════════════════════════════════════════════════════');
     console.log('\nThông tin đăng nhập:');
     console.log('  • SYS_ADMIN : admin@resihub.vn        | Mật khẩu: Admin@123456');
@@ -1177,6 +1563,7 @@ async function insertContractWithDepositAndServices(
     terminatedAt = null,
     terminationReason = null,
     billingDay,
+    paymentDueDays = 5,
     status,
     contractIndex,
     serviceCatalogMap,
@@ -1195,9 +1582,9 @@ async function insertContractWithDepositAndServices(
      VALUES (
        $1, $2, $3,
        $4::date, $5::date,
-       $6, 'monthly', $7, 5,
-       $8, $9, $10::date, $11,
-       $12, ($4::date)::timestamptz, NOW()
+       $6, 'monthly', $7, $8,
+       $9, $10, $11::date, $12,
+       $13, ($4::date)::timestamptz, NOW()
      )
      RETURNING id;`,
     [
@@ -1208,6 +1595,7 @@ async function insertContractWithDepositAndServices(
       endDate,
       apt.baseRent,
       billingDay,
+      paymentDueDays,
       depositAmt,
       status,
       terminatedAt,
@@ -1341,11 +1729,18 @@ async function insertContractWithDepositAndServices(
       plates: [`29A1-${String(10000 + contractIndex).slice(0, 5)}`],
     });
   }
-  if (contractIndex % 6 === 0) {
+  if (contractIndex % 4 === 0 || apt.bedrooms >= 3) {
     chosenSubs.push({
       sc: serviceCatalogMap.CAR_PARKING,
       qty: 1,
       plates: [`30H-${String(20000 + contractIndex).slice(0, 5)}`],
+    });
+  }
+  if (contractIndex % 6 === 0) {
+    chosenSubs.push({
+      sc: serviceCatalogMap.CLEANING_WEEKLY,
+      qty: (contractIndex % 12 === 0) ? 4 : 2,
+      plates: [],
     });
   }
 
@@ -1397,6 +1792,7 @@ async function insertContractWithDepositAndServices(
     contractIndex,
     apartmentId: apt.id,
     apartmentCode: apt.code,
+    bedrooms: apt.bedrooms,
     buildingId: apt.buildingId,
     buildingCode: apt.buildingCode,
     tenantId: tenant.tenantId,
@@ -1407,6 +1803,7 @@ async function insertContractWithDepositAndServices(
     terminatedAt,
     rentAmount: apt.baseRent,
     billingDay,
+    paymentDueDays,
     status,
     subscriptions,
     servicePrices,
