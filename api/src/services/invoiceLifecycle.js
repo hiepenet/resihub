@@ -497,9 +497,12 @@ export async function syncSubscriptionTerminationInvoicesInTx(
       [inv.id, subscription.id]
     );
 
-    if (linesRes.rows.length === 0) continue;
+    const regularLines = linesRes.rows.filter(
+      (l) => !Boolean(l.formula_meta?.carry_forward_arrears)
+    );
+    if (regularLines.length === 0) continue;
     foundAnyMatchingInvoice = true;
-    const line = linesRes.rows[0];
+    const line = regularLines[0];
 
     // Compute expected subscription charge for this period
     const charge = computeSubscriptionPeriodCharge({
@@ -650,6 +653,339 @@ export async function syncSubscriptionTerminationInvoicesInTx(
     voidedDraftInvoiceIds,
     createdAdjustments,
   };
+}
+
+/**
+ * Synchronize newly activated or updated ACTIVE subscription with existing invoices (Phương án A):
+ * - Scenario 1 (UNBILLED): No invoice exists yet for the period -> will be billed normally when invoice is generated.
+ * - Scenario 2 (DRAFT_UPDATED): DRAFT invoice exists -> inserts or updates the SERVICE invoice_line in place with pro-rata charge and recalculates draft totals.
+ * - Scenario 3 (DEFERRED_TO_NEXT_PERIOD): Current period invoice is already ISSUED / PAID / PARTIALLY_PAID / OVERDUE ->
+ *   preserves the issued/paid invoice untouched and defers the unbilled pro-rata charge to the next period's invoice as a carry-forward arrears line (or inserts it immediately if next period already has a DRAFT invoice).
+ *
+ * @param {object} client - Database client (within an active transaction)
+ * @param {object} params
+ * @param {object} params.subscription - The ACTIVE subscription (with service_code, service_name, unit, billing_type)
+ * @param {object} [params.contract] - Contract record
+ * @param {Array} [params.contractServicePrices] - Contract service price overrides
+ * @param {Array} [params.catalogItems] - Service catalog items
+ * @param {string} [params.actorId] - User UUID
+ * @returns {Promise<{ scenario: 'UNBILLED' | 'DRAFT_UPDATED' | 'DEFERRED_TO_NEXT_PERIOD' | 'NO_CHANGE', updatedDraftInvoiceIds: string[], deferredPeriods: string[], deferredAmount: number }>}
+ */
+export async function syncSubscriptionActivationInvoicesInTx(
+  client,
+  {
+    subscription,
+    contract = null,
+    contractServicePrices = [],
+    catalogItems = [],
+    actorId = null,
+  } = {}
+) {
+  if (!subscription || String(subscription.billing_type || '').toUpperCase() === 'METERED') {
+    return {
+      scenario: 'NO_CHANGE',
+      updatedDraftInvoiceIds: [],
+      deferredPeriods: [],
+      deferredAmount: 0,
+    };
+  }
+
+  const contractId = contract?.id || subscription?.contract_id;
+  const buildingId = contract?.building_id || subscription?.building_id;
+  const startYmd = subscription?.start_date ? toDateOnlyYmd(subscription.start_date) : '';
+  const startPeriod = startYmd ? startYmd.slice(0, 7) : '';
+
+  if (!contractId || !startPeriod) {
+    return {
+      scenario: 'UNBILLED',
+      updatedDraftInvoiceIds: [],
+      deferredPeriods: [],
+      deferredAmount: 0,
+    };
+  }
+
+  const invoicesRes = await client.query(
+    `SELECT * FROM invoice
+     WHERE contract_id = $1
+       AND status <> 'VOID'
+       AND period >= $2
+     ORDER BY period ASC
+     FOR UPDATE`,
+    [contractId, startPeriod]
+  );
+
+  if (invoicesRes.rows.length === 0) {
+    return {
+      scenario: 'UNBILLED',
+      updatedDraftInvoiceIds: [],
+      deferredPeriods: [],
+      deferredAmount: 0,
+    };
+  }
+
+  const updatedDraftInvoiceIds = [];
+  const deferredItems = [];
+
+  for (const inv of invoicesRes.rows) {
+    const linesRes = await client.query(
+      `SELECT * FROM invoice_line
+       WHERE invoice_id = $1
+         AND subscription_id = $2`,
+      [inv.id, subscription.id]
+    );
+
+    const regularLine = linesRes.rows.find(
+      (l) => !Boolean(l.formula_meta?.carry_forward_arrears)
+    );
+
+    const charge = computeSubscriptionPeriodCharge({
+      subscription,
+      periodYm: inv.period,
+      contractBuildingId: buildingId,
+      contractServicePrices,
+      catalogItems,
+      lockedUnitPrice: regularLine ? regularLine.unit_price : undefined,
+      lockedQuantity: undefined,
+    });
+
+    if (inv.status === 'DRAFT') {
+      let draftChanged = false;
+
+      if (!regularLine) {
+        if (charge.amount > 0) {
+          await client.query(
+            `INSERT INTO invoice_line (
+               invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta
+             )
+             VALUES ($1, 'SERVICE', $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              inv.id,
+              charge.description,
+              charge.quantity,
+              subscription.unit || 'tháng',
+              charge.unitPrice,
+              charge.amount,
+              subscription.id,
+              JSON.stringify(charge.formulaMeta),
+            ]
+          );
+          draftChanged = true;
+        }
+      } else {
+        const billedAmt = Number(regularLine.amount || 0);
+        const billedQty = Number(regularLine.quantity || 1);
+        if (charge.amount === 0) {
+          await client.query(`DELETE FROM invoice_line WHERE id = $1`, [regularLine.id]);
+          draftChanged = true;
+        } else if (charge.amount !== billedAmt || charge.quantity !== billedQty) {
+          await client.query(
+            `UPDATE invoice_line
+             SET description = $1, quantity = $2, unit_price = $3, amount = $4, formula_meta = $5
+             WHERE id = $6`,
+            [
+              charge.description,
+              charge.quantity,
+              charge.unitPrice,
+              charge.amount,
+              JSON.stringify(charge.formulaMeta),
+              regularLine.id,
+            ]
+          );
+          draftChanged = true;
+        }
+      }
+
+      // If there were prior issued/paid periods deferred before this DRAFT invoice, attach their arrears lines to this DRAFT
+      for (const defItem of deferredItems) {
+        if (defItem.period < inv.period && !defItem.attachedToDraft) {
+          const existingArrearsLine = linesRes.rows.find(
+            (l) =>
+              Boolean(l.formula_meta?.carry_forward_arrears) &&
+              l.formula_meta?.arrears_for_period === defItem.period
+          );
+          if (!existingArrearsLine) {
+            const arrearsMeta = {
+              ...defItem.charge.formulaMeta,
+              carry_forward_arrears: true,
+              arrears_for_period: defItem.period,
+              source_period_invoice_id: defItem.sourceInvoiceId,
+            };
+            await client.query(
+              `INSERT INTO invoice_line (
+                 invoice_id, item_type, description, quantity, unit, unit_price, amount, subscription_id, formula_meta
+               )
+               VALUES ($1, 'SERVICE', $2, $3, $4, $5, $6, $7, $8)`,
+              [
+                inv.id,
+                `Truy thu kỳ ${defItem.period}: ${defItem.charge.description}`,
+                defItem.charge.quantity,
+                subscription.unit || 'tháng',
+                defItem.charge.unitPrice,
+                defItem.charge.amount,
+                subscription.id,
+                JSON.stringify(arrearsMeta),
+              ]
+            );
+            defItem.attachedToDraft = true;
+            draftChanged = true;
+          }
+        }
+      }
+
+      if (draftChanged) {
+        await recalculateDraftInvoiceTotalsInTx(client, {
+          invoiceId: inv.id,
+          actorId,
+        });
+        updatedDraftInvoiceIds.push(inv.id);
+      }
+    } else {
+      // Non-DRAFT invoice (ISSUED, PAID, PARTIALLY_PAID, OVERDUE):
+      // Phương án A: Preserve issued/paid invoice untouched; if subscription was not billed on it, defer pro-rata charge to next period!
+      if (!regularLine && charge.amount > 0) {
+        deferredItems.push({
+          period: inv.period,
+          sourceInvoiceId: inv.id,
+          charge,
+          attachedToDraft: false,
+        });
+      }
+    }
+  }
+
+  const deferredPeriods = deferredItems.map((d) => d.period);
+  const deferredAmount = roundVND(deferredItems.reduce((s, d) => s + d.charge.amount, 0));
+
+  let scenario = 'NO_CHANGE';
+  if (updatedDraftInvoiceIds.length > 0) {
+    scenario = 'DRAFT_UPDATED';
+  } else if (deferredPeriods.length > 0) {
+    scenario = 'DEFERRED_TO_NEXT_PERIOD';
+  }
+
+  return {
+    scenario,
+    updatedDraftInvoiceIds,
+    deferredPeriods,
+    deferredAmount,
+  };
+}
+
+/**
+ * Collect carry-forward arrears lines for subscriptions registered mid-month in prior periods
+ * whose invoice had already been ISSUED/PAID without billing that subscription (Phương án A).
+ *
+ * @param {object} client - Database client
+ * @param {object} params
+ * @param {object} params.contract - Contract record
+ * @param {Array} params.subscriptions - Non-metered subscriptions of the contract
+ * @param {string} params.targetPeriodYm - Target billing period ('YYYY-MM')
+ * @param {Array} [params.contractServicePrices] - Contract service price overrides
+ * @param {Array} [params.catalogItems] - Service catalog items
+ * @returns {Promise<Array<object>>} Invoice line objects to append to targetPeriodYm invoice
+ */
+export async function collectPriorUnbilledSubscriptionArrearsLinesInTx(
+  client,
+  {
+    contract,
+    subscriptions = [],
+    targetPeriodYm,
+    contractServicePrices = [],
+    catalogItems = [],
+  } = {}
+) {
+  if (!contract?.id || !targetPeriodYm || !Array.isArray(subscriptions) || subscriptions.length === 0) {
+    return [];
+  }
+
+  // 1. Find prior non-VOID, non-DRAFT invoices for this contract before targetPeriodYm
+  const priorInvoicesRes = await client.query(
+    `SELECT id, period, status
+     FROM invoice
+     WHERE contract_id = $1
+       AND status NOT IN ('VOID', 'CANCELLED', 'DRAFT')
+       AND period < $2
+     ORDER BY period ASC`,
+    [contract.id, targetPeriodYm]
+  );
+
+  if (priorInvoicesRes.rows.length === 0) {
+    return [];
+  }
+
+  // 2. Load all subscription invoice_line rows across all non-VOID invoices of this contract
+  const existingSubLinesRes = await client.query(
+    `SELECT il.invoice_id, i.period AS invoice_period, i.status AS invoice_status,
+            il.subscription_id, il.amount, il.formula_meta
+     FROM invoice_line il
+     JOIN invoice i ON i.id = il.invoice_id
+     WHERE i.contract_id = $1
+       AND i.status NOT IN ('VOID', 'CANCELLED')
+       AND il.subscription_id IS NOT NULL`,
+    [contract.id]
+  );
+  const existingSubLines = existingSubLinesRes.rows;
+
+  const arrearsLines = [];
+
+  for (const sub of subscriptions) {
+    if (!sub || String(sub.billing_type || '').toUpperCase() === 'METERED') continue;
+    const startYmd = sub.start_date ? toDateOnlyYmd(sub.start_date) : '';
+    if (!startYmd) continue;
+    const startPeriod = startYmd.slice(0, 7);
+    if (startPeriod >= targetPeriodYm) continue;
+
+    for (const priorInv of priorInvoicesRes.rows) {
+      if (priorInv.period < startPeriod) continue;
+
+      // Was this subscription already billed regularly on priorInv?
+      const billedOnPriorInv = existingSubLines.some(
+        (l) =>
+          String(l.invoice_id) === String(priorInv.id) &&
+          String(l.subscription_id) === String(sub.id) &&
+          !Boolean(l.formula_meta?.carry_forward_arrears)
+      );
+      if (billedOnPriorInv) continue;
+
+      // Was this subscription's arrears for priorInv.period already carried forward onto another non-DRAFT invoice?
+      const alreadyCarriedForward = existingSubLines.some(
+        (l) =>
+          String(l.subscription_id) === String(sub.id) &&
+          l.invoice_period !== targetPeriodYm &&
+          Boolean(l.formula_meta?.carry_forward_arrears) &&
+          l.formula_meta?.arrears_for_period === priorInv.period
+      );
+      if (alreadyCarriedForward) continue;
+
+      const arrearsCharge = computeSubscriptionPeriodCharge({
+        subscription: sub,
+        periodYm: priorInv.period,
+        contractBuildingId: contract.building_id,
+        contractServicePrices,
+        catalogItems,
+      });
+
+      if (arrearsCharge.amount > 0) {
+        arrearsLines.push({
+          item_type: 'SERVICE',
+          description: `Truy thu kỳ ${priorInv.period}: ${arrearsCharge.description}`,
+          quantity: arrearsCharge.quantity,
+          unit: sub.unit || 'tháng',
+          unit_price: arrearsCharge.unitPrice,
+          amount: arrearsCharge.amount,
+          subscription_id: sub.id,
+          formula_meta: {
+            ...arrearsCharge.formulaMeta,
+            carry_forward_arrears: true,
+            arrears_for_period: priorInv.period,
+            source_period_invoice_id: priorInv.id,
+          },
+        });
+      }
+    }
+  }
+
+  return arrearsLines;
 }
 
 /**

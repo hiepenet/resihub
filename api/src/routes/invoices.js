@@ -24,6 +24,7 @@ import {
   applyAvailableCreditsInTx,
   releaseInvoiceCreditsInTx,
   notifyBuildingInvoiceAdjustmentApprovers,
+  collectPriorUnbilledSubscriptionArrearsLinesInTx,
 } from '../services/invoiceLifecycle.js';
 import { notifyUser } from '../services/notificationService.js';
 
@@ -638,6 +639,18 @@ export async function generateInvoicesCore(
           formula_meta: subCharge.formulaMeta,
         });
       }
+    }
+
+    // Carry-forward arrears for mid-month subscriptions registered after prior period's invoice was already ISSUED/PAID (Phương án A)
+    const subArrearsLines = await collectPriorUnbilledSubscriptionArrearsLinesInTx(client, {
+      contract: c,
+      subscriptions: subRes.rows,
+      targetPeriodYm: targetPeriod,
+      contractServicePrices: cspRes.rows,
+      catalogItems,
+    });
+    for (const arrLine of subArrearsLines) {
+      lines.push(arrLine);
     }
 
     // Existing DRAFT lookup (trước khi tổng hợp dòng để bảo toàn carry-forward LATE_FEE khi làm mới DRAFT)

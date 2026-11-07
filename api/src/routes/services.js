@@ -19,7 +19,10 @@ import {
   addDaysYmd,
   toDateOnlyYmd,
 } from '../services/serviceBilling.js';
-import { syncSubscriptionTerminationInvoicesInTx } from '../services/invoiceLifecycle.js';
+import {
+  syncSubscriptionTerminationInvoicesInTx,
+  syncSubscriptionActivationInvoicesInTx,
+} from '../services/invoiceLifecycle.js';
 import { notifyUser } from '../services/notificationService.js';
 
 export const serviceCatalogRouter = express.Router();
@@ -456,13 +459,35 @@ serviceSubscriptionsRouter.post(
       );
       const newSub = ins.rows[0];
 
+      let invoiceSyncResult = null;
+      if (targetContractId && svc.billing_type !== 'METERED') {
+        invoiceSyncResult = await syncSubscriptionActivationInvoicesInTx(client, {
+          subscription: {
+            ...newSub,
+            service_code: svc.code,
+            service_category: svc.category,
+            service_name: svc.name,
+            unit: svc.unit,
+            billing_type: svc.billing_type,
+          },
+          contract: { id: targetContractId, building_id: targetBuildingId },
+          contractServicePrices,
+          catalogItems: catRes.rows,
+          actorId: req.user.sub,
+        });
+      }
+
       await client.query(
         `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
          VALUES ($1, 'CREATE_SERVICE_SUBSCRIPTION', 'service_subscription', $2, $3)`,
         [req.user.sub, newSub.id, JSON.stringify(newSub)]
       );
 
-      res.status(201).json({ message: 'Đăng ký dịch vụ thành công.', data: newSub });
+      res.status(201).json({
+        message: 'Đăng ký dịch vụ thành công.',
+        data: newSub,
+        invoice_sync: invoiceSyncResult,
+      });
     } catch (err) {
       if (err.httpStatus) {
         return res.status(err.httpStatus).json({ code: err.code, message: err.message });
@@ -509,7 +534,7 @@ serviceSubscriptionsRouter.patch(
       await client.query('BEGIN');
 
       const curRes = await client.query(
-        `SELECT ss.*, sc.name AS service_name, sc.code AS service_code, sc.category AS service_category, sc.billing_type
+        `SELECT ss.*, sc.name AS service_name, sc.code AS service_code, sc.category AS service_category, sc.billing_type, sc.unit
          FROM service_subscription ss
          JOIN service_catalog sc ON sc.id = ss.service_id
          WHERE ss.id = $1 AND ss.org_id = $2
@@ -604,6 +629,29 @@ serviceSubscriptionsRouter.patch(
         nextEnd = toDateOnlyYmd(end_date);
       }
 
+      if (nextStatus === 'ACTIVE') {
+        const subStartYmd = toDateOnlyYmd(sub.start_date);
+        const activeCspRes = sub.contract_id
+          ? await client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
+          : { rows: [] };
+        const activeCatRes = await client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [orgId]);
+        if (subStartYmd) {
+          nextProrata = computeSubscriptionPeriodCharge({
+            subscription: {
+              ...sub,
+              quantity: nextQty,
+              end_date: nextEnd,
+              status: 'ACTIVE',
+              is_price_locked: sub.is_price_locked,
+            },
+            periodYm: subStartYmd.slice(0, 7),
+            contractBuildingId: sub.building_id,
+            contractServicePrices: activeCspRes.rows,
+            catalogItems: activeCatRes.rows,
+          }).amount;
+        }
+      }
+
       const up = await client.query(
         `UPDATE service_subscription
          SET status = $1,
@@ -621,16 +669,44 @@ serviceSubscriptionsRouter.patch(
       );
       const updatedSub = up.rows[0];
 
-      // Synchronize invoices on newly TERMINATED subscription across 3 scenarios
+      // Synchronize invoices on newly TERMINATED or newly ACTIVE/updated subscription across scenarios
       let invoiceSyncResult = null;
       if (nextStatus === 'TERMINATED' && sub.status !== 'TERMINATED') {
         const cRes = await client.query('SELECT * FROM contract WHERE id = $1', [sub.contract_id]);
         const contract = cRes.rows[0] || null;
         invoiceSyncResult = await syncSubscriptionTerminationInvoicesInTx(client, {
-          subscription: updatedSub,
+          subscription: {
+            ...updatedSub,
+            service_name: sub.service_name,
+            service_code: sub.service_code,
+            service_category: sub.service_category,
+            billing_type: sub.billing_type,
+            unit: sub.unit,
+          },
           contract,
           actorId: req.user.sub,
           reason: cleanNote || 'Chấm dứt gói đăng ký dịch vụ',
+        });
+      } else if (nextStatus === 'ACTIVE' && sub.billing_type !== 'METERED') {
+        const cRes = await client.query('SELECT * FROM contract WHERE id = $1', [sub.contract_id]);
+        const contract = cRes.rows[0] || null;
+        const activeCspRes = sub.contract_id
+          ? await client.query('SELECT * FROM contract_service_price WHERE contract_id = $1', [sub.contract_id])
+          : { rows: [] };
+        const activeCatRes = await client.query('SELECT * FROM service_catalog WHERE org_id = $1 AND is_active = TRUE', [orgId]);
+        invoiceSyncResult = await syncSubscriptionActivationInvoicesInTx(client, {
+          subscription: {
+            ...updatedSub,
+            service_name: sub.service_name,
+            service_code: sub.service_code,
+            service_category: sub.service_category,
+            billing_type: sub.billing_type,
+            unit: sub.unit,
+          },
+          contract,
+          contractServicePrices: activeCspRes.rows,
+          catalogItems: activeCatRes.rows,
+          actorId: req.user.sub,
         });
       }
 
