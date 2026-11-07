@@ -123,19 +123,31 @@ export function DashboardPage() {
   const toast = useToast();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const initialParams = {
+    months: 12,
+    ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
+  };
+  const initialDashboard = reportsService.peekDashboard(initialParams)?.data || null;
+
+  const [data, setData] = useState(initialDashboard);
+  const [loading, setLoading] = useState(() => !initialDashboard);
   const [months, setMonths] = useState(12);
   const [revenueMode, setRevenueMode] = useState('trend'); // 'trend' | 'source'
 
-  const loadDashboard = useCallback(async () => {
-    setLoading(true);
+  const loadDashboard = useCallback(async (opts = {}) => {
+    const params = {
+      months,
+      ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
+    };
+    const cached = !opts?.force ? reportsService.peekDashboard(params)?.data : null;
+    if (cached) {
+      setData(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
-      const params = {
-        months,
-        ...(selectedBuildingId ? { building_id: selectedBuildingId } : {}),
-      };
-      const res = await reportsService.getDashboard(params);
+      const res = await reportsService.getDashboard(params, { force: Boolean(opts?.force) });
       setData(res.data);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải dữ liệu bảng điều khiển.'));

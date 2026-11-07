@@ -153,7 +153,7 @@ export function DataTable({
                 const isActionCol = col.key === 'actions' || col.key === 'action';
                 const combinedCls = `${col.headerClassName || ''} ${col.className || ''}`;
                 const actionFitCls =
-                  isActionCol && !/\bw-\S+/.test(combinedCls) ? 'w-px whitespace-nowrap' : '';
+                  isActionCol && !/\bw-\S+/.test(combinedCls) ? 'min-w-[88px]' : '';
                 const cleanCellCls = stripTextAlign(col.className || '');
 
                 return (

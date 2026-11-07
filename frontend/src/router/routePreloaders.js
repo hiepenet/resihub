@@ -85,9 +85,16 @@ export function preloadCoreAdminNavigationChunks() {
   coreWarmScheduled = true;
 
   const warm = () => {
+    preloadRouteChunk('/admin/dashboard');
     preloadRouteChunk('/admin/buildings');
     preloadRouteChunk('/admin/tenants');
     preloadRouteChunk('/admin/contracts');
+    preloadRouteChunk('/admin/meters');
+    preloadRouteChunk('/admin/invoices');
+    preloadRouteChunk('/admin/payments');
+    preloadRouteChunk('/admin/deposits');
+    preloadRouteChunk('/admin/services');
+    preloadRouteChunk('/admin/maintenance');
   };
 
   if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {

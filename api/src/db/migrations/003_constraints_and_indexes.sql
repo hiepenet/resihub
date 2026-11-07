@@ -156,10 +156,12 @@ CREATE INDEX IF NOT EXISTS idx_contract_request_status ON contract_request(statu
 CREATE INDEX IF NOT EXISTS idx_deposit_contract ON deposit(contract_id, status);
 CREATE INDEX IF NOT EXISTS idx_deposit_contract_id ON deposit(contract_id);
 CREATE INDEX IF NOT EXISTS idx_deposit_created_at ON deposit(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deposit_txn_deposit_id ON deposit_transaction(deposit_id, created_at DESC);
 
 -- Audit Log
 CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_log_at_desc ON audit_log(at DESC);
 
 -- Notification & Announcements
 CREATE INDEX IF NOT EXISTS idx_notification_user_read ON notification(user_id, read_at);
@@ -178,18 +180,30 @@ CREATE INDEX IF NOT EXISTS idx_service_request_ai_triage_status ON service_reque
 
 -- Meters & Readings
 CREATE INDEX IF NOT EXISTS idx_meter_building ON meter(building_id, meter_type);
+CREATE INDEX IF NOT EXISTS idx_meter_apartment ON meter(apartment_id, meter_type);
 CREATE INDEX IF NOT EXISTS idx_meter_reading_period ON meter_reading(building_id, period);
 CREATE INDEX IF NOT EXISTS idx_meter_reading_status_period ON meter_reading (building_id, period, status);
 CREATE INDEX IF NOT EXISTS idx_meter_reading_contract_period ON meter_reading (contract_id, period);
+CREATE INDEX IF NOT EXISTS idx_meter_reading_meter_period_desc ON meter_reading(meter_id, period DESC, current_reading DESC, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_meter_reading_ai_suggestion ON meter_reading(ai_suggestion_id) WHERE ai_suggestion_id IS NOT NULL;
 
 -- Service Subscriptions & Finance
+CREATE INDEX IF NOT EXISTS idx_csp_contract_effective ON contract_service_price(contract_id, effective_from DESC);
 CREATE INDEX IF NOT EXISTS idx_service_sub_building ON service_subscription(building_id, status);
 CREATE INDEX IF NOT EXISTS idx_service_sub_contract ON service_subscription(contract_id, status);
 CREATE INDEX IF NOT EXISTS idx_invoice_building_period ON invoice(building_id, period, status);
+CREATE INDEX IF NOT EXISTS idx_invoice_apartment_period ON invoice(apartment_id, period);
 CREATE INDEX IF NOT EXISTS idx_invoice_contract ON invoice(contract_id, period);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_invoice_id ON invoice_line(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_invoice_type ON invoice_line(invoice_id, item_type);
+CREATE INDEX IF NOT EXISTS idx_invoice_line_reading_id ON invoice_line((formula_meta->>'reading_id')) WHERE (formula_meta->>'reading_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_invoice_adjustment_invoice_id ON invoice_adjustment(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_payment_building ON payment(building_id, status);
+CREATE INDEX IF NOT EXISTS idx_payment_invoice_id ON payment(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_payment_contract_id ON payment(contract_id);
 CREATE INDEX IF NOT EXISTS idx_receivable_building ON receivable(building_id, status, due_date);
+CREATE INDEX IF NOT EXISTS idx_receivable_invoice_id ON receivable(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_receivable_contract_id ON receivable(contract_id);
 CREATE INDEX IF NOT EXISTS idx_credit_balance_contract_avail ON credit_balance(contract_id, created_at) WHERE status IN ('AVAILABLE', 'PARTIALLY_APPLIED');
 
 -- Late fee tracker

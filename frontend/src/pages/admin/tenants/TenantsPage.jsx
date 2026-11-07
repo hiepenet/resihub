@@ -532,8 +532,8 @@ export function TenantsPage() {
             <div className="w-8 h-8 rounded-full bg-primary-50 text-primary-700 border border-primary-200 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
               {getAvatarLetters(row.full_name)}
             </div>
-            <div className="min-w-0 max-w-[240px]">
-              <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="min-w-0 max-w-[200px]">
+              <div className="flex items-center gap-1 flex-wrap">
                 <span className="font-semibold text-slate-900 break-words" title={row.full_name}>
                   {row.full_name}
                 </span>
@@ -625,15 +625,15 @@ export function TenantsPage() {
               <Link
                 to={`/admin/contracts/${ac.contract_id}`}
                 title={`${ac.apartment_code} • ${ac.building_name || ''}`}
-                className="inline-flex items-start gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50/70 hover:bg-primary-50 px-2.5 py-1 rounded-lg border border-primary-100 transition-colors whitespace-normal text-left max-w-[230px]"
+                className="inline-flex items-start gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 bg-primary-50/70 hover:bg-primary-50 px-2 py-1 rounded-lg border border-primary-100 transition-colors whitespace-normal text-left max-w-[190px]"
               >
                 <Building2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                <span className="leading-snug break-words">
+                <span className="leading-snug truncate">
                   <span>{ac.apartment_code}</span>
-                  {ac.building_name ? (
+                  {ac.building_code || ac.building_name ? (
                     <>
                       <span className="text-slate-400 mx-1">•</span>
-                      <span className="text-slate-700">{ac.building_name}</span>
+                      <span className="text-slate-700">{ac.building_code || ac.building_name}</span>
                     </>
                   ) : null}
                 </span>
@@ -671,7 +671,7 @@ export function TenantsPage() {
         align: 'center',
         render: (row) => (
           <div
-            className="inline-flex items-center justify-center gap-1"
+            className="inline-flex flex-wrap items-center justify-center gap-1"
             onClick={(e) => e.stopPropagation()}
           >
             <Button

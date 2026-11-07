@@ -136,7 +136,12 @@ export function validateZaloInviteLink(rawUrl) {
 /**
  * Deterministic Vietnamese formatter for pasting announcements into Building/Room Zalo groups (FR-069).
  * Wraps key operational fields in **...** for Rich Text bold copy on Zalo PC/Web.
+ *
+ * FIX BP-010: Phát hiện placeholder chưa được thay thế trong title/body và log warning.
+ * Placeholder pattern: [TEXT IN BRACKETS] — ví dụ: [NỘI DUNG CHI TIẾT], [TÊN CƯ DÂN]
  */
+const PLACEHOLDER_RE = /\[[^\]]{2,50}\]/;
+
 export function formatAnnouncementForZalo({
   type = 'ANNOUNCEMENT',
   title = '',
@@ -154,6 +159,16 @@ export function formatAnnouncementForZalo({
   const typeKey = String(type || 'ANNOUNCEMENT').trim().toUpperCase();
   const typeBadge = TYPE_HEADERS[typeKey] || 'THÔNG BÁO BQL';
 
+  // FIX BP-010: cảnh báo nếu caller truyền placeholder chưa replace
+  const rawTitle = String(title || '').trim();
+  const rawBody = String(body || '').trim();
+  if (PLACEHOLDER_RE.test(rawTitle) || PLACEHOLDER_RE.test(rawBody)) {
+    console.warn(
+      '[formatAnnouncementForZalo] WARNING: Nội dung thông báo còn chứa placeholder chưa được thay thế.',
+      { title: rawTitle, body: rawBody }
+    );
+  }
+
   const header = `**[THÔNG BÁO BQL TÒA ${codeOrName}]**`;
 
   let greeting = `Kính gửi Quý Cư dân **Tòa ${buildingName || codeOrName}**,`;
@@ -167,13 +182,13 @@ export function formatAnnouncementForZalo({
   if (typeKey !== 'ANNOUNCEMENT') {
     lines.push(`🔔 Phân loại: **${typeBadge}**`);
   }
-  if (title) {
-    lines.push(`📌 **${String(title).trim()}**`);
+  if (rawTitle) {
+    lines.push(`📌 **${rawTitle}**`);
   }
   lines.push('');
   lines.push(greeting);
-  if (body) {
-    lines.push(String(body).trim());
+  if (rawBody) {
+    lines.push(rawBody);
   }
 
   const tsText = formatVietnamDateTime(scheduledOrSentAt);

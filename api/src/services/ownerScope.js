@@ -94,19 +94,29 @@ export async function getAccessibleBuildingIds(req) {
   const roles = getUserRoleCodes(req);
   if (roles.includes('SYS_ADMIN')) return null;
 
-  const userId = req.user?.sub;
-  const orgId = req.user?.org_id;
-  const idSet = new Set();
+  if (req && req._accessibleBuildingIdsPromise) {
+    return req._accessibleBuildingIdsPromise;
+  }
 
-  if (roles.includes('OWNER')) {
-    const ownIds = await getOwnerBuildingIds(userId, orgId);
+  const compute = async () => {
+    const userId = req?.user?.sub;
+    const orgId = req?.user?.org_id;
+    const idSet = new Set();
+
+    const [ownIds, mgrIds] = await Promise.all([
+      roles.includes('OWNER') ? getOwnerBuildingIds(userId, orgId) : Promise.resolve([]),
+      roles.includes('MANAGER') ? getManagerBuildingIds(userId, orgId) : Promise.resolve([]),
+    ]);
     ownIds.forEach((id) => idSet.add(id));
-  }
-  if (roles.includes('MANAGER')) {
-    const mgrIds = await getManagerBuildingIds(userId, orgId);
     mgrIds.forEach((id) => idSet.add(id));
+    return Array.from(idSet);
+  };
+
+  if (req && typeof req === 'object') {
+    req._accessibleBuildingIdsPromise = compute();
+    return req._accessibleBuildingIdsPromise;
   }
-  return Array.from(idSet);
+  return compute();
 }
 
 /**

@@ -1,8 +1,18 @@
 import api from './api';
 import { withIdempotency } from '../utils/idempotency';
+import { buildCacheKey, cachedFetch, peekQueryCache } from './queryCache';
+
+const SERVICE_REQUESTS_TTL_MS = 20_000;
 
 export const serviceRequestsService = {
-  list: (params) => api.get('/api/v1/service-requests', { params }).then((r) => r.data),
+  peekList: (params) =>
+    peekQueryCache(buildCacheKey('serviceRequests', { op: 'list', ...(params || {}) }))?.data || null,
+  list: (params, options = {}) =>
+    cachedFetch(
+      buildCacheKey('serviceRequests', { op: 'list', ...(params || {}) }),
+      () => api.get('/api/v1/service-requests', { params }).then((r) => r.data),
+      { ttlMs: SERVICE_REQUESTS_TTL_MS, force: Boolean(options?.force) }
+    ),
   getById: (id) => api.get(`/api/v1/service-requests/${id}`).then((r) => r.data),
   create: (payload, options = {}) =>
     api.post('/api/v1/service-requests', payload, withIdempotency(options)).then((r) => r.data),

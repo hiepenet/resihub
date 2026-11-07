@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "dev": "nodemon -L --watch src src/server.js",
     "migrate": "node src/db/migrate.js",
-    "seed": "node src/db/seed.js",
+    "seed": "node src/db/seed_vinhomes.js",
+    "seed:vinhomes": "node src/db/seed_vinhomes.js",
     "test": "node --test --test-concurrency=1",
     "test:ui": "node scripts/devtools-ui-suite.mjs"
   },

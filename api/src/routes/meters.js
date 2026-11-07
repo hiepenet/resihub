@@ -108,7 +108,7 @@ router.get(
         }
       }
 
-      const params = [orgId, targetPeriod, ACTIVE_CONTRACT_STATUSES];
+      const params = [orgId, ACTIVE_CONTRACT_STATUSES];
       const { sql: scopeSql } = await scopedBuildingFilter(req, 'm.building_id', params);
 
       let sql = `
@@ -121,36 +121,12 @@ router.get(
                EXISTS (
                  SELECT 1 FROM contract c_act
                  WHERE c_act.apartment_id = m.apartment_id
-                   AND c_act.status = ANY($3::text[])
-               ) AS has_active_contract,
-               mr_base.avg_consumption AS prior_baseline_avg_consumption,
-               mr_prev.current_reading AS prior_period_reading,
-               mr_prev.consumption AS prior_period_consumption,
-               mr_prev.period AS prior_period_ym
+                   AND c_act.status = ANY($2::text[])
+               ) AS has_active_contract
         FROM meter m
         JOIN apartment a ON a.id = m.apartment_id
         JOIN building b ON b.id = m.building_id
         LEFT JOIN floor f ON f.id = a.floor_id
-        LEFT JOIN LATERAL (
-          SELECT current_reading, consumption, period
-          FROM meter_reading
-          WHERE meter_id = m.id AND period < $2
-          ORDER BY period DESC, current_reading DESC, recorded_at DESC
-          LIMIT 1
-        ) mr_prev ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT ROUND(AVG(sub.consumption)::numeric, 2) AS avg_consumption
-          FROM (
-            SELECT consumption
-            FROM meter_reading
-            WHERE meter_id = m.id
-              AND period < $2
-              AND status = 'CONFIRMED'
-              AND consumption > 0
-            ORDER BY period DESC, current_reading DESC, recorded_at DESC
-            LIMIT 3
-          ) sub
-        ) mr_base ON TRUE
         WHERE m.org_id = $1
         ${scopeSql}
       `;
@@ -172,28 +148,70 @@ router.get(
         sql += ` AND EXISTS (
           SELECT 1 FROM contract c_act
           WHERE c_act.apartment_id = m.apartment_id
-            AND c_act.status = ANY($3::text[])
+            AND c_act.status = ANY($2::text[])
         )`;
       } else if (normalizedActiveContract === false) {
         sql += ` AND NOT EXISTS (
           SELECT 1 FROM contract c_act
           WHERE c_act.apartment_id = m.apartment_id
-            AND c_act.status = ANY($3::text[])
+            AND c_act.status = ANY($2::text[])
         )`;
       }
 
       sql += ` ORDER BY b.code ASC, a.code ASC, m.meter_type ASC`;
 
-      const [result, billingCfg] = await Promise.all([
-        pool.query(sql, params),
-        loadBillingConfigValues(pool, orgId),
-      ]);
+      const result = await pool.query(sql, params);
+      const billingCfg = await loadBillingConfigValues(pool, orgId);
 
       let enrichedRows = result.rows;
       if (enrichedRows.length > 0) {
         const { monthEnd: periodEndYmd } = getMonthBoundsYmd(targetPeriod);
         const aptIds = [...new Set(enrichedRows.map((r) => r.apartment_id).filter(Boolean))];
         const meterIds = enrichedRows.map((r) => r.id);
+
+        const priorStatsRes = await pool.query(
+          `SELECT m_id AS meter_id,
+                  latest.current_reading AS prior_period_reading,
+                  latest.consumption AS prior_period_consumption,
+                  latest.period AS prior_period_ym,
+                  avg_conf.prior_baseline_avg_consumption
+           FROM unnest($1::uuid[]) AS m_id
+           LEFT JOIN LATERAL (
+             SELECT current_reading, consumption, period
+             FROM meter_reading mr
+             WHERE mr.meter_id = m_id AND mr.period < $2
+             ORDER BY mr.period DESC, mr.current_reading DESC, mr.recorded_at DESC
+             LIMIT 1
+           ) latest ON TRUE
+           LEFT JOIN LATERAL (
+             SELECT ROUND(AVG(consumption)::numeric, 2) AS prior_baseline_avg_consumption
+             FROM (
+               SELECT consumption
+               FROM meter_reading mr2
+               WHERE mr2.meter_id = m_id
+                 AND mr2.period < $2
+                 AND mr2.status = 'CONFIRMED'
+                 AND mr2.consumption > 0
+               ORDER BY mr2.period DESC, mr2.current_reading DESC, mr2.recorded_at DESC
+               LIMIT 3
+             ) top3
+           ) avg_conf ON TRUE
+           WHERE latest.period IS NOT NULL OR avg_conf.prior_baseline_avg_consumption IS NOT NULL`,
+          [meterIds, targetPeriod]
+        );
+        const priorStatsByMeter = new Map(
+          priorStatsRes.rows.map((r) => [String(r.meter_id), r])
+        );
+        enrichedRows = enrichedRows.map((r) => {
+          const ps = priorStatsByMeter.get(String(r.id));
+          return {
+            ...r,
+            prior_period_reading: ps?.prior_period_reading ?? null,
+            prior_period_consumption: ps?.prior_period_consumption ?? null,
+            prior_period_ym: ps?.prior_period_ym ?? null,
+            prior_baseline_avg_consumption: ps?.prior_baseline_avg_consumption ?? null,
+          };
+        });
 
         const contractsByApt = await loadApartmentPeriodContractsMap(pool, aptIds, targetPeriod);
         const catalogRes = await pool.query(
@@ -203,33 +221,34 @@ router.get(
           [orgId]
         );
 
+        const allContractIds = [
+          ...new Set(
+            [...contractsByApt.values()].flatMap((list) => list.map((c) => c.contract_id))
+          ),
+        ];
         const periodReadingsByMeter = await loadMeterPeriodReadingsWithLocks(
           pool,
           meterIds,
           targetPeriod,
           contractsByApt
         );
+        const cspRes =
+          allContractIds.length > 0
+            ? await pool.query(
+                `SELECT contract_id, service_code, unit_price, effective_from
+                 FROM contract_service_price
+                 WHERE contract_id = ANY($1::uuid[])
+                   AND effective_from <= $2::date
+                 ORDER BY effective_from DESC`,
+                [allContractIds, periodEndYmd]
+              )
+            : { rows: [] };
 
-        const allContractIds = [
-          ...new Set(
-            [...contractsByApt.values()].flatMap((list) => list.map((c) => c.contract_id))
-          ),
-        ];
         const cspByContract = new Map();
-        if (allContractIds.length > 0) {
-          const cspRes = await pool.query(
-            `SELECT contract_id, service_code, unit_price, effective_from
-             FROM contract_service_price
-             WHERE contract_id = ANY($1::uuid[])
-               AND effective_from <= $2::date
-             ORDER BY effective_from DESC`,
-            [allContractIds, periodEndYmd]
-          );
-          for (const csp of cspRes.rows) {
-            const cid = String(csp.contract_id);
-            if (!cspByContract.has(cid)) cspByContract.set(cid, []);
-            cspByContract.get(cid).push(csp);
-          }
+        for (const csp of cspRes.rows) {
+          const cid = String(csp.contract_id);
+          if (!cspByContract.has(cid)) cspByContract.set(cid, []);
+          cspByContract.get(cid).push(csp);
         }
 
         const reqContractId =

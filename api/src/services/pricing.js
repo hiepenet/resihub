@@ -58,7 +58,11 @@ export async function checkFourEyesOrWarn({
   entityId,
   actionContext = 'APPROVE',
 }) {
-  if (!creatorId || !actorId || String(creatorId) !== String(actorId)) {
+  // FIX BP-004: dùng != null thay vì !creatorId để id=0 không bị bỏ qua
+  // FIX BP-005: trim() trước khi so sánh để chống trailing whitespace bypass
+  const creatorStr = creatorId != null ? String(creatorId).trim() : null;
+  const actorStr = actorId != null ? String(actorId).trim() : null;
+  if (creatorStr == null || actorStr == null || creatorStr !== actorStr) {
     return { allowed: true, selfApproved: false };
   }
 

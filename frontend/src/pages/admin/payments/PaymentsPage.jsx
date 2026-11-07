@@ -81,14 +81,37 @@ export function PaymentsPage() {
   const [activeTab, setActiveTab] = useState('transactions'); // transactions | aging | credits | overpayments
 
   // Tab 1: Giao dịch thanh toán
-  const [payments, setPayments] = useState([]);
-  const [paymentsLoading, setPaymentsLoading] = useState(true);
+  const initialPaymentsRes = paymentsService.peekList({
+    building_id: selectedBuildingId || undefined,
+  });
+  const [payments, setPayments] = useState(() =>
+    Array.isArray(initialPaymentsRes?.data) ? initialPaymentsRes.data : []
+  );
+  const [paymentsLoading, setPaymentsLoading] = useState(
+    () => !Array.isArray(initialPaymentsRes?.data)
+  );
   const [payStatusFilter, setPayStatusFilter] = useState('');
   const [payMethodFilter, setPayMethodFilter] = useState('');
   const [paySearch, setPaySearch] = useState('');
+  const [debouncedPaySearch, setDebouncedPaySearch] = useState('');
+
+  useEffect(() => {
+    if (!paySearch) {
+      setDebouncedPaySearch('');
+      return undefined;
+    }
+    const t = setTimeout(() => setDebouncedPaySearch(paySearch), 200);
+    return () => clearTimeout(t);
+  }, [paySearch]);
 
   // Tab 2: Công nợ Aging (AC-016.1)
-  const [receivables, setReceivables] = useState([]);
+  const initialReceivablesRes = paymentsService.peekReceivables({
+    building_id: selectedBuildingId || undefined,
+    status: 'OPEN,PARTIALLY_PAID',
+  });
+  const [receivables, setReceivables] = useState(() =>
+    Array.isArray(initialReceivablesRes?.data) ? initialReceivablesRes.data : []
+  );
   const [agingSummary, setAgingSummary] = useState({
     current_not_due: 0,
     bucket_0_15: 0,
@@ -152,16 +175,23 @@ export function PaymentsPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [processingAction, setProcessingAction] = useState(false);
 
-  const fetchPayments = useCallback(async () => {
+  const fetchPayments = useCallback(async (opts = {}) => {
     const filterKey = `${selectedBuildingId || ''}|${payStatusFilter || ''}`;
-    setPaymentsLoading(true);
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      status: payStatusFilter || undefined,
+      method: payMethodFilter || undefined,
+      search: debouncedPaySearch.trim() || undefined,
+    };
+    const cached = !opts?.force ? paymentsService.peekList(params) : null;
+    if (Array.isArray(cached?.data)) {
+      setPayments(cached.data);
+      setPaymentsLoading(false);
+    } else {
+      setPaymentsLoading(true);
+    }
     try {
-      const res = await paymentsService.list({
-        building_id: selectedBuildingId || undefined,
-        status: payStatusFilter || undefined,
-        method: payMethodFilter || undefined,
-        search: paySearch.trim() || undefined,
-      });
+      const res = await paymentsService.list(params, { force: Boolean(opts?.force) });
       setPayments(res.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách giao dịch thanh toán.'));
@@ -169,15 +199,19 @@ export function PaymentsPage() {
       setPaymentsFetchedKey(filterKey);
       setPaymentsLoading(false);
     }
-  }, [selectedBuildingId, payStatusFilter, payMethodFilter, paySearch, toast]);
+  }, [selectedBuildingId, payStatusFilter, payMethodFilter, debouncedPaySearch, toast]);
 
-  const fetchReceivables = useCallback(async () => {
-    setAgingLoading(true);
+  const fetchReceivables = useCallback(async (opts = {}) => {
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      status: recStatusFilter,
+    };
+    const cached = !opts?.force ? paymentsService.peekReceivables(params) : null;
+    if (!Array.isArray(cached?.data)) {
+      setAgingLoading(true);
+    }
     try {
-      const res = await paymentsService.listReceivables({
-        building_id: selectedBuildingId || undefined,
-        status: recStatusFilter,
-      });
+      const res = await paymentsService.listReceivables(params, { force: Boolean(opts?.force) });
       setReceivables(res.data || []);
       const s = res.aging_summary_prd || res.aging_summary || {};
       setAgingSummary({
@@ -195,14 +229,21 @@ export function PaymentsPage() {
     }
   }, [selectedBuildingId, recStatusFilter, toast]);
 
-  const fetchCredits = useCallback(async () => {
+  const fetchCredits = useCallback(async (opts = {}) => {
     const filterKey = `${selectedBuildingId || ''}|${creditStatusFilter || ''}`;
-    setCreditsLoading(true);
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      status: creditStatusFilter || undefined,
+    };
+    const cached = !opts?.force ? paymentsService.peekCredits(params) : null;
+    if (Array.isArray(cached?.data)) {
+      setCredits(cached.data);
+      setCreditsLoading(false);
+    } else {
+      setCreditsLoading(true);
+    }
     try {
-      const res = await paymentsService.getCredits({
-        building_id: selectedBuildingId || undefined,
-        status: creditStatusFilter || undefined,
-      });
+      const res = await paymentsService.getCredits(params, { force: Boolean(opts?.force) });
       setCredits(res.data || []);
     } catch {
       setCredits([]);
@@ -212,13 +253,17 @@ export function PaymentsPage() {
     }
   }, [selectedBuildingId, creditStatusFilter]);
 
-  const fetchOverpayments = useCallback(async () => {
-    setOverLoading(true);
+  const fetchOverpayments = useCallback(async (opts = {}) => {
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      overpayment_only: 'true',
+    };
+    const cached = !opts?.force ? paymentsService.peekList(params) : null;
+    if (!Array.isArray(cached?.data)) {
+      setOverLoading(true);
+    }
     try {
-      const res = await paymentsService.list({
-        building_id: selectedBuildingId || undefined,
-        overpayment_only: 'true',
-      });
+      const res = await paymentsService.list(params, { force: Boolean(opts?.force) });
       setOverpayments(
         (res.data || []).filter((p) => Number(p.overpayment_amount || 0) > 0)
       );
@@ -244,10 +289,7 @@ export function PaymentsPage() {
   }, [location.search]);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      fetchPayments();
-    }, 200);
-    return () => clearTimeout(t);
+    fetchPayments();
   }, [fetchPayments]);
 
   useEffect(() => {
@@ -585,11 +627,10 @@ export function PaymentsPage() {
         key: 'actions',
         label: 'Thao tác',
         align: 'center',
-        className: 'whitespace-nowrap',
         render: (row) => {
           const hasProof = Array.isArray(row.proof_images) && row.proof_images.length > 0;
           return (
-            <div className="inline-flex flex-wrap items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <div className="inline-flex flex-wrap items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
               <Button
                 size="xs"
                 variant={row.status === 'PENDING_CONFIRMATION' ? 'soft' : 'outline'}
@@ -911,7 +952,6 @@ export function PaymentsPage() {
         key: 'actions',
         label: 'Thao tác (4 mắt)',
         align: 'center',
-        className: 'whitespace-nowrap',
         render: (row) => {
           const avail = Math.max(0, Number(row.amount || 0) - Number(row.applied_amount || 0));
           const canApprove =
@@ -925,7 +965,7 @@ export function PaymentsPage() {
 
           if (row.status === 'PENDING_DIRECT_REFUND') {
             return (
-              <div className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <div className="inline-flex flex-wrap items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
                 {canApprove ? (
                   <>
                     <Button

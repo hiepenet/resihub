@@ -44,14 +44,34 @@ export function InvoicesPage() {
   const { canManageInvoices } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [invoices, setInvoices] = useState([]);
-  const [summary, setSummary] = useState({ total_billed: 0, total_paid: 0, total_unpaid: 0 });
-  const [loading, setLoading] = useState(true);
+  const initPeriod = getCurrentPeriod();
+  const initialInvoicesRes = invoicesService.peekList({
+    building_id: selectedBuildingId || undefined,
+    period: initPeriod || undefined,
+  });
+
+  const [invoices, setInvoices] = useState(() =>
+    Array.isArray(initialInvoicesRes?.data) ? initialInvoicesRes.data : []
+  );
+  const [summary, setSummary] = useState(
+    () => initialInvoicesRes?.summary || { total_billed: 0, total_paid: 0, total_unpaid: 0 }
+  );
+  const [loading, setLoading] = useState(() => !Array.isArray(initialInvoicesRes?.data));
 
   // Bộ lọc
-  const [period, setPeriod] = useState(getCurrentPeriod());
+  const [period, setPeriod] = useState(initPeriod);
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    if (!search) {
+      setDebouncedSearch('');
+      return undefined;
+    }
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
 
   // Hàng đợi 4 mắt: Điều chỉnh hóa đơn chờ duyệt (Ruling 2)
   const [pendingAdjustments, setPendingAdjustments] = useState([]);
@@ -93,15 +113,23 @@ export function InvoicesPage() {
     }
   }, [location.search]);
 
-  const fetchInvoices = useCallback(async () => {
-    setLoading(true);
+  const fetchInvoices = useCallback(async (opts = {}) => {
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      period: period || undefined,
+      status: statusFilter || undefined,
+      search: debouncedSearch.trim() || undefined,
+    };
+    const cached = !opts?.force ? invoicesService.peekList(params) : null;
+    if (Array.isArray(cached?.data)) {
+      setInvoices(cached.data);
+      setSummary(cached.summary || { total_billed: 0, total_paid: 0, total_unpaid: 0 });
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
-      const res = await invoicesService.list({
-        building_id: selectedBuildingId || undefined,
-        period: period || undefined,
-        status: statusFilter || undefined,
-        search: search.trim() || undefined,
-      });
+      const res = await invoicesService.list(params, { force: Boolean(opts?.force) });
       setInvoices(res.data || []);
       setSummary(res.summary || { total_billed: 0, total_paid: 0, total_unpaid: 0 });
     } catch (err) {
@@ -109,14 +137,11 @@ export function InvoicesPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, period, statusFilter, search, toast]);
+  }, [selectedBuildingId, period, statusFilter, debouncedSearch, toast]);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      fetchInvoices();
-      fetchAdjustmentsQueue();
-    }, 200);
-    return () => clearTimeout(t);
+    fetchInvoices();
+    fetchAdjustmentsQueue();
   }, [fetchInvoices, fetchAdjustmentsQueue]);
 
   const openBatchModal = async () => {
@@ -228,14 +253,20 @@ export function InvoicesPage() {
         label: 'Căn hộ / Khách thuê',
         sortable: true,
         render: (row) => (
-          <div>
-            <p className="font-semibold text-slate-900">
+          <div className="max-w-[200px]">
+            <p className="font-semibold text-slate-900 whitespace-nowrap">
               Căn {row.apartment_code}{' '}
-              <span className="text-xs font-normal text-slate-500">
-                ({row.building_name || row.building_code})
+              <span
+                className="text-xs font-normal text-slate-500"
+                title={row.building_name || row.building_code}
+              >
+                ({row.building_code || row.building_name})
               </span>
             </p>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p
+              className="text-xs text-slate-500 mt-0.5 truncate"
+              title={`${row.tenant_name || ''}${row.tenant_phone ? ` • ${row.tenant_phone}` : ''}`}
+            >
               {row.tenant_name || '—'}
               {row.tenant_phone ? ` • ${row.tenant_phone}` : ''}
             </p>
@@ -320,9 +351,8 @@ export function InvoicesPage() {
         key: 'actions',
         label: 'Thao tác',
         align: 'center',
-        className: 'whitespace-nowrap',
         render: (row) => (
-          <div className="inline-flex items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="inline-flex flex-wrap items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
             {canManageInvoices && row.status === 'DRAFT' && row.invoice_type !== 'LATE_FEE_SETTLEMENT' ? (
               <Button
                 size="xs"

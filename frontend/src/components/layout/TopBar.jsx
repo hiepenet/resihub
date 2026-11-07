@@ -34,8 +34,11 @@ export function TopBar({ onOpenMobileMenu }) {
           const list = res.data || [];
           setBuildings(list);
           const currentSelected = useAuthStore.getState().selectedBuildingId;
-          if (list.length === 1 && !currentSelected) {
-            setSelectedBuildingId(list[0].id);
+          const hasValidSelection =
+            Boolean(currentSelected) &&
+            list.some((b) => String(b.id) === String(currentSelected));
+          if (!hasValidSelection) {
+            setSelectedBuildingId(list.length === 1 ? list[0].id : '');
           }
         })
         .catch(() => {});

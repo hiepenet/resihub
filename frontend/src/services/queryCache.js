@@ -158,21 +158,26 @@ export function invalidateQueryCache(prefixes) {
 }
 
 const URL_INVALIDATION_RULES = [
-  { match: '/api/v1/tenants', namespaces: ['tenants', 'contracts'] },
+  { match: '/api/v1/tenants', namespaces: ['tenants', 'contracts', 'reports'] },
   {
     match: '/api/v1/contracts',
-    namespaces: ['contracts', 'apartments', 'buildings', 'tenants', 'deposits'],
+    namespaces: ['contracts', 'apartments', 'buildings', 'tenants', 'deposits', 'meters', 'invoices', 'reports'],
   },
-  { match: '/api/v1/buildings', namespaces: ['buildings', 'apartments'] },
-  { match: '/api/v1/apartments', namespaces: ['apartments', 'buildings', 'contracts'] },
-  { match: '/api/v1/reservations', namespaces: ['reservations', 'apartments', 'buildings'] },
-  { match: '/api/v1/service-catalog', namespaces: ['services', 'contracts'] },
-  { match: '/api/v1/service-subscriptions', namespaces: ['services', 'contracts'] },
-  { match: '/api/v1/settings', namespaces: ['settings', 'reservations'] },
-  { match: '/api/v1/deposits', namespaces: ['deposits', 'contracts', 'apartments'] },
-  { match: '/api/v1/invoices', namespaces: ['contracts', 'apartments'] },
-  { match: '/api/v1/payments', namespaces: ['contracts', 'apartments'] },
-  { match: '/api/v1/meters', namespaces: ['apartments', 'contracts'] },
+  { match: '/api/v1/buildings', namespaces: ['buildings', 'apartments', 'meters', 'reports'] },
+  { match: '/api/v1/apartments', namespaces: ['apartments', 'buildings', 'contracts', 'meters', 'reports'] },
+  { match: '/api/v1/reservations', namespaces: ['reservations', 'apartments', 'buildings', 'reports'] },
+  { match: '/api/v1/service-catalog', namespaces: ['services', 'contracts', 'meters'] },
+  { match: '/api/v1/service-subscriptions', namespaces: ['services', 'contracts', 'invoices'] },
+  { match: '/api/v1/settings', namespaces: ['settings', 'reservations', 'meters'] },
+  { match: '/api/v1/deposits', namespaces: ['deposits', 'contracts', 'apartments', 'reports'] },
+  { match: '/api/v1/invoices', namespaces: ['invoices', 'payments', 'meters', 'contracts', 'apartments', 'reports', 'deposits'] },
+  { match: '/api/v1/payments', namespaces: ['payments', 'invoices', 'contracts', 'apartments', 'reports', 'deposits'] },
+  { match: '/api/v1/receivables', namespaces: ['payments', 'invoices', 'reports'] },
+  { match: '/api/v1/meters', namespaces: ['meters', 'invoices', 'apartments', 'contracts', 'reports'] },
+  { match: '/api/v1/service-requests', namespaces: ['serviceRequests', 'reports'] },
+  { match: '/api/v1/notifications', namespaces: ['notifications'] },
+  { match: '/api/v1/announcements', namespaces: ['notifications'] },
+  { match: '/api/v1/admin/users', namespaces: ['users'] },
 ];
 
 export function invalidateRelatedNamespacesForUrl(url) {

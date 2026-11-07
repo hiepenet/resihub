@@ -445,10 +445,55 @@ router.post('/refresh', async (req, res) => {
 });
 
 /**
- * GET /api/v1/auth/me (Lấy thông tin profile người dùng hiện tại)
+ * GET /api/v1/auth/me (Lấy thông tin profile người dùng hiện tại & xác thực user còn tồn tại trong DB)
  */
 router.get('/me', authenticateToken, async (req, res) => {
-  res.json({ user: req.user });
+  try {
+    const userRes = await pool.query(
+      `SELECT au.id, au.status, au.person_id, au.token_version,
+              p.org_id, p.phone, p.email, p.full_name
+       FROM app_user au
+       LEFT JOIN person p ON p.id = au.person_id
+       WHERE au.id = $1`,
+      [req.user.sub]
+    );
+
+    if (userRes.rows.length === 0 || userRes.rows[0].status !== 'ACTIVE') {
+      return res.status(401).json({
+        code: 'SESSION_INVALID',
+        message: 'Phiên đăng nhập không còn hiệu lực. Vui lòng đăng nhập lại.',
+      });
+    }
+
+    const row = userRes.rows[0];
+    const rolesRes = await pool.query(
+      `SELECT r.code, r.name, r.scope, ur.building_id
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       WHERE ur.user_id = $1`,
+      [row.id]
+    );
+
+    const freshUser = {
+      sub: row.id,
+      person_id: row.person_id || req.user.person_id,
+      org_id: row.org_id || req.user.org_id,
+      phone: row.phone || req.user.phone,
+      email: row.email || req.user.email,
+      full_name: row.full_name || req.user.full_name,
+      roles: rolesRes.rows.map((r) => ({
+        code: r.code,
+        name: r.name,
+        building_id: r.building_id,
+      })),
+      token_version: row.token_version || 1,
+    };
+
+    res.json({ user: freshUser });
+  } catch (err) {
+    console.error('[Auth Me Error]:', err);
+    res.json({ user: req.user });
+  }
 });
 
 /**

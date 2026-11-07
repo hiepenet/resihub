@@ -41,7 +41,8 @@ export function maskIdNumber(idNumber) {
 }
 
 export function buildOwnerPreview(ownerRow) {
-  if (!ownerRow || !ownerRow.id) return null;
+  // FIX BP-009: dùng != null thay vì !ownerRow.id để id=0 (hợp lệ) không bị trả null
+  if (!ownerRow || ownerRow.id == null) return null;
   return {
     id: ownerRow.id,
     masked_name: maskName(ownerRow.full_name),

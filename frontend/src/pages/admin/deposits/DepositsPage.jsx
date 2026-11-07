@@ -147,8 +147,11 @@ export function DepositsPage() {
   const currentUserId = user?.id || user?.sub;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
-  const [deposits, setDeposits] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const initialDeposits = depositsService.peekList()?.data;
+  const [deposits, setDeposits] = useState(() =>
+    Array.isArray(initialDeposits) ? initialDeposits : []
+  );
+  const [loading, setLoading] = useState(() => !Array.isArray(initialDeposits));
   const [activeTab, setActiveTab] = useState('held');
   const [search, setSearch] = useState('');
   const [exportingExcel, setExportingExcel] = useState(false);
@@ -285,11 +288,13 @@ export function DepositsPage() {
   const returnedIdemKeyRef = useRef(createIdempotencyKey());
   const bankUpdateIdemKeyRef = useRef(createIdempotencyKey());
 
-  const fetchDeposits = useCallback(async () => {
-    setLoading(true);
+  const fetchDeposits = useCallback(async (opts = {}) => {
+    if (!Array.isArray(depositsService.peekList()?.data)) {
+      setLoading(true);
+    }
     try {
       const [res, settingsRes] = await Promise.all([
-        depositsService.list(),
+        depositsService.list(undefined, { force: Boolean(opts?.force) }),
         usersService.getSettings().catch(() => null),
       ]);
       setDeposits(Array.isArray(res?.data) ? res.data : []);

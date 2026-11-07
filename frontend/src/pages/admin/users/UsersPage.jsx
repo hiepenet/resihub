@@ -492,12 +492,11 @@ export function UsersPage() {
         key: 'actions',
         label: 'Thao tác',
         align: 'center',
-        className: 'whitespace-nowrap',
         render: (row) => {
           if (!canManageUsers) return null;
           const isSelf = row.id === currentUser?.id;
           return (
-            <div className="inline-flex items-center justify-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <div className="inline-flex flex-wrap items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
               <Button
                 size="xs"
                 variant="outline"

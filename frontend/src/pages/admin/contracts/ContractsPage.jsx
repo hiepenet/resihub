@@ -1427,9 +1427,11 @@ export function ContractsPage() {
         label: 'Căn hộ / Tòa nhà',
         sortable: true,
         render: (row) => (
-          <div>
+          <div className="max-w-[180px]">
             <p className="font-semibold text-slate-900">{row.apartment_code}</p>
-            <p className="text-xs text-slate-500 break-words max-w-[230px]">{row.building_name}</p>
+            <p className="text-xs text-slate-500 truncate" title={row.building_name}>
+              {row.building_name}
+            </p>
           </div>
         ),
       },

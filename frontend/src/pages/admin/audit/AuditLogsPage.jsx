@@ -117,6 +117,7 @@ export function AuditLogsView({ lockedScope = '' } = {}) {
   const [totalPages, setTotalPages] = useState(1);
 
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [scope, setScope] = useState(initialScope);
   const effectiveScope = lockedScope || scope;
   const [exportingXlsx, setExportingXlsx] = useState(false);
@@ -128,20 +129,32 @@ export function AuditLogsView({ lockedScope = '' } = {}) {
 
   const [selectedLog, setSelectedLog] = useState(null);
 
-  const fetchLogs = useCallback(async () => {
-    setLoading(true);
+  useEffect(() => {
+    if (!search) {
+      setDebouncedSearch('');
+      return undefined;
+    }
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const fetchLogs = useCallback(async (opts = {}) => {
+    const params = {
+      page,
+      limit,
+      ...(effectiveScope ? { scope: effectiveScope } : {}),
+      ...(entity ? { entity } : {}),
+      ...(action ? { action } : {}),
+      ...(fromDate ? { from: fromDate } : {}),
+      ...(toDate ? { to: toDate } : {}),
+      ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+    };
+    const cached = !opts?.force ? auditService.peekList(params) : null;
+    if (!cached) {
+      setLoading(true);
+    }
     try {
-      const params = {
-        page,
-        limit,
-        ...(effectiveScope ? { scope: effectiveScope } : {}),
-        ...(entity ? { entity } : {}),
-        ...(action ? { action } : {}),
-        ...(fromDate ? { from: fromDate } : {}),
-        ...(toDate ? { to: toDate } : {}),
-        ...(search.trim() ? { search: search.trim() } : {}),
-      };
-      const res = await auditService.list(params);
+      const res = await auditService.list(params, { force: Boolean(opts?.force) });
       const rawItems = Array.isArray(res?.data)
         ? res.data
         : Array.isArray(res?.data?.items)
@@ -164,13 +177,10 @@ export function AuditLogsView({ lockedScope = '' } = {}) {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, effectiveScope, entity, action, fromDate, toDate, search, toast]);
+  }, [page, limit, effectiveScope, entity, action, fromDate, toDate, debouncedSearch, toast]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchLogs();
-    }, 200);
-    return () => clearTimeout(timer);
+    fetchLogs();
   }, [fetchLogs]);
 
   const handleResetFilters = () => {

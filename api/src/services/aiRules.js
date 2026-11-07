@@ -81,7 +81,7 @@ const MODEL_SLUG_RE = /^[a-z0-9][a-z0-9._-]{2,63}$/i;
 const DATA_URI_RE = /^data:([a-z0-9.+\-/]+);base64,\s*([A-Za-z0-9+/=\r\n]+)$/i;
 
 const SAFETY_HAZARD_RE =
-  /(rò\s*điện|giật\s*điện|đánh\s*tia\s*lửa|phóng\s*tia\s*lửa|chập\s*cháy|chập\s*điện|bốc\s*khói|có\s*khói|cháy\s*nổ|hỏa\s*hoạn|vỡ\s*ống|bể\s*ống|ngập\s*nước|tràn\s*nước\s*mạnh|rò\s*khí\s*gas|rò\s*gas|mùi\s*gas|mắc\s*kẹt\s*thang\s*máy|kẹt\s*khóa\s*cửa\s*ngoài)/i;
+  /(rò\s*điện|giật\s*điện|đánh\s*tia\s*lửa|phóng\s*tia\s*lửa|chập\s*cháy|chập\s*điện|bốc\s*khói|có\s*khói|cháy\s*nổ|hỏa\s*hoạn|vỡ\s*ống|bể\s*ống|ngập\s*nước|tràn\s*nước\s*mạnh|rò\s*khí\s*gas|rò\s*gas|mùi\s*gas|mắc\s*kẹt\s*thang\s*máy|kẹt\s*thang\s*máy|thang\s*máy\s*kẹt|kẹt\s*thang|kẹt\s*khóa\s*cửa\s*ngoài)/i;
 
 function validationError(message) {
   return Object.assign(new Error(message), {

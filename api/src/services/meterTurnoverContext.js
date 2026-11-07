@@ -106,26 +106,7 @@ export async function loadMeterPeriodReadingsWithLocks(
 
   const res = await queryable.query(
     `SELECT mr.*,
-            m.meter_type,
-            EXISTS (
-              SELECT 1
-              FROM invoice_line il
-              JOIN invoice inv ON inv.id = il.invoice_id
-              WHERE inv.status NOT IN ('DRAFT', 'VOID', 'CANCELLED')
-                AND il.item_type = m.meter_type
-                AND (
-                  (
-                    (il.formula_meta->>'reading_id') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                    AND (il.formula_meta->>'reading_id')::uuid = mr.id
-                  )
-                  OR (
-                    (il.formula_meta->>'reading_id') IS NULL
-                    AND inv.apartment_id = mr.apartment_id
-                    AND inv.period = mr.period
-                    AND (mr.contract_id = inv.contract_id OR mr.contract_id IS NULL)
-                  )
-                )
-            ) AS has_billed_line
+            m.meter_type
      FROM meter_reading mr
      JOIN meter m ON m.id = mr.meter_id
      WHERE mr.meter_id = ANY($1::uuid[])
@@ -134,15 +115,70 @@ export async function loadMeterPeriodReadingsWithLocks(
     [validMeterIds, periodYm]
   );
 
+  const readingIds = res.rows.map((r) => String(r.id));
+  const aptIds = [...new Set(res.rows.map((r) => String(r.apartment_id)).filter(Boolean))];
+  const billedReadingTypeSet = new Set();
+  const legacyBilledLines = [];
+
+  if (res.rows.length > 0 && aptIds.length > 0) {
+    const billedRes = await queryable.query(
+      `SELECT il.item_type,
+              il.formula_meta->>'reading_id' AS reading_id,
+              inv.apartment_id,
+              inv.period,
+              inv.contract_id
+       FROM invoice inv
+       JOIN invoice_line il ON il.invoice_id = inv.id
+       WHERE inv.apartment_id = ANY($1::uuid[])
+         AND inv.period = $2
+         AND inv.status NOT IN ('DRAFT', 'VOID', 'CANCELLED')
+         AND il.item_type IN ('ELECTRICITY', 'WATER')
+       UNION ALL
+       SELECT il.item_type,
+              il.formula_meta->>'reading_id' AS reading_id,
+              inv.apartment_id,
+              inv.period,
+              inv.contract_id
+       FROM invoice_line il
+       JOIN invoice inv ON inv.id = il.invoice_id
+       WHERE (il.formula_meta->>'reading_id') IS NOT NULL
+         AND (il.formula_meta->>'reading_id') = ANY($3::text[])
+         AND il.item_type IN ('ELECTRICITY', 'WATER')
+         AND inv.apartment_id = ANY($1::uuid[])
+         AND inv.period <> $2
+         AND inv.status NOT IN ('DRAFT', 'VOID', 'CANCELLED')`,
+      [aptIds, periodYm, readingIds]
+    );
+
+    for (const b of billedRes.rows) {
+      if (b.reading_id) {
+        billedReadingTypeSet.add(`${String(b.reading_id).toLowerCase()}:${b.item_type}`);
+      } else {
+        legacyBilledLines.push(b);
+      }
+    }
+  }
+
   for (const row of res.rows) {
     const meterId = String(row.meter_id);
+    const readingKey = `${String(row.id).toLowerCase()}:${row.meter_type}`;
+    const hasBilledLine =
+      billedReadingTypeSet.has(readingKey) ||
+      legacyBilledLines.some(
+        (b) =>
+          b.item_type === row.meter_type &&
+          String(b.apartment_id) === String(row.apartment_id) &&
+          String(b.period) === String(row.period) &&
+          (!row.contract_id || String(b.contract_id) === String(row.contract_id))
+      );
+
     const aptContracts = contractsByApt.get(String(row.apartment_id)) || [];
     const matchedContract = row.contract_id
       ? aptContracts.find((c) => String(c.contract_id) === String(row.contract_id))
       : null;
 
     const isBilled =
-      Boolean(row.has_billed_line) ||
+      Boolean(hasBilledLine) ||
       (row.status === 'CONFIRMED' &&
         Boolean(row.contract_id) &&
         Boolean(matchedContract?.is_period_finalized));
@@ -150,6 +186,7 @@ export async function loadMeterPeriodReadingsWithLocks(
     if (!map.has(meterId)) map.set(meterId, []);
     map.get(meterId).push({
       ...row,
+      has_billed_line: hasBilledLine,
       is_billed: isBilled,
     });
   }
@@ -176,9 +213,10 @@ export async function loadPriorAndNextMeterReadings(queryable, meterId, periodYm
             mr.is_abnormal, mr.abnormal_note, mr.status,
             EXISTS (
               SELECT 1
-              FROM invoice_line il
-              JOIN invoice inv ON inv.id = il.invoice_id
-              WHERE inv.status NOT IN ('DRAFT', 'VOID', 'CANCELLED')
+              FROM invoice inv
+              JOIN invoice_line il ON il.invoice_id = inv.id
+              WHERE inv.apartment_id = mr.apartment_id
+                AND inv.status NOT IN ('DRAFT', 'VOID', 'CANCELLED')
                 AND il.item_type = m.meter_type
                 AND (
                   (
@@ -187,7 +225,6 @@ export async function loadPriorAndNextMeterReadings(queryable, meterId, periodYm
                   )
                   OR (
                     (il.formula_meta->>'reading_id') IS NULL
-                    AND inv.apartment_id = mr.apartment_id
                     AND inv.period = mr.period
                     AND (mr.contract_id = inv.contract_id OR mr.contract_id IS NULL)
                   )

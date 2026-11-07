@@ -59,7 +59,9 @@ export function validateDeduction(input) {
     return { ok: false, code: 'INVALID_INPUT', message: 'Dữ liệu khấu trừ không hợp lệ.' };
   }
 
-  const { category, amount, description, evidence } = input;
+  const { amount, description, evidence } = input;
+  // FIX BP-002: normalize category sang uppercase để bắt mọi variant (rent/RENT/Rent)
+  const category = typeof input.category === 'string' ? input.category.trim().toUpperCase() : input.category;
 
   if (category === 'RENT') {
     return {
@@ -105,17 +107,28 @@ export function validateDeduction(input) {
 }
 
 /**
+ * Chuyển đổi an toàn một giá trị tiền VND sang BigInt.
+ * Làm tròn số thực về số nguyên gần nhất trước khi convert.
+ * Throw RangeError nếu giá trị âm hoặc không hợp lệ.
+ */
+function safeVndToBigInt(val) {
+  if (val === null || val === undefined) return 0n;
+  const num = typeof val === 'string' ? Number(val.trim() || 0) : Number(val);
+  if (!Number.isFinite(num)) return 0n;
+  // FIX BUG-001: làm tròn float về số nguyên trước BigInt() để tránh TypeError
+  return BigInt(Math.round(num));
+}
+
+/**
  * Compute refund and shortfall according to AC-017
  * refund = max(0, deposit − debt − Σitems)
  * shortfall = max(0, debt + Σitems − deposit)
  */
 export function computeRefund({ depositAmount, outstandingDebt, items }) {
-  const dep = BigInt(depositAmount ?? 0);
-  const debt = BigInt(outstandingDebt ?? 0);
+  const dep = safeVndToBigInt(depositAmount);
+  const debt = safeVndToBigInt(outstandingDebt);
   const sumItems = (items || []).reduce((acc, item) => {
-    const raw = item?.amount ?? 0;
-    const normalized = typeof raw === 'string' ? raw.trim() : raw;
-    return acc + BigInt(normalized || 0);
+    return acc + safeVndToBigInt(item?.amount);
   }, 0n);
 
   const totalDeductions = debt + sumItems;
@@ -144,14 +157,12 @@ export function splitDepositOpening({ depositAmount, holdAmount }) {
  * - REFUNDED when full deposit is refunded (deductions == 0 && shortfall == 0)
  */
 export function resolvePostSettlementStatus({ refundAmount = 0, outstandingDebt = 0, items = [], shortfall = 0 }) {
-  const refund = BigInt(refundAmount ?? 0);
-  const debt = BigInt(outstandingDebt ?? 0);
+  const refund = safeVndToBigInt(refundAmount);
+  const debt = safeVndToBigInt(outstandingDebt);
   const sumItems = (items || []).reduce((acc, item) => {
-    const raw = item?.amount ?? 0;
-    const normalized = typeof raw === 'string' ? raw.trim() : raw;
-    return acc + BigInt(normalized || 0);
+    return acc + safeVndToBigInt(item?.amount);
   }, 0n);
-  const sf = BigInt(shortfall ?? 0);
+  const sf = safeVndToBigInt(shortfall);
   const totalDeductions = debt + sumItems;
 
   if (refund === 0n && (totalDeductions > 0n || sf > 0n)) {

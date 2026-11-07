@@ -1,8 +1,18 @@
 import api from './api';
 import { withIdempotency } from '../utils/idempotency';
+import { buildCacheKey, cachedFetch, peekQueryCache } from './queryCache';
+
+const DEPOSITS_TTL_MS = 20_000;
 
 export const depositsService = {
-  list: (params) => api.get('/api/v1/deposits', { params }).then((r) => r.data),
+  peekList: (params) =>
+    peekQueryCache(buildCacheKey('deposits', { op: 'list', ...(params || {}) }))?.data || null,
+  list: (params, options = {}) =>
+    cachedFetch(
+      buildCacheKey('deposits', { op: 'list', ...(params || {}) }),
+      () => api.get('/api/v1/deposits', { params }).then((r) => r.data),
+      { ttlMs: DEPOSITS_TTL_MS, force: Boolean(options?.force) }
+    ),
   listTransactions: (id) => api.get(`/api/v1/deposits/${id}/transactions`).then((r) => r.data),
   getAuditLogs: (id) => api.get(`/api/v1/deposits/${id}/audit-logs`).then((r) => r.data),
   createTransaction: (id, payload, options = {}) =>

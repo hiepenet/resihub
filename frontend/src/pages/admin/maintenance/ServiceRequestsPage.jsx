@@ -200,16 +200,31 @@ export function ServiceRequestsPage() {
   const { canHandleMaintenance } = usePermission();
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
 
+  const initialRequestsRes = serviceRequestsService.peekList({
+    building_id: selectedBuildingId || undefined,
+  });
   const [viewMode, setViewMode] = useState('kanban'); // 'kanban' | 'table'
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [requests, setRequests] = useState(() =>
+    Array.isArray(initialRequestsRes?.data) ? initialRequestsRes.data : []
+  );
+  const [loading, setLoading] = useState(() => !Array.isArray(initialRequestsRes?.data));
 
   // Bộ lọc
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [overdueOnly, setOverdueOnly] = useState(false);
+
+  useEffect(() => {
+    if (!search) {
+      setDebouncedSearch('');
+      return undefined;
+    }
+    const t = setTimeout(() => setDebouncedSearch(search), 200);
+    return () => clearTimeout(t);
+  }, [search]);
 
   // Modal tạo yêu cầu hộ cư dân
   const [createOpen, setCreateOpen] = useState(false);
@@ -249,30 +264,34 @@ export function ServiceRequestsPage() {
   });
   const [previewImg, setPreviewImg] = useState(null);
 
-  const fetchRequests = useCallback(async () => {
-    setLoading(true);
+  const fetchRequests = useCallback(async (opts = {}) => {
+    const params = {
+      building_id: selectedBuildingId || undefined,
+      category: categoryFilter || undefined,
+      priority: priorityFilter || undefined,
+      status: statusFilter || undefined,
+      overdue_sla: overdueOnly ? 'true' : undefined,
+      search: debouncedSearch.trim() || undefined,
+    };
+    const cached = !opts?.force ? serviceRequestsService.peekList(params) : null;
+    if (Array.isArray(cached?.data)) {
+      setRequests(cached.data);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
-      const res = await serviceRequestsService.list({
-        building_id: selectedBuildingId || undefined,
-        category: categoryFilter || undefined,
-        priority: priorityFilter || undefined,
-        status: statusFilter || undefined,
-        overdue_sla: overdueOnly ? 'true' : undefined,
-        search: search.trim() || undefined,
-      });
+      const res = await serviceRequestsService.list(params, { force: Boolean(opts?.force) });
       setRequests(res.data || []);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách yêu cầu bảo trì.'));
     } finally {
       setLoading(false);
     }
-  }, [selectedBuildingId, categoryFilter, priorityFilter, statusFilter, overdueOnly, search, toast]);
+  }, [selectedBuildingId, categoryFilter, priorityFilter, statusFilter, overdueOnly, debouncedSearch, toast]);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchRequests();
-    }, 200);
-    return () => clearTimeout(timer);
+    fetchRequests();
   }, [fetchRequests]);
 
   const stats = useMemo(() => {

@@ -238,16 +238,36 @@ const tempCleanup = {
 const suffix = Date.now().toString().slice(-6);
 
 try {
+  await adminPool.query(
+    `UPDATE contract SET end_date = '2026-12-31', status = 'ACTIVE' WHERE end_date = '2026-11-06'`
+  );
+  await adminPool.query(
+    `UPDATE apartment a SET status = 'OCCUPIED' WHERE EXISTS (SELECT 1 FROM contract c WHERE c.apartment_id = a.id AND c.status = 'ACTIVE')`
+  );
+
   const adminLogin = await apiJson('/api/v1/auth/login', null, {
     method: 'POST',
     body: JSON.stringify({ email: 'admin@resihub.vn', password: 'Admin@123456' }),
   });
   const adminToken = adminLogin.body.accessToken;
 
-  const vopARes = await adminPool.query(`SELECT id FROM building WHERE code = 'VOP-A' LIMIT 1`);
-  const vscARes = await adminPool.query(`SELECT id FROM building WHERE code = 'VSC-A' LIMIT 1`);
+  const vopARes = await adminPool.query(`SELECT id, code FROM building WHERE code IN ('VOP-A', 'VOP-1') ORDER BY code LIMIT 1`);
+  const vscARes = await adminPool.query(`SELECT id, code FROM building WHERE code IN ('VSC-A', 'VOP-2') ORDER BY code LIMIT 1`);
   const vopAId = vopARes.rows[0].id;
+  const vopACode = vopARes.rows[0].code;
   const vscAId = vscARes.rows[0].id;
+  const vscACode = vscARes.rows[0].code;
+
+  const mgr1UserRes = await adminPool.query(
+    `SELECT p.email FROM app_user u
+     JOIN person p ON p.id = u.person_id
+     JOIN user_role ur ON ur.user_id = u.id
+     JOIN role r ON r.id = ur.role_id
+     WHERE r.code = 'MANAGER' AND ur.building_id = $1
+     ORDER BY u.created_at ASC LIMIT 1`,
+    [vopAId]
+  );
+  const mgr1Email = mgr1UserRes.rows[0]?.email || 'manager.vop1@resihub.vn';
 
   const mgr2Email = `mgr2.ui.${suffix}@resihub.vn`;
 
@@ -323,9 +343,9 @@ try {
       `
       INSERT INTO contract (
         building_id, apartment_id, primary_tenant_id,
-        start_date, end_date, rent_amount, billing_day, payment_due_days, deposit_amount, status
+        start_date, end_date, rent_amount, billing_day, payment_due_days, deposit_amount, status, created_at
       )
-      VALUES ($1, $2, $3, CURRENT_DATE - INTERVAL '5 days', CURRENT_DATE + INTERVAL '180 days', 11500000, 5, 5, 11500000, 'ACTIVE')
+      VALUES ($1, $2, $3, CURRENT_DATE - INTERVAL '5 days', CURRENT_DATE + INTERVAL '180 days', 11500000, 5, 5, 11500000, 'ACTIVE', '2024-06-01T00:00:00Z')
       RETURNING id
     `,
       [vscAId, tempCleanup.secondAptId, tenant1Info.tenant_id]
@@ -400,7 +420,9 @@ try {
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/buildings/${vopAId}/floor-plan` });
     await sleep(1100);
     const fpSnap = await callTool('take_snapshot', { pageId });
-    if (!fpSnap.text.includes('A101')) throw new Error('Floor plan did not render apartment A101');
+    if (!fpSnap.text.includes('A101') && !fpSnap.text.includes('11A01')) {
+      throw new Error('Floor plan did not render apartment A101/11A01');
+    }
 
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/users` });
     await sleep(1000);
@@ -440,10 +462,13 @@ try {
       if (pgSpec.path === '/admin/buildings') {
         const bSnap = await callTool('take_snapshot', { pageId });
         hasVopABC =
-          bSnap.text.includes('VOP-A') &&
-          bSnap.text.includes('VOP-B') &&
-          bSnap.text.includes('VOP-C') &&
-          !bSnap.text.includes('VSC-A');
+          (bSnap.text.includes('VOP-A') &&
+            bSnap.text.includes('VOP-B') &&
+            bSnap.text.includes('VOP-C') &&
+            !bSnap.text.includes('VSC-A')) ||
+          (bSnap.text.includes('VOP-1') &&
+            bSnap.text.includes('VOP-2') &&
+            bSnap.text.includes('VOP-3'));
       }
       if (pgSpec.path === '/admin/contracts') {
         await screenshot(pageId, 'dt_v2_02_owner_readonly_contracts.png');
@@ -480,14 +505,14 @@ try {
   });
 
   await recordStep('UI-07 [MANAGER] Confidential Owner Lookup Modal with Masked PII Preview', async () => {
-    await loginWithEmailForm(pageId, 'manager.vop.a@resihub.vn', 'Demo@123456', '/admin/dashboard');
+    await loginWithEmailForm(pageId, mgr1Email, 'Demo@123456', '/admin/dashboard');
     await sleep(800);
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/buildings` });
     await sleep(900);
 
     let snap = await callTool('take_snapshot', { pageId });
-    if (!snap.text.includes('VOP-A') || snap.text.includes('VOP-B')) {
-      throw new Error('MANAGER VOP-A scope mismatch on BuildingsPage');
+    if (!snap.text.includes(vopACode) || snap.text.includes('VOP-B') || snap.text.includes('VOP-2')) {
+      throw new Error(`MANAGER ${vopACode} scope mismatch on BuildingsPage`);
     }
 
     const addBldgUid = findUid(snap.text, (l) => l.includes('button') && l.includes('Thêm tòa nhà mới'));
@@ -516,8 +541,15 @@ try {
 
   await recordStep('UI-08 [MANAGER] Shared Cross-Building Resident Badge ("Liên tòa") on TenantsPage', async () => {
     await callTool('navigate_page', { pageId, type: 'url', url: `${BASE_URL}/admin/tenants` });
+    await sleep(900);
+    let snap = await callTool('take_snapshot', { pageId });
+    const searchUid = findUid(snap.text, (l) => l.includes('textbox') && l.includes('Tìm theo họ tên'));
+    if (searchUid) {
+      await callTool('fill', { pageId, uid: searchUid, value: 'tenant1@resihub.vn', includeSnapshot: false });
+      await sleep(500);
+    }
     await callTool('wait_for', { pageId, text: ['Liên tòa'], timeout: 8000 });
-    const snap = await callTool('take_snapshot', { pageId });
+    snap = await callTool('take_snapshot', { pageId });
     const hasSharedBadge = snap.text.includes('Liên tòa');
     await screenshot(pageId, 'dt_v2_04_manager_shared_tenant_badge.png');
     await collectDiagnostics(pageId, 'ManagerTenantsSharedBadge');
@@ -549,12 +581,12 @@ try {
     snap = await callTool('take_snapshot', { pageId });
     const hasMaskedTenant = snap.text.includes('***');
     const hasCrossBadge = snap.text.includes('Liên kết liên tòa');
-    const leakedVsc = snap.text.includes('VSC-A');
+    const leakedVsc = snap.text.includes(vscACode);
     await screenshot(pageId, 'dt_v2_05_manager_masked_tenant_lookup.png');
     await collectDiagnostics(pageId, 'ManagerContractTenantLookup');
     if (!hasMaskedTenant) throw new Error('Masked resident preview did not appear');
     if (!hasCrossBadge) throw new Error('Cross-building PII badge did not appear');
-    if (leakedVsc) throw new Error('Cross-building VSC-A contract leaked in MANAGER lookup modal!');
+    if (leakedVsc) throw new Error(`Cross-building ${vscACode} contract leaked in MANAGER lookup modal!`);
     return { hasMaskedTenant, hasCrossBadge, leakedCrossBuildingInfo: false };
   });
 

@@ -3,10 +3,24 @@ import { withIdempotency } from '../utils/idempotency';
 import { buildCacheKey, cachedFetch, peekQueryCache } from './queryCache';
 
 const SETTINGS_TTL_MS = 120_000;
+const USERS_TTL_MS = 25_000;
 
 export const usersService = {
-  list: (params) => api.get('/api/v1/admin/users', { params }).then((r) => r.data),
-  listRoles: () => api.get('/api/v1/admin/users/roles').then((r) => r.data),
+  peekList: (params) =>
+    peekQueryCache(buildCacheKey('users', { op: 'list', ...(params || {}) }))?.data || null,
+  list: (params, options = {}) =>
+    cachedFetch(
+      buildCacheKey('users', { op: 'list', ...(params || {}) }),
+      () => api.get('/api/v1/admin/users', { params }).then((r) => r.data),
+      { ttlMs: USERS_TTL_MS, force: Boolean(options?.force) }
+    ),
+  peekRoles: () => peekQueryCache(buildCacheKey('users', 'roles'))?.data || null,
+  listRoles: (options = {}) =>
+    cachedFetch(
+      buildCacheKey('users', 'roles'),
+      () => api.get('/api/v1/admin/users/roles').then((r) => r.data),
+      { ttlMs: SETTINGS_TTL_MS, force: Boolean(options?.force) }
+    ),
   create: (payload) => api.post('/api/v1/admin/users', payload).then((r) => r.data),
   update: (id, payload) => api.patch(`/api/v1/admin/users/${id}`, payload).then((r) => r.data),
 

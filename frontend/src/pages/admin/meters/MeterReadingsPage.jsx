@@ -116,22 +116,22 @@ function evaluateRowMetrics(row, draftValue, thresholdPct = 30) {
 function renderReadingStatusBadge(status, thresholdPct = 30) {
   if (status === 'CONFIRMED') {
     return (
-      <Badge variant="emerald" dot>
-        Đã chốt (CONFIRMED)
+      <Badge variant="emerald" dot title="CONFIRMED">
+        Đã chốt
       </Badge>
     );
   }
   if (status === 'FLAGGED') {
     return (
-      <Badge variant="red" dot>
-        Tạm giữ &gt;{thresholdPct}% (FLAGGED)
+      <Badge variant="red" dot title="FLAGGED">
+        Tạm giữ &gt;{thresholdPct}%
       </Badge>
     );
   }
   if (status === 'DRAFT') {
     return (
-      <Badge variant="sky" dot>
-        Bản nháp (DRAFT)
+      <Badge variant="sky" dot title="DRAFT">
+        Bản nháp
       </Badge>
     );
   }
@@ -142,27 +142,369 @@ function getMeterOcrSlotKey(meterId, contractId) {
   return contractId ? `${meterId}:${contractId}` : String(meterId);
 }
 
+function buildInitialDraftsAndNotes(list) {
+  const initDrafts = {};
+  const initNotes = {};
+  if (Array.isArray(list)) {
+    for (const m of list) {
+      initDrafts[m.id] =
+        m.period_current_reading !== null && m.period_current_reading !== undefined
+          ? String(Number(m.period_current_reading))
+          : '';
+      initNotes[m.id] = m.period_abnormal_note || '';
+    }
+  }
+  return { initDrafts, initNotes };
+}
+
+const MeterReadingRow = React.memo(function MeterReadingRow({
+  meter,
+  draftValue,
+  noteValue,
+  ocrState,
+  canWriteMeters,
+  anomalyThresholdPct,
+  isConfirming,
+  onDraftChange,
+  onNoteChange,
+  onOcrConfirm,
+  onOcrDismiss,
+  onOcrScan,
+  onQuickConfirm,
+  onOpenDetail,
+}) {
+  const metrics = useMemo(
+    () => evaluateRowMetrics(meter, draftValue, anomalyThresholdPct),
+    [meter, draftValue, anomalyThresholdPct]
+  );
+  const isElec = meter.meter_type === 'ELECTRICITY';
+  const rowHighlight = metrics.isInvalid
+    ? 'bg-rose-50/70'
+    : metrics.isAbnormal || metrics.readingStatus === 'FLAGGED'
+    ? 'bg-amber-50/70'
+    : metrics.isDirty
+    ? 'bg-sky-50/40'
+    : '';
+
+  const estMoney = computeMeterEstimatedAmount(metrics.consumption, meter);
+  const appliedPrice = meter.effective_unit_price ?? meter.unit_price;
+  const rowLocked = isMeterRowLockedForEdit(meter, canWriteMeters);
+  const turnoverBadge = resolveMeterTurnoverBadgeMeta(meter);
+  const rowOcrKey = getMeterOcrSlotKey(meter.id, meter.target_contract_id);
+
+  const canQuickConfirm =
+    !rowLocked &&
+    Boolean(meter.period_reading_id) &&
+    ['DRAFT', 'FLAGGED'].includes(metrics.readingStatus || '') &&
+    !metrics.isDirty;
+
+  return (
+    <tr className={`transition-colors ${rowHighlight}`}>
+      <TD className="max-w-[185px]">
+        <p className="font-semibold text-slate-900 whitespace-nowrap">
+          Căn {meter.apartment_code}{' '}
+          <span className="text-xs font-normal text-slate-500">
+            ({meter.building_code})
+          </span>
+        </p>
+        <div className="flex flex-wrap items-center gap-1 mt-0.5">
+          <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
+            {meter.meter_code}
+          </span>
+          {turnoverBadge.isMultiSlot ? (
+            <Badge variant="indigo">{turnoverBadge.slotLabel}</Badge>
+          ) : null}
+        </div>
+        {turnoverBadge.contractCode ? (
+          <p
+            className="text-[11px] text-slate-500 mt-0.5 truncate max-w-[175px]"
+            title={`${turnoverBadge.contractCode}${turnoverBadge.tenantName ? ` • ${turnoverBadge.tenantName}` : ''}`}
+          >
+            <span className="font-mono font-semibold text-slate-700">
+              {turnoverBadge.contractCode}
+            </span>
+            {turnoverBadge.tenantName ? ` • ${turnoverBadge.tenantName}` : ''}
+          </p>
+        ) : null}
+      </TD>
+
+      <TD>
+        <div className="flex items-center gap-1">
+          {isElec ? (
+            <Badge variant="amber">
+              <Zap className="w-3 h-3" /> Điện ({meter.unit})
+            </Badge>
+          ) : (
+            <Badge variant="sky">
+              <Droplets className="w-3 h-3" /> Nước ({meter.unit})
+            </Badge>
+          )}
+        </div>
+        <p className="text-xs text-slate-500 mt-1 whitespace-nowrap">
+          {formatMoney(appliedPrice)}/{meter.unit}
+          {meter.effective_price_source === 'CONTRACT_OVERRIDE' ? (
+            <span className="ml-1 text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded">
+              Giá HĐ
+            </span>
+          ) : meter.effective_price_source === 'BUILDING_CATALOG' ? (
+            <span className="ml-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">
+              Giá tòa
+            </span>
+          ) : null}
+        </p>
+      </TD>
+
+      <TD className="text-right font-mono tabular-nums font-medium text-slate-700 whitespace-nowrap">
+        <div>{metrics.prevReading}</div>
+        {metrics.baselineAvg !== null ? (
+          <div className="text-[11px] text-slate-400">
+            TB: {metrics.baselineAvg} {meter.unit}
+          </div>
+        ) : null}
+      </TD>
+
+      <TD className="text-center">
+        <AISuggestionField
+          active={Boolean(
+            canWriteMeters &&
+              ocrState &&
+              ocrState.reading !== null &&
+              ocrState.reading !== undefined
+          )}
+          confirmed={Boolean(ocrState?.confirmed)}
+          edited={Boolean(ocrState?.edited)}
+          confidence={ocrState?.confidence}
+          threshold={0.85}
+          warningText={
+            ocrState?.warnings?.length
+              ? ocrState.reason ||
+                `Cảnh báo hậu kiểm AI: ${ocrState.warnings.join(', ')}`
+              : ''
+          }
+          onConfirm={() => onOcrConfirm(rowOcrKey, draftValue)}
+          onDismiss={() => onOcrDismiss(rowOcrKey)}
+          className="inline-block text-left max-w-[200px]"
+        >
+          <input
+            type="number"
+            step="0.01"
+            min={metrics.prevReading}
+            disabled={rowLocked}
+            value={draftValue}
+            onChange={(e) => onDraftChange(meter.id, rowOcrKey, e.target.value)}
+            placeholder={`>= ${metrics.prevReading}`}
+            className={`w-28 h-8 px-2 rounded-lg border font-mono tabular-nums text-sm font-semibold text-center focus:outline-none focus:ring-2 ${
+              metrics.isInvalid
+                ? 'border-rose-400 bg-rose-50 text-rose-800 focus:ring-rose-500/20'
+                : metrics.isAbnormal
+                ? 'border-amber-400 bg-white text-amber-900 focus:ring-amber-500/20'
+                : 'border-slate-200 bg-white text-slate-900 focus:border-primary-500 focus:ring-primary-500/20'
+            } disabled:bg-slate-50 disabled:text-slate-500`}
+          />
+        </AISuggestionField>
+        {metrics.isInvalid ? (
+          <p className="text-[11px] text-rose-600 font-medium mt-1 whitespace-nowrap">
+            &lt; {metrics.prevReading}
+          </p>
+        ) : null}
+        {ocrState?.reading === null && ocrState?.reason ? (
+          <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-1 mt-1 max-w-[200px] mx-auto leading-snug">
+            {ocrState.reason}
+          </p>
+        ) : null}
+        {ocrState?.errorBanner ? (
+          <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-1 max-w-[200px] mx-auto leading-snug">
+            {ocrState.errorBanner}
+          </p>
+        ) : null}
+      </TD>
+
+      <TD className="text-right whitespace-nowrap">
+        {metrics.consumption !== null ? (
+          <div>
+            <span
+              className={`font-mono tabular-nums font-bold ${
+                metrics.isAbnormal ? 'text-amber-700' : 'text-slate-900'
+              }`}
+            >
+              {metrics.consumption} {meter.unit}
+            </span>
+            {metrics.diffPct !== null ? (
+              <p
+                className={`text-[11px] font-medium ${
+                  Math.abs(metrics.diffPct) > anomalyThresholdPct
+                    ? 'text-rose-600'
+                    : 'text-slate-400'
+                }`}
+              >
+                {metrics.diffPct > 0 ? `+${metrics.diffPct}%` : `${metrics.diffPct}%`}{' '}
+                vs TB
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <span className="text-xs text-slate-400">—</span>
+        )}
+      </TD>
+
+      <TD className="text-right font-mono tabular-nums font-semibold text-slate-800 whitespace-nowrap">
+        {estMoney !== null ? formatMoney(estMoney) : '—'}
+      </TD>
+
+      <TD className="text-center">
+        <div className="space-y-1 max-w-[180px] mx-auto">
+          <div>
+            {renderReadingStatusBadge(metrics.readingStatus, anomalyThresholdPct)}
+          </div>
+          {meter.period_reading_billed ? (
+            <div>
+              <Badge variant="slate">
+                <Lock className="w-3 h-3" /> Đã lập HĐ
+              </Badge>
+            </div>
+          ) : null}
+          {metrics.isAbnormal ? (
+            <div>
+              <Badge
+                variant={
+                  metrics.diffPct !== null &&
+                  Math.abs(metrics.diffPct) >= anomalyThresholdPct * 2
+                    ? 'red'
+                    : 'amber'
+                }
+              >
+                <AlertTriangle className="w-3 h-3" /> &gt;{anomalyThresholdPct}%
+              </Badge>
+            </div>
+          ) : null}
+          {metrics.isAbnormal || metrics.readingStatus === 'FLAGGED' ? (
+            !rowLocked ? (
+              <input
+                type="text"
+                value={noteValue}
+                onChange={(e) => onNoteChange(meter.id, e.target.value)}
+                placeholder="Ghi chú giải trình..."
+                className="w-full h-7 px-2 text-xs rounded border border-amber-300 bg-white text-slate-700 focus:outline-none focus:border-amber-500"
+              />
+            ) : meter.period_abnormal_note ? (
+              <p className="text-xs text-amber-800">{meter.period_abnormal_note}</p>
+            ) : null
+          ) : null}
+        </div>
+      </TD>
+
+      <TD className="text-center">
+        <div className="inline-flex flex-wrap items-center justify-center gap-1">
+          {!rowLocked ? (
+            <label
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
+                ocrState?.loading
+                  ? 'bg-indigo-50 text-indigo-400 border-indigo-200 pointer-events-none'
+                  : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
+              }`}
+              title="Chụp hoặc chọn ảnh mặt đồng hồ để AI đọc chỉ số nháp (AI-02)"
+            >
+              {ocrState?.loading ? (
+                <RefreshCw className="w-3 h-3 animate-spin" />
+              ) : (
+                <Sparkles className="w-3 h-3" />
+              )}
+              <span>{ocrState?.loading ? 'Đang đọc...' : 'Ảnh AI'}</span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                capture="environment"
+                className="hidden"
+                disabled={Boolean(ocrState?.loading)}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) onOcrScan(meter, f);
+                }}
+              />
+            </label>
+          ) : null}
+          {canQuickConfirm ? (
+            <Button
+              size="xs"
+              variant="soft"
+              icon={CheckCircle2}
+              loading={isConfirming}
+              onClick={() => onQuickConfirm(meter, metrics)}
+            >
+              Chốt
+            </Button>
+          ) : null}
+          <Button
+            size="xs"
+            variant={meter.period_image_url ? 'soft' : 'outline'}
+            icon={Camera}
+            onClick={() => onOpenDetail(meter)}
+          >
+            {meter.period_image_url ? 'Có ảnh' : 'Chi tiết'}
+          </Button>
+        </div>
+      </TD>
+    </tr>
+  );
+});
+
 export function MeterReadingsPage() {
   const toast = useToast();
   const { isManager } = usePermission();
   // PRD 6.2: Chỉ MANAGER mới được khởi tạo, ghi nhận và xác nhận chốt chỉ số đồng hồ (SYS_ADMIN / OWNER chỉ đọc)
   const canWriteMeters = isManager;
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
+  const setSelectedBuildingId = useAuthStore((s) => s.setSelectedBuildingId);
   const [searchParams, setSearchParams] = useSearchParams();
+  const fetchSeqRef = React.useRef(0);
 
-  const [period, setPeriod] = useState(() => searchParams.get('period') || getCurrentPeriod());
+  const initialPeriod = searchParams.get('period') || getCurrentPeriod();
+  const initialCachedRes = metersService.peekList(
+    buildMeterListQueryParams({
+      buildingId: selectedBuildingId,
+      meterType: '',
+      statusFilter: '',
+      activeContractFilter: '',
+      period: initialPeriod,
+      search: '',
+    })
+  );
+  const initialSeed = useMemo(
+    () => buildInitialDraftsAndNotes(initialCachedRes?.data),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  const [period, setPeriod] = useState(initialPeriod);
   const [meterType, setMeterType] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [activeContractFilter, setActiveContractFilter] = useState('');
+  const [activeContractFilter, setActiveContractFilter] = useState(true);
   const [abnormalOnly, setAbnormalOnly] = useState(false);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
 
-  const [meters, setMeters] = useState([]);
-  const [anomalyThresholdPct, setAnomalyThresholdPct] = useState(30);
-  const [drafts, setDrafts] = useState({});
-  const [notes, setNotes] = useState({});
+  useEffect(() => {
+    if (!search) {
+      setDebouncedSearch('');
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const [meters, setMeters] = useState(() =>
+    Array.isArray(initialCachedRes?.data) ? initialCachedRes.data : []
+  );
+  const [anomalyThresholdPct, setAnomalyThresholdPct] = useState(() =>
+    resolveAnomalyThresholdPct(initialCachedRes?.anomaly_threshold_pct)
+  );
+  const [drafts, setDrafts] = useState(() => initialSeed.initDrafts);
+  const [notes, setNotes] = useState(() => initialSeed.initNotes);
   const [aiOcrByMeter, setAiOcrByMeter] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !Array.isArray(initialCachedRes?.data));
   const [savingBatch, setSavingBatch] = useState(false);
   const [confirmingBatch, setConfirmingBatch] = useState(false);
   const [confirmingRowId, setConfirmingRowId] = useState(null);
@@ -203,69 +545,88 @@ export function MeterReadingsPage() {
     initial_reading: '0',
   });
 
-  const fetchMeters = useCallback(async () => {
-    setLoading(true);
+  const fetchMeters = useCallback(async (opts = {}) => {
+    const seq = ++fetchSeqRef.current;
+    const queryParams = buildMeterListQueryParams({
+      buildingId: selectedBuildingId,
+      meterType,
+      statusFilter,
+      activeContractFilter,
+      period,
+      search: debouncedSearch,
+    });
+    const cached = !opts?.force ? metersService.peekList(queryParams) : null;
+    if (Array.isArray(cached?.data)) {
+      setMeters(cached.data);
+      setAnomalyThresholdPct(resolveAnomalyThresholdPct(cached.anomaly_threshold_pct));
+      const { initDrafts, initNotes } = buildInitialDraftsAndNotes(cached.data);
+      setDrafts(initDrafts);
+      setNotes(initNotes);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
-      const res = await metersService.list(
-        buildMeterListQueryParams({
-          buildingId: selectedBuildingId,
-          meterType,
-          statusFilter,
-          activeContractFilter,
-          period,
-          search,
-        })
-      );
+      const res = await metersService.list(queryParams, { force: Boolean(opts?.force) });
+      if (seq !== fetchSeqRef.current) return;
       const list = res.data || [];
       setMeters(list);
       setAnomalyThresholdPct(resolveAnomalyThresholdPct(res.anomaly_threshold_pct));
 
-      const initDrafts = {};
-      const initNotes = {};
-      for (const m of list) {
-        initDrafts[m.id] =
-          m.period_current_reading !== null && m.period_current_reading !== undefined
-            ? String(Number(m.period_current_reading))
-            : '';
-        initNotes[m.id] = m.period_abnormal_note || '';
-      }
+      const { initDrafts, initNotes } = buildInitialDraftsAndNotes(list);
       setDrafts(initDrafts);
       setNotes(initNotes);
       setAiOcrByMeter({});
     } catch (err) {
+      if (seq !== fetchSeqRef.current) return;
+      if (err?.response?.status === 403 && selectedBuildingId) {
+        setSelectedBuildingId('');
+        return;
+      }
       toast.error(extractErrorMessage(err, 'Không thể tải danh sách đồng hồ điện/nước.'));
     } finally {
-      setLoading(false);
+      if (seq === fetchSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [selectedBuildingId, meterType, statusFilter, activeContractFilter, period, search, toast]);
+  }, [
+    selectedBuildingId,
+    setSelectedBuildingId,
+    meterType,
+    statusFilter,
+    activeContractFilter,
+    period,
+    debouncedSearch,
+    toast,
+  ]);
 
   useEffect(() => {
-    const t = setTimeout(() => {
-      fetchMeters();
-    }, 200);
-    return () => clearTimeout(t);
+    fetchMeters();
   }, [fetchMeters]);
 
-  const enrichedRows = useMemo(() => {
-    let mapped = meters.map((m) => ({
-      ...m,
+  const rowsWithMetrics = useMemo(() => {
+    return meters.map((m) => ({
+      meter: m,
       metrics: evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct),
     }));
+  }, [meters, drafts, anomalyThresholdPct]);
+
+  const enrichedRows = useMemo(() => {
+    let filtered = rowsWithMetrics;
     if (statusFilter) {
-      mapped = mapped.filter((r) => r.metrics.readingStatus === statusFilter);
+      filtered = filtered.filter((r) => r.metrics.readingStatus === statusFilter);
     }
     if (abnormalOnly) {
-      mapped = mapped.filter((r) => r.metrics.isAbnormal || Boolean(r.period_is_abnormal));
+      filtered = filtered.filter((r) => r.metrics.isAbnormal || Boolean(r.meter.period_is_abnormal));
     }
-    return mapped;
-  }, [meters, drafts, statusFilter, abnormalOnly, anomalyThresholdPct]);
+    return filtered;
+  }, [rowsWithMetrics, statusFilter, abnormalOnly]);
 
   const dirtyValidRows = useMemo(() => {
-    return meters.filter((m) => {
-      const meta = evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct);
-      return !m.period_reading_billed && meta.isDirty && !meta.isInvalid;
-    });
-  }, [meters, drafts, anomalyThresholdPct]);
+    return rowsWithMetrics
+      .filter((r) => !r.meter.period_reading_billed && r.metrics.isDirty && !r.metrics.isInvalid)
+      .map((r) => r.meter);
+  }, [rowsWithMetrics]);
 
   const unconfirmedRows = useMemo(() => {
     return meters.filter(
@@ -277,31 +638,32 @@ export function MeterReadingsPage() {
   }, [meters]);
 
   const hasInvalidDrafts = useMemo(() => {
-    return meters.some(
-      (m) => !m.period_reading_billed && evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isInvalid
+    return rowsWithMetrics.some(
+      (r) => !r.meter.period_reading_billed && r.metrics.isInvalid
     );
-  }, [meters, drafts, anomalyThresholdPct]);
+  }, [rowsWithMetrics]);
 
   const stats = useMemo(() => {
-    const total = meters.length;
-    const confirmed = meters.filter(
-      (m) =>
-        Boolean(m.period_reading_id) &&
-        (m.period_reading_status || 'CONFIRMED') === 'CONFIRMED'
-    ).length;
-    const pendingConfirm = meters.filter(
-      (m) =>
+    const total = rowsWithMetrics.length;
+    let confirmed = 0;
+    let pendingConfirm = 0;
+    let abnormalCount = 0;
+    for (const { meter: m, metrics } of rowsWithMetrics) {
+      if (Boolean(m.period_reading_id) && (m.period_reading_status || 'CONFIRMED') === 'CONFIRMED') {
+        confirmed += 1;
+      } else if (
         Boolean(m.period_reading_id) &&
         ['DRAFT', 'FLAGGED'].includes(m.period_reading_status || '')
-    ).length;
+      ) {
+        pendingConfirm += 1;
+      }
+      if (metrics.isAbnormal || Boolean(m.period_is_abnormal)) {
+        abnormalCount += 1;
+      }
+    }
     const unrecorded = Math.max(0, total - confirmed - pendingConfirm);
-    const abnormalCount = meters.filter(
-      (m) =>
-        evaluateRowMetrics(m, drafts[m.id], anomalyThresholdPct).isAbnormal ||
-        Boolean(m.period_is_abnormal)
-    ).length;
     return { total, confirmed, pendingConfirm, unrecorded, abnormalCount };
-  }, [meters, drafts, anomalyThresholdPct]);
+  }, [rowsWithMetrics]);
 
   const handleMeterOcrScan = async (meter, rawFileOrDataUri, { intoSingleModal = false } = {}) => {
     if (!canWriteMeters || !meter || !rawFileOrDataUri) return;
@@ -473,10 +835,11 @@ export function MeterReadingsPage() {
     }
   };
 
-  const handleConfirmSingleRow = async (row) => {
+  const handleConfirmSingleRow = async (row, rowMetrics) => {
     if (!canWriteMeters || !row.period_reading_id) return;
     const noteText = (notes[row.id] ?? row.period_abnormal_note ?? '').trim();
-    if ((row.period_is_abnormal || row.metrics?.isAbnormal) && !noteText) {
+    const isRowAbnormal = Boolean(row.period_is_abnormal || rowMetrics?.isAbnormal || row.metrics?.isAbnormal);
+    if (isRowAbnormal && !noteText) {
       toast.warning(
         `Công tơ ${row.meter_code} có biến động >${anomalyThresholdPct}%. Vui lòng nhập ghi chú giải trình trước khi xác nhận chốt.`
       );
@@ -488,13 +851,71 @@ export function MeterReadingsPage() {
         abnormal_note: noteText || undefined,
       });
       toast.success(res.message || `Đã xác nhận chốt chỉ số công tơ ${row.meter_code}.`);
-      fetchMeters();
+      fetchMeters({ force: true });
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể xác nhận chốt chỉ số.'));
     } finally {
       setConfirmingRowId(null);
     }
   };
+
+  const handleDraftChange = useCallback((meterId, rowOcrKey, val) => {
+    setDrafts((prev) => ({ ...prev, [meterId]: val }));
+    setAiOcrByMeter((prev) =>
+      prev[rowOcrKey]?.reading !== null && prev[rowOcrKey]?.reading !== undefined
+        ? {
+            ...prev,
+            [rowOcrKey]: {
+              ...prev[rowOcrKey],
+              confirmed: true,
+              edited: Number(val) !== Number(prev[rowOcrKey].reading),
+            },
+          }
+        : prev
+    );
+  }, []);
+
+  const handleNoteChange = useCallback((meterId, val) => {
+    setNotes((prev) => ({ ...prev, [meterId]: val }));
+  }, []);
+
+  const handleOcrConfirm = useCallback((rowOcrKey, draftVal) => {
+    setAiOcrByMeter((prev) => ({
+      ...prev,
+      [rowOcrKey]: {
+        ...prev[rowOcrKey],
+        confirmed: true,
+        edited: Number(draftVal) !== Number(prev[rowOcrKey]?.reading),
+      },
+    }));
+  }, []);
+
+  const handleOcrDismiss = useCallback((rowOcrKey) => {
+    setAiOcrByMeter((prev) => {
+      const next = { ...prev };
+      delete next[rowOcrKey];
+      return next;
+    });
+  }, []);
+
+  const rowActionsRef = React.useRef({});
+  rowActionsRef.current = {
+    handleMeterOcrScan,
+    handleConfirmSingleRow,
+    openSingleModal: (m) => openSingleModal(m),
+  };
+
+  const handleRowOcrScan = useCallback((meter, file) => {
+    rowActionsRef.current.handleMeterOcrScan(meter, file);
+  }, []);
+
+  const handleRowQuickConfirm = useCallback((meter, metrics) => {
+    rowActionsRef.current.handleConfirmSingleRow(meter, metrics);
+  }, []);
+
+  const handleRowOpenDetail = useCallback((meter) => {
+    rowActionsRef.current.openSingleModal(meter);
+  }, []);
 
   const handleSlotContractChange = (nextContractId) => {
     setSelectedSlotContractId(nextContractId);
@@ -902,317 +1323,35 @@ export function MeterReadingsPage() {
               <tr>
                 <TH>Căn hộ / Công tơ</TH>
                 <TH>Loại &amp; Đơn giá</TH>
-                <TH className="text-right">Chỉ số cũ &amp; TB 3 kỳ</TH>
-                <TH className="min-w-[150px] text-center">Chỉ số mới ({period})</TH>
+                <TH className="text-right">Chỉ số cũ</TH>
+                <TH className="w-[120px] text-center">Chỉ số mới ({period})</TH>
                 <TH className="text-right">Sản lượng</TH>
                 <TH className="text-right">Tạm tính</TH>
                 <TH className="text-center">Trạng thái</TH>
-                <TH className="w-px whitespace-nowrap text-center">Thao tác</TH>
+                <TH className="text-center">Thao tác</TH>
               </tr>
             </THead>
             <TBody>
-              {enrichedRows.map((row) => {
-                const { metrics } = row;
-                const isElec = row.meter_type === 'ELECTRICITY';
-                const rowHighlight = metrics.isInvalid
-                  ? 'bg-rose-50/70'
-                  : metrics.isAbnormal || metrics.readingStatus === 'FLAGGED'
-                  ? 'bg-amber-50/70'
-                  : metrics.isDirty
-                  ? 'bg-sky-50/40'
-                  : '';
-
-                const estMoney = computeMeterEstimatedAmount(metrics.consumption, row);
-                const appliedPrice = row.effective_unit_price ?? row.unit_price;
-                const rowLocked = isMeterRowLockedForEdit(row, canWriteMeters);
-                const turnoverBadge = resolveMeterTurnoverBadgeMeta(row);
-                const rowOcrKey = getMeterOcrSlotKey(row.id, row.target_contract_id);
-
-                const canQuickConfirm =
-                  !rowLocked &&
-                  Boolean(row.period_reading_id) &&
-                  ['DRAFT', 'FLAGGED'].includes(metrics.readingStatus || '') &&
-                  !metrics.isDirty;
-
+              {enrichedRows.map(({ meter }) => {
+                const rowOcrKey = getMeterOcrSlotKey(meter.id, meter.target_contract_id);
                 return (
-                  <tr key={row.id} className={`transition-colors ${rowHighlight}`}>
-                    <TD>
-                      <p className="font-semibold text-slate-900 whitespace-nowrap">
-                        Căn {row.apartment_code}{' '}
-                        <span className="text-xs font-normal text-slate-500">
-                          ({row.building_code})
-                        </span>
-                      </p>
-                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                        <span className="font-mono text-[11px] text-slate-500 whitespace-nowrap">
-                          {row.meter_code}
-                        </span>
-                        {turnoverBadge.isMultiSlot ? (
-                          <Badge variant="indigo">{turnoverBadge.slotLabel}</Badge>
-                        ) : null}
-                      </div>
-                      {turnoverBadge.contractCode ? (
-                        <p className="text-[11px] text-slate-500 mt-0.5 whitespace-nowrap">
-                          <span className="font-mono font-semibold text-slate-700">
-                            {turnoverBadge.contractCode}
-                          </span>
-                          {turnoverBadge.tenantName ? ` • ${turnoverBadge.tenantName}` : ''}
-                        </p>
-                      ) : null}
-                    </TD>
-
-                    <TD>
-                      <div className="flex items-center gap-1.5">
-                        {isElec ? (
-                          <Badge variant="amber">
-                            <Zap className="w-3 h-3" /> Điện ({row.unit})
-                          </Badge>
-                        ) : (
-                          <Badge variant="sky">
-                            <Droplets className="w-3 h-3" /> Nước ({row.unit})
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-500 mt-1 whitespace-nowrap">
-                        {formatMoney(appliedPrice)} / {row.unit}
-                        {row.effective_price_source === 'CONTRACT_OVERRIDE' ? (
-                          <span className="ml-1 text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded">
-                            Giá HĐ
-                          </span>
-                        ) : row.effective_price_source === 'BUILDING_CATALOG' ? (
-                          <span className="ml-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">
-                            Giá tòa
-                          </span>
-                        ) : null}
-                      </p>
-                    </TD>
-
-                    <TD className="text-right font-mono tabular-nums font-medium text-slate-700 whitespace-nowrap">
-                      <div>{metrics.prevReading}</div>
-                      {metrics.baselineAvg !== null ? (
-                        <div className="text-[11px] text-slate-400">
-                          TB 3 kỳ: {metrics.baselineAvg} {row.unit}
-                        </div>
-                      ) : null}
-                    </TD>
-
-                    <TD className="text-center">
-                      <AISuggestionField
-                        active={Boolean(
-                          canWriteMeters &&
-                            aiOcrByMeter[rowOcrKey] &&
-                            aiOcrByMeter[rowOcrKey].reading !== null &&
-                            aiOcrByMeter[rowOcrKey].reading !== undefined
-                        )}
-                        confirmed={Boolean(aiOcrByMeter[rowOcrKey]?.confirmed)}
-                        edited={Boolean(aiOcrByMeter[rowOcrKey]?.edited)}
-                        confidence={aiOcrByMeter[rowOcrKey]?.confidence}
-                        threshold={0.85}
-                        warningText={
-                          aiOcrByMeter[rowOcrKey]?.warnings?.length
-                            ? aiOcrByMeter[rowOcrKey].reason ||
-                              `Cảnh báo hậu kiểm AI: ${aiOcrByMeter[rowOcrKey].warnings.join(', ')}`
-                            : ''
-                        }
-                        onConfirm={() =>
-                          setAiOcrByMeter((prev) => ({
-                            ...prev,
-                            [rowOcrKey]: {
-                              ...prev[rowOcrKey],
-                              confirmed: true,
-                              edited:
-                                Number(drafts[row.id]) !== Number(prev[rowOcrKey]?.reading),
-                            },
-                          }))
-                        }
-                        onDismiss={() =>
-                          setAiOcrByMeter((prev) => {
-                            const next = { ...prev };
-                            delete next[rowOcrKey];
-                            return next;
-                          })
-                        }
-                        className="inline-block text-left max-w-[240px]"
-                      >
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={metrics.prevReading}
-                          disabled={rowLocked}
-                          value={drafts[row.id] ?? ''}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setDrafts((prev) => ({ ...prev, [row.id]: val }));
-                            setAiOcrByMeter((prev) =>
-                              prev[rowOcrKey]?.reading !== null && prev[rowOcrKey]?.reading !== undefined
-                                ? {
-                                    ...prev,
-                                    [rowOcrKey]: {
-                                      ...prev[rowOcrKey],
-                                      confirmed: true,
-                                      edited: Number(val) !== Number(prev[rowOcrKey].reading),
-                                    },
-                                  }
-                                : prev
-                            );
-                          }}
-                          placeholder={`>= ${metrics.prevReading}`}
-                          className={`w-36 h-9 px-3 rounded-lg border font-mono tabular-nums text-sm font-semibold text-center focus:outline-none focus:ring-2 ${
-                            metrics.isInvalid
-                              ? 'border-rose-400 bg-rose-50 text-rose-800 focus:ring-rose-500/20'
-                              : metrics.isAbnormal
-                              ? 'border-amber-400 bg-white text-amber-900 focus:ring-amber-500/20'
-                              : 'border-slate-200 bg-white text-slate-900 focus:border-primary-500 focus:ring-primary-500/20'
-                          } disabled:bg-slate-50 disabled:text-slate-500`}
-                        />
-                      </AISuggestionField>
-                      {metrics.isInvalid ? (
-                        <p className="text-[11px] text-rose-600 font-medium mt-1 whitespace-nowrap">
-                          Nhỏ hơn chỉ số cũ ({metrics.prevReading})
-                        </p>
-                      ) : null}
-                      {aiOcrByMeter[rowOcrKey]?.reading === null && aiOcrByMeter[rowOcrKey]?.reason ? (
-                        <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
-                          {aiOcrByMeter[rowOcrKey].reason}
-                        </p>
-                      ) : null}
-                      {aiOcrByMeter[rowOcrKey]?.errorBanner ? (
-                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-1 max-w-[230px] mx-auto leading-snug">
-                          {aiOcrByMeter[rowOcrKey].errorBanner}
-                        </p>
-                      ) : null}
-                    </TD>
-
-                    <TD className="text-right whitespace-nowrap">
-                      {metrics.consumption !== null ? (
-                        <div>
-                          <span
-                            className={`font-mono tabular-nums font-bold ${
-                              metrics.isAbnormal ? 'text-amber-700' : 'text-slate-900'
-                            }`}
-                          >
-                            {metrics.consumption} {row.unit}
-                          </span>
-                          {metrics.diffPct !== null ? (
-                            <p
-                              className={`text-[11px] font-medium ${
-                                Math.abs(metrics.diffPct) > anomalyThresholdPct
-                                  ? 'text-rose-600'
-                                  : 'text-slate-400'
-                              }`}
-                            >
-                              {metrics.diffPct > 0 ? `+${metrics.diffPct}%` : `${metrics.diffPct}%`}{' '}
-                              vs TB 3 kỳ
-                            </p>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-slate-400">—</span>
-                      )}
-                    </TD>
-
-                    <TD className="text-right font-mono tabular-nums font-semibold text-slate-800 whitespace-nowrap">
-                      {estMoney !== null ? formatMoney(estMoney) : '—'}
-                    </TD>
-
-                    <TD className="text-center">
-                      <div className="space-y-1 max-w-[220px] mx-auto">
-                        <div>
-                          {renderReadingStatusBadge(metrics.readingStatus, anomalyThresholdPct)}
-                        </div>
-                        {row.period_reading_billed ? (
-                          <div>
-                            <Badge variant="slate">
-                              <Lock className="w-3 h-3" /> Đã lập HĐ
-                            </Badge>
-                          </div>
-                        ) : null}
-                        {metrics.isAbnormal ? (
-                          <div>
-                            <Badge
-                              variant={
-                                metrics.diffPct !== null &&
-                                Math.abs(metrics.diffPct) >= anomalyThresholdPct * 2
-                                  ? 'red'
-                                  : 'amber'
-                              }
-                            >
-                              <AlertTriangle className="w-3 h-3" /> Biến động &gt;
-                              {anomalyThresholdPct}%
-                            </Badge>
-                          </div>
-                        ) : null}
-                        {metrics.isAbnormal || metrics.readingStatus === 'FLAGGED' ? (
-                          !rowLocked ? (
-                            <input
-                              type="text"
-                              value={notes[row.id] ?? ''}
-                              onChange={(e) =>
-                                setNotes((prev) => ({ ...prev, [row.id]: e.target.value }))
-                              }
-                              placeholder="Ghi chú giải trình bất thường..."
-                              className="w-full h-7 px-2 text-xs rounded border border-amber-300 bg-white text-slate-700 focus:outline-none focus:border-amber-500"
-                            />
-                          ) : row.period_abnormal_note ? (
-                            <p className="text-xs text-amber-800">{row.period_abnormal_note}</p>
-                          ) : null
-                        ) : null}
-                      </div>
-                    </TD>
-
-                    <TD className="w-px whitespace-nowrap text-center">
-                      <div className="inline-flex items-center gap-1.5">
-                        {!rowLocked ? (
-                          <label
-                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
-                              aiOcrByMeter[rowOcrKey]?.loading
-                                ? 'bg-indigo-50 text-indigo-400 border-indigo-200 pointer-events-none'
-                                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
-                            }`}
-                            title="Chụp hoặc chọn ảnh mặt đồng hồ để AI đọc chỉ số nháp (AI-02)"
-                          >
-                            {aiOcrByMeter[rowOcrKey]?.loading ? (
-                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Sparkles className="w-3.5 h-3.5" />
-                            )}
-                            <span>{aiOcrByMeter[rowOcrKey]?.loading ? 'Đang đọc...' : 'Ảnh AI'}</span>
-                            <input
-                              type="file"
-                              accept="image/jpeg,image/png,image/webp"
-                              capture="environment"
-                              className="hidden"
-                              disabled={Boolean(aiOcrByMeter[rowOcrKey]?.loading)}
-                              onChange={(e) => {
-                                const f = e.target.files?.[0];
-                                e.target.value = '';
-                                if (f) handleMeterOcrScan(row, f);
-                              }}
-                            />
-                          </label>
-                        ) : null}
-                        {canQuickConfirm ? (
-                          <Button
-                            size="xs"
-                            variant="soft"
-                            icon={CheckCircle2}
-                            loading={confirmingRowId === row.period_reading_id}
-                            onClick={() => handleConfirmSingleRow(row)}
-                          >
-                            Xác nhận chốt
-                          </Button>
-                        ) : null}
-                        <Button
-                          size="xs"
-                          variant={row.period_image_url ? 'soft' : 'outline'}
-                          icon={Camera}
-                          onClick={() => openSingleModal(row)}
-                        >
-                          {row.period_image_url ? 'Có ảnh' : 'Chi tiết'}
-                        </Button>
-                      </div>
-                    </TD>
-                  </tr>
+                  <MeterReadingRow
+                    key={meter.id}
+                    meter={meter}
+                    draftValue={drafts[meter.id] ?? ''}
+                    noteValue={notes[meter.id] ?? ''}
+                    ocrState={aiOcrByMeter[rowOcrKey]}
+                    canWriteMeters={canWriteMeters}
+                    anomalyThresholdPct={anomalyThresholdPct}
+                    isConfirming={confirmingRowId === meter.period_reading_id}
+                    onDraftChange={handleDraftChange}
+                    onNoteChange={handleNoteChange}
+                    onOcrConfirm={handleOcrConfirm}
+                    onOcrDismiss={handleOcrDismiss}
+                    onOcrScan={handleRowOcrScan}
+                    onQuickConfirm={handleRowQuickConfirm}
+                    onOpenDetail={handleRowOpenDetail}
+                  />
                 );
               })}
             </TBody>

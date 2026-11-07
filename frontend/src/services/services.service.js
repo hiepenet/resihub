@@ -16,6 +16,8 @@ export const servicesService = {
   createCatalog: (payload) => api.post('/api/v1/service-catalog', payload).then((r) => r.data),
   updateCatalog: (id, payload) => api.patch(`/api/v1/service-catalog/${id}`, payload).then((r) => r.data),
 
+  peekSubscriptions: (params) =>
+    peekQueryCache(buildCacheKey('services', { op: 'subscriptions', ...(params || {}) }))?.data || null,
   listSubscriptions: (params, options = {}) =>
     cachedFetch(
       buildCacheKey('services', { op: 'subscriptions', ...(params || {}) }),

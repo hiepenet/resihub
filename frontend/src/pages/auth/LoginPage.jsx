@@ -25,7 +25,9 @@ import { extractErrorMessage, isValidPhone, normalizePhone } from '../../utils/v
 const DEMO_ACCOUNTS = [
   { label: 'Quản trị (SYS_ADMIN)', email: 'admin@resihub.vn', pass: 'Admin@123456' },
   { label: 'Chủ đầu tư Ocean Park', email: 'owner.vop@resihub.vn', pass: 'Demo@123456' },
-  { label: 'Quản lý Tòa VOP-A', email: 'manager.vop.a@resihub.vn', pass: 'Demo@123456' },
+  { label: 'Quản lý Ocean Park 1', email: 'manager.vop1@resihub.vn', pass: 'Demo@123456' },
+  { label: 'Quản lý Ocean Park 2', email: 'manager.vop2@resihub.vn', pass: 'Demo@123456' },
+  { label: 'Quản lý Ocean Park 3', email: 'manager.vop3@resihub.vn', pass: 'Demo@123456' },
   { label: 'Cư dân mẫu', email: 'tenant1@resihub.vn', pass: 'Demo@123456' },
 ];
 

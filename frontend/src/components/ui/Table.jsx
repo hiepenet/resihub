@@ -24,7 +24,7 @@ export function TH({ children, className = '', ...props }) {
   const alignCls = /\btext-(left|center|right)\b/.test(className) ? '' : 'text-left';
   return (
     <th
-      className={`px-4 py-3 first:pl-5 last:pr-5 text-xs font-semibold text-slate-600 tracking-normal whitespace-nowrap align-middle ${alignCls} ${className}`.trim()}
+      className={`px-2.5 py-2.5 sm:px-3 first:pl-4 last:pr-4 text-xs font-semibold text-slate-600 tracking-normal whitespace-nowrap align-middle ${alignCls} ${className}`.trim()}
       {...props}
     >
       {children}
@@ -36,7 +36,7 @@ export function TD({ children, className = '', ...props }) {
   const alignCls = /\btext-(left|center|right)\b/.test(className) ? '' : 'text-left';
   return (
     <td
-      className={`px-4 py-3.5 first:pl-5 last:pr-5 text-sm text-slate-700 align-middle ${alignCls} ${className}`.trim()}
+      className={`px-2.5 py-2.5 sm:px-3 first:pl-4 last:pr-4 text-sm text-slate-700 align-middle ${alignCls} ${className}`.trim()}
       {...props}
     >
       {children}

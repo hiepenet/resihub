@@ -31,14 +31,22 @@ export const useAuthStore = create((set, get) => ({
     if (refreshToken) localStorage.setItem('refreshToken', refreshToken);
     localStorage.setItem('user', JSON.stringify(user));
     localStorage.removeItem('activeRole');
-    localStorage.removeItem('resihub_selected_building_id');
+
+    const assignedBuildingIds = getAssignedBuildingIds(user);
+    const initialBuildingId =
+      assignedBuildingIds.length === 1 ? String(assignedBuildingIds[0]) : '';
+    if (initialBuildingId) {
+      localStorage.setItem('resihub_selected_building_id', initialBuildingId);
+    } else {
+      localStorage.removeItem('resihub_selected_building_id');
+    }
 
     set({
       accessToken,
       refreshToken: refreshToken || get().refreshToken,
       user,
       isAuthenticated: true,
-      selectedBuildingId: '',
+      selectedBuildingId: initialBuildingId,
     });
   },
 
