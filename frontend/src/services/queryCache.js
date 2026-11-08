@@ -158,7 +158,7 @@ export function invalidateQueryCache(prefixes) {
 }
 
 const URL_INVALIDATION_RULES = [
-  { match: '/api/v1/tenants', namespaces: ['tenants', 'contracts', 'reports'] },
+  { match: '/api/v1/tenants', namespaces: ['tenants', 'contracts', 'reports', 'users'] },
   {
     match: '/api/v1/contracts',
     namespaces: ['contracts', 'apartments', 'buildings', 'tenants', 'deposits', 'meters', 'invoices', 'reports'],
@@ -177,7 +177,8 @@ const URL_INVALIDATION_RULES = [
   { match: '/api/v1/service-requests', namespaces: ['serviceRequests', 'reports'] },
   { match: '/api/v1/notifications', namespaces: ['notifications'] },
   { match: '/api/v1/announcements', namespaces: ['notifications'] },
-  { match: '/api/v1/admin/users', namespaces: ['users'] },
+  { match: '/api/v1/zalo-groups', namespaces: ['notifications'] },
+  { match: '/api/v1/admin/users', namespaces: ['users', 'tenants'] },
 ];
 
 export function invalidateRelatedNamespacesForUrl(url) {

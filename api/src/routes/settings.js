@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool } from '../db/client.js';
+import { pool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
@@ -7,6 +7,11 @@ import { runDailyJobs } from '../jobs/daily.js';
 import { todayVietnamYmd } from '../services/serviceBilling.js';
 import { normalizeAiConfig } from '../services/aiRules.js';
 import { isGeminiApiKeyConfigured } from '../services/geminiClient.js';
+import { getUserRoleCodes, logAccessDenied } from '../services/ownerScope.js';
+import {
+  DEFAULT_SYSTEM_SETTINGS,
+  VALID_SYSTEM_SETTING_KEYS,
+} from '../services/sysAdminDeleteGuards.js';
 
 const router = express.Router();
 const DATE_YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -94,6 +99,25 @@ function normalizeSlaConfig(incoming, existing = {}) {
   return merged;
 }
 
+function buildSettingsMapWithDefaults(rows = []) {
+  const map = structuredClone(DEFAULT_SYSTEM_SETTINGS);
+  for (const row of rows) {
+    if (
+      map[row.key] &&
+      typeof map[row.key] === 'object' &&
+      !Array.isArray(map[row.key]) &&
+      row.value &&
+      typeof row.value === 'object' &&
+      !Array.isArray(row.value)
+    ) {
+      map[row.key] = { ...map[row.key], ...row.value };
+    } else {
+      map[row.key] = row.value;
+    }
+  }
+  return map;
+}
+
 /**
  * GET /api/v1/settings
  * Lấy cấu hình hệ thống của tổ chức (billing_config, sla_config, contact_config) (M01 FR-005)
@@ -104,10 +128,7 @@ router.get('/', authenticateToken, async (req, res) => {
       'SELECT key, value, description, updated_at FROM system_setting WHERE org_id = $1 ORDER BY key ASC',
       [req.user.org_id]
     );
-    const map = {};
-    for (const row of result.rows) {
-      map[row.key] = row.value;
-    }
+    const map = buildSettingsMapWithDefaults(result.rows);
     res.json({
       data: map,
       items: result.rows,
@@ -173,10 +194,7 @@ router.put('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) 
       'SELECT key, value, description, updated_at FROM system_setting WHERE org_id = $1 ORDER BY key ASC',
       [orgId]
     );
-    const map = {};
-    for (const row of refreshed.rows) {
-      map[row.key] = row.value;
-    }
+    const map = buildSettingsMapWithDefaults(refreshed.rows);
 
     res.json({
       message: 'Lưu cấu hình hệ thống thành công.',
@@ -190,6 +208,83 @@ router.put('/', authenticateToken, requireRole(['SYS_ADMIN']), async (req, res) 
     }
     console.error('[Settings Update Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi lưu cấu hình hệ thống.' });
+  }
+});
+
+/**
+ * DELETE /api/v1/settings/:key
+ * Xóa bản ghi cấu hình tùy chỉnh để khôi phục về mặc định chuẩn của hệ thống (SYS_ADMIN — PRD 6.2, FR-005)
+ */
+router.delete('/:key', authenticateToken, async (req, res) => {
+  const key = String(req.params.key || '').trim();
+  const orgId = req.user.org_id;
+  const roles = getUserRoleCodes(req);
+
+  if (!roles.includes('SYS_ADMIN')) {
+    await logAccessDenied(req, 'system_setting', orgId, `Non-SYS_ADMIN attempted DELETE /settings/${key}`);
+    return res.status(403).json({
+      code: 'DELETE_PROHIBITED',
+      message: 'Chỉ Quản trị viên hệ thống (SYS_ADMIN) mới có quyền khôi phục cấu hình mặc định.',
+    });
+  }
+
+  if (!VALID_SYSTEM_SETTING_KEYS.includes(key)) {
+    return res.status(400).json({
+      code: 'INVALID_SETTING_KEY',
+      message: `Khóa cấu hình "${key}" không hợp lệ. Chỉ hỗ trợ: ${VALID_SYSTEM_SETTING_KEYS.join(', ')}.`,
+    });
+  }
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const delRes = await client.query(
+      'DELETE FROM system_setting WHERE org_id = $1 AND key = $2 RETURNING key, value, description',
+      [orgId, key]
+    );
+    const previousValue = delRes.rows[0]?.value ?? null;
+    const defaultValue = structuredClone(DEFAULT_SYSTEM_SETTINGS[key]);
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before, after)
+       VALUES ($1, 'RESET_SETTING', 'system_setting', $2, $3, $4)`,
+      [
+        req.user.sub,
+        orgId,
+        JSON.stringify({ key, value: previousValue }),
+        JSON.stringify({ key, reset_to_default: true, default_value: defaultValue }),
+      ]
+    );
+
+    const refreshed = await client.query(
+      'SELECT key, value, description, updated_at FROM system_setting WHERE org_id = $1 ORDER BY key ASC',
+      [orgId]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    const map = buildSettingsMapWithDefaults(refreshed.rows);
+
+    return res.json({
+      message: `Đã khôi phục nhóm cấu hình "${key}" về mặc định hệ thống.`,
+      key,
+      default_value: defaultValue,
+      data: map,
+      items: refreshed.rows,
+      ai_runtime: { api_key_configured: isGeminiApiKeyConfigured() },
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    console.error('[Settings Reset Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi khôi phục cấu hình mặc định.' });
+  } finally {
+    await release();
   }
 });
 

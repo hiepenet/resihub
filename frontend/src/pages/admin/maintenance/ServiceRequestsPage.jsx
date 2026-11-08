@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Wrench,
@@ -263,6 +263,9 @@ export function ServiceRequestsPage() {
     internal_note: '',
   });
   const [previewImg, setPreviewImg] = useState(null);
+  const detailReqSeqRef = useRef(0);
+  const requestsRef = useRef(requests);
+  requestsRef.current = requests;
 
   const fetchRequests = useCallback(async (opts = {}) => {
     const params = {
@@ -422,20 +425,41 @@ export function ServiceRequestsPage() {
   };
 
   const openDetailDrawer = useCallback(async (id) => {
+    const reqSeq = ++detailReqSeqRef.current;
+    const cachedDetail = serviceRequestsService.peekById(id)?.data || null;
+    const seedItem = cachedDetail || requestsRef.current.find((r) => r.id === id) || null;
+
     setDrawerOpen(true);
-    setDetailLoading(true);
     setCopiedRoomZalo(false);
     setAiTriageError(null);
+
+    if (seedItem) {
+      setDetail(seedItem);
+      syncEditStateFromDetail(seedItem);
+      setDetailLoading(false);
+    } else {
+      setDetail(null);
+      setDetailLoading(true);
+    }
+
     try {
       const res = await serviceRequestsService.getById(id);
+      if (reqSeq !== detailReqSeqRef.current) return;
       const d = res.data;
       setDetail(d);
-      syncEditStateFromDetail(d);
+      if (!seedItem) {
+        syncEditStateFromDetail(d);
+      }
     } catch (err) {
+      if (reqSeq !== detailReqSeqRef.current) return;
       toast.error(extractErrorMessage(err, 'Không thể tải chi tiết yêu cầu.'));
-      setDrawerOpen(false);
+      if (!seedItem) {
+        setDrawerOpen(false);
+      }
     } finally {
-      setDetailLoading(false);
+      if (reqSeq === detailReqSeqRef.current) {
+        setDetailLoading(false);
+      }
     }
   }, [toast]);
 
@@ -453,12 +477,12 @@ export function ServiceRequestsPage() {
     try {
       const res = await serviceRequestsService.applyTriage(detail.id, {});
       toast.success(res.message || 'Đã áp dụng đề xuất phân loại & điều phối của AI.');
-      const fresh = await serviceRequestsService.getById(detail.id);
+      const fresh = await serviceRequestsService.getById(detail.id, { force: true });
       if (fresh?.data) {
         setDetail(fresh.data);
         syncEditStateFromDetail(fresh.data);
       }
-      fetchRequests();
+      fetchRequests({ force: true });
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể áp dụng đề xuất AI.'));
     } finally {
@@ -478,12 +502,12 @@ export function ServiceRequestsPage() {
       };
       const res = await serviceRequestsService.applyTriage(detail.id, payload);
       toast.success(res.message || 'Đã áp dụng điều phối kèm chỉnh sửa của quản lý.');
-      const fresh = await serviceRequestsService.getById(detail.id);
+      const fresh = await serviceRequestsService.getById(detail.id, { force: true });
       if (fresh?.data) {
         setDetail(fresh.data);
         syncEditStateFromDetail(fresh.data);
       }
-      fetchRequests();
+      fetchRequests({ force: true });
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể áp dụng điều chỉnh phân loại.'));
     } finally {
@@ -497,12 +521,12 @@ export function ServiceRequestsPage() {
     setAiTriageError(null);
     try {
       await aiService.classifyServiceRequest({ service_request_id: detail.id });
-      const fresh = await serviceRequestsService.getById(detail.id);
+      const fresh = await serviceRequestsService.getById(detail.id, { force: true });
       if (fresh?.data) {
         setDetail(fresh.data);
         syncEditStateFromDetail(fresh.data);
       }
-      fetchRequests();
+      fetchRequests({ force: true });
       toast.success('AI đã cập nhật gợi ý phân loại & điều phối mới.');
     } catch (err) {
       setAiTriageError(mapAiErrorToVietnamese(err));
@@ -538,10 +562,10 @@ export function ServiceRequestsPage() {
         internal_note: editState.internal_note,
       });
       toast.success(res.message || 'Cập nhật yêu cầu thành công.');
-      const refreshed = await serviceRequestsService.getById(detail.id);
+      const refreshed = await serviceRequestsService.getById(detail.id, { force: true });
       setDetail(refreshed.data);
       syncEditStateFromDetail(refreshed.data);
-      fetchRequests();
+      fetchRequests({ force: true });
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Không thể cập nhật yêu cầu bảo trì.'));
     } finally {

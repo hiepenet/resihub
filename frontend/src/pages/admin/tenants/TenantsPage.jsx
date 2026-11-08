@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   RefreshCw,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -32,6 +33,7 @@ import { StatsCard } from '../../../components/common/StatsCard';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
 import { SearchBar } from '../../../components/common/SearchBar';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { tenantsService } from '../../../services/tenants.service';
 import { aiService } from '../../../services/ai.service';
 import { usePermission } from '../../../hooks/usePermission';
@@ -143,6 +145,8 @@ export function TenantsPage() {
     reason: 'Gộp hồ sơ cư dân trùng thông tin liên hệ / CCCD',
   });
   const [submittingMerge, setSubmittingMerge] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deletingTenant, setDeletingTenant] = useState(false);
 
   const fetchTenants = useCallback(async (opts = {}) => {
     if (!Array.isArray(tenantsService.peekList()?.data)) {
@@ -521,6 +525,21 @@ export function TenantsPage() {
     }
   };
 
+  const handleConfirmDeleteTenant = async () => {
+    if (!deleteTarget?.id) return;
+    setDeletingTenant(true);
+    try {
+      const res = await tenantsService.remove(deleteTarget.id);
+      toast.success(res?.message || `Đã xóa hồ sơ cư dân "${deleteTarget.full_name}".`);
+      setDeleteTarget(null);
+      await fetchTenants({ force: true });
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa hồ sơ cư dân.'));
+    } finally {
+      setDeletingTenant(false);
+    }
+  };
+
   const columns = useMemo(
     () => [
       {
@@ -705,11 +724,39 @@ export function TenantsPage() {
                 </Button>
               </>
             ) : null}
+            {isSysAdmin ? (() => {
+              const hasContractRef = Boolean(row.active_contract || row.has_past_contract);
+              return (
+                <span
+                  title={
+                    hasContractRef
+                      ? 'Không thể xóa cư dân đang hoặc đã từng có hợp đồng thuê.'
+                      : 'Xóa vĩnh viễn hồ sơ cư dân chưa phát sinh lịch sử'
+                  }
+                >
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    icon={Trash2}
+                    disabled={hasContractRef}
+                    className={
+                      hasContractRef ? '' : 'text-rose-600 hover:text-rose-700 hover:bg-rose-50'
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteTarget(row);
+                    }}
+                  >
+                    Xóa
+                  </Button>
+                </span>
+              );
+            })() : null}
           </div>
         ),
       },
     ],
-    [canManageTenants, navigate]
+    [canManageTenants, isSysAdmin, navigate]
   );
 
   return (
@@ -1306,6 +1353,23 @@ export function TenantsPage() {
           />
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!deletingTenant) setDeleteTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteTenant}
+        loading={deletingTenant}
+        variant="danger"
+        title="Xác nhận xóa hồ sơ cư dân"
+        confirmLabel="Xóa hồ sơ"
+        message={
+          deleteTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn hồ sơ cư dân "${deleteTarget.full_name}" (${deleteTarget.phone || '—'})? Nếu hồ sơ tạo nhầm chưa có lịch sử, tài khoản Cổng cư dân và định danh gốc không còn liên kết cũng sẽ được dọn sạch.`
+            : ''
+        }
+      />
     </div>
   );
 }

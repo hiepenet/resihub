@@ -261,7 +261,8 @@ export function BulkApartmentModal({ open, buildingId, floors = [], zones = [], 
             }}
             options={zones.map((z) => ({
               value: z.id,
-              label: `${z.code} — ${z.name || ''}`,
+              label: z.name?.trim() || `Khu ${z.code}`,
+              searchText: z.code,
             }))}
           />
           <Input

@@ -7,6 +7,7 @@ import {
   BookmarkCheck,
   Play,
   RefreshCw,
+  RotateCcw,
   Clock,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
@@ -18,6 +19,7 @@ import { Badge } from '../../../components/ui/Badge';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Table, THead, TBody, TH, TD } from '../../../components/ui/Table';
 import { PageHeader } from '../../../components/common/PageHeader';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { usersService } from '../../../services/users.service';
 import { buildingsService } from '../../../services/buildings.service';
 import { usePermission } from '../../../hooks/usePermission';
@@ -71,6 +73,8 @@ export function SettingsPage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [resetSettingTarget, setResetSettingTarget] = useState(null);
+  const [resettingSetting, setResettingSetting] = useState(false);
   const [billingConfig, setBillingConfig] = useState(DEFAULT_BILLING_CONFIG);
   const [slaConfig, setSlaConfig] = useState(DEFAULT_SLA_CONFIG);
   const [contactConfig, setContactConfig] = useState(DEFAULT_CONTACT_CONFIG);
@@ -350,6 +354,55 @@ export function SettingsPage() {
     }
   };
 
+  const handleConfirmResetSetting = async () => {
+    if (!resetSettingTarget?.key) return;
+    const key = resetSettingTarget.key;
+    setResettingSetting(true);
+    try {
+      const res = await usersService.resetSetting(key);
+      const def = res?.default_value;
+      if (key === 'ai_config') {
+        setAiConfig(mergeAiConfigState(def || DEFAULT_AI_CONFIG));
+      } else if (key === 'approval_config') {
+        setApprovalConfig({ allow_self_approval: Boolean(def?.allow_self_approval) });
+      } else if (key === 'reservation_cancel_policy') {
+        setReservationCancelPolicy({
+          ...DEFAULT_RESERVATION_CANCEL_POLICY,
+          ...(def || {}),
+        });
+      } else if (key === 'billing_config') {
+        const resolvedDueDays = def?.due_date_offset_days ?? def?.payment_due_days ?? 5;
+        setBillingConfig({
+          ...DEFAULT_BILLING_CONFIG,
+          ...(def || {}),
+          payment_due_days: resolvedDueDays,
+          due_date_offset_days: resolvedDueDays,
+          late_fee_cap:
+            def?.late_fee_cap !== null &&
+            def?.late_fee_cap !== undefined &&
+            Number(def.late_fee_cap) > 0
+              ? def.late_fee_cap
+              : '',
+          reminder_days_text: Array.isArray(def?.reminder_days)
+            ? def.reminder_days.join(', ')
+            : DEFAULT_BILLING_CONFIG.reminder_days_text,
+        });
+      } else if (key === 'sla_config') {
+        setSlaConfig({ ...DEFAULT_SLA_CONFIG, ...(def || {}) });
+      } else if (key === 'contact_config') {
+        setContactConfig({ ...DEFAULT_CONTACT_CONFIG, ...(def || {}) });
+      }
+      toast.success(
+        res?.message || `Đã khôi phục cấu hình "${resetSettingTarget.label}" về mặc định.`
+      );
+      setResetSettingTarget(null);
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể khôi phục cấu hình mặc định.'));
+    } finally {
+      setResettingSetting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -380,6 +433,16 @@ export function SettingsPage() {
             onChange={setAiConfig}
             apiKeyConfigured={aiKeyConfigured}
             canEdit={isSysAdmin}
+            resetting={resettingSetting && resetSettingTarget?.key === 'ai_config'}
+            onReset={
+              isSysAdmin
+                ? () =>
+                    setResetSettingTarget({
+                      key: 'ai_config',
+                      label: 'Cổng Trợ lý AI — Gemini Gateway (ai_config)',
+                    })
+                : null
+            }
           />
 
           {/* Quy tắc Phê duyệt Nội bộ (Four-eyes) — R-23 */}
@@ -387,6 +450,25 @@ export function SettingsPage() {
             <CardHeader
               title="Quy tắc Phê duyệt Nội bộ (Four-eyes)"
               subtitle="Khóa cấu hình: approval_config"
+              action={
+                isSysAdmin ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    icon={RotateCcw}
+                    className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                    onClick={() =>
+                      setResetSettingTarget({
+                        key: 'approval_config',
+                        label: 'Quy tắc Phê duyệt Nội bộ (approval_config)',
+                      })
+                    }
+                  >
+                    Khôi phục mặc định
+                  </Button>
+                ) : null
+              }
             />
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
@@ -433,6 +515,25 @@ export function SettingsPage() {
             <CardHeader
               title="Chính sách Đặt cọc Giữ chỗ (FR-005 / FR-067)"
               subtitle="Khóa cấu hình: reservation_cancel_policy"
+              action={
+                isSysAdmin ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    icon={RotateCcw}
+                    className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                    onClick={() =>
+                      setResetSettingTarget({
+                        key: 'reservation_cancel_policy',
+                        label: 'Chính sách Đặt cọc Giữ chỗ (reservation_cancel_policy)',
+                      })
+                    }
+                  >
+                    Khôi phục mặc định
+                  </Button>
+                ) : null
+              }
             />
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
               <MoneyInput
@@ -523,6 +624,25 @@ export function SettingsPage() {
               <CardHeader
                 title="Chu kỳ Hóa đơn, Phạt chậm & Giá mặc định"
                 subtitle="Khóa cấu hình: billing_config"
+                action={
+                  isSysAdmin ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      icon={RotateCcw}
+                      className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                      onClick={() =>
+                        setResetSettingTarget({
+                          key: 'billing_config',
+                          label: 'Chu kỳ Hóa đơn, Phạt chậm & Giá mặc định (billing_config)',
+                        })
+                      }
+                    >
+                      Khôi phục mặc định
+                    </Button>
+                  ) : null
+                }
               />
               <div className="space-y-1">
                 <Input
@@ -654,6 +774,25 @@ export function SettingsPage() {
               <CardHeader
                 title="Cam kết SLA Kỹ thuật & Tiền cọc"
                 subtitle="Khóa cấu hình: sla_config"
+                action={
+                  isSysAdmin ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      icon={RotateCcw}
+                      className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                      onClick={() =>
+                        setResetSettingTarget({
+                          key: 'sla_config',
+                          label: 'Cam kết SLA Kỹ thuật & Tiền cọc (sla_config)',
+                        })
+                      }
+                    >
+                      Khôi phục mặc định
+                    </Button>
+                  ) : null
+                }
               />
               <Input
                 label="Thời gian phản hồi tiếp nhận tối đa (giờ)"
@@ -711,6 +850,25 @@ export function SettingsPage() {
               <CardHeader
                 title="Danh bạ Ban Quản Lý (Cổng Cư Dân)"
                 subtitle="Khóa cấu hình: contact_config"
+                action={
+                  isSysAdmin ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      icon={RotateCcw}
+                      className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                      onClick={() =>
+                        setResetSettingTarget({
+                          key: 'contact_config',
+                          label: 'Danh bạ Ban Quản Lý (contact_config)',
+                        })
+                      }
+                    >
+                      Khôi phục mặc định
+                    </Button>
+                  ) : null
+                }
               />
               <Input
                 label="Khung giờ làm việc hành chính"
@@ -1004,6 +1162,23 @@ export function SettingsPage() {
           </div>
         ) : null}
       </Modal>
+
+      <ConfirmDialog
+        open={Boolean(resetSettingTarget)}
+        onClose={() => {
+          if (!resettingSetting) setResetSettingTarget(null);
+        }}
+        onConfirm={handleConfirmResetSetting}
+        loading={resettingSetting}
+        variant="danger"
+        title="Khôi phục cấu hình về mặc định"
+        confirmLabel="Khôi phục mặc định"
+        message={
+          resetSettingTarget
+            ? `Bạn có chắc chắn muốn xóa các tùy chỉnh hiện tại của "${resetSettingTarget.label}" và đưa nhóm cấu hình này về giá trị mặc định ban đầu của hệ thống?`
+            : ''
+        }
+      />
     </div>
   );
 }

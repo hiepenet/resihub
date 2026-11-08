@@ -20,5 +20,7 @@ export const announcementsService = {
     api.post('/api/v1/zalo-groups', payload, withIdempotency(options)).then((r) => r.data),
   updateZaloGroup: (id, payload, options = {}) =>
     api.put(`/api/v1/zalo-groups/${id}`, payload, withIdempotency(options)).then((r) => r.data),
+  deleteZaloGroup: (id) =>
+    api.delete(`/api/v1/zalo-groups/${id}`).then((r) => r.data),
 };
 

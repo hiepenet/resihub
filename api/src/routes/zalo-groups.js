@@ -1,5 +1,5 @@
 import express from 'express';
-import { getUserClient } from '../db/client.js';
+import { adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
@@ -112,9 +112,9 @@ router.get('/', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER', 'MANAGER']
 
 /**
  * POST /api/v1/zalo-groups (FR-069, PRD 6.2)
- * Tạo mới nhóm Zalo tòa nhà / phòng (chỉ MANAGER của tòa được phép ghi)
+ * Tạo mới nhóm Zalo tòa nhà / phòng (SYS_ADMIN toàn tổ chức, hoặc MANAGER của tòa được phép ghi)
  */
-router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
+router.post('/', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), idempotencyGuard(), async (req, res) => {
   const {
     building_id,
     scope = 'BUILDING',
@@ -253,9 +253,9 @@ router.post('/', authenticateToken, requireRole(['MANAGER']), idempotencyGuard()
 
 /**
  * PUT /api/v1/zalo-groups/:id (FR-069, PRD 6.2)
- * Cập nhật thông tin nhóm Zalo (chỉ MANAGER của tòa được phép ghi)
+ * Cập nhật thông tin nhóm Zalo (SYS_ADMIN toàn tổ chức, hoặc MANAGER của tòa được phép ghi)
  */
-router.put('/:id', authenticateToken, requireRole(['MANAGER']), idempotencyGuard(), async (req, res) => {
+router.put('/:id', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), idempotencyGuard(), async (req, res) => {
   const { id } = req.params;
   const { name, scope, apartment_id, invite_link, note, is_active } = req.body || {};
 
@@ -390,6 +390,83 @@ router.put('/:id', authenticateToken, requireRole(['MANAGER']), idempotencyGuard
     }
     console.error('[Update Zalo Group Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật nhóm Zalo.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * DELETE /api/v1/zalo-groups/:id (FR-069, PRD 6.2)
+ * Xóa nhóm Zalo khỏi danh bạ (chỉ SYS_ADMIN được phép xóa)
+ */
+router.delete('/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const roles = getUserRoleCodes(req);
+
+  try {
+    const scopeRes = await adminPool.query(
+      'SELECT id, org_id, building_id FROM zalo_group WHERE id = $1 AND org_id = $2 LIMIT 1',
+      [id, req.user.org_id]
+    );
+    if (scopeRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy nhóm Zalo.' });
+    }
+
+    if (!roles.includes('SYS_ADMIN')) {
+      await logAccessDenied(req, 'zalo_group', id, 'Non-SYS_ADMIN attempted DELETE /zalo-groups/:id');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Chỉ Quản trị viên hệ thống (SYS_ADMIN) mới có quyền xóa nhóm Zalo.',
+      });
+    }
+  } catch (err) {
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy nhóm Zalo.' });
+    }
+    console.error('[Delete Zalo Group Scope Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi kiểm tra nhóm Zalo.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const delRes = await client.query(
+      'DELETE FROM zalo_group WHERE id = $1 AND org_id = $2 RETURNING *',
+      [id, req.user.org_id]
+    );
+    if (delRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy nhóm Zalo.' });
+    }
+    const deleted = delRes.rows[0];
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'zalo_group', $2, $3)`,
+      [req.user.sub, id, JSON.stringify(deleted)]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    return res.json({
+      message: 'Đã xóa nhóm Zalo khỏi danh bạ.',
+      data: deleted,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy nhóm Zalo.' });
+    }
+    console.error('[Delete Zalo Group Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi xóa nhóm Zalo.' });
   } finally {
     await release();
   }

@@ -3,6 +3,12 @@ import bcrypt from 'bcryptjs';
 import { adminPool } from '../../db/client.js';
 import { authenticateToken } from '../../middleware/auth.js';
 import { requireRole } from '../../middleware/rbac.js';
+import { getUserRoleCodes, logAccessDenied } from '../../services/ownerScope.js';
+import {
+  checkUserHistoryForDelete,
+  cleanupOrphanedPersonInTx,
+  unlinkStoragePathsBestEffort,
+} from '../../services/sysAdminDeleteGuards.js';
 
 const router = express.Router();
 
@@ -278,6 +284,30 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
 
     // Cập nhật app_user (status, password_hash, tăng token_version nếu khóa hoặc đổi role)
     const nextStatus = status && ['ACTIVE', 'SUSPENDED'].includes(status) ? status : cur.status;
+    if (nextStatus !== 'ACTIVE' && !Array.isArray(roles)) {
+      const targetWasSysAdmin = await client.query(
+        `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+         WHERE ur.user_id = $1 AND r.org_id = $2 AND r.code = 'SYS_ADMIN' LIMIT 1`,
+        [id, orgId]
+      );
+      if (targetWasSysAdmin.rows.length > 0) {
+        const otherAdmins = await client.query(
+          `SELECT COUNT(DISTINCT au.id)::int AS cnt
+           FROM app_user au
+           JOIN user_role ur ON ur.user_id = au.id
+           JOIN role r ON r.id = ur.role_id
+           WHERE r.org_id = $1 AND r.code = 'SYS_ADMIN' AND au.status = 'ACTIVE' AND au.id <> $2`,
+          [orgId, id]
+        );
+        if ((otherAdmins.rows[0]?.cnt || 0) === 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            code: 'LAST_SYS_ADMIN_PROHIBITED',
+            message: 'Không thể khóa hoặc gỡ quyền Quản trị viên hệ thống hoạt động cuối cùng của tổ chức.',
+          });
+        }
+      }
+    }
     let nextHash = cur.password_hash;
     if (password && password.length >= 8) {
       nextHash = await bcrypt.hash(password, 10);
@@ -296,6 +326,7 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
 
     // Cập nhật phân quyền user_role nếu có truyền mảng roles
     if (Array.isArray(roles)) {
+      const nextRoleCodes = [];
       for (const item of roles) {
         const code = typeof item === 'string' ? item : (item.role_code || item.code);
         if (code && !VALID_ROLE_CODES.includes(code)) {
@@ -305,7 +336,42 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
             message: `Vai trò "${code}" không còn hợp lệ. Hệ thống chỉ hỗ trợ: ${VALID_ROLE_CODES.join(', ')}.`,
           });
         }
+        if (code) nextRoleCodes.push(code);
       }
+
+      if (id === req.user.sub && !nextRoleCodes.includes('SYS_ADMIN')) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          code: 'SELF_ROLE_REMOVAL_PROHIBITED',
+          message: 'Không thể tự gỡ vai trò Quản trị viên hệ thống (SYS_ADMIN) của chính tài khoản đang đăng nhập.',
+        });
+      }
+
+      if (!nextRoleCodes.includes('SYS_ADMIN') || nextStatus !== 'ACTIVE') {
+        const targetWasSysAdmin = await client.query(
+          `SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+           WHERE ur.user_id = $1 AND r.org_id = $2 AND r.code = 'SYS_ADMIN' LIMIT 1`,
+          [id, orgId]
+        );
+        if (targetWasSysAdmin.rows.length > 0) {
+          const otherAdmins = await client.query(
+            `SELECT COUNT(DISTINCT au.id)::int AS cnt
+             FROM app_user au
+             JOIN user_role ur ON ur.user_id = au.id
+             JOIN role r ON r.id = ur.role_id
+             WHERE r.org_id = $1 AND r.code = 'SYS_ADMIN' AND au.status = 'ACTIVE' AND au.id <> $2`,
+            [orgId, id]
+          );
+          if ((otherAdmins.rows[0]?.cnt || 0) === 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              code: 'LAST_SYS_ADMIN_PROHIBITED',
+              message: 'Không thể khóa hoặc gỡ quyền Quản trị viên hệ thống hoạt động cuối cùng của tổ chức.',
+            });
+          }
+        }
+      }
+
       await client.query('DELETE FROM user_role WHERE user_id = $1', [id]);
       for (const item of roles) {
         const code = typeof item === 'string' ? item : (item.role_code || item.code);
@@ -355,6 +421,161 @@ router.patch('/:id', authenticateToken, requireRole(['SYS_ADMIN']), async (req, 
     await client.query('ROLLBACK');
     console.error('[Update Admin User Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi cập nhật tài khoản.' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * DELETE /api/v1/admin/users/:id
+ * Xóa cứng tài khoản người dùng tạo nhầm chưa phát sinh lịch sử nghiệp vụ / kiểm toán (chỉ SYS_ADMIN — PRD 6.2)
+ */
+router.delete('/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const orgId = req.user.org_id;
+  const actorRoles = getUserRoleCodes(req);
+
+  const client = await adminPool.connect();
+  let txStarted = false;
+  try {
+    const existing = await client.query(
+      `SELECT au.id,
+              au.person_id,
+              au.auth_uid,
+              au.status,
+              au.last_login_at,
+              au.created_at,
+              p.full_name,
+              p.email,
+              p.phone,
+              p.id_number,
+              ARRAY_REMOVE(ARRAY_AGG(DISTINCT r.code), NULL) AS role_codes
+       FROM app_user au
+       JOIN person p ON p.id = au.person_id
+       LEFT JOIN user_role ur ON ur.user_id = au.id
+       LEFT JOIN role r ON r.id = ur.role_id
+       WHERE au.id = $1 AND p.org_id = $2
+       GROUP BY au.id, p.id`,
+      [id, orgId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tài khoản.' });
+    }
+    const cur = existing.rows[0];
+
+    if (!actorRoles.includes('SYS_ADMIN')) {
+      await logAccessDenied(req, 'app_user', id, 'Non-SYS_ADMIN attempted DELETE /admin/users/:id');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Chỉ Quản trị viên hệ thống (SYS_ADMIN) mới có quyền xóa tài khoản người dùng.',
+      });
+    }
+
+    if (id === req.user.sub) {
+      return res.status(409).json({
+        code: 'SELF_DELETE_PROHIBITED',
+        message: 'Không thể tự xóa tài khoản Quản trị viên đang đăng nhập.',
+      });
+    }
+
+    await client.query('BEGIN');
+    txStarted = true;
+
+    await client.query('SELECT id FROM app_user WHERE id = $1 FOR UPDATE', [id]);
+    await client.query('SELECT id FROM person WHERE id = $1 AND org_id = $2 FOR UPDATE', [cur.person_id, orgId]);
+
+    const roleCodes = Array.isArray(cur.role_codes) ? cur.role_codes : [];
+    if (cur.status === 'ACTIVE' && roleCodes.includes('SYS_ADMIN')) {
+      const otherAdmins = await client.query(
+        `SELECT COUNT(DISTINCT au.id)::int AS cnt
+         FROM app_user au
+         JOIN user_role ur ON ur.user_id = au.id
+         JOIN role r ON r.id = ur.role_id
+         WHERE r.org_id = $1 AND r.code = 'SYS_ADMIN' AND au.status = 'ACTIVE' AND au.id <> $2`,
+        [orgId, id]
+      );
+      if ((otherAdmins.rows[0]?.cnt || 0) === 0) {
+        await client.query('ROLLBACK');
+        txStarted = false;
+        return res.status(409).json({
+          code: 'LAST_SYS_ADMIN_PROHIBITED',
+          message: 'Không thể xóa Quản trị viên hệ thống đang hoạt động cuối cùng của tổ chức.',
+        });
+      }
+    }
+
+    const hist = await checkUserHistoryForDelete(client, {
+      userId: id,
+      personId: cur.person_id,
+      orgId,
+      phone: cur.phone,
+      roleCodes,
+    });
+    if (hist.hasHistory) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(409).json({
+        code: 'USER_HAS_HISTORY',
+        message: hist.reason,
+      });
+    }
+
+    const delRes = await client.query(
+      'DELETE FROM app_user WHERE id = $1 RETURNING id, person_id, auth_uid, status, created_at',
+      [id]
+    );
+    if (delRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tài khoản.' });
+    }
+
+    const cleanup = await cleanupOrphanedPersonInTx(client, {
+      personId: cur.person_id,
+      orgId,
+      allowAutoDeletePureResidentUser: false,
+    });
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE_USER', 'app_user', $2, $3)`,
+      [
+        req.user.sub,
+        id,
+        JSON.stringify({
+          ...cur,
+          person_deleted: cleanup.personDeleted,
+          owner_deleted: cleanup.ownerDeleted,
+        }),
+      ]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    await unlinkStoragePathsBestEffort(cleanup.deletedPaths);
+
+    return res.json({
+      message: 'Đã xóa tài khoản người dùng thành công.',
+      data: {
+        ...delRes.rows[0],
+        full_name: cur.full_name,
+        email: cur.email,
+        phone: cur.phone,
+      },
+      person_deleted: cleanup.personDeleted,
+      owner_deleted: cleanup.ownerDeleted,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tài khoản.' });
+    }
+    console.error('[Delete Admin User Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi xóa tài khoản người dùng.' });
   } finally {
     client.release();
   }

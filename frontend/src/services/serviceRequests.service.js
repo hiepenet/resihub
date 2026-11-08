@@ -13,7 +13,16 @@ export const serviceRequestsService = {
       () => api.get('/api/v1/service-requests', { params }).then((r) => r.data),
       { ttlMs: SERVICE_REQUESTS_TTL_MS, force: Boolean(options?.force) }
     ),
-  getById: (id) => api.get(`/api/v1/service-requests/${id}`).then((r) => r.data),
+  peekById: (id) =>
+    id
+      ? peekQueryCache(buildCacheKey('serviceRequests', { op: 'detail', id }))?.data || null
+      : null,
+  getById: (id, options = {}) =>
+    cachedFetch(
+      buildCacheKey('serviceRequests', { op: 'detail', id }),
+      () => api.get(`/api/v1/service-requests/${id}`).then((r) => r.data),
+      { ttlMs: SERVICE_REQUESTS_TTL_MS, force: Boolean(options?.force) }
+    ),
   create: (payload, options = {}) =>
     api.post('/api/v1/service-requests', payload, withIdempotency(options)).then((r) => r.data),
   updateStatus: (id, payload, options = {}) =>

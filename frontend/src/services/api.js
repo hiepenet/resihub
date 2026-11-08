@@ -47,7 +47,7 @@ let refreshPromise = null;
 api.interceptors.response.use(
   (response) => {
     const method = String(response?.config?.method || 'get').toUpperCase();
-    if (MUTATING_METHODS.has(method)) {
+    if (MUTATING_METHODS.has(method) && !response?.config?.skipCacheInvalidation) {
       invalidateRelatedNamespacesForUrl(response?.config?.url);
     }
     return response;

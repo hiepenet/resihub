@@ -17,6 +17,7 @@ import {
   ExternalLink,
   MessageSquare,
   ArrowRight,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -29,6 +30,7 @@ import { PageHeader } from '../../../components/common/PageHeader';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { EmptyState } from '../../../components/common/EmptyState';
 import { StatusBadge } from '../../../components/common/StatusBadge';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { notificationsService } from '../../../services/notifications.service';
 import { announcementsService } from '../../../services/announcements.service';
 import { buildingsService } from '../../../services/buildings.service';
@@ -123,7 +125,7 @@ function toLocalDateTimeInputValue(isoValue) {
 export function NotificationsPage() {
   const toast = useToast();
   const [searchParams] = useSearchParams();
-  const { canSendNotifications } = usePermission();
+  const { canSendNotifications, canManageZaloGroups, canDeleteZaloGroups } = usePermission();
   const user = useAuthStore((s) => s.user);
   const selectedBuildingId = useAuthStore((s) => s.selectedBuildingId);
   const syncBellStore = useNotificationStore((s) => s.fetchNotifications);
@@ -186,12 +188,14 @@ export function NotificationsPage() {
   const [copiedZaloBody, setCopiedZaloBody] = useState(false);
   const [markingZalo, setMarkingZalo] = useState(false);
 
-  // Zalo Group Directory Create/Edit Modal (MANAGER only)
+  // Zalo Group Directory Create/Edit/Delete Modal (SYS_ADMIN + MANAGER)
   const [groupModalOpen, setGroupModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState(null);
   const [groupApartments, setGroupApartments] = useState([]);
   const [groupSubmitting, setGroupSubmitting] = useState(false);
   const [groupLinkError, setGroupLinkError] = useState('');
+  const [deleteGroupTarget, setDeleteGroupTarget] = useState(null);
+  const [deletingGroup, setDeletingGroup] = useState(false);
   const [groupForm, setGroupForm] = useState({
     building_id: selectedBuildingId || '',
     scope: 'BUILDING',
@@ -664,6 +668,21 @@ export function NotificationsPage() {
       toast.error(extractErrorMessage(err, 'Không thể lưu thông tin nhóm Zalo.'));
     } finally {
       setGroupSubmitting(false);
+    }
+  };
+
+  const handleConfirmDeleteGroup = async () => {
+    if (!deleteGroupTarget?.id) return;
+    setDeletingGroup(true);
+    try {
+      const res = await announcementsService.deleteZaloGroup(deleteGroupTarget.id);
+      toast.success(res?.message || `Đã xóa nhóm Zalo "${deleteGroupTarget.name}".`);
+      setDeleteGroupTarget(null);
+      await fetchAllData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa nhóm Zalo.'));
+    } finally {
+      setDeletingGroup(false);
     }
   };
 
@@ -1245,7 +1264,7 @@ export function NotificationsPage() {
               </label>
             </div>
 
-            {canSendNotifications ? (
+            {canManageZaloGroups ? (
               <Button variant="primary" size="sm" icon={Plus} onClick={openCreateGroupModal}>
                 Thêm nhóm Zalo
               </Button>
@@ -1262,7 +1281,7 @@ export function NotificationsPage() {
               title="Chưa cấu hình nhóm Zalo vận hành"
               description="Lưu danh sách link nhóm Zalo Tòa nhà (1 nhóm chung) và nhóm Zalo từng Phòng (Cư dân + BQL) để mở nhanh khi dán thông báo hoặc cập nhật sửa chữa."
               action={
-                canSendNotifications ? (
+                canManageZaloGroups ? (
                   <Button size="sm" icon={Plus} onClick={openCreateGroupModal}>
                     Thêm nhóm Zalo đầu tiên
                   </Button>
@@ -1311,13 +1330,24 @@ export function NotificationsPage() {
                       <span className="text-xs text-slate-400 italic">Chưa gắn link zalo.me</span>
                     )}
 
-                    {canSendNotifications ? (
+                    {canManageZaloGroups ? (
                       <Button
                         size="xs"
                         variant="outline"
                         onClick={() => openEditGroupModal(grp)}
                       >
                         Chỉnh sửa
+                      </Button>
+                    ) : null}
+                    {canDeleteZaloGroups ? (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        icon={Trash2}
+                        className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                        onClick={() => setDeleteGroupTarget(grp)}
+                      >
+                        Xóa
                       </Button>
                     ) : null}
                   </div>
@@ -1730,6 +1760,23 @@ export function NotificationsPage() {
       </Modal>
 
       <NotificationDetailModal {...detailModalProps} />
+
+      <ConfirmDialog
+        open={Boolean(deleteGroupTarget)}
+        onClose={() => {
+          if (!deletingGroup) setDeleteGroupTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteGroup}
+        loading={deletingGroup}
+        variant="danger"
+        title="Xác nhận xóa nhóm Zalo"
+        confirmLabel="Xóa nhóm Zalo"
+        message={
+          deleteGroupTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn nhóm Zalo "${deleteGroupTarget.name}" (${deleteGroupTarget.building_code || ''}) khỏi danh bạ vận hành?`
+            : ''
+        }
+      />
     </div>
   );
 }

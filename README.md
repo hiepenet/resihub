@@ -335,6 +335,7 @@ Tại màn hình đăng nhập, hệ thống cung cấp các nút bấm nhanh:
 - `POST /api/v1/buildings` — Tạo tòa nhà mới (Chỉ Manager; tự động gán quyền quản lý).
 - `GET /api/v1/buildings/:id/floor-map` — Lấy sơ đồ phân tầng và trạng thái từng căn hộ.
 - `POST /api/v1/buildings/:id/floors` — Thêm tầng hầm, trệt, lầu (Chặn trùng level).
+- `POST /api/v1/buildings/:id/floors/bulk` — Khởi tạo tầng hàng loạt theo dải tầng hoặc danh sách tùy chỉnh (`dry_run` xem trước, `skip_existing` bỏ qua tầng đã có, lưu nguyên tử kèm `audit_log`).
 - `GET /api/v1/apartments` — Danh sách căn hộ có lọc theo tòa nhà và trạng thái (`AVAILABLE`, `OCCUPIED`, `RESERVED`).
 - `POST /api/v1/apartments` — Tạo căn hộ mới với giá thuê định dạng BigInt.
 - `POST /api/v1/apartments/bulk` — Tạo hàng loạt căn hộ theo mẫu tầng trên 1..n tầng; gửi `dry_run: true` để xem trước mã căn và danh sách trùng.

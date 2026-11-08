@@ -24,6 +24,7 @@ import { Modal } from '../../../components/ui/Modal';
 import { Input } from '../../../components/ui/Input';
 import { PageSkeleton } from '../../../components/ui/Skeleton';
 import { FloorPlanView } from './FloorPlanPage';
+import { FloorModal } from './FloorModal';
 import { buildingsService } from '../../../services/buildings.service';
 import { contractsService } from '../../../services/contracts.service';
 import { tenantsService } from '../../../services/tenants.service';
@@ -59,8 +60,15 @@ export function BuildingDetailPage() {
   const [zoneModalOpen, setZoneModalOpen] = useState(false);
   const [zoneForm, setZoneForm] = useState({ code: '', name: '' });
   const [savingZone, setSavingZone] = useState(false);
+  const [floorModalOpen, setFloorModalOpen] = useState(false);
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [deleteBuildingOpen, setDeleteBuildingOpen] = useState(false);
+  const [deletingBuilding, setDeletingBuilding] = useState(false);
+  const [deleteZoneTarget, setDeleteZoneTarget] = useState(null);
+  const [deletingZone, setDeletingZone] = useState(false);
+  const [deleteFloorTarget, setDeleteFloorTarget] = useState(null);
+  const [deletingFloor, setDeletingFloor] = useState(false);
 
   const loadBuildingData = useCallback(async (opts = {}) => {
     const force = Boolean(opts?.force);
@@ -138,14 +146,50 @@ export function BuildingDetailPage() {
     }
   };
 
-  const handleDeleteZone = async (zone, e) => {
-    e?.stopPropagation();
+  const handleConfirmDeleteZone = async () => {
+    if (!deleteZoneTarget?.id) return;
+    setDeletingZone(true);
     try {
-      await buildingsService.deleteZone(id, zone.id);
-      toast.success(`Đã xóa phân khu ${zone.code}.`);
-      loadBuildingData();
+      await buildingsService.deleteZone(id, deleteZoneTarget.id);
+      toast.success(`Đã xóa phân khu ${deleteZoneTarget.code}.`);
+      setDeleteZoneTarget(null);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      await loadBuildingData({ force: true });
     } catch (err) {
       toast.error(extractErrorMessage(err));
+    } finally {
+      setDeletingZone(false);
+    }
+  };
+
+  const handleConfirmDeleteFloor = async () => {
+    if (!deleteFloorTarget?.id) return;
+    setDeletingFloor(true);
+    try {
+      const res = await buildingsService.deleteFloor(id, deleteFloorTarget.id);
+      toast.success(res?.message || `Đã xóa ${deleteFloorTarget.name || `Tầng ${deleteFloorTarget.level}`}.`);
+      setDeleteFloorTarget(null);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      await loadBuildingData({ force: true });
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa tầng.'));
+    } finally {
+      setDeletingFloor(false);
+    }
+  };
+
+  const handleConfirmDeleteBuilding = async () => {
+    setDeletingBuilding(true);
+    try {
+      const res = await buildingsService.remove(id);
+      toast.success(res?.message || `Đã xóa tòa nhà ${building?.code || ''}.`);
+      setDeleteBuildingOpen(false);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      navigate('/admin/buildings');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa tòa nhà.'));
+    } finally {
+      setDeletingBuilding(false);
     }
   };
 
@@ -172,6 +216,8 @@ export function BuildingDetailPage() {
   if (!building) return null;
 
   const isBuildingActive = (building.status || 'ACTIVE') === 'ACTIVE';
+  const hasBuildingChildren =
+    zones.length > 0 || floors.length > 0 || Number(building.total_apartments || 0) > 0;
 
   return (
     <div className="space-y-6">
@@ -184,6 +230,29 @@ export function BuildingDetailPage() {
         ]}
         actions={
           <>
+            {canManageBuildings ? (
+              <span
+                title={
+                  hasBuildingChildren
+                    ? 'Chỉ được xóa tòa nhà rỗng (0 khu, 0 tầng, 0 căn hộ). Vui lòng dùng Ngừng khai thác nếu đã vận hành.'
+                    : 'Xóa tòa nhà rỗng'
+                }
+              >
+                <Button
+                  variant="outline"
+                  icon={Trash2}
+                  disabled={hasBuildingChildren}
+                  className={
+                    hasBuildingChildren
+                      ? ''
+                      : 'border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300'
+                  }
+                  onClick={() => setDeleteBuildingOpen(true)}
+                >
+                  Xóa tòa nhà
+                </Button>
+              </span>
+            ) : null}
             {canEditRealEstate ? (
               isBuildingActive ? (
                 <Button
@@ -305,7 +374,13 @@ export function BuildingDetailPage() {
             </Card>
           </div>
 
-          <FloorPlanView buildingId={id} embedded initialBuilding={building} initialZones={zones} />
+          <FloorPlanView
+            buildingId={id}
+            embedded
+            initialBuilding={building}
+            initialZones={zones}
+            onFloorsChanged={() => loadBuildingData({ force: true })}
+          />
         </div>
       ) : null}
 
@@ -334,17 +409,34 @@ export function BuildingDetailPage() {
                 className: 'whitespace-nowrap',
                 render: (r) => (
                   <div className="inline-flex items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
-                    {canManageBuildings && Number(r.apartment_count || 0) === 0 ? (
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        icon={Trash2}
-                        className="text-rose-600 hover:text-rose-700 hover:bg-rose-50"
-                        onClick={(e) => handleDeleteZone(r, e)}
-                      >
-                        Xóa
-                      </Button>
-                    ) : null}
+                    {canManageBuildings ? (() => {
+                      const zoneHasApts = Number(r.apartment_count || 0) > 0;
+                      return (
+                        <span
+                          title={
+                            zoneHasApts
+                              ? 'Không thể xóa phân khu đang có căn hộ gắn kèm.'
+                              : 'Xóa phân khu'
+                          }
+                        >
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            icon={Trash2}
+                            disabled={zoneHasApts}
+                            className={
+                              zoneHasApts ? '' : 'text-rose-600 hover:text-rose-700 hover:bg-rose-50'
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteZoneTarget(r);
+                            }}
+                          >
+                            Xóa
+                          </Button>
+                        </span>
+                      );
+                    })() : null}
                     <Button
                       variant="ghost"
                       size="xs"
@@ -361,19 +453,67 @@ export function BuildingDetailPage() {
               },
             ]}
           />
-          {floors.length > 0 ? (
-            <Card>
-              <CardHeader title={`Danh sách tầng (${floors.length} tầng)`} />
+          <Card>
+            <CardHeader
+              title={`Danh sách tầng (${floors.length} tầng)`}
+              action={
+                canEditRealEstate ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    icon={Layers}
+                    onClick={() => setFloorModalOpen(true)}
+                  >
+                    Thêm tầng / Hàng loạt
+                  </Button>
+                ) : null
+              }
+            />
+            {floors.length > 0 ? (
               <div className="flex flex-wrap gap-2">
-                {floors.map((f) => (
-                  <div key={f.id} className="px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs">
-                    <span className="font-semibold text-slate-800">{f.name || `Tầng ${f.level}`}</span>
-                    <span className="text-slate-400 ml-1.5">({f.apartment_count || 0} căn)</span>
-                  </div>
-                ))}
+                {floors.map((f) => {
+                  const floorAptCount = Number(f.apartment_count || 0);
+                  const floorHasApts = floorAptCount > 0;
+                  return (
+                    <div
+                      key={f.id}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs"
+                    >
+                      <span className="font-semibold text-slate-800">{f.name || `Tầng ${f.level}`}</span>
+                      <span className="text-slate-400">({floorAptCount} căn)</span>
+                      {canManageBuildings ? (
+                        <span
+                          title={
+                            floorHasApts
+                              ? 'Không thể xóa tầng đang có căn hộ. Vui lòng xóa hoặc chuyển căn hộ trước.'
+                              : 'Xóa tầng rỗng'
+                          }
+                        >
+                          <button
+                            type="button"
+                            disabled={floorHasApts}
+                            onClick={() => setDeleteFloorTarget(f)}
+                            className={`ml-1 p-1 rounded-md transition-colors ${
+                              floorHasApts
+                                ? 'text-slate-300 cursor-not-allowed'
+                                : 'text-rose-500 hover:text-rose-700 hover:bg-rose-50'
+                            }`}
+                            aria-label={`Xóa ${f.name || `Tầng ${f.level}`}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
-            </Card>
-          ) : null}
+            ) : (
+              <p className="text-xs text-slate-500">
+                Tòa nhà chưa có tầng nào. Nhấn <strong>Thêm tầng / Hàng loạt</strong> để khởi tạo nhanh dải tầng.
+              </p>
+            )}
+          </Card>
         </div>
       ) : null}
 
@@ -441,6 +581,15 @@ export function BuildingDetailPage() {
         </form>
       </Modal>
 
+      <FloorModal
+        open={floorModalOpen}
+        onClose={() => setFloorModalOpen(false)}
+        buildingId={id}
+        existingFloors={floors}
+        initialMode="bulk"
+        onCreated={() => loadBuildingData({ force: true })}
+      />
+
       <ConfirmDialog
         open={deactivateConfirmOpen}
         onClose={() => setDeactivateConfirmOpen(false)}
@@ -450,6 +599,53 @@ export function BuildingDetailPage() {
         title="Xác nhận ngừng khai thác tòa nhà"
         confirmLabel="Ngừng khai thác"
         message={`Bạn có chắc chắn muốn chuyển tòa nhà "${building.code} — ${building.name}" sang trạng thái Ngừng khai thác (INACTIVE)?`}
+      />
+
+      <ConfirmDialog
+        open={deleteBuildingOpen}
+        onClose={() => {
+          if (!deletingBuilding) setDeleteBuildingOpen(false);
+        }}
+        onConfirm={handleConfirmDeleteBuilding}
+        loading={deletingBuilding}
+        variant="danger"
+        title="Xác nhận xóa vĩnh viễn tòa nhà"
+        confirmLabel="Xóa tòa nhà"
+        message={`Bạn có chắc chắn muốn xóa vĩnh viễn tòa nhà "${building.code} — ${building.name}"? Thao tác này không thể hoàn tác.`}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteZoneTarget)}
+        onClose={() => {
+          if (!deletingZone) setDeleteZoneTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteZone}
+        loading={deletingZone}
+        variant="danger"
+        title="Xác nhận xóa phân khu"
+        confirmLabel="Xóa phân khu"
+        message={
+          deleteZoneTarget
+            ? `Bạn có chắc chắn muốn xóa phân khu "${deleteZoneTarget.code} — ${deleteZoneTarget.name}"?`
+            : ''
+        }
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteFloorTarget)}
+        onClose={() => {
+          if (!deletingFloor) setDeleteFloorTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteFloor}
+        loading={deletingFloor}
+        variant="danger"
+        title="Xác nhận xóa tầng"
+        confirmLabel="Xóa tầng"
+        message={
+          deleteFloorTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn "${deleteFloorTarget.name || `Tầng ${deleteFloorTarget.level}`}" khỏi tòa nhà ${building.code}?`
+            : ''
+        }
       />
     </div>
   );

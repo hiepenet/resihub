@@ -126,7 +126,14 @@ export function ZoneDetailPage() {
         emptyTitle="Chưa có căn hộ nào gán vào phân khu này"
         columns={[
           { key: 'code', label: 'Mã căn hộ', sortable: true, render: (r) => <span className="font-bold text-primary-700">{r.code}</span> },
-          { key: 'floor_name', label: 'Tầng', align: 'center', className: 'whitespace-nowrap' },
+          {
+            key: 'floor_name',
+            label: 'Tầng',
+            align: 'center',
+            sortable: true,
+            sortValue: (r) => r.floor_level ?? Number.MAX_SAFE_INTEGER,
+            className: 'whitespace-nowrap',
+          },
           {
             key: 'type',
             label: 'Loại căn / PN',

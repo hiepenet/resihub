@@ -54,6 +54,11 @@ async function cleanupNov2026Invoices() {
     WHERE invoice_id IN (SELECT id FROM invoice WHERE period = '2026-11')
   `);
   await adminPool.query(`
+    SELECT fn_sync_late_fee_trackers_on_invoice_void(id)
+    FROM invoice
+    WHERE period = '2026-11'
+  `);
+  await adminPool.query(`
     DELETE FROM invoice
     WHERE period = '2026-11'
   `);

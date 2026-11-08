@@ -23,6 +23,7 @@ export const usersService = {
     ),
   create: (payload) => api.post('/api/v1/admin/users', payload).then((r) => r.data),
   update: (id, payload) => api.patch(`/api/v1/admin/users/${id}`, payload).then((r) => r.data),
+  remove: (id) => api.delete(`/api/v1/admin/users/${id}`).then((r) => r.data),
 
   peekSettings: () => peekQueryCache(buildCacheKey('settings', 'global'))?.data || null,
   getSettings: (options = {}) =>
@@ -38,6 +39,8 @@ export const usersService = {
         ...(settings && typeof settings === 'object' ? settings : {}),
       })
       .then((r) => r.data),
+  resetSetting: (key) =>
+    api.delete(`/api/v1/settings/${encodeURIComponent(key)}`).then((r) => r.data),
 
   listCronRuns: (params) =>
     api.get('/api/v1/settings/cron-runs', { params }).then((r) => r.data),

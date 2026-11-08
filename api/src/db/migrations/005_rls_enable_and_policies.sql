@@ -159,7 +159,10 @@ CREATE POLICY rls_building_update ON building FOR UPDATE
 
 DROP POLICY IF EXISTS rls_building_delete ON building;
 CREATE POLICY rls_building_delete ON building FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
 
 
 -- ============================================================================
@@ -201,7 +204,11 @@ DROP POLICY IF EXISTS rls_floor_delete ON floor;
 CREATE POLICY rls_floor_delete ON floor FOR DELETE
 USING (
   (SELECT is_org_admin())
-  OR building_id IN (SELECT building_id FROM get_user_assigned_buildings())
+  AND EXISTS (
+    SELECT 1 FROM building b
+    WHERE b.id = floor.building_id
+      AND b.org_id = (SELECT get_current_user_org_id())
+  )
 );
 
 
@@ -229,7 +236,10 @@ CREATE POLICY rls_zone_update ON zone FOR UPDATE
 
 DROP POLICY IF EXISTS rls_zone_delete ON zone;
 CREATE POLICY rls_zone_delete ON zone FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
 
 
 -- ============================================================================
@@ -266,7 +276,14 @@ CREATE POLICY rls_apartment_update ON apartment FOR UPDATE
 
 DROP POLICY IF EXISTS rls_apartment_delete ON apartment;
 CREATE POLICY rls_apartment_delete ON apartment FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND EXISTS (
+    SELECT 1 FROM building b
+    WHERE b.id = apartment.building_id
+      AND b.org_id = (SELECT get_current_user_org_id())
+  )
+);
 
 
 -- ============================================================================
@@ -315,7 +332,10 @@ CREATE POLICY rls_person_update ON person FOR UPDATE
 
 DROP POLICY IF EXISTS rls_person_delete ON person;
 CREATE POLICY rls_person_delete ON person FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
 
 
 -- ============================================================================
@@ -346,6 +366,11 @@ DROP POLICY IF EXISTS rls_app_user_delete ON app_user;
 CREATE POLICY rls_app_user_delete ON app_user FOR DELETE
 USING (
   (SELECT is_org_admin())
+  AND EXISTS (
+    SELECT 1 FROM person p
+    WHERE p.id = app_user.person_id
+      AND p.org_id = (SELECT get_current_user_org_id())
+  )
 );
 
 
@@ -377,7 +402,14 @@ CREATE POLICY rls_user_role_update ON user_role FOR UPDATE
 
 DROP POLICY IF EXISTS rls_user_role_delete ON user_role;
 CREATE POLICY rls_user_role_delete ON user_role FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND EXISTS (
+    SELECT 1 FROM role r
+    WHERE r.id = user_role.role_id
+      AND r.org_id = (SELECT get_current_user_org_id())
+  )
+);
 
 
 -- ============================================================================
@@ -430,7 +462,10 @@ CREATE POLICY rls_tenant_update ON tenant FOR UPDATE
 
 DROP POLICY IF EXISTS rls_tenant_delete ON tenant;
 CREATE POLICY rls_tenant_delete ON tenant FOR DELETE
-  USING ((SELECT is_org_admin()));
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
 
 
 -- ============================================================================
@@ -750,7 +785,7 @@ CREATE POLICY rls_deposit_delete ON deposit FOR DELETE
 DROP POLICY IF EXISTS rls_deposit_txn_select ON deposit_transaction;
 CREATE POLICY rls_deposit_txn_select ON deposit_transaction FOR SELECT USING (
   (SELECT is_org_admin())
-  OR deposit_id IN (SELECT id FROM deposit)
+  OR EXISTS (SELECT 1 FROM deposit d WHERE d.id = deposit_transaction.deposit_id)
 );
 
 DROP POLICY IF EXISTS rls_deposit_txn_insert ON deposit_transaction;
@@ -1114,24 +1149,45 @@ USING (
 DROP POLICY IF EXISTS rls_zalo_group_insert ON zalo_group;
 CREATE POLICY rls_zalo_group_insert ON zalo_group FOR INSERT
 WITH CHECK (
-  (SELECT is_manager())
-  AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  (
+    (SELECT is_org_admin())
+    AND org_id = (SELECT get_current_user_org_id())
+  )
+  OR (
+    (SELECT is_manager())
+    AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  )
 );
 
 DROP POLICY IF EXISTS rls_zalo_group_update ON zalo_group;
 CREATE POLICY rls_zalo_group_update ON zalo_group FOR UPDATE
 USING (
-  (SELECT is_manager())
-  AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  (
+    (SELECT is_org_admin())
+    AND org_id = (SELECT get_current_user_org_id())
+  )
+  OR (
+    (SELECT is_manager())
+    AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  )
 )
 WITH CHECK (
-  (SELECT is_manager())
-  AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  (
+    (SELECT is_org_admin())
+    AND org_id = (SELECT get_current_user_org_id())
+  )
+  OR (
+    (SELECT is_manager())
+    AND building_id IN (SELECT building_id FROM get_manager_building_ids())
+  )
 );
 
 DROP POLICY IF EXISTS rls_zalo_group_delete ON zalo_group;
 CREATE POLICY rls_zalo_group_delete ON zalo_group FOR DELETE
-USING (FALSE);
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
 
 
 -- ============================================================================
@@ -1316,6 +1372,13 @@ WITH CHECK (
   AND building_id IN (SELECT building_id FROM get_manager_building_ids())
 );
 
+DROP POLICY IF EXISTS rls_meter_delete ON meter;
+CREATE POLICY rls_meter_delete ON meter FOR DELETE
+USING (
+  (SELECT is_org_admin())
+  AND org_id = (SELECT get_current_user_org_id())
+);
+
 
 -- ============================================================================
 -- Table: meter_reading
@@ -1458,27 +1521,33 @@ CREATE POLICY rls_invoice_update ON invoice FOR UPDATE USING (
 DROP POLICY IF EXISTS rls_invoice_line_select ON invoice_line;
 CREATE POLICY rls_invoice_line_select ON invoice_line FOR SELECT USING (
   (SELECT is_org_admin())
-  OR invoice_id IN (SELECT id FROM invoice)
+  OR EXISTS (SELECT 1 FROM invoice i WHERE i.id = invoice_line.invoice_id)
 );
 
 DROP POLICY IF EXISTS rls_invoice_line_insert ON invoice_line;
 CREATE POLICY rls_invoice_line_insert ON invoice_line FOR INSERT WITH CHECK (
   (SELECT is_manager())
-  AND invoice_id IN (
-    SELECT id FROM invoice WHERE building_id IN (SELECT building_id FROM get_manager_building_ids())
+  AND EXISTS (
+    SELECT 1 FROM invoice i
+    WHERE i.id = invoice_line.invoice_id
+      AND i.building_id IN (SELECT building_id FROM get_manager_building_ids())
   )
 );
 
 DROP POLICY IF EXISTS rls_invoice_line_update ON invoice_line;
 CREATE POLICY rls_invoice_line_update ON invoice_line FOR UPDATE USING (
   (SELECT is_manager())
-  AND invoice_id IN (
-    SELECT id FROM invoice WHERE building_id IN (SELECT building_id FROM get_manager_building_ids())
+  AND EXISTS (
+    SELECT 1 FROM invoice i
+    WHERE i.id = invoice_line.invoice_id
+      AND i.building_id IN (SELECT building_id FROM get_manager_building_ids())
   )
 ) WITH CHECK (
   (SELECT is_manager())
-  AND invoice_id IN (
-    SELECT id FROM invoice WHERE building_id IN (SELECT building_id FROM get_manager_building_ids())
+  AND EXISTS (
+    SELECT 1 FROM invoice i
+    WHERE i.id = invoice_line.invoice_id
+      AND i.building_id IN (SELECT building_id FROM get_manager_building_ids())
   )
 );
 

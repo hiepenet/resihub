@@ -15,11 +15,13 @@ import {
   Search,
   AlertTriangle,
   Lock,
+  Trash2,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatsCard } from '../../../components/common/StatsCard';
 import { SearchBar } from '../../../components/common/SearchBar';
 import { EmptyState } from '../../../components/common/EmptyState';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { Badge } from '../../../components/ui/Badge';
@@ -54,6 +56,8 @@ export function BuildingsPage() {
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [codeCheck, setCodeCheck] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Bảo mật danh tính Chủ đầu tư (Know-Before-You-Link): tra cứu chính xác theo Email / SĐT
   const [ownerIdentifier, setOwnerIdentifier] = useState('');
@@ -277,6 +281,22 @@ export function BuildingsPage() {
     }
   };
 
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget?.id) return;
+    setDeleting(true);
+    try {
+      const res = await buildingsService.remove(deleteTarget.id);
+      toast.success(res?.message || `Đã xóa tòa nhà ${deleteTarget.code}.`);
+      setDeleteTarget(null);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      await loadData({ force: true });
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa tòa nhà.'));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading && buildings.length === 0) return <PageSkeleton />;
 
   const filtered = buildings.filter((b) => {
@@ -453,6 +473,40 @@ export function BuildingsPage() {
                           Sửa
                         </Button>
                       ) : null}
+                      {canManageBuildings ? (() => {
+                        const hasChildren =
+                          Number(b.total_floors || 0) > 0 ||
+                          Number(b.total_zones || 0) > 0 ||
+                          Number(b.total_apartments || 0) > 0;
+                        return (
+                          <span
+                            onClick={(e) => e.stopPropagation()}
+                            title={
+                              hasChildren
+                                ? 'Chỉ được xóa tòa nhà rỗng (chưa có khu, tầng hoặc căn hộ). Vui lòng dùng Ngừng khai thác nếu đã vận hành.'
+                                : 'Xóa tòa nhà rỗng'
+                            }
+                          >
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              icon={Trash2}
+                              disabled={hasChildren}
+                              className={
+                                hasChildren
+                                  ? ''
+                                  : 'text-rose-600 hover:text-rose-700 hover:bg-rose-50'
+                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteTarget(b);
+                              }}
+                            >
+                              Xóa
+                            </Button>
+                          </span>
+                        );
+                      })() : null}
                     </div>
                     <span className="inline-flex items-center gap-1 text-xs font-semibold text-primary-600 group-hover:translate-x-0.5 transition-transform">
                       Chi tiết
@@ -637,18 +691,18 @@ export function BuildingsPage() {
                   }}
                 />
               </div>
-              <div className="sm:col-span-3">
+              <div className="sm:col-span-7">
                 <Input
                   label="Số tài khoản"
-                  placeholder="001100..."
+                  placeholder="Nhập số tài khoản ngân hàng"
                   value={form.account_number}
                   onChange={(e) => setForm({ ...form, account_number: e.target.value })}
                 />
               </div>
-              <div className="sm:col-span-4">
+              <div className="sm:col-span-12">
                 <Input
                   label="Chủ tài khoản"
-                  placeholder="CONG TY..."
+                  placeholder="Nhập tên chủ tài khoản ngân hàng"
                   value={form.account_holder}
                   onChange={(e) => setForm({ ...form, account_holder: e.target.value })}
                 />
@@ -666,6 +720,23 @@ export function BuildingsPage() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onConfirm={handleConfirmDelete}
+        loading={deleting}
+        variant="danger"
+        title="Xác nhận xóa tòa nhà"
+        confirmLabel="Xóa tòa nhà"
+        message={
+          deleteTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn tòa nhà "${deleteTarget.code} — ${deleteTarget.name}"? Thao tác này không thể hoàn tác.`
+            : ''
+        }
+      />
     </div>
   );
 }

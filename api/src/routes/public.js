@@ -17,6 +17,7 @@ import {
   persistReservationEvidence,
   getTodayVnDateStr,
 } from './reservations.js';
+import { DEFAULT_SYSTEM_SETTINGS } from '../services/sysAdminDeleteGuards.js';
 
 const router = express.Router();
 
@@ -178,14 +179,22 @@ router.get('/apartments', async (req, res) => {
       );
       for (const oid of orgIds) {
         policiesByOrg[oid] = { ...DEFAULT_RESERVATION_CANCEL_POLICY };
+        billingConfigByOrg[oid] = { ...DEFAULT_SYSTEM_SETTINGS.billing_config };
+        contactConfigByOrg[oid] = { ...DEFAULT_SYSTEM_SETTINGS.contact_config };
       }
       for (const sRow of settingsRes.rows) {
         if (sRow.key === 'reservation_cancel_policy') {
           policiesByOrg[sRow.org_id] = normalizeCancelPolicyValue(sRow.value);
         } else if (sRow.key === 'billing_config') {
-          billingConfigByOrg[sRow.org_id] = sRow.value || {};
+          billingConfigByOrg[sRow.org_id] = {
+            ...DEFAULT_SYSTEM_SETTINGS.billing_config,
+            ...(sRow.value || {}),
+          };
         } else if (sRow.key === 'contact_config') {
-          contactConfigByOrg[sRow.org_id] = sRow.value || {};
+          contactConfigByOrg[sRow.org_id] = {
+            ...DEFAULT_SYSTEM_SETTINGS.contact_config,
+            ...(sRow.value || {}),
+          };
         }
       }
     }

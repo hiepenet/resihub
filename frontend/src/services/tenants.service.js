@@ -32,6 +32,9 @@ export const tenantsService = {
   checkDup: (params) => api.get('/api/v1/tenants/check-dup', { params }).then((r) => r.data),
   create: (payload) => api.post('/api/v1/tenants', payload).then((r) => r.data),
   update: (id, payload) => api.patch(`/api/v1/tenants/${id}`, payload).then((r) => r.data),
+  remove: (id) => api.delete(`/api/v1/tenants/${id}`).then((r) => r.data),
   merge: (payload) => api.post('/api/v1/tenants/merge', payload).then((r) => r.data),
   uploadIdImage: (id, payload) => api.post(`/api/v1/tenants/${id}/id-images`, payload).then((r) => r.data),
+  deleteIdImage: (id, attachmentId) =>
+    api.delete(`/api/v1/tenants/${id}/id-images/${attachmentId}`).then((r) => r.data),
 };

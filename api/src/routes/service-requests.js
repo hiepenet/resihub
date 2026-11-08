@@ -1,5 +1,5 @@
 import express from 'express';
-import { pool, getUserClient } from '../db/client.js';
+import { pool, adminPool, getUserClient } from '../db/client.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
@@ -416,25 +416,40 @@ router.get(
       );
 
       const timelineRes = await client.query(
-        `SELECT al.id,
-                al.actor_id,
-                al.action,
-                al.entity,
-                al.entity_id,
-                al.before,
-                al.after,
-                al.at,
-                al.at AS created_at,
-                p.full_name AS actor_name
-         FROM audit_log al
-         LEFT JOIN app_user au ON au.id = al.actor_id
-         LEFT JOIN person p ON p.id = au.person_id
-         WHERE al.entity = 'service_request'
-           AND al.entity_id = $1
-         ORDER BY al.id DESC
+        `WITH matched AS MATERIALIZED (
+           SELECT al.id,
+                  al.actor_id,
+                  al.action,
+                  al.entity,
+                  al.entity_id,
+                  al.before,
+                  al.after,
+                  al.at,
+                  al.at AS created_at
+           FROM audit_log al
+           WHERE al.entity = 'service_request'
+             AND al.entity_id = $1
+         )
+         SELECT *
+         FROM matched
+         ORDER BY id DESC
          LIMIT 50`,
         [id]
       );
+
+      const actorIds = Array.from(
+        new Set(timelineRes.rows.map((r) => r.actor_id).filter(Boolean))
+      );
+      const actorNamesPromise =
+        actorIds.length > 0
+          ? adminPool.query(
+              `SELECT au.id, p.full_name
+               FROM app_user au
+               LEFT JOIN person p ON p.id = au.person_id
+               WHERE au.id = ANY($1::uuid[])`,
+              [actorIds]
+            )
+          : Promise.resolve({ rows: [] });
 
       const zaloGroupRes = await client.query(
         `SELECT id, scope, building_id, apartment_id, name, invite_link, note
@@ -448,7 +463,16 @@ router.get(
       );
       const apartmentZaloGroup = zaloGroupRes.rows[0] || null;
 
-      const settingsMap = await loadOrgSettingsMap((s, p) => client.query(s, p), orgId);
+      const [settingsMap, actorsRes] = await Promise.all([
+        loadOrgSettingsMap((s, p) => client.query(s, p), orgId),
+        actorNamesPromise,
+      ]);
+      const actorNameMap = new Map(actorsRes.rows.map((a) => [a.id, a.full_name || null]));
+      const auditTimeline = timelineRes.rows.map((row) => ({
+        ...row,
+        actor_name: row.actor_id ? actorNameMap.get(row.actor_id) || null : null,
+      }));
+
       const zaloRoomMessagePreview = formatServiceRequestForRoomZalo({
         trackingCode: sr.tracking_code,
         category: sr.category,
@@ -468,7 +492,7 @@ router.get(
         data: {
           ...sr,
           available_assignees: assigneesRes.rows,
-          audit_timeline: timelineRes.rows,
+          audit_timeline: auditTimeline,
           apartment_zalo_group: apartmentZaloGroup,
           zalo_room_message_preview: zaloRoomMessagePreview,
         },

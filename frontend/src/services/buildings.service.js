@@ -52,6 +52,16 @@ export const buildingsService = {
       { ttlMs: BUILDINGS_TTL_MS, force: Boolean(options?.force) }
     ),
   createFloor: (id, payload) => api.post(`/api/v1/buildings/${id}/floors`, payload).then((r) => r.data),
+  previewFloorsBulk: (id, payload) =>
+    api
+      .post(
+        `/api/v1/buildings/${id}/floors/bulk`,
+        { ...payload, dry_run: true },
+        { skipCacheInvalidation: true }
+      )
+      .then((r) => r.data),
+  createFloorsBulk: (id, payload) =>
+    api.post(`/api/v1/buildings/${id}/floors/bulk`, { ...payload, dry_run: false }).then((r) => r.data),
   updateFloor: (id, floorId, payload) => api.patch(`/api/v1/buildings/${id}/floors/${floorId}`, payload).then((r) => r.data),
   deleteFloor: (id, floorId) => api.delete(`/api/v1/buildings/${id}/floors/${floorId}`).then((r) => r.data),
 
@@ -85,7 +95,13 @@ export const buildingsService = {
     ),
   createApartment: (payload) => api.post('/api/v1/apartments', payload).then((r) => r.data),
   previewApartmentsBulk: (payload) =>
-    api.post('/api/v1/apartments/bulk', { ...payload, dry_run: true }).then((r) => r.data),
+    api
+      .post(
+        '/api/v1/apartments/bulk',
+        { ...payload, dry_run: true },
+        { skipCacheInvalidation: true }
+      )
+      .then((r) => r.data),
   createApartmentsBulk: (payload) =>
     api.post('/api/v1/apartments/bulk', { ...payload, dry_run: false }).then((r) => r.data),
   updateApartment: (id, payload) => api.patch(`/api/v1/apartments/${id}`, payload).then((r) => r.data),

@@ -11,10 +11,12 @@ import {
   XCircle,
   Clock,
   CopyPlus,
+  Trash2,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState } from '../../../components/common/EmptyState';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { Card } from '../../../components/ui/Card';
 import { Badge } from '../../../components/ui/Badge';
 import { Button } from '../../../components/ui/Button';
@@ -51,6 +53,7 @@ import {
   canManagerConfirmReservationPayment,
 } from '../../../utils/depositUiHelpers';
 import { BulkApartmentModal } from './BulkApartmentModal';
+import { FloorModal } from './FloorModal';
 
 function computeSuggestedHoldUntil(startStr, busyIntervals = [], maxHoldDays = 30) {
   if (!startStr) return '';
@@ -64,6 +67,11 @@ function computeSuggestedHoldUntil(startStr, busyIntervals = [], maxHoldDays = 3
   return minDateStr(defaultUntil, maxBeforeBusy);
 }
 
+function sortFloorsAsc(list) {
+  if (!Array.isArray(list)) return [];
+  return [...list].sort((a, b) => Number(a?.level ?? 0) - Number(b?.level ?? 0));
+}
+
 export function FloorPlanView({
   buildingId,
   embedded = false,
@@ -71,10 +79,11 @@ export function FloorPlanView({
   buildingSelector = null,
   initialBuilding = null,
   initialZones = null,
+  onFloorsChanged = null,
 }) {
   const navigate = useNavigate();
   const toast = useToast();
-  const { canEditRealEstate, isManager } = usePermission();
+  const { canEditRealEstate, canManageBuildings, isManager } = usePermission();
 
   const isMatchingInitial = Boolean(
     initialBuilding && String(initialBuilding.id) === String(buildingId)
@@ -94,7 +103,7 @@ export function FloorPlanView({
   })?.data;
 
   const [building, setBuilding] = useState(cachedBld);
-  const [floorMap, setFloorMap] = useState(() => (Array.isArray(cachedFloorMap) ? cachedFloorMap : []));
+  const [floorMap, setFloorMap] = useState(() => sortFloorsAsc(cachedFloorMap));
   const [zones, setZones] = useState(() => (Array.isArray(cachedZones) ? cachedZones : []));
   const [pendingConfirms, setPendingConfirms] = useState(() => (Array.isArray(cachedPending) ? cachedPending : []));
   const [cancelPolicy, setCancelPolicy] = useState(DEFAULT_RESERVATION_CANCEL_POLICY);
@@ -107,9 +116,11 @@ export function FloorPlanView({
   const [aptDetail, setAptDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Modals: Add Floor, Add Apartment, Create Reservation, Reject Payment
+  // Modals: Add Floor (Single & Bulk), Add Apartment, Create Reservation, Reject Payment
   const [floorModalOpen, setFloorModalOpen] = useState(false);
-  const [floorForm, setFloorForm] = useState({ level: '', name: '' });
+  const [floorModalMode, setFloorModalMode] = useState('bulk');
+  const [deleteFloorTarget, setDeleteFloorTarget] = useState(null);
+  const [deletingFloor, setDeletingFloor] = useState(false);
 
   const [aptModalOpen, setAptModalOpen] = useState(false);
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
@@ -180,7 +191,7 @@ export function FloorPlanView({
           .catch(() => ({ data: [] })),
       ]);
       setBuilding(bRes.data);
-      setFloorMap(fmRes.data || []);
+      setFloorMap(sortFloorsAsc(fmRes.data));
       setZones(zRes.data || []);
       setPendingConfirms(pendRes.data || []);
     } catch (err) {
@@ -265,25 +276,6 @@ export function FloorPlanView({
     }
   };
 
-  const handleCreateFloor = async (e) => {
-    e.preventDefault();
-    setSubmitting(true);
-    try {
-      await buildingsService.createFloor(buildingId, {
-        level: Number(floorForm.level),
-        name: floorForm.name.trim() || undefined,
-      });
-      toast.success('Đã thêm tầng mới.');
-      setFloorModalOpen(false);
-      setFloorForm({ level: '', name: '' });
-      loadFloorPlan();
-    } catch (err) {
-      toast.error(extractErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const handleCreateApt = async (e) => {
     e.preventDefault();
     setSubmitting(true);
@@ -324,6 +316,25 @@ export function FloorPlanView({
       toast.error(extractErrorMessage(err));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleConfirmDeleteFloor = async () => {
+    if (!deleteFloorTarget?.id) return;
+    setDeletingFloor(true);
+    try {
+      const res = await buildingsService.deleteFloor(buildingId, deleteFloorTarget.id);
+      toast.success(
+        res?.message || `Đã xóa ${deleteFloorTarget.name || `Tầng ${deleteFloorTarget.level}`}.`
+      );
+      setDeleteFloorTarget(null);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      await loadFloorPlan({ force: true });
+      onFloorsChanged?.();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa tầng.'));
+    } finally {
+      setDeletingFloor(false);
     }
   };
 
@@ -477,7 +488,15 @@ export function FloorPlanView({
                   <Button variant="outline" size="sm" icon={CopyPlus} onClick={() => setBulkModalOpen(true)}>
                     Tạo hàng loạt
                   </Button>
-                  <Button variant="outline" size="sm" icon={Layers} onClick={() => setFloorModalOpen(true)}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={Layers}
+                    onClick={() => {
+                      setFloorModalMode('bulk');
+                      setFloorModalOpen(true);
+                    }}
+                  >
                     Thêm tầng
                   </Button>
                   <Button
@@ -635,7 +654,8 @@ export function FloorPlanView({
                   { value: 'ALL', label: `Tất cả phân khu (${zones.length})` },
                   ...zones.map((z) => ({
                     value: z.id,
-                    label: `Khu ${z.code}${z.name ? ` — ${z.name}` : ''}`,
+                    label: z.name?.trim() || `Khu ${z.code}`,
+                    searchText: z.code,
                   })),
                   { value: 'UNASSIGNED', label: 'Chưa gán khu' },
                 ]}
@@ -648,7 +668,15 @@ export function FloorPlanView({
               <Button variant="outline" size="xs" icon={CopyPlus} onClick={() => setBulkModalOpen(true)}>
                 Tạo hàng loạt
               </Button>
-              <Button variant="outline" size="xs" icon={Layers} onClick={() => setFloorModalOpen(true)}>
+              <Button
+                variant="outline"
+                size="xs"
+                icon={Layers}
+                onClick={() => {
+                  setFloorModalMode('bulk');
+                  setFloorModalOpen(true);
+                }}
+              >
                 Thêm tầng
               </Button>
               <Button
@@ -673,6 +701,33 @@ export function FloorPlanView({
             icon={DoorOpen}
             title="Chưa có dữ liệu tầng"
             description="Hãy khởi tạo các tầng và căn hộ cho tòa nhà này."
+            action={
+              canEditRealEstate ? (
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button
+                    size="sm"
+                    icon={Layers}
+                    onClick={() => {
+                      setFloorModalMode('bulk');
+                      setFloorModalOpen(true);
+                    }}
+                  >
+                    Thêm tầng hàng loạt
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={Plus}
+                    onClick={() => {
+                      setFloorModalMode('single');
+                      setFloorModalOpen(true);
+                    }}
+                  >
+                    Thêm từng tầng
+                  </Button>
+                </div>
+              ) : null
+            }
           />
         </Card>
       ) : (
@@ -699,13 +754,39 @@ export function FloorPlanView({
                 key={floor.id}
                 className="bg-white rounded-xl border border-slate-200/80 shadow-card p-4 flex flex-col md:flex-row md:items-start gap-4"
               >
-                <div className="md:w-36 shrink-0 flex md:flex-col justify-between md:justify-start border-b md:border-b-0 md:border-r border-slate-100 pb-2 md:pb-0 md:pr-4">
+                <div className="md:w-36 shrink-0 flex md:flex-col justify-between md:justify-start border-b md:border-b-0 md:border-r border-slate-100 pb-2 md:pb-0 md:pr-4 gap-2">
                   <div>
                     <p className="text-sm font-bold text-slate-900">{floor.name || `Tầng ${floor.level}`}</p>
                     <p className="text-xs text-slate-400 mt-0.5">
                       {(floor.apartments || []).length} căn hộ
                     </p>
                   </div>
+                  {canManageBuildings ? (() => {
+                    const totalFloorApts = (floor.apartments || []).length;
+                    const floorHasApts = totalFloorApts > 0;
+                    return (
+                      <span
+                        title={
+                          floorHasApts
+                            ? 'Không thể xóa tầng đang có căn hộ. Vui lòng xóa căn hộ trước.'
+                            : 'Xóa tầng rỗng'
+                        }
+                      >
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          icon={Trash2}
+                          disabled={floorHasApts}
+                          className={
+                            floorHasApts ? '' : 'text-rose-600 hover:text-rose-700 hover:bg-rose-50'
+                          }
+                          onClick={() => setDeleteFloorTarget(floor)}
+                        >
+                          Xóa tầng
+                        </Button>
+                      </span>
+                    );
+                  })() : null}
                 </div>
 
                 <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6 gap-2.5">
@@ -1083,37 +1164,17 @@ export function FloorPlanView({
         </form>
       </Modal>
 
-      {/* Add Floor Modal */}
-      <Modal
+      <FloorModal
         open={floorModalOpen}
         onClose={() => setFloorModalOpen(false)}
-        title="Thêm tầng mới"
-        size="sm"
-      >
-        <form onSubmit={handleCreateFloor} className="space-y-4">
-          <Input
-            label="Số tầng (số nguyên, VD: 11 hoặc -1 cho hầm)"
-            type="number"
-            required
-            value={floorForm.level}
-            onChange={(e) => setFloorForm({ ...floorForm, level: e.target.value })}
-          />
-          <Input
-            label="Tên hiển thị (để trống sẽ tự đặt)"
-            placeholder="VD: Tầng 11"
-            value={floorForm.name}
-            onChange={(e) => setFloorForm({ ...floorForm, name: e.target.value })}
-          />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setFloorModalOpen(false)}>
-              Hủy
-            </Button>
-            <Button type="submit" loading={submitting}>
-              Tạo tầng
-            </Button>
-          </div>
-        </form>
-      </Modal>
+        buildingId={buildingId}
+        existingFloors={floorMap}
+        initialMode={floorModalMode}
+        onCreated={() => {
+          loadFloorPlan({ force: true });
+          onFloorsChanged?.();
+        }}
+      />
 
       {/* Add Apartment Modal */}
       <Modal
@@ -1137,7 +1198,11 @@ export function FloorPlanView({
                 placeholder="-- Không chọn --"
                 value={aptForm.zone_id}
                 onChange={(e) => setAptForm({ ...aptForm, zone_id: e.target.value })}
-                options={zones.map((z) => ({ value: z.id, label: `${z.code} — ${z.name || ''}` }))}
+                options={zones.map((z) => ({
+                  value: z.id,
+                  label: z.name?.trim() || `Khu ${z.code}`,
+                  searchText: z.code,
+                }))}
               />
             ) : (
               <Input
@@ -1306,6 +1371,23 @@ export function FloorPlanView({
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={Boolean(deleteFloorTarget)}
+        onClose={() => {
+          if (!deletingFloor) setDeleteFloorTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteFloor}
+        loading={deletingFloor}
+        variant="danger"
+        title="Xác nhận xóa tầng"
+        confirmLabel="Xóa tầng"
+        message={
+          deleteFloorTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn "${deleteFloorTarget.name || `Tầng ${deleteFloorTarget.level}`}"?`
+            : ''
+        }
+      />
     </div>
   );
 }

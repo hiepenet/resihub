@@ -12,6 +12,8 @@ import {
   logAccessDenied,
 } from '../services/ownerScope.js';
 import { normalizeVnPhone } from '../services/residentAccount.js';
+import { defaultFloorName, validateAndNormalizeBulkFloors } from '../services/floorBulk.js';
+import { checkBuildingEmptyForDelete } from '../services/sysAdminDeleteGuards.js';
 import { buildOwnerPreview, checkLookupRateLimit } from '../utils/piiMask.js';
 
 const router = express.Router();
@@ -302,7 +304,8 @@ router.get('/', authenticateToken, async (req, res) => {
         (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id) as total_apartments,
         (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id AND a.status = 'AVAILABLE') as available_apartments,
         (SELECT COUNT(*) FROM apartment a WHERE a.building_id = b.id AND a.status = 'OCCUPIED') as occupied_apartments,
-        (SELECT COUNT(*) FROM floor f WHERE f.building_id = b.id) as total_floors
+        (SELECT COUNT(*) FROM floor f WHERE f.building_id = b.id) as total_floors,
+        (SELECT COUNT(*) FROM zone z WHERE z.building_id = b.id) as total_zones
       FROM building b
       WHERE b.org_id = $1
     `;
@@ -582,13 +585,27 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
     }
 
-    const zones = await pool.query(
-      'SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC',
-      [id]
-    );
+    const [zones, countsRes] = await Promise.all([
+      pool.query('SELECT id, code, name FROM zone WHERE building_id = $1 ORDER BY code ASC', [id]),
+      pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM apartment WHERE building_id = $1) AS total_apartments,
+           (SELECT COUNT(*)::int FROM floor WHERE building_id = $1) AS total_floors`,
+        [id]
+      ),
+    ]);
     const [withOwner] = await attachOwnerPreviews([check.building], req.user.org_id);
+    const counts = countsRes.rows[0] || { total_apartments: 0, total_floors: 0 };
 
-    res.json({ data: { ...withOwner, zones: zones.rows } });
+    res.json({
+      data: {
+        ...withOwner,
+        total_apartments: counts.total_apartments,
+        total_floors: counts.total_floors,
+        total_zones: zones.rows.length,
+        zones: zones.rows,
+      },
+    });
   } catch (err) {
     console.error('[Building Detail Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi khi tải thông tin tòa nhà.' });
@@ -620,38 +637,68 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     if (!access.allowed) {
       return res.status(access.status).json({ code: 'FORBIDDEN', message: access.message });
     }
-
-    const depRes = await pool.query(
-      `SELECT
-         (SELECT COUNT(*)::int FROM apartment WHERE building_id = $1) AS apt_cnt,
-         (SELECT COUNT(*)::int FROM floor WHERE building_id = $1) AS floor_cnt,
-         (SELECT COUNT(*)::int FROM zone WHERE building_id = $1) AS zone_cnt,
-         (SELECT COUNT(*)::int FROM contract WHERE building_id = $1) AS contract_cnt`,
-      [id]
-    );
-    const { apt_cnt, floor_cnt, zone_cnt, contract_cnt } = depRes.rows[0] || {};
-    if (apt_cnt > 0 || floor_cnt > 0 || zone_cnt > 0 || contract_cnt > 0) {
-      return res.status(400).json({
-        code: 'BUILDING_NOT_EMPTY',
-        message: 'Không thể xóa tòa nhà đang chứa phân khu, tầng, căn hộ hoặc hợp đồng.',
-      });
+  } catch (err) {
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
     }
+    console.error('[Delete Building Access Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa tòa nhà.' });
+  }
 
-    const delRes = await pool.query('DELETE FROM building WHERE id = $1 RETURNING *', [id]);
-    if (delRes.rows.length === 0) {
+  const { id } = req.params;
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const lockRes = await client.query(
+      'SELECT * FROM building WHERE id = $1 AND org_id = $2 FOR UPDATE',
+      [id, req.user.org_id]
+    );
+    if (lockRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
     }
 
-    await pool.query(
+    const { empty } = await checkBuildingEmptyForDelete(client, id);
+    if (!empty) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(400).json({
+        code: 'BUILDING_NOT_EMPTY',
+        message: 'Không thể xóa tòa nhà đang chứa phân khu, tầng, căn hộ hoặc dữ liệu vận hành/lịch sử liên quan.',
+      });
+    }
+
+    const delRes = await client.query('DELETE FROM building WHERE id = $1 AND org_id = $2 RETURNING *', [
+      id,
+      req.user.org_id,
+    ]);
+    const deleted = delRes.rows[0];
+
+    await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
        VALUES ($1, 'DELETE', 'building', $2, $3)`,
-      [req.user.sub, id, JSON.stringify(delRes.rows[0])]
+      [req.user.sub, id, JSON.stringify(deleted)]
     );
 
-    return res.json({ message: 'Đã xóa tòa nhà trống thành công.', data: delRes.rows[0] });
+    await client.query('COMMIT');
+    txStarted = false;
+
+    return res.json({ message: 'Đã xóa tòa nhà trống thành công.', data: deleted });
   } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy tòa nhà.' });
+    }
     console.error('[Delete Building Error]:', err);
-    res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa tòa nhà.' });
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa tòa nhà.' });
+  } finally {
+    await release();
   }
 });
 
@@ -899,7 +946,7 @@ router.get('/:id/floor-map', authenticateToken, async (req, res) => {
 
   try {
     const floorsRes = await pool.query(
-      'SELECT * FROM floor WHERE building_id = $1 ORDER BY level DESC',
+      'SELECT * FROM floor WHERE building_id = $1 ORDER BY level ASC',
       [id]
     );
 
@@ -956,6 +1003,139 @@ router.get('/:id/floors', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/v1/buildings/:id/floors/bulk (FR-007 / NV-04 — Khởi tạo tầng hàng loạt)
+ * Quyền: SYS_ADMIN hoặc MANAGER được phân công quản lý tòa nhà đó.
+ * Hỗ trợ dry_run: true (xem trước), skip_existing: true (bỏ qua tầng đã có),
+ * và commit nguyên tử all-or-nothing qua getUserClient(req) kèm ghi audit_log.
+ */
+router.post('/:id/floors/bulk', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER']), async (req, res) => {
+  const { id } = req.params;
+  const body = req.body || {};
+  const skipExisting = Boolean(body.skip_existing);
+  const dryRun = Boolean(body.dry_run);
+
+  const check = await checkBuildingAccess(req, id, 'create');
+  if (!check.allowed) {
+    return res.status(check.status).json({ code: 'ACCESS_DENIED', message: check.message });
+  }
+
+  const parsed = validateAndNormalizeBulkFloors(body);
+  if (!parsed.ok) {
+    const extra = parsed.conflicts ? { conflicts: parsed.conflicts } : {};
+    return res.status(422).json({ code: parsed.code, message: parsed.message, ...extra });
+  }
+
+  const drafts = parsed.drafts;
+
+  try {
+    const existingRes = await pool.query(
+      'SELECT id, level, name FROM floor WHERE building_id = $1 AND level = ANY($2::int[]) ORDER BY level ASC',
+      [id, drafts.map((d) => d.level)]
+    );
+    const existingByLevel = new Map(existingRes.rows.map((r) => [Number(r.level), r]));
+
+    const matchedExisting = drafts
+      .filter((d) => existingByLevel.has(d.level))
+      .map((d) => {
+        const ex = existingByLevel.get(d.level);
+        return {
+          level: d.level,
+          name: d.name,
+          existing_id: ex.id,
+          existing_name: ex.name,
+        };
+      });
+
+    const toCreate = skipExisting
+      ? drafts.filter((d) => !existingByLevel.has(d.level))
+      : drafts;
+    const conflicts = skipExisting ? [] : matchedExisting;
+    const skipped = skipExisting ? matchedExisting : [];
+
+    if (dryRun) {
+      return res.json({
+        data: toCreate,
+        conflicts,
+        skipped,
+        total: toCreate.length,
+        valid: conflicts.length === 0,
+      });
+    }
+
+    if (conflicts.length > 0) {
+      const conflictLabels = conflicts.map((c) => c.level).join(', ');
+      return res.status(409).json({
+        code: 'FLOOR_EXISTS',
+        message: `Các tầng sau đã tồn tại trong tòa nhà này: ${conflictLabels}.`,
+        conflicts,
+      });
+    }
+
+    if (toCreate.length === 0) {
+      return res.status(200).json({
+        message: 'Tất cả các tầng trong danh sách đã tồn tại, không có tầng mới nào cần tạo.',
+        created_count: 0,
+        skipped_count: skipped.length,
+        skipped,
+        data: [],
+      });
+    }
+
+    const { client, release } = await getUserClient(req);
+    try {
+      await client.query('BEGIN');
+
+      const insertedRes = await client.query(
+        `INSERT INTO floor (building_id, level, name)
+         SELECT $1::uuid, u.lvl, u.nm
+         FROM UNNEST($2::int[], $3::text[]) WITH ORDINALITY AS u(lvl, nm, ord)
+         ORDER BY u.ord ASC
+         RETURNING *`,
+        [id, toCreate.map((d) => d.level), toCreate.map((d) => d.name)]
+      );
+      const created = insertedRes.rows;
+
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity, entity_id, after)
+         SELECT $1::uuid, 'CREATE', 'floor', r.id, r.payload
+         FROM UNNEST($2::uuid[], $3::jsonb[]) WITH ORDINALITY AS r(id, payload, ord)
+         ORDER BY r.ord ASC`,
+        [
+          req.user.sub,
+          created.map((r) => r.id),
+          created.map((r) => JSON.stringify(r)),
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      const skippedSuffix = skipped.length > 0 ? ` (đã bỏ qua ${skipped.length} tầng có sẵn)` : '';
+      return res.status(201).json({
+        message: `Đã khởi tạo thành công ${created.length} tầng mới${skippedSuffix}.`,
+        created_count: created.length,
+        skipped_count: skipped.length,
+        skipped,
+        data: created,
+      });
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (txErr.code === '23505') {
+        return res.status(409).json({
+          code: 'FLOOR_EXISTS',
+          message: 'Một hoặc nhiều tầng vừa được tạo bởi thao tác khác. Vui lòng thử lại.',
+        });
+      }
+      throw txErr;
+    } finally {
+      await release();
+    }
+  } catch (err) {
+    console.error('[Bulk Create Floors Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi khởi tạo tầng hàng loạt.' });
+  }
+});
+
+/**
  * POST /api/v1/buildings/:id/floors (NV-04)
  * Quyền: SYS_ADMIN hoặc MANAGER của tòa nhà đó
  */
@@ -977,12 +1157,7 @@ router.post('/:id/floors', authenticateToken, requireRole(['SYS_ADMIN', 'MANAGER
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Số tầng phải là số nguyên (INTEGER).' });
   }
 
-  let floorName = name?.trim();
-  if (!floorName) {
-    if (lvl < 0) floorName = `Tầng hầm B${Math.abs(lvl)}`;
-    else if (lvl === 0) floorName = `Tầng Trệt`;
-    else floorName = `Tầng ${lvl}`;
-  }
+  const floorName = name?.trim() || defaultFloorName(lvl);
 
   try {
     const checkDup = await pool.query(

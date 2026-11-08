@@ -5,6 +5,7 @@ import { requireRole } from '../middleware/rbac.js';
 import { saveBase64Image } from '../services/imageUpload.js';
 import { isTransitionAllowed, APARTMENT_TRANSITIONS, syncApartmentStatus } from '../services/apartmentStatus.js';
 import { buildApartmentDrafts, findDuplicateCodes } from '../services/apartmentBulk.js';
+import { checkApartmentHistoryForDelete } from '../services/sysAdminDeleteGuards.js';
 import {
   getUserRoleCodes,
   getOwnerBuildingIds,
@@ -60,7 +61,7 @@ router.get('/', authenticateToken, async (req, res) => {
     let sql = `
       SELECT a.*,
              b.name as building_name, b.code as building_code,
-             f.name as floor_name,
+             f.name as floor_name, f.level as floor_level,
              z.name as zone_name, z.code as zone_code,
              (SELECT COUNT(*)::int FROM contract c
               WHERE c.apartment_id = a.id
@@ -113,7 +114,7 @@ router.get('/', authenticateToken, async (req, res) => {
       sql += ` AND a.status = ANY(string_to_array($${params.length}, ','))`;
     }
 
-    sql += ` ORDER BY b.code ASC, a.code ASC`;
+    sql += ` ORDER BY b.code ASC, f.level ASC NULLS LAST, a.code ASC`;
 
     const result = await pool.query(sql, params);
     res.json({ data: result.rows });
@@ -758,44 +759,100 @@ router.delete('/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const roleCodes = getUserRoleCodes(req);
 
-  if (!roleCodes.includes('SYS_ADMIN')) {
-    await logAccessDenied(req, 'apartment', id, 'Non-SYS_ADMIN attempted to delete apartment');
-    return res.status(403).json({
-      code: 'DELETE_PROHIBITED',
-      message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa căn hộ.',
-    });
-  }
-
   try {
-    const hasHistory = await pool.query(
-      `SELECT 1 FROM contract WHERE apartment_id = $1
-       UNION ALL
-       SELECT 1 FROM reservation WHERE apartment_id = $1
+    const scopeRes = await adminPool.query(
+      `SELECT a.id, a.building_id
+       FROM apartment a
+       JOIN building b ON b.id = a.building_id
+       WHERE a.id = $1 AND b.org_id = $2
        LIMIT 1`,
-      [id]
+      [id, req.user.org_id]
     );
-    if (hasHistory.rows.length > 0) {
-      return res.status(409).json({
-        code: 'APARTMENT_HAS_HISTORY',
-        message: 'Không thể xóa căn hộ đã từng phát sinh hợp đồng hoặc giữ chỗ. Vui lòng chuyển sang trạng thái INACTIVE.',
-      });
-    }
-
-    const delRes = await pool.query('DELETE FROM apartment WHERE id = $1 RETURNING *', [id]);
-    if (delRes.rows.length === 0) {
+    if (scopeRes.rows.length === 0) {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
     }
 
-    await pool.query(
+    if (!roleCodes.includes('SYS_ADMIN')) {
+      await logAccessDenied(req, 'apartment', id, 'Non-SYS_ADMIN attempted to delete apartment');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa căn hộ.',
+      });
+    }
+  } catch (err) {
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
+    console.error('[Delete Apartment Scope Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi xóa căn hộ.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const lockRes = await client.query('SELECT * FROM apartment WHERE id = $1 FOR UPDATE', [id]);
+    if (lockRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
+
+    const hist = await checkApartmentHistoryForDelete(client, id);
+    if (hist.hasHistory) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(409).json({
+        code: 'APARTMENT_HAS_HISTORY',
+        message: hist.reason,
+      });
+    }
+
+    const [metersSnap, zaloSnap] = await Promise.all([
+      client.query(
+        'SELECT id, meter_type, meter_code, unit, unit_price FROM meter WHERE apartment_id = $1 ORDER BY created_at ASC',
+        [id]
+      ),
+      client.query(
+        'SELECT id, name, invite_link, scope FROM zalo_group WHERE apartment_id = $1 ORDER BY created_at ASC',
+        [id]
+      ),
+    ]);
+
+    const delRes = await client.query('DELETE FROM apartment WHERE id = $1 RETURNING *', [id]);
+    const deleted = delRes.rows[0];
+
+    await client.query(
       `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
        VALUES ($1, 'DELETE', 'apartment', $2, $3)`,
-      [req.user.sub, id, JSON.stringify(delRes.rows[0])]
+      [
+        req.user.sub,
+        id,
+        JSON.stringify({
+          ...deleted,
+          cascaded_meters: metersSnap.rows,
+          cascaded_zalo_groups: zaloSnap.rows,
+        }),
+      ]
     );
 
-    return res.json({ message: 'Đã xóa căn hộ thành công.', data: delRes.rows[0] });
+    await client.query('COMMIT');
+    txStarted = false;
+
+    return res.json({ message: 'Đã xóa căn hộ thành công.', data: deleted });
   } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy căn hộ.' });
+    }
     console.error('[Delete Apartment Error]:', err);
     return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi xóa căn hộ.' });
+  } finally {
+    await release();
   }
 });
 

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   XCircle,
   RefreshCw,
+  RotateCcw,
   BarChart3,
 } from 'lucide-react';
 import { Card, CardHeader } from '../ui/Card';
@@ -21,6 +22,8 @@ export function AiGatewayConfigCard({
   onChange,
   apiKeyConfigured = false,
   canEdit = false,
+  onReset = null,
+  resetting = false,
 }) {
   const [usage, setUsage] = useState(null);
   const [loadingUsage, setLoadingUsage] = useState(false);
@@ -91,6 +94,19 @@ export function AiGatewayConfigCard({
             >
               Làm mới thống kê
             </Button>
+            {canEdit && typeof onReset === 'function' ? (
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                icon={RotateCcw}
+                loading={resetting}
+                onClick={onReset}
+                className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+              >
+                Khôi phục mặc định
+              </Button>
+            ) : null}
           </div>
         }
       />

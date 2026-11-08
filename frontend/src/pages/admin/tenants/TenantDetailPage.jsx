@@ -22,6 +22,7 @@ import {
   AlertTriangle,
   Building2,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -122,6 +123,10 @@ export function TenantDetailPage() {
   // Approve / Reject pending tenant profile
   const [approvalDialog, setApprovalDialog] = useState({ open: false, action: 'approve', reason: '', error: '' });
   const [processingApproval, setProcessingApproval] = useState(false);
+  const [deleteTenantOpen, setDeleteTenantOpen] = useState(false);
+  const [deletingTenant, setDeletingTenant] = useState(false);
+  const [deleteImageTarget, setDeleteImageTarget] = useState(null);
+  const [deletingImage, setDeletingImage] = useState(false);
 
   const loadData = useCallback(async (opts = {}) => {
     if (!id) return;
@@ -360,6 +365,40 @@ export function TenantDetailPage() {
     }
   };
 
+  const handleConfirmDeleteTenant = async () => {
+    setDeletingTenant(true);
+    try {
+      const res = await tenantsService.remove(id);
+      toast.success(res?.message || `Đã xóa hồ sơ cư dân "${tenant?.full_name || ''}".`);
+      setDeleteTenantOpen(false);
+      navigate('/admin/tenants');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa hồ sơ cư dân.'));
+    } finally {
+      setDeletingTenant(false);
+    }
+  };
+
+  const handleConfirmDeleteIdImage = async () => {
+    if (!deleteImageTarget?.attachment_id) return;
+    setDeletingImage(true);
+    try {
+      const res = await tenantsService.deleteIdImage(id, deleteImageTarget.attachment_id);
+      toast.success(res?.message || 'Đã xóa ảnh giấy tờ định danh.');
+      setDeleteImageTarget(null);
+      const imgRes = await tenantsService.getIdImages(id, { force: true });
+      setIdImages(Array.isArray(imgRes?.data) ? imgRes.data : []);
+      setIdImagesMeta({
+        maskedForOwner: Boolean(imgRes?.masked_for_owner),
+        hasIdImages: Boolean(imgRes?.has_id_images),
+      });
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa ảnh giấy tờ định danh.'));
+    } finally {
+      setDeletingImage(false);
+    }
+  };
+
   const contractColumns = useMemo(
     () => [
       {
@@ -595,6 +634,33 @@ export function TenantDetailPage() {
                 Xem hợp đồng gần nhất
               </Button>
             ) : null}
+
+            {isSysAdmin ? (() => {
+              const hasContractHistory = Boolean(activeContract || contracts.length > 0);
+              return (
+                <span
+                  title={
+                    hasContractHistory
+                      ? 'Không thể xóa cư dân đã phát sinh hợp đồng thuê.'
+                      : 'Xóa vĩnh viễn hồ sơ cư dân chưa có lịch sử vận hành'
+                  }
+                >
+                  <Button
+                    variant="outline"
+                    icon={Trash2}
+                    disabled={hasContractHistory}
+                    className={
+                      hasContractHistory
+                        ? ''
+                        : 'border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300'
+                    }
+                    onClick={() => setDeleteTenantOpen(true)}
+                  >
+                    Xóa hồ sơ
+                  </Button>
+                </span>
+              );
+            })() : null}
           </>
         }
       />
@@ -1009,17 +1075,34 @@ export function TenantDetailPage() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-700">1. Mặt trước CCCD (Front)</span>
                   {latestFrontImg ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPreviewTitle('CCCD Mặt trước — ' + tenant.full_name);
-                        setPreviewSrc(`/api/v1/attachments/${latestFrontImg.attachment_id}/view`);
-                      }}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-700"
-                    >
-                      <ZoomIn className="w-3.5 h-3.5" />
-                      Phóng to
-                    </button>
+                    <div className="inline-flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewTitle('CCCD Mặt trước — ' + tenant.full_name);
+                          setPreviewSrc(`/api/v1/attachments/${latestFrontImg.attachment_id}/view`);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-700"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                        Phóng to
+                      </button>
+                      {isSysAdmin ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDeleteImageTarget({
+                              ...latestFrontImg,
+                              label: 'CCCD Mặt trước',
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 hover:text-rose-700"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Xóa ảnh
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
 
@@ -1063,17 +1146,34 @@ export function TenantDetailPage() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-700">2. Mặt sau CCCD (Back)</span>
                   {latestBackImg ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPreviewTitle('CCCD Mặt sau — ' + tenant.full_name);
-                        setPreviewSrc(`/api/v1/attachments/${latestBackImg.attachment_id}/view`);
-                      }}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-700"
-                    >
-                      <ZoomIn className="w-3.5 h-3.5" />
-                      Phóng to
-                    </button>
+                    <div className="inline-flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPreviewTitle('CCCD Mặt sau — ' + tenant.full_name);
+                          setPreviewSrc(`/api/v1/attachments/${latestBackImg.attachment_id}/view`);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary-600 hover:text-primary-700"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                        Phóng to
+                      </button>
+                      {isSysAdmin ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDeleteImageTarget({
+                              ...latestBackImg,
+                              label: 'CCCD Mặt sau',
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 hover:text-rose-700"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Xóa ảnh
+                        </button>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
 
@@ -1127,9 +1227,25 @@ export function TenantDetailPage() {
                             setPreviewTitle(`Giấy tờ #${idx + 1} — ${tenant.full_name}`);
                             setPreviewSrc(src);
                           }}
-                          className="h-28 rounded-xl border border-slate-200 overflow-hidden bg-slate-50 cursor-pointer hover:border-primary-400 transition-colors"
+                          className="relative h-28 rounded-xl border border-slate-200 overflow-hidden bg-slate-50 cursor-pointer hover:border-primary-400 transition-colors"
                         >
                           <AuthImage src={src} alt={`Giấy tờ #${idx + 1}`} className="w-full h-full object-cover" />
+                          {isSysAdmin ? (
+                            <button
+                              type="button"
+                              title="Xóa ảnh giấy tờ"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteImageTarget({
+                                  ...img,
+                                  label: `Giấy tờ #${idx + 1}`,
+                                });
+                              }}
+                              className="absolute top-1.5 right-1.5 p-1.5 rounded-lg bg-white/90 text-rose-600 hover:bg-rose-50 shadow-sm border border-slate-200"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -1387,6 +1503,36 @@ export function TenantDetailPage() {
           </div>
         </Modal>
       )}
+
+      <ConfirmDialog
+        open={deleteTenantOpen}
+        onClose={() => {
+          if (!deletingTenant) setDeleteTenantOpen(false);
+        }}
+        onConfirm={handleConfirmDeleteTenant}
+        loading={deletingTenant}
+        variant="danger"
+        title="Xác nhận xóa vĩnh viễn hồ sơ cư dân"
+        confirmLabel="Xóa hồ sơ"
+        message={`Bạn có chắc chắn muốn xóa vĩnh viễn hồ sơ cư dân "${tenant.full_name}" (${tenant.phone || '—'})? Nếu hồ sơ chưa phát sinh hợp đồng, giữ chỗ hay hóa đơn, hệ thống sẽ dọn sạch cả tài khoản Cổng cư dân và tệp giấy tờ đi kèm.`}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteImageTarget)}
+        onClose={() => {
+          if (!deletingImage) setDeleteImageTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteIdImage}
+        loading={deletingImage}
+        variant="danger"
+        title="Xác nhận xóa ảnh giấy tờ tùy thân"
+        confirmLabel="Xóa ảnh"
+        message={
+          deleteImageTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn tệp "${deleteImageTarget.label || 'CCCD'}" của cư dân "${tenant.full_name}"? Thao tác này sẽ ghi nhận vào Nhật ký Kiểm toán.`
+            : ''
+        }
+      />
     </div>
   );
 }

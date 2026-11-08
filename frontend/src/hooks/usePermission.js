@@ -49,6 +49,8 @@ export function usePermission() {
     canViewFinancialAuditLogs: isSysAdmin || isOwner || isManager,
     canHandleMaintenance: isManager,
     canSendNotifications: isManager,
+    canManageZaloGroups: isSysAdmin || isManager,
+    canDeleteZaloGroups: isSysAdmin,
     canManageUsers: isSysAdmin,
     canViewAuditLogs: isSysAdmin || isOwner,
   };

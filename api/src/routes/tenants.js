@@ -25,6 +25,11 @@ import {
   maskPhone,
 } from '../utils/piiMask.js';
 import { reviewAiSuggestion } from '../services/aiGateway.js';
+import {
+  checkTenantHistoryForDelete,
+  cleanupOrphanedPersonInTx,
+  unlinkStoragePathsBestEffort,
+} from '../services/sysAdminDeleteGuards.js';
 
 const router = express.Router();
 const checkDupBuckets = new Map();
@@ -1323,6 +1328,222 @@ router.get('/:id/id-images', authenticateToken, requireRole(['SYS_ADMIN', 'OWNER
   } catch (err) {
     console.error('[List Id Images Error]:', err);
     res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi tải ảnh CCCD.' });
+  }
+});
+
+/**
+ * DELETE /api/v1/tenants/:id/id-images/:attachment_id
+ * Xóa ảnh CCCD tải nhầm trên hồ sơ cư dân (chỉ SYS_ADMIN — PRD 6.2)
+ */
+router.delete('/:id/id-images/:attachment_id', authenticateToken, async (req, res) => {
+  const { id, attachment_id } = req.params;
+  const orgId = req.user.org_id;
+  const roles = getUserRoleCodes(req);
+
+  let tenantPersonId = null;
+  try {
+    const tRes = await adminPool.query(
+      `SELECT t.id, t.person_id
+       FROM tenant t
+       JOIN person p ON p.id = t.person_id
+       WHERE t.id = $1 AND t.org_id = $2
+       LIMIT 1`,
+      [id, orgId]
+    );
+    if (tRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+    }
+    tenantPersonId = tRes.rows[0].person_id;
+
+    if (!roles.includes('SYS_ADMIN')) {
+      await logAccessDenied(req, 'attachment', attachment_id, 'Non-SYS_ADMIN attempted to delete tenant CCCD image');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Chỉ Quản trị viên hệ thống (SYS_ADMIN) mới có quyền xóa ảnh giấy tờ tùy thân.',
+      });
+    }
+  } catch (err) {
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy ảnh CCCD.' });
+    }
+    console.error('[Delete Tenant Id Image Scope Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa ảnh CCCD.' });
+  }
+
+  const { client, release } = await getUserClient(req);
+  let txStarted = false;
+  try {
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const pRes = await client.query(
+      'SELECT id, id_images FROM person WHERE id = $1 AND org_id = $2 FOR UPDATE',
+      [tenantPersonId, orgId]
+    );
+    if (pRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+    }
+
+    const delAttRes = await client.query(
+      `DELETE FROM attachment
+       WHERE id = $1 AND owner_entity = 'person' AND owner_id = $2
+       RETURNING *`,
+      [attachment_id, tenantPersonId]
+    );
+    if (delAttRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy ảnh CCCD trên hồ sơ này.' });
+    }
+    const att = delAttRes.rows[0];
+
+    const filteredMarkers = (pRes.rows[0].id_images || []).filter((raw) => {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed?.attachmentId !== attachment_id;
+      } catch {
+        return true;
+      }
+    });
+
+    await client.query('UPDATE person SET id_images = $1, updated_at = NOW() WHERE id = $2 AND org_id = $3', [
+      filteredMarkers,
+      tenantPersonId,
+      orgId,
+    ]);
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'attachment', $2, $3)`,
+      [req.user.sub, attachment_id, JSON.stringify({ ...att, tenant_id: id })]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    await unlinkStoragePathsBestEffort([att.storage_path]);
+
+    return res.json({
+      message: 'Đã xóa ảnh giấy tờ tùy thân thành công.',
+      attachment_id,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy ảnh CCCD.' });
+    }
+    console.error('[Delete Tenant Id Image Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa ảnh CCCD.' });
+  } finally {
+    await release();
+  }
+});
+
+/**
+ * DELETE /api/v1/tenants/:id
+ * Xóa cứng hồ sơ cư dân tạo nhầm chưa phát sinh hợp đồng / giao dịch (chỉ SYS_ADMIN — PRD 6.2)
+ * Tự động dọn kèm tài khoản RESIDENT tự sinh rỗng và bản ghi person mồ côi để giải phóng SĐT/CCCD.
+ */
+router.delete('/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const orgId = req.user.org_id;
+  const roles = getUserRoleCodes(req);
+
+  const client = await adminPool.connect();
+  let txStarted = false;
+  try {
+    const tRes = await client.query(
+      `SELECT t.*, p.full_name, p.phone, p.email, p.id_number
+       FROM tenant t
+       JOIN person p ON p.id = t.person_id
+       WHERE t.id = $1 AND t.org_id = $2
+       LIMIT 1`,
+      [id, orgId]
+    );
+    if (tRes.rows.length === 0) {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+    }
+    const cur = tRes.rows[0];
+
+    if (!roles.includes('SYS_ADMIN')) {
+      await logAccessDenied(req, 'tenant', id, 'Non-SYS_ADMIN attempted DELETE /tenants/:id');
+      return res.status(403).json({
+        code: 'DELETE_PROHIBITED',
+        message: 'Thao tác xóa không được phép. Quyền của Quản lý là CRU (Tạo, Xem, Sửa), không được Xóa hồ sơ cư dân.',
+      });
+    }
+
+    const hist = await checkTenantHistoryForDelete(client, {
+      tenantId: id,
+      orgId,
+      phone: cur.phone,
+    });
+    if (hist.hasHistory) {
+      return res.status(409).json({
+        code: 'TENANT_HAS_HISTORY',
+        message: hist.reason,
+      });
+    }
+
+    await client.query('BEGIN');
+    txStarted = true;
+
+    const delRes = await client.query('DELETE FROM tenant WHERE id = $1 AND org_id = $2 RETURNING *', [
+      id,
+      orgId,
+    ]);
+    if (delRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      txStarted = false;
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+    }
+
+    const cleanup = await cleanupOrphanedPersonInTx(client, {
+      personId: cur.person_id,
+      orgId,
+      allowAutoDeletePureResidentUser: true,
+    });
+
+    await client.query(
+      `INSERT INTO audit_log (actor_id, action, entity, entity_id, before)
+       VALUES ($1, 'DELETE', 'tenant', $2, $3)`,
+      [
+        req.user.sub,
+        id,
+        JSON.stringify({
+          ...cur,
+          person_deleted: cleanup.personDeleted,
+          resident_user_deleted: cleanup.residentUserDeleted,
+        }),
+      ]
+    );
+
+    await client.query('COMMIT');
+    txStarted = false;
+
+    await unlinkStoragePathsBestEffort(cleanup.deletedPaths);
+
+    return res.json({
+      message: 'Đã xóa hồ sơ cư dân thành công.',
+      data: delRes.rows[0],
+      person_deleted: cleanup.personDeleted,
+      resident_user_deleted: cleanup.residentUserDeleted,
+    });
+  } catch (err) {
+    if (txStarted) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+    if (err.code === '22P02') {
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Không tìm thấy hồ sơ cư dân.' });
+    }
+    console.error('[Delete Tenant Error]:', err);
+    return res.status(500).json({ code: 'DB_ERROR', message: 'Lỗi máy chủ khi xóa hồ sơ cư dân.' });
+  } finally {
+    client.release();
   }
 });
 

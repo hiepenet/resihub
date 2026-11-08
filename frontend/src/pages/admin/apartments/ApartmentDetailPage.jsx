@@ -14,10 +14,12 @@ import {
   Scale,
   ShieldCheck,
   Wallet,
+  Trash2,
 } from 'lucide-react';
 import { PageHeader } from '../../../components/common/PageHeader';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { DataTable } from '../../../components/common/DataTable';
+import { ConfirmDialog } from '../../../components/common/ConfirmDialog';
 import { BankSelect } from '../../../components/common/BankSelect';
 import { Card, CardHeader } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
@@ -62,7 +64,7 @@ export function ApartmentDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [reviewReservationModal, setReviewReservationModal] = useState(null);
   const toast = useToast();
-  const { canEditRealEstate, isOwner, isManager, isSysAdmin, user } = usePermission();
+  const { canEditRealEstate, canManageBuildings, isOwner, isManager, isSysAdmin, user } = usePermission();
   const currentUserId = user?.id || user?.sub;
   const todayStr = toDateOnlyStr(new Date());
 
@@ -82,6 +84,8 @@ export function ApartmentDetailPage() {
   const [loading, setLoading] = useState(() => !cachedApt);
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingApt, setDeletingApt] = useState(false);
   const [form, setForm] = useState(() => ({
     zone_id: cachedApt?.zone_id || '',
     type: cachedApt?.type || '1PN',
@@ -221,6 +225,22 @@ export function ApartmentDetailPage() {
       toast.error(extractErrorMessage(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleConfirmDeleteApartment = async () => {
+    setDeletingApt(true);
+    try {
+      const targetBuildingId = apt?.building_id;
+      const res = await buildingsService.deleteApartment(id);
+      toast.success(res?.message || `Đã xóa căn hộ ${apt?.code || ''}.`);
+      setDeleteConfirmOpen(false);
+      window.dispatchEvent(new Event('resihub:buildings-updated'));
+      navigate(targetBuildingId ? `/admin/buildings/${targetBuildingId}/floor-plan` : '/admin/buildings');
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa căn hộ.'));
+    } finally {
+      setDeletingApt(false);
     }
   };
 
@@ -817,6 +837,33 @@ export function ApartmentDetailPage() {
                 Chỉnh sửa
               </Button>
             ) : null}
+            {canManageBuildings ? (() => {
+              const aptBusy = ['OCCUPIED', 'RESERVED'].includes(apt.status);
+              return (
+                <span
+                  title={
+                    aptBusy
+                      ? 'Không thể xóa căn hộ đang cho thuê hoặc đang giữ chỗ.'
+                      : 'Xóa căn hộ chưa phát sinh lịch sử vận hành'
+                  }
+                >
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={Trash2}
+                    disabled={aptBusy}
+                    className={
+                      aptBusy
+                        ? ''
+                        : 'border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300'
+                    }
+                    onClick={() => setDeleteConfirmOpen(true)}
+                  >
+                    Xóa căn hộ
+                  </Button>
+                </span>
+              );
+            })() : null}
           </>
         }
       />
@@ -2095,7 +2142,8 @@ export function ApartmentDetailPage() {
             onChange={(e) => setForm({ ...form, zone_id: e.target.value })}
             options={zones.map((z) => ({
               value: z.id,
-              label: `${z.code}${z.name ? ` — ${z.name}` : ''}`,
+              label: z.name?.trim() || `Khu ${z.code}`,
+              searchText: z.code,
             }))}
           />
           <div className="grid grid-cols-2 gap-3.5">
@@ -2158,6 +2206,19 @@ export function ApartmentDetailPage() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        onClose={() => {
+          if (!deletingApt) setDeleteConfirmOpen(false);
+        }}
+        onConfirm={handleConfirmDeleteApartment}
+        loading={deletingApt}
+        variant="danger"
+        title="Xác nhận xóa căn hộ"
+        confirmLabel="Xóa căn hộ"
+        message={`Bạn có chắc chắn muốn xóa vĩnh viễn căn hộ "${apt.code}" (${apt.building_code})? Nếu căn hộ đã từng có hợp đồng, giữ chỗ, hóa đơn hoặc yêu cầu dịch vụ, hệ thống sẽ từ chối và khuyến nghị chuyển sang trạng thái Tạm khóa (INACTIVE).`}
+      />
     </div>
   );
 }

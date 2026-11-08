@@ -16,6 +16,7 @@ import {
   ScrollText,
   ExternalLink,
   Building2,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '../../../components/ui/Button';
 import { Input } from '../../../components/ui/Input';
@@ -107,13 +108,17 @@ export function UsersPage() {
     roles: [{ role_code: 'MANAGER', building_id: '' }],
   });
 
-  // Confirm khóa / mở tài khoản
+  // Confirm khóa / mở tài khoản & xóa tài khoản
   const [toggleStatusTarget, setToggleStatusTarget] = useState(null);
   const [togglingStatus, setTogglingStatus] = useState(false);
+  const [deleteUserTarget, setDeleteUserTarget] = useState(null);
+  const [deletingUser, setDeletingUser] = useState(false);
 
   // Tab 2: Cấu hình hệ thống
   const [loadingSettings, setLoadingSettings] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [resetSettingTarget, setResetSettingTarget] = useState(null);
+  const [resettingSetting, setResettingSetting] = useState(false);
   const [billingConfig, setBillingConfig] = useState(DEFAULT_BILLING_CONFIG);
   const [slaConfig, setSlaConfig] = useState(DEFAULT_SLA_CONFIG);
   const [contactConfig, setContactConfig] = useState(DEFAULT_CONTACT_CONFIG);
@@ -225,13 +230,14 @@ export function UsersPage() {
 
   const openEditUserModal = (u) => {
     setEditingUser(u);
-    const mappedRoles =
-      Array.isArray(u.roles) && u.roles.length > 0
-        ? u.roles.map((r) => ({
+    const mappedRoles = Array.isArray(u.roles)
+      ? u.roles
+          .filter((r) => r && r.code)
+          .map((r) => ({
             role_code: r.code,
             building_id: r.building_id || '',
           }))
-        : [{ role_code: 'MANAGER', building_id: selectedBuildingId || '' }];
+      : [];
 
     setUserForm({
       full_name: u.full_name || '',
@@ -266,10 +272,13 @@ export function UsersPage() {
   };
 
   const removeRoleRow = (idx) => {
-    setUserForm((s) => ({
-      ...s,
-      roles: s.roles.length > 1 ? s.roles.filter((_, i) => i !== idx) : s.roles,
-    }));
+    setUserForm((s) => {
+      const minRoles = editingUser ? 0 : 1;
+      return {
+        ...s,
+        roles: s.roles.length > minRoles ? s.roles.filter((_, i) => i !== idx) : s.roles,
+      };
+    });
   };
 
   const handleSaveUser = async (e) => {
@@ -361,6 +370,59 @@ export function UsersPage() {
     }
   };
 
+  const handleConfirmDeleteUser = async () => {
+    if (!deleteUserTarget?.id) return;
+    setDeletingUser(true);
+    try {
+      const res = await usersService.remove(deleteUserTarget.id);
+      toast.success(res?.message || `Đã xóa tài khoản "${deleteUserTarget.full_name}".`);
+      setDeleteUserTarget(null);
+      await fetchUsersData();
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể xóa tài khoản người dùng.'));
+    } finally {
+      setDeletingUser(false);
+    }
+  };
+
+  const handleConfirmResetSetting = async () => {
+    if (!resetSettingTarget?.key) return;
+    const key = resetSettingTarget.key;
+    setResettingSetting(true);
+    try {
+      const res = await usersService.resetSetting(key);
+      const def = res?.default_value;
+      if (key === 'ai_config') {
+        setAiConfig(mergeAiConfigState(def || DEFAULT_AI_CONFIG));
+      } else if (key === 'approval_config') {
+        setApprovalConfig({ allow_self_approval: Boolean(def?.allow_self_approval) });
+      } else if (key === 'billing_config') {
+        setBillingConfig({
+          billing_day: def?.billing_day ?? DEFAULT_BILLING_CONFIG.billing_day,
+          payment_due_days: def?.payment_due_days ?? DEFAULT_BILLING_CONFIG.payment_due_days,
+          reminder_days_text: Array.isArray(def?.reminder_days)
+            ? def.reminder_days.join(', ')
+            : DEFAULT_BILLING_CONFIG.reminder_days_text,
+          late_fee_percent: def?.late_fee_percent ?? DEFAULT_BILLING_CONFIG.late_fee_percent,
+          electricity_default_price:
+            def?.electricity_default_price ?? DEFAULT_BILLING_CONFIG.electricity_default_price,
+          water_default_price:
+            def?.water_default_price ?? DEFAULT_BILLING_CONFIG.water_default_price,
+        });
+      } else if (key === 'sla_config') {
+        setSlaConfig({ ...DEFAULT_SLA_CONFIG, ...(def || {}) });
+      } else if (key === 'contact_config') {
+        setContactConfig({ ...DEFAULT_CONTACT_CONFIG, ...(def || {}) });
+      }
+      toast.success(res?.message || `Đã khôi phục cấu hình "${resetSettingTarget.label}" về mặc định.`);
+      setResetSettingTarget(null);
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Không thể khôi phục cấu hình mặc định.'));
+    } finally {
+      setResettingSetting(false);
+    }
+  };
+
   const handleSaveSettings = async (e) => {
     e.preventDefault();
     const reminderDays = String(billingConfig.reminder_days_text || '')
@@ -372,7 +434,7 @@ export function UsersPage() {
     try {
       const res = await usersService.updateSettings({
         billing_config: {
-          billing_day: Math.min(28, Math.max(1, Number(billingConfig.billing_day) || 1)),
+          billing_day: Math.min(31, Math.max(1, Number(billingConfig.billing_day) || 1)),
           payment_due_days: Math.max(1, Number(billingConfig.payment_due_days) || 5),
           reminder_days: reminderDays.length > 0 ? reminderDays : [3, 7, 15],
           late_fee_percent: Math.max(0, Number(billingConfig.late_fee_percent) || 0),
@@ -494,7 +556,8 @@ export function UsersPage() {
         align: 'center',
         render: (row) => {
           if (!canManageUsers) return null;
-          const isSelf = row.id === currentUser?.id;
+          const currentUserId = currentUser?.id || currentUser?.sub;
+          const isSelf = Boolean(currentUserId && String(row.id) === String(currentUserId));
           return (
             <div className="inline-flex flex-wrap items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
               <Button
@@ -515,6 +578,28 @@ export function UsersPage() {
               >
                 {row.status === 'ACTIVE' ? 'Khóa' : 'Mở khóa'}
               </Button>
+              <span
+                title={
+                  isSelf
+                    ? 'Không thể tự xóa tài khoản đang đăng nhập'
+                    : 'Xóa tài khoản chưa phát sinh lịch sử thao tác'
+                }
+              >
+                <Button
+                  size="xs"
+                  variant="outline"
+                  icon={Trash2}
+                  disabled={isSelf}
+                  className={
+                    isSelf
+                      ? ''
+                      : 'border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300'
+                  }
+                  onClick={() => setDeleteUserTarget(row)}
+                >
+                  Xóa
+                </Button>
+              </span>
             </div>
           );
         },
@@ -657,6 +742,16 @@ export function UsersPage() {
               onChange={setAiConfig}
               apiKeyConfigured={aiKeyConfigured}
               canEdit={canManageUsers}
+              resetting={resettingSetting && resetSettingTarget?.key === 'ai_config'}
+              onReset={
+                canManageUsers
+                  ? () =>
+                      setResetSettingTarget({
+                        key: 'ai_config',
+                        label: 'Cổng Trợ lý AI — Gemini Gateway (ai_config)',
+                      })
+                  : null
+              }
             />
 
             {/* Quy tắc Phê duyệt Nội bộ (Four-eyes) — R-23 */}
@@ -664,6 +759,25 @@ export function UsersPage() {
               <CardHeader
                 title="Quy tắc Phê duyệt Nội bộ (Four-eyes)"
                 subtitle="Khóa cấu hình: approval_config"
+                action={
+                  canManageUsers ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      icon={RotateCcw}
+                      className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                      onClick={() =>
+                        setResetSettingTarget({
+                          key: 'approval_config',
+                          label: 'Quy tắc Phê duyệt Nội bộ (approval_config)',
+                        })
+                      }
+                    >
+                      Khôi phục mặc định
+                    </Button>
+                  ) : null
+                }
               />
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
                 <div className="space-y-1">
@@ -710,12 +824,31 @@ export function UsersPage() {
                 <CardHeader
                   title="Chu kỳ Hóa đơn & Giá mặc định"
                   subtitle="Khóa cấu hình: billing_config"
+                  action={
+                    canManageUsers ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="outline"
+                        icon={RotateCcw}
+                        className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                        onClick={() =>
+                          setResetSettingTarget({
+                            key: 'billing_config',
+                            label: 'Chu kỳ Hóa đơn & Giá mặc định (billing_config)',
+                          })
+                        }
+                      >
+                        Khôi phục mặc định
+                      </Button>
+                    ) : null
+                  }
                 />
                 <Input
                   label="Ngày chốt chỉ số & lập hóa đơn hàng tháng"
                   type="number"
                   min="1"
-                  max="28"
+                  max="31"
                   disabled={!canManageUsers}
                   value={billingConfig.billing_day}
                   onChange={(e) =>
@@ -786,6 +919,25 @@ export function UsersPage() {
                 <CardHeader
                   title="Cam kết SLA Kỹ thuật & Tiền cọc"
                   subtitle="Khóa cấu hình: sla_config"
+                  action={
+                    canManageUsers ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="outline"
+                        icon={RotateCcw}
+                        className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                        onClick={() =>
+                          setResetSettingTarget({
+                            key: 'sla_config',
+                            label: 'Cam kết SLA Kỹ thuật & Tiền cọc (sla_config)',
+                          })
+                        }
+                      >
+                        Khôi phục mặc định
+                      </Button>
+                    ) : null
+                  }
                 />
                 <Input
                   label="Thời gian phản hồi tiếp nhận tối đa (giờ)"
@@ -834,6 +986,25 @@ export function UsersPage() {
                 <CardHeader
                   title="Danh bạ Ban Quản Lý (Cổng Cư Dân)"
                   subtitle="Khóa cấu hình: contact_config"
+                  action={
+                    canManageUsers ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="outline"
+                        icon={RotateCcw}
+                        className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300"
+                        onClick={() =>
+                          setResetSettingTarget({
+                            key: 'contact_config',
+                            label: 'Danh bạ Ban Quản Lý (contact_config)',
+                          })
+                        }
+                      >
+                        Khôi phục mặc định
+                      </Button>
+                    ) : null
+                  }
                 />
                 <Input
                   label="Khung giờ làm việc hành chính"
@@ -988,8 +1159,15 @@ export function UsersPage() {
             </div>
 
             <div className="space-y-2.5">
+              {userForm.roles.length === 0 ? (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                  Tài khoản này sẽ không giữ vai trò nào sau khi lưu (không thể truy cập phân hệ quản trị nội bộ). Bấm{' '}
+                  <strong>Thêm vai trò</strong> nếu muốn cấp lại quyền.
+                </div>
+              ) : null}
               {userForm.roles.map((row, idx) => {
                 const isGlobalRole = row.role_code === ROLES.SYS_ADMIN;
+                const disableRemoveRole = !editingUser && userForm.roles.length <= 1;
                 return (
                   <div
                     key={idx}
@@ -1019,14 +1197,22 @@ export function UsersPage() {
                       />
                     </div>
                     <div className="sm:col-span-1 flex justify-end">
-                      <button
-                        type="button"
-                        disabled={userForm.roles.length <= 1}
-                        onClick={() => removeRoleRow(idx)}
-                        className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+                      <span
+                        title={
+                          disableRemoveRole
+                            ? 'Khi tạo mới phải gán tối thiểu 1 vai trò.'
+                            : 'Gỡ vai trò này'
+                        }
                       >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                        <button
+                          type="button"
+                          disabled={disableRemoveRole}
+                          onClick={() => removeRoleRow(idx)}
+                          className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-30"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </span>
                     </div>
                   </div>
                 );
@@ -1056,6 +1242,42 @@ export function UsersPage() {
             : ''
         }
         confirmLabel={toggleStatusTarget?.status === 'ACTIVE' ? 'Khóa tài khoản' : 'Mở khóa'}
+      />
+
+      {/* Confirm Xóa tài khoản */}
+      <ConfirmDialog
+        open={Boolean(deleteUserTarget)}
+        onClose={() => {
+          if (!deletingUser) setDeleteUserTarget(null);
+        }}
+        onConfirm={handleConfirmDeleteUser}
+        loading={deletingUser}
+        variant="danger"
+        title="Xác nhận xóa vĩnh viễn tài khoản"
+        confirmLabel="Xóa tài khoản"
+        message={
+          deleteUserTarget
+            ? `Bạn có chắc chắn muốn xóa vĩnh viễn tài khoản "${deleteUserTarget.full_name}" (${deleteUserTarget.email || deleteUserTarget.phone || '—'})? Nếu tài khoản đã phát sinh lịch sử thao tác, phê duyệt hoặc sở hữu tòa nhà, hệ thống sẽ từ chối và khuyến nghị sử dụng chức năng Tạm khóa (SUSPENDED).`
+            : ''
+        }
+      />
+
+      {/* Confirm Khôi phục cấu hình mặc định */}
+      <ConfirmDialog
+        open={Boolean(resetSettingTarget)}
+        onClose={() => {
+          if (!resettingSetting) setResetSettingTarget(null);
+        }}
+        onConfirm={handleConfirmResetSetting}
+        loading={resettingSetting}
+        variant="danger"
+        title="Khôi phục cấu hình về mặc định"
+        confirmLabel="Khôi phục mặc định"
+        message={
+          resetSettingTarget
+            ? `Bạn có chắc chắn muốn xóa các tùy chỉnh hiện tại của "${resetSettingTarget.label}" và đưa khóa này về giá trị mặc định ban đầu của hệ thống?`
+            : ''
+        }
       />
     </div>
   );

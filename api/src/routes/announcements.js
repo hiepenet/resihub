@@ -13,6 +13,7 @@ import {
   ZALO_ANNOUNCEMENT_TEMPLATES,
   formatAnnouncementForZalo,
 } from '../services/zaloFormatter.js';
+import { DEFAULT_SYSTEM_SETTINGS } from '../services/sysAdminDeleteGuards.js';
 
 const router = express.Router();
 
@@ -51,12 +52,15 @@ export async function resolveOpsScope(queryFn, entity, id) {
 }
 
 export async function loadOrgContactConfig(queryFn, orgId) {
-  if (!orgId) return {};
+  if (!orgId) return { ...DEFAULT_SYSTEM_SETTINGS.contact_config };
   const res = await queryFn(
     `SELECT value FROM system_setting WHERE org_id = $1 AND key = 'contact_config' LIMIT 1`,
     [orgId]
   );
-  return res.rows[0]?.value || {};
+  return {
+    ...DEFAULT_SYSTEM_SETTINGS.contact_config,
+    ...(res.rows[0]?.value || {}),
+  };
 }
 
 export async function loadScopeLabels(queryFn, { building_id, floor_id, apartment_id }) {
