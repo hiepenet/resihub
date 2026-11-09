@@ -59,6 +59,7 @@ set_env_var() {
       if (!found) print k "=" v
     }
   ' "${file}" | tr -d '\r' > "${tmp}"
+  chmod --reference="${file}" "${tmp}" 2>/dev/null || chmod 600 "${tmp}"
   mv "${tmp}" "${file}"
 }
 

@@ -100,7 +100,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'src/jobs/worker.js' >/dev/null"]
+      test: ["CMD-SHELL", "pgrep -f '[s]rc/jobs/worker.js' >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -168,3 +168,4 @@ volumes:
   api_uploads:
   caddy_data:
   caddy_config:
+

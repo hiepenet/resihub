@@ -115,18 +115,18 @@ if [ "${MODE}" = "--apply" ]; then
   echo "[Restore Apply] Đang nạp lại CSDL từ bản sao lưu..."
   compose_cmd exec -T backup pg_restore --clean --if-exists --no-owner --no-privileges -d "${TARGET_DB}" < "${DUMP_FILE}"
 
-  # Đánh dấu chạy lại phân quyền RLS (005, 007) vì pg_dump dùng --no-acl
+  # Đánh dấu chạy lại phân quyền RLS (005, 007) trong bảng _migrations vì pg_dump dùng --no-acl
   compose_cmd exec -T backup psql -v ON_ERROR_STOP=1 -d "${TARGET_DB}" \
-    -c "DELETE FROM schema_migrations WHERE version IN ('005_rls_enable_and_policies.sql', '007_grants.sql');" >/dev/null 2>&1 || true
+    -c "DELETE FROM _migrations WHERE name IN ('005_rls_enable_and_policies.sql', '007_grants.sql');" >/dev/null
 
   if [ -n "${UPLOADS_TAR}" ]; then
     echo "[Restore Apply] Đang khôi phục tệp đính kèm vào volume api_uploads..."
-    compose_cmd run --rm --no-deps --entrypoint /bin/sh api \
+    compose_cmd run -T --rm --no-deps --entrypoint /bin/sh api \
       -c "mkdir -p /app/uploads && find /app/uploads -mindepth 1 -delete && tar -xzf - -C /app/uploads && chown -R node:node /app/uploads" < "${UPLOADS_TAR}"
   fi
 
-  echo "[Restore Apply] Khởi động lại api và worker (tự động đồng bộ RLS & mật khẩu resihub_app)..."
-  compose_cmd start api worker
+  echo "[Restore Apply] Khởi động lại api và worker theo thứ tự healthcheck (tự động đồng bộ RLS & mật khẩu resihub_app)..."
+  compose_cmd up -d api worker
   echo "[Restore Apply] Khôi phục hoàn tất thành công!"
   exit 0
 fi

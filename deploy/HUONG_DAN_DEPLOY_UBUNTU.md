@@ -155,6 +155,7 @@ Container `backup` tự động chạy lúc **02:00 sáng hàng ngày (giờ Vi�
 | **Khởi động lại tiến trình API** | `docker compose -f docker-compose.prod.yml --env-file .env.production restart api worker` |
 
 ### Xử lý nhanh một số tình huống:
-- **Lỗi đăng nhập CSDL của `resihub_app` sau khi đổi `APP_DB_PASSWORD`:** Chỉ cần chạy `docker compose -f docker-compose.prod.yml --env-file .env.production restart api` — tiến trình `bootstrapProd.js` sẽ tự động đồng bộ lại mật khẩu role `resihub_app` khớp với `.env.production`.
+- **Lỗi đăng nhập CSDL của `resihub_app` sau khi đổi `APP_DB_PASSWORD`:** Chỉ cần chạy `docker compose -f docker-compose.prod.yml --env-file .env.production up -d api worker` (dùng `up -d` thay vì `restart` để Docker nạp lại biến môi trường mới) — tiến trình `bootstrapProd.js` sẽ tự động đồng bộ lại mật khẩu role `resihub_app` khớp với `.env.production`.
 - **Caddy chưa cấp được HTTPS khi mới đổi tên miền:** Kiểm tra `ufw status` đã mở cổng `80/tcp` và `443/tcp` chưa (cả trên tường lửa giao diện quản trị của nhà cung cấp VPS nếu có Cloud Firewall riêng).
 - **Tải ảnh CCCD / PDF hợp đồng dung lượng lớn bị ngắt:** Cấu hình `deploy/Caddyfile` đã mở sẵn `max_size 25MB`; đảm bảo tệp tải lên tuân thủ giới hạn định dạng & kích thước của từng phân hệ.
+
