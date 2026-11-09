@@ -11,8 +11,9 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env.production}"
-COMPOSE_FILE="${ROOT_DIR}/docker-compose.prod.yml"
+cd "${ROOT_DIR}"
+ENV_FILE="${ENV_FILE:-.env.production}"
+COMPOSE_FILE="docker-compose.prod.yml"
 
 usage() {
   cat <<EOF
@@ -159,3 +160,4 @@ case "${ACTION}" in
     exit 1
     ;;
 esac
+

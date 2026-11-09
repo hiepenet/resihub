@@ -3,8 +3,9 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env.production}"
-COMPOSE_FILE="${ROOT_DIR}/docker-compose.prod.yml"
+cd "${ROOT_DIR}"
+ENV_FILE="${ENV_FILE:-.env.production}"
+COMPOSE_FILE="docker-compose.prod.yml"
 DRILL_DB="resihub_restore_drill"
 
 usage() {
@@ -38,7 +39,7 @@ compose_cmd() {
 if [ "${MODE}" = "--verify-only" ]; then
   DUMP_FILE="${1:-}"
   if [ -z "${DUMP_FILE}" ]; then
-    DUMP_FILE="$(ls -1t "${ROOT_DIR}/backups"/db_*.dump 2>/dev/null | head -n 1 || true)"
+    DUMP_FILE="$(ls -1t backups/db_*.dump 2>/dev/null | head -n 1 || true)"
   fi
 
   if [ -z "${DUMP_FILE}" ] || [ ! -s "${DUMP_FILE}" ]; then
@@ -132,3 +133,4 @@ fi
 
 usage
 exit 1
+
