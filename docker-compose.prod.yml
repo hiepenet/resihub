@@ -1,0 +1,170 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      PGTZ: Asia/Ho_Chi_Minh
+      POSTGRES_DB: ${POSTGRES_DB:-resihub}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - resihub_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-resihub}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: resihub-api:prod
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-resihub}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}
+      APP_DATABASE_URL: postgresql://resihub_app:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-resihub}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      OTP_DEMO_MODE: ${OTP_DEMO_MODE:-false}
+      SHOW_DEMO_ACCOUNTS: ${SHOW_DEMO_ACCOUNTS:-false}
+      SEED_DEMO_ON_FIRST_BOOT: ${SEED_DEMO_ON_FIRST_BOOT:-false}
+      ENABLE_IN_PROCESS_CRON: "false"
+      RUN_MIGRATIONS_ON_BOOT: "true"
+      RUN_BOOTSTRAP: "true"
+      INIT_ORG_NAME: ${INIT_ORG_NAME:-Ban Quản Lý Tòa Nhà ResiHub}
+      INIT_ADMIN_EMAIL: ${INIT_ADMIN_EMAIL:-admin@resihub.vn}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:-}
+      INIT_ADMIN_PHONE: ${INIT_ADMIN_PHONE:-0900000001}
+      VIETQR_CLIENT_ID: ${VIETQR_CLIENT_ID:-}
+      VIETQR_API_KEY: ${VIETQR_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+      GEMINI_TIMEOUT_MS: ${GEMINI_TIMEOUT_MS:-45000}
+    volumes:
+      - api_uploads:/app/uploads
+    networks:
+      - default
+      - resihub_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 35s
+    logging: *default-logging
+
+  worker:
+    image: resihub-api:prod
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+    pull_policy: never
+    command: ["node", "src/jobs/worker.js"]
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-resihub}
+      APP_DATABASE_URL: postgresql://resihub_app:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-resihub}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      OTP_DEMO_MODE: ${OTP_DEMO_MODE:-false}
+      RUN_MIGRATIONS_ON_BOOT: "false"
+      RUN_BOOTSTRAP: "false"
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+      GEMINI_TIMEOUT_MS: ${GEMINI_TIMEOUT_MS:-45000}
+    volumes:
+      - api_uploads:/app/uploads
+    networks:
+      - resihub_internal
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'src/jobs/worker.js' >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+  web:
+    image: resihub-web:prod
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.prod
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - default
+      - resihub_internal
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-resihub}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+    volumes:
+      - ./deploy/backup-cron.sh:/usr/local/bin/backup-cron.sh:ro
+      - api_uploads:/uploads:ro
+      - ./backups:/backups
+    networks:
+      - resihub_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "0 2 * * * /bin/sh /usr/local/bin/backup-cron.sh >> /proc/1/fd/1 2>> /proc/1/fd/2" > /etc/crontabs/root
+        echo "[Backup Cron] Scheduled daily backup at 02:00 Asia/Ho_Chi_Minh (retention: $${BACKUP_RETENTION_DAYS:-30}d)"
+        exec crond -f -l 2
+    logging: *default-logging
+
+networks:
+  resihub_internal:
+    internal: true
+
+volumes:
+  pgdata:
+  api_uploads:
+  caddy_data:
+  caddy_config:

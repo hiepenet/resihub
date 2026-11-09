@@ -1,0 +1,28 @@
+{$APP_DOMAIN::80} {
+  request_body {
+    max_size 25MB
+  }
+
+  encode zstd gzip
+
+  header {
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "SAMEORIGIN"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    -Server
+  }
+
+  handle /api/* {
+    reverse_proxy api:5000
+  }
+
+  handle {
+    root * /srv
+    @hashed_assets path /assets/*
+    header @hashed_assets Cache-Control "public, max-age=31536000, immutable"
+    @html_entry path / /index.html
+    header @html_entry Cache-Control "no-cache"
+    try_files {path} /index.html
+    file_server
+  }
+}
