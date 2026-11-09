@@ -54,6 +54,22 @@ export function LoginPage() {
   const [devOtpHint, setDevOtpHint] = useState('');
 
   const [loading, setLoading] = useState(false);
+  const [showDemoAccounts, setShowDemoAccounts] = useState(Boolean(import.meta.env.DEV));
+
+  useEffect(() => {
+    let mounted = true;
+    authService
+      .getPublicConfig()
+      .then((cfg) => {
+        if (mounted && cfg && Object.prototype.hasOwnProperty.call(cfg, 'showDemoAccounts')) {
+          setShowDemoAccounts(Boolean(cfg.showDemoAccounts));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (isAuthenticated && user) {
@@ -342,29 +358,31 @@ export function LoginPage() {
           )}
 
           {/* Quick Demo Accounts */}
-          <div className="bg-white/70 rounded-2xl border border-slate-200/70 p-4">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
-              Tài khoản Demo kiểm thử nhanh
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {DEMO_ACCOUNTS.map((acc) => (
-                <button
-                  key={acc.email}
-                  type="button"
-                  title={`${acc.label} (${acc.email})`}
-                  onClick={() => {
-                    setMode('email');
-                    setEmail(acc.email);
-                    setPassword(acc.pass);
-                  }}
-                  className="text-left px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary-300 hover:bg-primary-50/40 transition-colors"
-                >
-                  <p className="text-xs font-semibold text-slate-800 leading-snug break-words">{acc.label}</p>
-                  <p className="text-[11px] text-slate-500 break-all leading-snug mt-0.5">{acc.email}</p>
-                </button>
-              ))}
+          {showDemoAccounts ? (
+            <div className="bg-white/70 rounded-2xl border border-slate-200/70 p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
+                Tài khoản Demo kiểm thử nhanh
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {DEMO_ACCOUNTS.map((acc) => (
+                  <button
+                    key={acc.email}
+                    type="button"
+                    title={`${acc.label} (${acc.email})`}
+                    onClick={() => {
+                      setMode('email');
+                      setEmail(acc.email);
+                      setPassword(acc.pass);
+                    }}
+                    className="text-left px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary-300 hover:bg-primary-50/40 transition-colors"
+                  >
+                    <p className="text-xs font-semibold text-slate-800 leading-snug break-words">{acc.label}</p>
+                    <p className="text-[11px] text-slate-500 break-all leading-snug mt-0.5">{acc.email}</p>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
     </div>

@@ -1,6 +1,9 @@
 import api from './api';
 
 export const authService = {
+  getPublicConfig: () =>
+    api.get('/api/v1/auth/public-config').then((r) => r.data),
+
   loginEmail: (email, password) =>
     api.post('/api/v1/auth/login', { email, password }).then((r) => r.data),
 

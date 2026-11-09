@@ -14,11 +14,21 @@ const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 const IDEMPOTENT_FINANCIAL_ENDPOINTS = [
   '/api/v1/invoices',
   '/api/v1/payments',
+  '/api/v1/services',
   '/api/v1/service-catalog',
   '/api/v1/service-subscriptions',
   '/api/v1/contracts',
   '/api/v1/deposits',
   '/api/v1/resident',
+  '/api/v1/meters',
+  '/api/v1/reservations',
+  '/api/v1/public/reservations',
+  '/api/v1/service-requests',
+  '/api/v1/announcements',
+  '/api/v1/notifications',
+  '/api/v1/zalo-groups',
+  '/api/v1/ai',
+  '/api/v1/settings',
 ];
 
 api.interceptors.request.use(
