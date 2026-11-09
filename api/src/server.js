@@ -28,6 +28,7 @@ import auditLogsRoute from './routes/admin/audit-logs.js';
 import settingsRoute from './routes/settings.js';
 import reportsRoute from './routes/reports.js'; import publicRoute from './routes/public.js';
 import aiRoute from './routes/ai.js';
+import { resolveCorsOriginOption } from './config/env.js';
 import { startDailyJobs } from './jobs/daily.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
@@ -36,9 +37,13 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+if (process.env.NODE_ENV === 'production' || process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1);
+}
+
 // Enable CORS
 app.use(cors({
-  origin: '*',
+  origin: resolveCorsOriginOption(),
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
   exposedHeaders: ['Idempotent-Replayed'],
@@ -131,7 +136,9 @@ app.listen(PORT, () => {
   console.log(`🚀 ResiHub API running on http://localhost:${PORT}`);
   console.log(`🩺 Health check: http://localhost:${PORT}/api/health`);
   console.log(`===============================================`);
-  startDailyJobs();
+  if (process.env.ENABLE_IN_PROCESS_CRON !== 'false') {
+    startDailyJobs();
+  }
 });
 
 export default app;

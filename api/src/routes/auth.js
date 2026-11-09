@@ -5,10 +5,27 @@ import bcrypt from 'bcryptjs';
 import { adminPool as pool } from '../db/client.js';
 import { otpRequestLimiter, generalLimiter } from '../middleware/rateLimiter.js';
 import { authenticateToken } from '../middleware/auth.js';
-import { JWT_SECRET, JWT_REFRESH_SECRET } from '../config/env.js';
+import {
+  JWT_SECRET,
+  JWT_REFRESH_SECRET,
+  isOtpDemoEnabled,
+  isDemoAccountsEnabled,
+} from '../config/env.js';
 import { requestPhoneOtp, storePhoneOtp, verifyPhoneOtp } from '../services/otpService.js';
 
 const router = express.Router();
+
+/**
+ * GET /api/v1/auth/public-config
+ * Trả cấu hình hiển thị giao diện Demo / OTP kiểm thử theo runtime trên máy chủ
+ */
+router.get('/public-config', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    showDemoAccounts: isDemoAccountsEnabled(),
+    otpDemoMode: isOtpDemoEnabled(),
+  });
+});
 
 // Helper normalize phone: Chuyển mọi dạng (+84, 84, có dấu cách, gạch nối) thành chuẩn 10 chữ số VN
 function normalizePhone(phone) {
@@ -111,7 +128,8 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
   const { otp, expiresAt } = otpCheck;
   storePhoneOtp(cleanPhone, otp, expiresAt);
 
-  if (process.env.NODE_ENV !== 'production') {
+  const otpDemo = isOtpDemoEnabled();
+  if (otpDemo) {
     console.log(`\n=============================================`);
     console.log(`[SMS MOCK] Mã OTP cho số ${cleanPhone}: 👉 ${otp} 👈`);
     console.log(`=============================================\n`);
@@ -119,7 +137,7 @@ router.post('/otp/request', otpRequestLimiter, async (req, res) => {
 
   res.json({
     message: neutralMessage,
-    ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}),
+    ...(otpDemo ? { devOtp: otp } : {}),
   });
 });
 
@@ -616,17 +634,20 @@ router.post('/forgot-password', generalLimiter, async (req, res) => {
     );
 
     const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpDemo = isOtpDemoEnabled();
     if (userRes.rows.length > 0) {
       resetTokenStore.set(cleanEmail, { code: resetCode, expiresAt: Date.now() + 15 * 60 * 1000 });
-      console.log(`\n=============================================`);
-      console.log(`[RESET PASSWORD MOCK] Mã đặt lại mật khẩu cho ${cleanEmail}: 👉 ${resetCode} 👈`);
-      console.log(`=============================================\n`);
+      if (otpDemo) {
+        console.log(`\n=============================================`);
+        console.log(`[RESET PASSWORD MOCK] Mã đặt lại mật khẩu cho ${cleanEmail}: 👉 ${resetCode} 👈`);
+        console.log(`=============================================\n`);
+      }
     }
 
     // Thông báo trung lập bảo vệ danh tính (anti-enumeration)
     res.json({
       message: 'Nếu email tồn tại trong hệ thống, mã xác nhận đã được gửi thành công.',
-      devResetCode: process.env.NODE_ENV !== 'production' && userRes.rows.length > 0 ? resetCode : undefined,
+      devResetCode: otpDemo && userRes.rows.length > 0 ? resetCode : undefined,
     });
   } catch (err) {
     console.error('[Forgot Password Error]:', err);

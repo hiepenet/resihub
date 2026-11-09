@@ -1,5 +1,6 @@
 import express from 'express';
 import { adminPool } from '../db/client.js';
+import { isOtpDemoEnabled } from '../config/env.js';
 import { otpRequestLimiter } from '../middleware/rateLimiter.js';
 import { idempotencyGuard } from '../middleware/idempotency.js';
 import { requestPhoneOtp, verifyPhoneOtp, consumePhoneOtp } from '../services/otpService.js';
@@ -267,14 +268,13 @@ router.post('/reservations/otp/request', otpRequestLimiter, async (req, res) => 
     });
   }
 
-  console.log(`\n========================================`);
-  console.log(`🔑 [PUBLIC RESERVATION OTP] SĐT: ${cleanPhone} | Mã OTP: ${otpRes.otp}`);
-  console.log(`========================================\n`);
-
   const responsePayload = {
     message: NEUTRAL_OTP_MESSAGE,
   };
-  if (process.env.NODE_ENV !== 'production') {
+  if (isOtpDemoEnabled()) {
+    console.log(`\n========================================`);
+    console.log(`🔑 [PUBLIC RESERVATION OTP] SĐT: ${cleanPhone} | Mã OTP: ${otpRes.otp}`);
+    console.log(`========================================\n`);
     responsePayload.devOtp = otpRes.otp;
   }
 

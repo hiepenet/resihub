@@ -1,4 +1,4 @@
-// config/env.js — JWT secrets bắt buộc (fail fast khi thiếu — audit D5) + cấu hình Gemini server-only (M15)
+// config/env.js — JWT secrets bắt buộc (fail fast khi thiếu — audit D5) + cấu hình Gemini server-only (M15) + Production runtime flags
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +21,25 @@ const GEMINI_TIMEOUT_MS = Math.max(
   1000,
   Number(process.env.GEMINI_TIMEOUT_MS || 45000) || 45000
 );
+
+export function isOtpDemoEnabled(envObj = process.env) {
+  return envObj.NODE_ENV !== 'production' || envObj.OTP_DEMO_MODE === 'true';
+}
+
+export function isDemoAccountsEnabled(envObj = process.env) {
+  return envObj.NODE_ENV !== 'production' || envObj.SHOW_DEMO_ACCOUNTS === 'true';
+}
+
+export function resolveCorsOriginOption(envObj = process.env) {
+  if (envObj.NODE_ENV !== 'production') {
+    return '*';
+  }
+  const origins = String(envObj.CORS_ORIGIN || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return origins.length > 0 ? origins : false;
+}
 
 export const env = {
   jwtSecret: JWT_SECRET,

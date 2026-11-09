@@ -1648,6 +1648,7 @@ export function startDailyJobs(options = {}) {
     targetHour = 0,
     targetMinute = 5,
     runCatchUpOnBoot = true,
+    keepAlive = false,
   } = options || {};
 
   let stopped = false;
@@ -1686,12 +1687,17 @@ export function startDailyJobs(options = {}) {
         scheduleNext();
       }
     }, delayMs);
-    timer.unref?.();
+    if (!keepAlive) {
+      timer.unref?.();
+    }
   }
 
   scheduleNext();
 
   return {
+    hasRef() {
+      return Boolean(timer?.hasRef?.());
+    },
     stop() {
       stopped = true;
       if (timer) {
