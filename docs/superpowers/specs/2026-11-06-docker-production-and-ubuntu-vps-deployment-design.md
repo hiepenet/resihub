@@ -14,7 +14,7 @@
 
 Thiết kế phải giải quyết trọn vẹn thực tế chuyển tiếp của dự án:
 1. **Chưa mua sẵn tên miền thương mại:** Cho phép truy cập ngay qua địa chỉ IP trần (`HTTP :80`) lúc vừa dựng VPS, đồng thời chỉ cần điền 1 biến `APP_DOMAIN` (dùng tên miền miễn phí `*.duckdns.org` khi nghiệm thu Giai đoạn 3 hoặc tên miền `.vn`/`.com` chính thức của Chủ đầu tư sau này) là hệ thống **tự động kích hoạt và gia hạn chứng chỉ SSL/TLS (HTTPS)** mà không phải sửa code hay cấu hình lại chứng chỉ thủ công.
-2. **Chưa tích hợp đầu số SMS Brandname:** Tách công tắc hiển thị mã OTP kiểm thử (`OTP_DEMO_MODE`) độc lập hoàn toàn với `NODE_ENV=production`, giúp giai đoạn chạy thử/demo trên VPS vẫn lấy được mã OTP như dưới local mà không làm mở toang các lỗ hổng chỉ dành cho môi trường dev.
+2. **Chưa tích hợp đầu số SMS Brandname & Nhu cầu bật/tắt chế độ trình diễn Demo ngay trên VPS:** Tách các công tắc runtime (`OTP_DEMO_MODE`, `SHOW_DEMO_ACCOUNTS`, `SEED_DEMO_ON_FIRST_BOOT`) độc lập hoàn toàn với `NODE_ENV=production`, giúp trên VPS có thể bật/tắt tức thì giao diện tài khoản Demo và mã OTP kiểm thử trong ~2 giây mà **không cần build lại Frontend image** và không làm mở các lỗ hổng chỉ dành cho môi trường dev.
 
 ---
 
@@ -71,6 +71,11 @@ Thiết kế phải giải quyết trọn vẹn thực tế chuyển tiếp củ
 - **Kiến trúc:** Dùng `nginx:alpine` đi kèm container `certbot`, và để `daily.js` chạy chung bên trong tiến trình `api`.
 - **Lý do loại bỏ:** Quy trình cấp SSL lần đầu với Nginx + Certbot gặp bài toán "con gà – quả trứng" (Nginx lỗi không khởi động được nếu khai báo file chứng chỉ HTTPS chưa tồn tại), buộc người vận hành phải đổi qua lại giữa 2 file cấu hình HTTP/HTTPS khi mới trỏ tên miền. Đồng thời việc gộp chung Cron vào `api` không tách bạch dịch vụ theo yêu cầu đóng gói.
 
+### Lựa chọn cơ chế Bật/Tắt Giao diện Demo trên VPS
+
+- **Hướng 1 (Loại bỏ — Cứng lúc Build):** Dùng biến Vite build-time `ARG VITE_SHOW_DEMO_ACCOUNTS=false`. *Nhược điểm:* Mỗi lần muốn bật hoặc tắt khung 6 tài khoản Demo trên VPS phải chạy `docker compose build web` biên dịch lại toàn bộ React SPA (tốn 1–2 phút và ngốn RAM trên VPS nhỏ).
+- **Hướng 2 (Đã chọn — Bật/Tắt Runtime tức thì qua API):** Một bản build `resihub-web:prod` duy nhất gọi `GET /api/v1/auth/public-config` (`Cache-Control: no-store`) để đọc cờ `showDemoAccounts` từ biến môi trường `SHOW_DEMO_ACCOUNTS=true|false` của `api`, đi kèm tiện ích `deploy/demo-mode.sh` (`on [--seed]` / `off` / `status`) và cờ tùy chọn `SEED_DEMO_ON_FIRST_BOOT=true|false` (chỉ nạp `seed_vinhomes.js` khi bảng `organization` đang trống 0 dòng). *Ưu điểm:* Bật/tắt giao diện Demo trên VPS mất ~2 giây mà không cần build lại bất kỳ image nào.
+
 ### Phân tách Quyết định của Người dùng & Đề xuất mặc định của Agent
 
 - **Quyết định từ Người dùng:**
@@ -78,9 +83,10 @@ Thiết kế phải giải quyết trọn vẹn thực tế chuyển tiếp củ
   2. Giai đoạn đầu chưa mua sẵn tên miền thương mại (cần chạy được ngay và dễ nâng cấp lên tên miền/HTTPS sau).
   3. Giữ trải nghiệm lấy mã OTP tiện lợi như dưới local cho giai đoạn chạy thử trên VPS.
   4. Chọn **Phương án 1** (Caddy làm cổng Web/Auto-SSL + tách riêng container `worker` cho Cron jobs).
+  5. Chọn **Hướng 2 cho chế độ Demo trên VPS**: cho phép bật/tắt giao diện Demo tức thì lúc chạy (runtime) thông qua cấu hình trên VPS mà không phải biên dịch lại Frontend, kèm khả năng nạp dữ liệu mẫu Vinhomes khi cần trình diễn.
 - **Đề xuất mặc định từ Agent (Agent's calls — có thể điều chỉnh nếu cần):**
   1. Tách bộ file `.prod` riêng (`docker-compose.prod.yml`, `api/Dockerfile.prod`, `frontend/Dockerfile.prod`) để giữ nguyên 100% môi trường `docker-compose.yml` ở local dev.
-  2. Ẩn khung *"Tài khoản Demo kiểm thử nhanh"* trên màn hình đăng nhập ở bản build Production mặc định (`VITE_SHOW_DEMO_ACCOUNTS=false`), tránh lộ gợi ý tài khoản trên Internet.
+  2. Đặt mặc định `SHOW_DEMO_ACCOUNTS=false` và `SEED_DEMO_ON_FIRST_BOOT=false` trong `.env.production.example` (an toàn mặc định), đồng thời cung cấp `deploy/demo-mode.sh` để bật/tắt nhanh bằng 1 lệnh.
   3. Đặt lịch chạy container `backup` lúc `02:00` sáng giờ Việt Nam (lệch hẳn khung `00:05` của `worker` sinh hóa đơn), giữ bản lưu `30 ngày`, và bổ sung chế độ diễn tập `--Verify-Only` trên DB nháp `resihub_restore_drill`.
   4. Tự động tạo thêm `2GB Swap` trong script cài đặt Ubuntu VPS nếu máy chủ có dưới `1GB Swap` để chống treo máy lúc build giao diện.
 
@@ -126,11 +132,11 @@ Internet (HTTP :80 / HTTPS :443)
 
 ### 5.2 Điều chỉnh trong Mã nguồn Ứng dụng (Backward-Compatible 100%)
 
-1. **Tách biến `OTP_DEMO_MODE` (`api/src/config/env.js`, `api/src/routes/auth.js`, `api/src/routes/public.js`):**
-   - Bổ sung hàm `isOtpDemoEnabled()` trong `api/src/config/env.js`: trả về `true` khi `process.env.NODE_ENV !== 'production' || process.env.OTP_DEMO_MODE === 'true'`.
-   - Tại `POST /api/v1/auth/otp/request` (`auth.js`) và `POST /api/v1/public/reservations/request-otp` (`public.js`): chỉ đính kèm `devOtp` trong JSON trả về và in log OTP mẫu khi `isOtpDemoEnabled()` là `true`. Khi `false`, tuyệt đối không trả `devOtp` và không in mã OTP ra log (tuân thủ NFR-007).
-   - Tại `POST /api/v1/auth/forgot-password` (`auth.js`): chỉ in log `resetCode` và trả `devResetCode` khi `process.env.NODE_ENV !== 'production'`.
-   - **Giữ nguyên khóa bảo mật Production:** Mật khẩu fallback `'password123'` (`auth.js`), mã bypass `'123456'` (`otpService.js`), điều kiện bỏ qua `rateLimiter.js`, và quyền truyền `as_of_date` tùy ý khi kích hoạt cron (`settings.js`) **vẫn chỉ dựa trên `NODE_ENV !== 'production'`** (không bao giờ mở khi `NODE_ENV=production` kể cả khi `OTP_DEMO_MODE=true`).
+1. **Tách biến runtime `OTP_DEMO_MODE` và `SHOW_DEMO_ACCOUNTS` (`api/src/config/env.js`, `api/src/routes/auth.js`, `api/src/routes/public.js`):**
+   - Bổ sung `isOtpDemoEnabled(envObj)` trả về `true` khi `envObj.NODE_ENV !== 'production' || envObj.OTP_DEMO_MODE === 'true'`, và `isDemoAccountsEnabled(envObj)` trả về `true` khi `envObj.NODE_ENV !== 'production' || envObj.SHOW_DEMO_ACCOUNTS === 'true'`.
+   - Bổ sung endpoint công khai `GET /api/v1/auth/public-config` trong `auth.js` (trả `{ showDemoAccounts, otpDemoMode }` kèm `Cache-Control: no-store`).
+   - Tại `POST /api/v1/auth/otp/request` (`auth.js`), `POST /api/v1/public/reservations/otp/request` (`public.js`) và `POST /api/v1/auth/forgot-password` (`auth.js`): chỉ đính kèm `devOtp` / `devResetCode` khi `isOtpDemoEnabled()` là `true`; khi `false`, tuyệt đối không trả mã và không in ra log (tuân thủ NFR-007).
+   - **Giữ nguyên khóa bảo mật Production:** Mật khẩu fallback `'password123'` (`auth.js`), mã bypass `'123456'` (`otpService.js`), điều kiện bỏ qua `rateLimiter.js`, và quyền truyền `as_of_date` tùy ý khi kích hoạt cron (`settings.js`) **vẫn chỉ dựa trên `NODE_ENV !== 'production'`** (không bao giờ mở khi `NODE_ENV=production` kể cả khi `OTP_DEMO_MODE=true` hay `SHOW_DEMO_ACCOUNTS=true`).
 
 2. **Cấu hình `trust proxy` và `CORS_ORIGIN` (`api/src/server.js`):**
    - Khi `process.env.NODE_ENV === 'production'` hoặc `process.env.TRUST_PROXY === 'true'`, gọi `app.set('trust proxy', 1)` trước middleware `rateLimiter` để Express giải mã đúng IP thật của người dùng từ header `X-Forwarded-For` do Caddy chuyển xuống (ngăn chặn lỗi nhận nhầm toàn bộ lưu lượng Internet thành IP Docker nội bộ `172.x.x.x` trong `isLocalOrDev`).
@@ -151,9 +157,9 @@ Internet (HTTP :80 / HTTPS :443)
    - Khi `SELECT NOW()` thành công: giữ nguyên HTTP `200` với `{ status: 'ok', database: 'connected', ... }`.
    - Khi truy vấn DB thất bại: trả HTTP `503` với `{ status: 'degraded', database: 'error: ...' }` để Docker `healthcheck` nhận diện đúng trạng thái mất kết nối CSDL.
 
-5. **Hoàn thiện nhỏ phía Frontend (`frontend/src/pages/auth/LoginPage.jsx`, `frontend/src/services/api.js`):**
-   - Trên `LoginPage.jsx`: chỉ hiển thị khung *"Tài khoản Demo kiểm thử nhanh"* khi `import.meta.env.DEV || import.meta.env.VITE_SHOW_DEMO_ACCOUNTS === 'true'`.
-   - Trên `frontend/src/services/api.js`: bổ sung `'/api/v1/services'` vào `IDEMPOTENT_FINANCIAL_ENDPOINTS` để đảm bảo không sót bất kỳ endpoint ghi dữ liệu nào yêu cầu `Idempotency-Key` khi `NODE_ENV=production`.
+5. **Hoàn thiện nhỏ phía Frontend (`frontend/src/services/auth.service.js`, `frontend/src/pages/auth/LoginPage.jsx`, `frontend/src/services/api.js`):**
+   - Trên `LoginPage.jsx`: khởi tạo trạng thái hiển thị khung *"Tài khoản Demo kiểm thử nhanh"* từ `Boolean(import.meta.env.DEV)` và gọi `authService.getPublicConfig()` (`GET /api/v1/auth/public-config`) khi mở trang để bật/tắt khung Demo động theo cấu hình runtime trên VPS mà không cần build lại giao diện.
+   - Trên `frontend/src/services/api.js`: bổ sung đầy đủ các prefix route dùng `idempotencyGuard()` vào `IDEMPOTENT_FINANCIAL_ENDPOINTS` để đảm bảo không sót bất kỳ endpoint ghi dữ liệu nào yêu cầu `Idempotency-Key` khi `NODE_ENV=production`.
 
 ### 5.3 Đóng gói Docker Production & Khởi tạo Dữ liệu Gốc
 
@@ -170,11 +176,12 @@ Internet (HTTP :80 / HTTPS :443)
    - Chạy `npm ci --omit=dev && npm cache clean --force`.
    - `api/docker-entrypoint.sh`:
      - Đảm bảo `/app/uploads` tồn tại và `chown -R node:node /app/uploads` (khi entrypoint bắt đầu ở quyền root), sau đó chuyển sang thực thi dưới user `node` bằng `su-exec node`.
-     - Nếu `RUN_MIGRATIONS_ON_BOOT=true` (bật trên `api`, tắt trên `worker`): chạy `node src/db/migrate.js` rồi chạy `node src/db/bootstrapProd.js`.
-     - Cuối cùng `exec "$@"` (`node src/server.js` cho `api`, `node src/jobs/worker.js` cho `worker`).
+     - Nếu `RUN_MIGRATIONS_ON_BOOT=true` (bật trên `api`, tắt trên `worker`): chạy `node src/db/migrate.js`; nếu `SEED_DEMO_ON_FIRST_BOOT=true` và bảng `organization` đang trống (`0` bản ghi) thì nạp 1 lần dữ liệu mẫu Vinhomes (`node src/db/seed_vinhomes.js`); tiếp theo luôn chạy `node src/db/bootstrapProd.js` để đồng bộ mật khẩu `resihub_app` và đảm bảo đủ dữ liệu nền.
+     - Cuối cùng `exec su-exec node "$@"` (`node src/server.js` cho `api`, `node src/jobs/worker.js` cho `worker`).
+   - Kèm tiện ích `deploy/demo-mode.sh` (`on [--seed]` | `off` | `status`) giúp quản trị viên trên VPS bật/tắt `SHOW_DEMO_ACCOUNTS` + `OTP_DEMO_MODE` (và tùy chọn nạp dữ liệu mẫu Vinhomes) chỉ bằng 1 lệnh.
 
 3. **`frontend/Dockerfile.prod` & `deploy/Caddyfile`:**
-   - **Stage 1 (`build` trên `node:22-alpine`):** Nhận `ARG VITE_SHOW_DEMO_ACCOUNTS=false`, chạy `npm ci` và `npm run build` xuất ra `/app/dist`.
+   - **Stage 1 (`build` trên `node:22-alpine`):** Chạy `npm ci` và `npm run build` xuất ra `/app/dist` (một bản build duy nhất dùng cho cả chế độ vận hành sạch lẫn chế độ trình diễn Demo nhờ đọc cờ runtime từ `/api/v1/auth/public-config`).
    - **Stage 2 (`caddy:2-alpine`):** Copy `/app/dist` vào `/srv` và `deploy/Caddyfile` vào `/etc/caddy/Caddyfile`.
    - **Nội dung `deploy/Caddyfile`:**
      - Sử dụng địa chỉ site `{$APP_DOMAIN::80}`:
