@@ -1,12 +1,13 @@
-# 🏢 ResiHub — Hệ thống Quản lý Căn hộ & Cho thuê Bất động sản
+# 🏢 ResiHub — Hệ thống Quản lý Căn hộ & Cho thuê Bất động sản (v2.0)
 
-[![Node.js](https://img.shields.io/badge/Node.js-v20+-green.svg)](https://nodejs.org/)
-[![React](https://img.shields.io/badge/React-v19-blue.svg)](https://react.dev/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-v16-336791.svg)](https://www.postgresql.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-v20%2B%20%7C%20v22_LTS-339933.svg)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/React-v19.2-61DAFB.svg)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-v8.3-646CFF.svg)](https://vite.dev/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-v16_(Native_RLS)-336791.svg)](https://www.postgresql.org/)
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-v3.4-38B2AC.svg)](https://tailwindcss.com/)
-[![License](https://img.shields.io/badge/License-MIT-amber.svg)](LICENSE)
+[![Gemini AI](https://img.shields.io/badge/AI_Gateway-Google_Gemini-4285F4.svg)](https://ai.google.dev/)
 
-**ResiHub** là nền tảng quản lý vận hành bất động sản, căn hộ dịch vụ và nhà cho thuê chuyên nghiệp. Hệ thống số hóa toàn diện quy trình từ khâu tiếp thị, đặt cọc giữ chỗ, lập hợp đồng thuê, quản lý sổ cọc, hồ sơ cư dân đến cổng dịch vụ số tương tác 2 chiều giữa Ban Quản Lý (BQL) và Cư dân.
+**ResiHub** là nền tảng Full-Stack quản lý tập trung vận hành chuỗi căn hộ dịch vụ, chung cư mini và nhà cho thuê đa tòa nhà / đa chủ sở hữu. Hệ thống số hóa khép kín toàn bộ vòng đời khai thác bất động sản: **Khám phá phòng trống & Đặt giữ chỗ online → Hồ sơ cư dân → Hợp đồng thuê → Sổ cọc độc lập → Dịch vụ & Đồng hồ điện/nước → Động cơ tính tiền & Hóa đơn kỳ → Thanh toán & Tuổi nợ → Báo hỏng SLA → Thông báo Zalo Rich Text → Dashboard phân tích & AI Gateway hỗ trợ tác nghiệp**.
 
 ---
 
@@ -16,407 +17,419 @@
 2. [Công nghệ sử dụng (Tech Stack)](#2-công-nghệ-sử-dụng-tech-stack)
 3. [Cấu trúc thư mục](#3-cấu-trúc-thư-mục)
 4. [Yêu cầu môi trường](#4-yêu-cầu-môi-trường)
-5. [Hướng dẫn cài đặt và chạy](#5-hướng-dẫn-cài-đặt-và-chạy)
-6. [Cấu hình hệ thống (.env)](#6-cấu-hình-hệ-thống)
-7. [Kiến trúc & Danh mục API](#7-kiến-trúc--danh-mục-api)
-8. [Kiểm thử và Xử lý lỗi](#8-kiểm-thử-và-xử-lý-lỗi)
-9. [Quy chuẩn đóng góp & Giấy phép](#9-quy-chuẩn-đóng-góp--giấy-phép)
+5. [Hướng dẫn cài đặt và khởi chạy](#5-hướng-dẫn-cài-đặt-và-khởi-chạy)
+6. [Cấu hình hệ thống (`.env`)](#6-cấu-hình-hệ-thống-env)
+7. [Kiến trúc bảo mật, Tài khoản Demo & Danh mục API](#7-kiến-trúc-bảo-mật-tài-khoản-demo--danh-mục-api)
+8. [Kiểm thử & Xử lý sự cố (Testing & Troubleshooting)](#8-kiểm-thử--xử-lý-sự-cố-testing--troubleshooting)
+9. [Tài liệu kỹ thuật & Quy chuẩn đóng góp](#9-tài-liệu-kỹ-thuật--quy-chuẩn-đóng-góp)
 
 ---
 
 ## 1. Giới thiệu dự án
 
-### 1.1. Mục đích dự án
-Xây dựng một nền tảng quản lý tập trung, hiện đại, loại bỏ các bất cập của việc quản lý bằng sổ tay, file Excel truyền thống; đảm bảo dữ liệu minh bạch, tài chính chuẩn xác và tối ưu hóa tỷ lệ lấp đầy phòng.
+### 1.1. Mục tiêu cốt lõi
+Thay thế triệt để phương thức quản lý rời rạc bằng sổ tay, file Excel và tin nhắn Zalo thủ công; thiết lập một hệ thống chuẩn xác về tài chính, minh bạch về pháp lý/sổ cọc, bảo vệ dữ liệu cá nhân (PII) và sẵn sàng mở rộng quy mô nhiều tòa nhà thuộc nhiều chủ đầu tư khác nhau.
 
-### 1.2. Bài toán dự án giải quyết
-- **Chống chồng lấn hợp đồng (Overlap Contract):** Ngăn chặn triệt để tình trạng 2 hợp đồng thuê cùng hiệu lực trên một căn hộ trong cùng một khoảng thời gian.
-- **Minh bạch sổ cọc (Deposit Ledger):** Tách biệt số dư tiền cọc bảo lưu với dòng tiền doanh thu thuê nhà; cấm tuyệt đối việc cấn trừ tiền cọc vào tiền thuê nhà sai quy định.
-- **Cô lập dữ liệu đa cấp (Data Scoping & RLS):** Đảm bảo Quản lý chỉ được thao tác trên các tòa nhà mình quản lý; Cư dân chỉ xem được hợp đồng và căn hộ của chính mình.
-- **Trải nghiệm cư dân thông minh (Resident Onboarding):** Tách biệt rõ 2 luồng: Khách thuê mới chưa ký hợp đồng (xem cọc giữ chỗ, khám phá căn hộ trống, tự khai CCCD nhận nhà) và Cư dân đang cư trú (quản lý tiền thuê, báo hỏng thiết bị, liên hệ BQL).
+### 1.2. Các nguyên tắc nghiệp vụ trọng tâm
+- **Chống chồng lấn hợp đồng 2 lớp (`contract_no_overlap`):** Kiểm tra xung đột ở tầng API và khóa cứng tại PostgreSQL bằng ràng buộc `EXCLUDE USING gist` trên nửa khoảng thời gian `[start_date, end_date)`, cho phép ký hợp đồng nối tiếp ngày mượt mà nhưng chặn tuyệt đối trùng kỳ hạn dù thao tác đồng thời.
+- **Sổ cọc độc lập & Quy tắc 4 mắt (`Four-Eyes Approval`):** Tách bạch hoàn toàn tiền cọc bảo đảm với doanh thu tiền thuê; **cấm tuyệt đối cấn trừ tiền cọc vào nợ tiền thuê (`RENT_DEDUCTION_FORBIDDEN`)**, theo dõi cam kết hoàn cọc trong **3–5 ngày** sau khi chấm dứt hợp đồng và bắt buộc người phê duyệt độc lập với người lập phiếu.
+- **Động cơ tính tiền chính xác & Hóa đơn bất biến:** Tự động tính tiền thuê và dịch vụ *pro-rata* theo số ngày thực tế (làm tròn hàng nghìn VND), áp dụng thứ tự ưu tiên đơn giá 3 tầng (*Ghi đè theo Hợp đồng → Khóa giá Đăng ký / Danh mục Tòa nhà → Danh mục Tổ chức*). Hóa đơn đã phát hành được bảo vệ bất biến; phí phạt chậm thanh toán (`100.000 ₫/ngày` sau `5 ngày` ân hạn) được tích lũy riêng trong `late_fee_accrual_tracker` để kết chuyển sang kỳ sau hoặc lập hóa đơn tất toán phí phạt.
+- **Cô lập dữ liệu đa tầng bằng Native PostgreSQL RLS:** Kết hợp RBAC Middleware tại Express và `FORCE ROW LEVEL SECURITY` dưới PostgreSQL thông qua role chuyên biệt `resihub_app` gắn ngữ cảnh người dùng trên từng HTTP request.
+- **AI đề xuất – Người quyết định (`Human-in-the-Loop`):** Google Gemini AI chỉ sinh bản ghi gợi ý (`PENDING`) cho trích xuất CCCD/Hợp đồng, đọc ảnh công tơ điện/nước hàng loạt và phân loại báo hỏng kèm lưới an toàn sinh mạng; mọi thay đổi dữ liệu chính thức đều phải qua con người rà soát xác nhận.
 
-### 1.3. Đối tượng sử dụng (Actors & Roles)
-Hệ thống chuẩn hóa 3 vai trò cố định:
-1. **Chủ sở hữu / Chủ đầu tư (`OWNER`):**
-   - Xem báo cáo, thống kê doanh thu, tỷ lệ lấp đầy của toàn bộ các tòa nhà thuộc sở hữu trong tổ chức (Quyền `R` - Read-only).
-2. **Quản lý vận hành (`MANAGER`):**
-   - Toàn quyền khởi tạo, theo dõi, cập nhật tòa nhà, tầng, căn hộ trong phạm vi được phân công (Quyền `CRU` - Create, Read, Update).
-   - Lập hợp đồng thuê, thu tiền cọc, duyệt hồ sơ cư dân và xử lý yêu cầu báo hỏng.
-3. **Cư dân thuê (`RESIDENT`):**
-   - **Chưa có HĐ:** Theo dõi phiếu đặt cọc giữ chỗ, khai báo CCCD nhận phòng, xem danh mục phòng trống.
-   - **Đã ký HĐ:** Theo dõi tiền thuê, số dư cọc đang giữ, báo hỏng thiết bị 24/7 và đăng ký dịch vụ.
+### 1.3. Mô hình Vai trò & Đối tượng sử dụng
+Hệ thống chuẩn hóa **4 vai trò định danh** kết hợp **luồng khách vãng lai công khai**:
 
-### 1.4. Các chức năng chính (Modules)
-- **M01 — Xác thực OTP & Mật khẩu:** Đăng nhập OTP qua SĐT (chống rò rỉ dữ liệu) và đăng nhập nội bộ qua Email/Password.
-- **M02 — Phân quyền RBAC & RLS:** Bảo mật 2 lớp: Middleware API và Row Level Security trong PostgreSQL.
-- **M03 — Quản lý Bất động sản:** Quản lý Tòa nhà, Tầng hầm/trệt/lầu, Căn hộ, Sơ đồ trạng thái phòng thời gian thực (Floor-map).
-- **M04 — Cọc giữ chỗ & Hồ sơ cư dân:** Quản lý khách tiềm năng, đặt cọc giữ chỗ tự động khóa căn hộ (`HELD` -> `RESERVED`), khai báo PII cư dân (CCCD, SĐT).
-- **M05 — Quản lý Hợp đồng thuê:** Lập hợp đồng, quản lý chu kỳ thu tiền, gia hạn và thanh lý hợp đồng.
-- **M06 — Sổ cọc độc lập:** Theo dõi cọc đang giữ (`HELD`), lịch sử khấu trừ hư hại tài sản và hoàn cọc minh bạch.
-- **M07 — Cổng Cư Dân (Resident Portal):** Giao diện chuyên biệt cho cư dân, tương thích thiết bị di động.
-- **M08 — Trung tâm Thông báo:** Tiếp nhận và xử lý thông báo biến động hợp đồng, sự cố tòa nhà theo thời gian thực.
+| Vai trò | Mã (`role.code`) | Phạm vi & Quyền hạn chính |
+| :--- | :--- | :--- |
+| **Quản trị hệ thống** | `SYS_ADMIN` | Quản trị người dùng & phân quyền toàn tổ chức, cấu hình tham số hệ thống & ngân sách AI, giám sát Cron jobs, xem Audit Log và thực hiện **Xóa có điều kiện (`Guarded Hard Delete`)** đối với danh mục rỗng chưa phát sinh lịch sử tài chính. |
+| **Chủ đầu tư / Chủ nhà** | `OWNER` | Xem Dashboard, báo cáo doanh thu, tỷ lệ lấp đầy, tuổi nợ trên các tòa nhà thuộc sở hữu (chế độ `Read-only`, tự động ẩn PII nhạy cảm) và thực hiện quyền **Phê duyệt 4 mắt (`Approve`)** cho hợp đồng giảm giá, quyết toán hoàn cọc, điều chỉnh hóa đơn, hoàn tiền thừa. |
+| **Quản lý tòa nhà** | `MANAGER` | Toàn quyền tác nghiệp **Tạo – Đọc – Sửa (`CRU`)** trong phạm vi tòa nhà được gán: quản lý khu/tầng/phòng, giữ chỗ, cư dân, hợp đồng, thu/quyết toán cọc, chốt điện/nước, phát hành hóa đơn, thu tiền, điều phối bảo trì SLA và gửi thông báo Zalo. |
+| **Cư dân** | `RESIDENT` | Sử dụng **Cổng Cư Dân Mobile-First (`/resident`)** với 2 trạng thái:<br>• *Khách mới đặt giữ chỗ:* Theo dõi phiếu giữ chỗ, tải CCCD 2 mặt, gửi hồ sơ đăng ký thuê.<br>• *Cư dân đang thuê (hỗ trợ đa căn hộ):* Xem hợp đồng & sổ cọc, tra cứu hóa đơn & báo đã chuyển khoản VietQR, đăng ký/hủy dịch vụ, gửi báo hỏng & đánh giá sao. |
+| **Khách tiềm năng** | *(Public `/explore`)* | Không cần tài khoản trước: tìm kiếm căn hộ trống theo tòa/số phòng ngủ/khoảng giá, xác thực SĐT qua OTP và gửi yêu cầu đặt cọc giữ chỗ trực tuyến. |
+
+### 1.4. Các phân hệ chức năng (Modules M01 – M15)
+- **M01 & M02 — Xác thực, Người dùng, RBAC & RLS:** Đăng nhập SĐT + OTP 6 số (chống dò quét danh tính), Email + Mật khẩu, Quên mật khẩu, JWT Access/Refresh Token (`token_version`), Idempotency-Key chống gửi trùng giao dịch tài chính và Nhật ký kiểm toán bất biến (`audit_log`).
+- **M03 — Quản lý Bất động sản & Sơ đồ tầng:** Quản lý Tòa nhà (cấu hình VietQR nhận tiền), Khu (`zone`), Tầng (tạo lẻ & dải tầng hàng loạt `floors/bulk`), Căn hộ (tạo lẻ & theo mẫu tầng `apartments/bulk`), máy trạng thái tự động 5 trạng thái (`AVAILABLE`, `RESERVED`, `OCCUPIED`, `MAINTENANCE`, `INACTIVE`), nghiệm thu bàn giao phòng và Sơ đồ mặt bằng trực quan (`FloorPlanPage`).
+- **M04 — Hồ sơ Cư dân & Đặt cọc Giữ chỗ:** Mô hình định danh 2 tầng (`person` + `tenant`), kiểm tra trùng SĐT/CCCD, tra cứu liên kết khách thuê liên tòa bảo vệ PII (`SHARED_PROFILE_LOCKED`), gộp hồ sơ trùng (`merge`) và quản lý phiếu giữ chỗ nội bộ / trực tuyến (`reservation`).
+- **M05 — Quản lý Hợp đồng thuê:** Lập hợp đồng nháp, xuất bản in mẫu HTML/PDF, đính kèm bản scan đã ký, phê duyệt hợp đồng ưu đãi giá (>10%), quản lý thành viên ở cùng, phụ lục phiên bản hóa (`contract_version`), gia hạn nối tiếp và chuyển phòng kết chuyển cọc (`transfer-room`).
+- **M06 — Quản lý Sổ cọc độc lập:** Mở sổ cọc tự động khi kích hoạt hợp đồng, kết chuyển tiền giữ chỗ, thu bổ sung cọc, khấu trừ hư hại có ảnh bằng chứng, luồng quyết toán hoàn cọc 4 mắt, xử lý tranh chấp (`DISPUTED`) và lệnh chi hoàn trả (`RETURNED`).
+- **M07 — Danh mục & Đăng ký Dịch vụ:** Quản lý biểu phí dịch vụ (`METERED`, `FIXED`, `QUANTITY`, `ONE_TIME`), đăng ký dịch vụ gắn biển số xe gửi hầm, khóa giá hoặc ghi đè đơn giá riêng theo từng hợp đồng, xử lý đăng ký/hủy dịch vụ giữa tháng tính pro-rata tự động.
+- **M08 — Đồng hồ Điện / Nước:** Tự động khởi tạo công tơ Điện/Nước cho hợp đồng hiệu lực, ghi chỉ số lẻ/hàng loạt, hỗ trợ tách chỉ số khi đổi khách thuê giữa tháng trên cùng công tơ, cảnh báo tiêu thụ tăng đột biến (>30%) và nhập ảnh công tơ hàng loạt qua AI OCR.
+- **M09 — Động cơ Tính tiền & Hóa đơn kỳ:** Sinh hóa đơn tự động theo `billing_day` riêng của từng hợp đồng hoặc sinh hàng loạt theo tòa, quản lý dòng chi tiết hóa đơn nháp, phát hành bất biến, quy trình điều chỉnh hóa đơn 4 mắt và theo dõi phí phạt quá hạn.
+- **M10 — Thanh toán, Công nợ & Số dư Tín dụng:** Ghi nhận & xác nhận thanh toán chuyển khoản/VietQR/tiền mặt, phân tích công nợ theo **5 nhóm tuổi nợ**, tự động bù trừ tiền thừa theo cơ chế FIFO (`credit_balance`) và hoàn tiền thừa có phê duyệt.
+- **M11 — Yêu cầu Bảo trì / Báo hỏng & SLA:** Cấp mã phiếu `SR-YYYYMMDD-XXXX`, cảnh báo trùng trong 24h, theo dõi cam kết SLA phản hồi (2h) & xử lý (4h khẩn cấp / 24h thường), tự động leo thang cảnh báo khi quá hạn SLA, cư dân nghiệm thu đóng phiếu hoặc mở lại trong 3 ngày.
+- **M12 — Cổng Cư Dân Đa thiết bị:** Giao diện tự phục vụ 8 phân mục (`P1..P8`) tối ưu chuyên sâu cho Mobile (Bottom Navigation 5 ô + Bottom-Sheet), Tablet (Sticky Sub-Header) và Desktop (Sidebar).
+- **M13 — Thông báo & Tích hợp Nhóm Zalo:** Phát hành thông báo theo phạm vi Tòa/Tầng/Phòng, quản lý danh bạ nhóm Zalo tòa nhà & từng căn hộ (`zalo_group`), 5 mẫu thông báo vận hành dựng sẵn và sao chép **Zalo Rich Text** giữ nguyên định dạng in đậm khi dán sang Zalo PC/Web.
+- **M14 — Dashboard Chart.js & Báo cáo:** Trực quan hóa Xu hướng Phát hành vs Thực thu, Cơ cấu Doanh thu theo nguồn, Tuổi nợ 5 nhóm (hỗ trợ click *drill-down*) và Biểu đồ Tỷ lệ lấp đầy 6/12/24 tháng; xuất dữ liệu báo cáo CSV.
+- **M15 — AI Gateway (Google Gemini):** Cổng AI phía server với Kill Switch, kiểm soát trần ngân sách VND & Token hàng tháng, kiểm tra magic bytes tệp tải lên và che giấu PII cho 3 nghiệp vụ: `CCCD_EXTRACT` / `CONTRACT_EXTRACT`, `METER_OCR` và `TICKET_TRIAGE`.
+- **Hệ thống Cron Jobs Hằng ngày (`daily.js`):** Tự động kích hoạt lúc `00:05` giờ Việt Nam với khóa phân tán `pg_try_advisory_lock`, tự động đồng bộ hết hạn hợp đồng/giữ chỗ, chuyển trạng thái phòng, đánh dấu hóa đơn `OVERDUE`, tích lũy phí phạt chậm, sinh hóa đơn nháp định kỳ, leo thang SLA và dọn gợi ý AI hết hạn.
 
 ---
 
 ## 2. Công nghệ sử dụng (Tech Stack)
 
-| Tầng hệ thống | Công nghệ / Thư viện | Vai trò |
-| :--- | :--- | :--- |
-| **Frontend** | **React 19** | Thư viện UI hiện đại |
-| | **Vite 8** | Build tool siêu tốc với HMR |
-| | **Zustand 5** | Quản lý global state (Auth, Session) |
-| | **React Router DOM v7** | Điều hướng Single Page Application |
-| | **TailwindCSS v3.4** | Utility-first CSS framework |
-| | **Lucide React** | Bộ icon SVG hiện đại, sắc nét |
-| | **Chart.js & React-Chartjs-2**| Biểu đồ trực quan hóa dữ liệu Dashboard |
-| | **Axios** | HTTP client kết nối Backend RESTful API |
-| **Backend** | **Node.js (ES Modules)** | Nền tảng thực thi server-side |
-| | **Express.js 4** | Web framework xây dựng REST API |
-| | **jsonwebtoken (JWT)** | Xác thực Access Token (15m) & Refresh Token (7d) |
-| | **bcryptjs** | Mã hóa an toàn mật khẩu người dùng |
-| | **express-rate-limit** | Chống tấn công brute-force & DoS API |
-| | **Morgan** | Logging HTTP request |
-| **Database** | **PostgreSQL 16** | Cơ sở dữ liệu quan hệ ACID mạnh mẽ |
-| | **pg (node-postgres)** | Native connection pool driver cho Node.js |
-| | **PostgreSQL RLS** | Row Level Security cô lập dữ liệu theo org & tòa nhà |
-| **DevOps & Tooling** | **Docker & Docker Compose** | Đóng gói môi trường đồng nhất một lệnh chạy |
-| | **Nodemon** | Auto-reload server backend trong môi trường phát triển |
+| Tầng hệ thống | Công nghệ / Thư viện | Phiên bản | Vai trò trong kiến trúc |
+| :--- | :--- | :--- | :--- |
+| **Frontend** | **React** | `^19.2.8` | Xây dựng giao diện người dùng (Admin Portal, Resident Portal, Public Explore) |
+| | **Vite** | `^8.3.0` | Bundler tốc độ cao, HMR và tách gói vendor (`react`, `chart`, `icons`) |
+| | **React Router DOM** | `^7.18.4` | Điều hướng SPA, Lazy-loading Preloader & Route Guards theo vai trò |
+| | **Zustand** | `^5.0.15` | Quản lý trạng thái toàn cục (`authStore`, `notificationStore`, `toastStore`) |
+| | **TailwindCSS** | `^3.4.19` | Thiết kế UI responsive, hệ màu chuẩn và hỗ trợ vùng an toàn di động (`pb-safe`) |
+| | **Chart.js & react-chartjs-2** | `^4.5.1` / `^5.3.1` | Hệ thống biểu đồ phân tích doanh thu, tuổi nợ và tỷ lệ lấp đầy |
+| | **Lucide React** | `^1.57.0` | Bộ biểu tượng vector đồng bộ |
+| | **Axios** | `^1.20.0` | HTTP client tích hợp tự động làm mới JWT, Cache truy vấn & `Idempotency-Key` |
+| | **Oxlint** | `^1.81.0` | Công cụ kiểm tra tĩnh mã nguồn JavaScript/JSX siêu tốc |
+| **Backend** | **Node.js (ES Modules)** | `v20+` / `v22 LTS` | Môi trường thực thi bất đồng bộ phía máy chủ |
+| | **Express.js** | `^4.21.2` | RESTful API framework kèm middleware nén Gzip tự động cho JSON payload |
+| | **pg (`node-postgres`)** | `^8.13.1` | Quản lý Dual Connection Pool (`adminPool` & `appPool`) + `AsyncLocalStorage` |
+| | **jsonwebtoken & bcryptjs** | `^9.0.2` / `^2.4.3` | Ký xác thực Access/Refresh Token và băm mật khẩu người dùng |
+| | **express-rate-limit** | `^7.5.0` | Bảo vệ chống brute-force OTP, đăng nhập và giới hạn tần suất gọi API |
+| | **Google Gemini REST Client** | `v1beta` | Trích xuất dữ liệu có cấu trúc (Structured Outputs JSON Schema) phía server |
+| **Database** | **PostgreSQL** | `v16` | CSDL quan hệ ACID với `uuid-ossp`, `pgcrypto`, `btree_gist` |
+| | **PostgreSQL Native RLS** | `v16` | `ENABLE` & `FORCE ROW LEVEL SECURITY` trên toàn bộ bảng nghiệp vụ |
+| **DevOps & Test** | **Docker & Docker Compose** | Compose v2 | Đóng gói đồng nhất PostgreSQL 16, Backend API và Frontend |
+| | **Node.js Test Runner** | Built-in (`node:test`) | Chạy 16 bộ kiểm thử Unit, Integration và UAT Performance |
 
 ---
 
 ## 3. Cấu trúc thư mục
 
-```
+```text
 resihub/
-├── .env.example                     # Mẫu biến môi trường dùng chung
-├── docker-compose.yml               # Cấu hình khởi chạy trọn gói Docker (DB, API, Frontend)
-├── docker-compose.dev.yml           # Cấu hình Docker dành cho môi trường dev
-├── PRD - Quan ly Can ho va Nha cho thue v2.0.md  # Tài liệu đặc tả yêu cầu phần mềm chuẩn (PRD)
-├── Phase1_Plan_Chi_Tiet.md          # Kế hoạch chi tiết và ma trận nghiệm thu Phase 1
+├── .env.example                          # Mẫu biến môi trường chuẩn tại thư mục gốc
+├── docker-compose.yml                    # Khởi chạy trọn gói PostgreSQL 16, Backend API & Frontend
+├── docker-compose.dev.yml                # Ghi đè lệnh hot-reload cho môi trường phát triển Docker
+├── PRD - Quan ly Can ho va Nha cho thue v2.0.md  # Tài liệu đặc tả yêu cầu sản phẩm (PRD v2.0)
+├── FRONTEND DEVELOPER Roadmap (Hiep).md  # Lộ trình triển khai dự án theo 3 giai đoạn (12 tuần)
 │
-├── api/                             # MÃ NGUỒN BACKEND (Node.js/Express)
-│   ├── package.json                 # Cấu hình dependency & scripts backend
-│   ├── remove_deprecated_roles.js   # Script dọn dẹp các vai trò cũ khỏi DB
-│   ├── setup_resident_test_accounts.js # Script khởi tạo tài khoản test cư dân
-│   ├── test_crud_scoping.mjs        # Bộ kiểm thử tự động phân quyền CRUD tòa nhà/căn hộ (21 test)
-│   ├── test_phase1_compliance.mjs   # Bộ kiểm thử nghiệp vụ toàn diện Phase 1 PRD (39 test)
-│   └── src/
-│       ├── server.js                # Điểm khởi động Express server & đăng ký route
-│       ├── db/
-│       │   ├── client.js            # Khởi tạo PostgreSQL Connection Pool
-│       │   ├── migrate.js           # Bộ chạy migration tự động theo thứ tự
-│       │   ├── seed.js              # Khởi tạo dữ liệu mẫu (Tòa nhà, tầng, căn hộ, users)
-│       │   └── migrations/          # 12 bản migration SQL khởi tạo schema & RLS
-│       │       ├── 001_extensions.sql
-│       │       ├── 002_organization_users.sql
-│       │       ├── 003_real_estate.sql
-│       │       ├── 004_tenants_reservations.sql
-│       │       ├── 005_contracts.sql
-│       │       ├── 006_deposits.sql
-│       │       ├── 007_audit_attachments.sql
-│       │       ├── 008_indexes.sql
-│       │       ├── 009_rls.sql
-│       │       ├── 010_rls_policies.sql
-│       │       ├── 011_notifications.sql
-│       │       └── 012_remove_deprecated_roles.sql
-│       ├── middleware/
-│       │   ├── auth.js              # Middleware xác thực JWT token
-│       │   ├── rbac.js              # Middleware kiểm tra quyền theo vai trò (requireRole)
-│       │   └── rateLimiter.js       # Giới hạn tần suất gọi API
-│       └── routes/                  # Các RESTful API routes
-│           ├── auth.js              # Đăng nhập OTP, Email/Password, Refresh token
-│           ├── buildings.js         # CRUD Tòa nhà, Tầng (Floors), Sơ đồ căn hộ
-│           ├── apartments.js        # CRUD Căn hộ, cập nhật giá thuê, trạng thái
-│           ├── tenants.js           # Quản lý hồ sơ cư dân & duplicate check
-│           ├── contracts.js         # Lập HĐ, gia hạn, chống trùng lặp, thanh lý
-│           ├── deposits.js          # Sổ cọc, thu cọc, cấm cấn trừ, khấu trừ hư hại
-│           ├── reservations.js      # Đặt cọc giữ chỗ khách tiềm năng
-│           ├── resident.js          # Cổng Cư Dân: tổng quan, khai báo CCCD, báo hỏng
-│           ├── notifications.js     # Danh sách thông báo, đánh dấu đã đọc
-│           └── health.js            # Health-check endpoint hệ thống
+├── docs/                                 # Tài liệu kỹ thuật, báo cáo nghiệm thu & thiết kế chi tiết
+│   ├── BAO_CAO_GIAI_DOAN_1_TUAN_1_4.md   # Báo cáo kỹ thuật & Schema Giai đoạn 1 (M01–M06)
+│   ├── BAO_CAO_GIAI_DOAN_2_TUAN_5_8.md   # Báo cáo kỹ thuật & Schema Giai đoạn 2 (M07–M15)
+│   ├── BAO_CAO_RA_SOAT_THU_HOAN_COC_M06.md
+│   ├── BAO_CAO_TUAN_THU_PRD_M03_M06.md
+│   ├── superpowers/                      # Hồ sơ thiết kế (specs/) & kế hoạch triển khai (plans/)
+│   └── test-samples/cccd/                # Bộ ảnh mẫu CCCD phục vụ kiểm thử AI OCR
 │
-└── frontend/                        # MÃ NGUỒN FRONTEND (React 19 + Vite)
-    ├── package.json                 # Dependency & scripts frontend
-    ├── vite.config.js               # Cấu hình Vite dev server và build
-    ├── tailwind.config.js           # Cấu hình theme, màu sắc và typography Tailwind
+├── api/                                  # MÃ NGUỒN BACKEND (Node.js + Express + PostgreSQL)
+│   ├── Dockerfile                        # Cấu hình đóng gói container API (node:22-alpine)
+│   ├── .env.example                      # Mẫu cấu hình biến môi trường chi tiết cho Backend
+│   ├── package.json                      # Scripts (dev, start, migrate, seed, test, test:ui)
+│   ├── scripts/
+│   │   └── devtools-ui-suite.mjs         # Kịch bản kiểm thử giao diện tự động qua Chrome DevTools
+│   ├── src/
+│   │   ├── server.js                     # Khởi tạo Express, Gzip, CORS, Rate Limit, Routes & Cron
+│   │   ├── config/
+│   │   │   └── env.js                    # Kiểm tra biến môi trường bắt buộc (JWT, Gemini)
+│   │   ├── db/
+│   │   │   ├── client.js                 # Quản lý adminPool, appPool (RLS) & AsyncLocalStorage
+│   │   │   ├── migrate.js                # Bộ thực thi migration tự động có bảng theo dõi _migrations
+│   │   │   ├── seed_vinhomes.js          # Seed mặc định: 3 tòa Vinhomes Ocean Park (240 căn, 2025–2027)
+│   │   │   ├── seed_demo.js              # Seed tùy chọn: 3 Chủ đầu tư, 9 tòa nhà (450 căn)
+│   │   │   ├── seed.js                   # Seed tối giản khởi tạo nhanh tổ chức & vai trò
+│   │   │   └── migrations/               # 9 bản migration SQL hợp nhất toàn bộ 29 bảng & RLS
+│   │   │       ├── 001_extensions_and_roles.sql
+│   │   │       ├── 002_core_tables.sql
+│   │   │       ├── 003_constraints_and_indexes.sql
+│   │   │       ├── 004_helper_functions.sql
+│   │   │       ├── 005_rls_enable_and_policies.sql
+│   │   │       ├── 006_triggers.sql
+│   │   │       ├── 007_grants.sql
+│   │   │       ├── 008_seeds.sql
+│   │   │       └── 009_cron_jobs.sql
+│   │   ├── jobs/
+│   │   │   └── daily.js                  # Tiến trình nền hằng ngày (HĐ, giữ chỗ, hóa đơn, phạt, SLA)
+│   │   ├── middleware/                   # auth.js, rbac.js, idempotency.js, rateLimiter.js
+│   │   ├── routes/                       # 22 module định tuyến RESTful API (/api/health & /api/v1/*)
+│   │   ├── services/                     # 26 module xử lý nghiệp vụ cốt lõi (Billing, AI, Deposit, v.v.)
+│   │   └── utils/                        # Tiện ích xuất CSV (csv.js) & che giấu dữ liệu cá nhân (piiMask.js)
+│   └── test/                             # 16 bộ kiểm thử tự động (504 test assertions)
+│
+└── frontend/                             # MÃ NGUỒN FRONTEND (React 19 + Vite 8 + TailwindCSS)
+    ├── Dockerfile                        # Cấu hình đóng gói container Frontend (node:22-alpine)
+    ├── package.json                      # Scripts (dev, build, lint, preview)
+    ├── vite.config.js                    # Cấu hình proxy /api -> :5000 & tách gói manualChunks
+    ├── tailwind.config.js                # Cấu hình bảng màu thương hiệu, font chữ & giao diện
     └── src/
-        ├── main.jsx                 # Điểm gắn kết React DOM
-        ├── App.jsx                  # Root App component
-        ├── constants/
-        │   └── navigation.js        # Menu điều hướng theo phân quyền RBAC
-        ├── services/
-        │   └── api.js               # Axios instance tự động đính kèm Bearer Token
-        ├── stores/
-        │   └── authStore.js         # Zustand store lưu thông tin user, role, token
-        ├── router/
-        │   └── index.jsx            # Định tuyến thông minh, Route Guards theo Role
+        ├── main.jsx & App.jsx            # Điểm khởi chạy ứng dụng React
+        ├── constants/                    # Cấu hình vai trò (roles.js), menu (navigation.js), trạng thái
+        ├── hooks/                        # usePermission, useNotificationAction, useVietQrBanks, useToast
+        ├── router/                       # Định tuyến SPA, RoleGuard & cơ chế nạp trước routePreloaders
+        ├── services/                     # 17 module gọi API & bộ nhớ đệm truy vấn (queryCache.js)
+        ├── stores/                       # Zustand stores: authStore, notificationStore, toastStore
+        ├── utils/                        # Định dạng tiền tệ, biểu đồ, VietQR, Zalo Rich Text, AI helpers
         ├── components/
-        │   ├── layout/
-        │   │   ├── AdminLayout.jsx  # Layout dành riêng cho OWNER và MANAGER
-        │   │   ├── ResidentLayout.jsx # Layout dành riêng cho RESIDENT
-        │   │   ├── Sidebar.jsx      # Thanh điều hướng phân hệ quản trị
-        │   │   └── TopBar.jsx       # Header quản trị, chuông thông báo, chọn tòa
-        │   └── common/
-        │       └── AccessDenied.jsx # Màn hình thông báo phân quyền 403
+        │   ├── ui/                       # 14 UI Primitives (Modal, MoneyInput, FileUpload, Select, v.v.)
+        │   ├── common/                   # DataTable, NotificationBell, BankSelect, ConfirmDialog, v.v.
+        │   ├── layout/                   # AdminLayout, ResidentLayout, Sidebar, TopBar
+        │   ├── meters/                   # MeterBatchPhotoImportModal (Nhập ảnh đồng hồ OCR hàng loạt)
+        │   └── settings/                 # AiGatewayConfigCard (Quản trị cấu hình & ngân sách AI)
         └── pages/
-            ├── auth/
-            │   └── LoginPage.jsx    # Trang đăng nhập OTP & Mật khẩu (Quick-fill test)
-            ├── admin/
-            │   ├── dashboard/       # Báo cáo tổng quan theo vai trò Owner / Manager
-            │   ├── buildings/       # Quản trị Tòa nhà, Tầng, Căn hộ
-            │   ├── tenants/         # Quản trị danh sách Cư dân
-            │   ├── contracts/       # Quản trị Hợp đồng thuê
-            │   └── deposits/        # Quản trị Sổ cọc & Khấu trừ
-            └── resident/
-                └── ResidentPortalPage.jsx # Cổng Cư Dân (Đã ký HĐ & Chưa ký HĐ)
+            ├── public/                   # PublicExplorePage (/explore — Khám phá phòng & giữ chỗ online)
+            ├── auth/                     # LoginPage, ForgotPasswordPage
+            ├── admin/                    # 14 phân khu quản trị (dashboard, buildings, apartments, tenants,
+            │                             #   contracts, deposits, meters, services, invoices, payments,
+            │                             #   maintenance, notifications, reports, audit, users, settings)
+            └── resident/                 # ResidentPortalPage & 8 tab nghiệp vụ cư dân (tabs/*)
 ```
 
 ---
 
 ## 4. Yêu cầu môi trường
 
-Để chạy dự án ổn định, máy tính của bạn cần đáp ứng các điều kiện tiên quyết sau:
-
 | Công cụ | Phiên bản yêu cầu | Ghi chú |
 | :--- | :--- | :--- |
-| **Node.js** | `>= 18.18.0` (Khuyến nghị **v20.x** hoặc **v22.x LTS**) | Kiểm tra bằng: `node -v` |
-| **npm** | `>= 9.x` | Đi kèm khi cài Node.js |
-| **PostgreSQL** | `>= 15.x` (Khuyến nghị **v16**) | Chạy local hoặc qua Docker |
-| **Docker & Compose** | Docker Desktop 4.x+ | *(Tùy chọn)* Nếu muốn chạy container |
-| **Git** | `>= 2.30` | Quản lý phiên bản mã nguồn |
+| **Node.js** | `>= 20.x` (Khuyến nghị **v22.x LTS**) | Bắt buộc hỗ trợ sẵn `fetch` và `node --test` |
+| **npm** | `>= 10.x` | Đi kèm khi cài đặt Node.js |
+| **PostgreSQL** | `>= 15.x` (Khuyến nghị **PostgreSQL 16**) | Chạy trực tiếp trên máy hoặc thông qua Docker |
+| **Docker & Compose** | Docker Desktop `4.x+` | *(Tùy chọn)* Khuyến nghị để dựng nhanh PostgreSQL đúng cổng `5433` |
+| **Google Gemini API Key** | Gemini API (`v1beta`) | *(Tùy chọn)* Cần thiết nếu muốn trải nghiệm thực tế tính năng AI (M15) |
 
 ---
 
-## 5. Hướng dẫn cài đặt và chạy
+## 5. Hướng dẫn cài đặt và khởi chạy
 
-### Cách 1: Chạy trực tiếp trên máy cục bộ (Khuyến nghị cho Lập trình viên)
+### Cách 1: Chạy trực tiếp trên máy cục bộ (Khuyến nghị khi phát triển)
 
-#### Bước 1: Clone mã nguồn
+#### Bước 1: Chuẩn bị Cơ sở dữ liệu PostgreSQL
+Bạn có thể bật nhanh riêng container PostgreSQL 16 trên cổng `5433` bằng Docker:
 ```bash
-git clone https://github.com/your-username/resihub.git
-cd resihub
+docker compose up -d postgres
 ```
+*(Nếu dùng PostgreSQL cài sẵn trên máy ở cổng `5432`, hãy tạo database `CREATE DATABASE resihub;` và chỉnh `DB_PORT=5432` cùng chuỗi kết nối trong file `.env` ở Bước 2).*
 
-#### Bước 2: Thiết lập Cơ sở dữ liệu PostgreSQL
-1. Đảm bảo PostgreSQL đang chạy trên cổng `5433` (hoặc `5432` theo cấu hình của bạn).
-2. Tạo cơ sở dữ liệu `resihub`:
-```sql
-CREATE DATABASE resihub;
-```
-
-#### Bước 3: Cài đặt và Khởi tạo Backend (API)
+#### Bước 2: Cài đặt, Migrate & Seed dữ liệu cho Backend (`api/`)
 ```bash
-# 1. Di chuyển vào thư mục api
+# 1. Di chuyển vào thư mục backend
 cd api
 
-# 2. Cài đặt các thư viện phụ thuộc
+# 2. Cài đặt dependencies
 npm install
 
-# 3. Tạo file cấu hình biến môi trường
-cp ../.env.example .env
-# (Chỉnh sửa file .env cho đúng thông tin kết nối PostgreSQL của bạn)
+# 3. Khởi tạo file cấu hình môi trường
+cp .env.example .env
+# (Cập nhật thông tin kết nối DB hoặc GEMINI_API_KEY trong api/.env nếu cần)
 
-# 4. Chạy migration tạo bảng và chính sách bảo mật RLS
+# 4. Chạy 9 bản migration khởi tạo 29 bảng, role resihub_app và chính sách RLS
 npm run migrate
 
-# 5. Khởi tạo dữ liệu mẫu ban đầu
+# 5. Nạp bộ dữ liệu thực tế Vinhomes Ocean Park 1, 2, 3 (240 căn hộ, ~245 hợp đồng)
 npm run seed
 
-# 6. Thiết lập tài khoản test cho cư dân
-node setup_resident_test_accounts.js
-
-# 7. Khởi động server backend (chạy trên port 5000)
+# 6. Khởi chạy server Backend ở chế độ phát triển (http://localhost:5000)
 npm run dev
 ```
 
-#### Bước 4: Cài đặt và Khởi động Frontend
-Mở một cửa sổ Terminal mới:
+> [!TIP]
+> **Các chế độ nạp dữ liệu mẫu (`seed`):**
+> - `npm run seed` *(mặc định — chạy `src/db/seed_vinhomes.js`)*: Tạo dữ liệu thực tế cho 3 tòa **Vinhomes Ocean Park 1, 2, 3** (240 căn hộ, 276 cư dân, lịch sử hợp đồng & hóa đơn từ `01/2025` đến `10/2026`, đầy đủ chỉ số điện/nước tháng `11/2026` đã chốt để bạn trải nghiệm ngay nút **Sinh hóa đơn hàng loạt kỳ 2026-11** trên giao diện).
+> - `node src/db/seed_demo.js`: Tạo mô hình đa chủ sở hữu gồm 3 Chủ đầu tư × 3 tòa = 9 tòa nhà (450 căn hộ).
+> - `node src/db/seed.js`: Chỉ khởi tạo Tổ chức, 4 Vai trò chuẩn và tài khoản mẫu tối giản.
+
+#### Bước 3: Cài đặt và Khởi chạy Frontend (`frontend/`)
+Mở một cửa sổ Terminal mới tại thư mục gốc dự án:
 ```bash
 # 1. Di chuyển vào thư mục frontend
 cd frontend
 
-# 2. Cài đặt các thư viện phụ thuộc
+# 2. Cài đặt dependencies
 npm install
 
-# 3. Khởi động Vite dev server (chạy trên port 3000)
+# 3. Khởi động Vite dev server (http://localhost:3000)
 npm run dev
 ```
 
-#### Bước 5: Truy cập ứng dụng
-- Mở trình duyệt tại địa chỉ: **[http://localhost:3000](http://localhost:3000)**
-- Kiểm tra trạng thái Backend API: **[http://localhost:5000/api/health](http://localhost:5000/api/health)**
+#### Bước 4: Truy cập hệ thống
+- **Cổng Khám phá công khai (Khách tìm phòng):** http://localhost:3000/explore
+- **Trang Đăng nhập (Quản trị & Cư dân):** http://localhost:3000/login
+- **Kiểm tra trạng thái Backend Health-check:** http://localhost:5000/api/health
 
 ---
 
-### Cách 2: Khởi chạy nhanh bằng Docker Compose
+### Cách 2: Khởi chạy toàn bộ bằng Docker Compose
 
-Nếu bạn đã cài đặt sẵn Docker Desktop, chỉ cần chạy 1 lệnh duy nhất:
 ```bash
-# Khởi chạy toàn bộ PostgreSQL, Backend API và Frontend
+# 1. Tạo file .env tại thư mục gốc từ file mẫu
+cp .env.example .env
+
+# 2. Dựng đồng bộ 3 container: postgres (5433), api (5000), frontend (3000)
 docker compose up --build -d
+
+# 3. Chạy migration và nạp dữ liệu mẫu vào container api (lần đầu tiên)
+docker exec -it resihub-api npm run migrate
+docker exec -it resihub-api npm run seed
 ```
-Docker sẽ tự động kích hoạt container PostgreSQL (port 5433), Backend (port 5000) và Frontend (port 3000).
 
 ---
 
-## 6. Cấu hình hệ thống
+## 6. Cấu hình hệ thống (`.env`)
 
-Tạo file `.env` tại thư mục gốc hoặc trong thư mục `api/` dựa trên mẫu sau:
+Hệ thống đọc biến môi trường từ `api/.env` (hoặc `.env` tại thư mục gốc). Tham khảo đầy đủ từ [`api/.env.example`](api/.env.example):
 
 ```env
 # ==============================================================================
-# CẤU HÌNH KẾT NỐI POSTGRESQL DATABASE
+# 1. CẤU HÌNH POSTGRESQL & ROW-LEVEL SECURITY POOL
 # ==============================================================================
 POSTGRES_DB=resihub
 POSTGRES_USER=postgres
-POSTGRES_PASSWORD=your_secure_password_here
+POSTGRES_PASSWORD=postgres
 DB_HOST=localhost
 DB_PORT=5433
-DATABASE_URL=postgres://postgres:your_secure_password_here@localhost:5433/resihub
+
+# Kết nối Superuser/Owner (chỉ dùng cho migration, seed & tra cứu xác thực ban đầu)
+DATABASE_URL=postgres://postgres:postgres@localhost:5433/resihub
+
+# Kết nối ứng dụng chịu sự kiểm soát của FORCE ROW LEVEL SECURITY (role resihub_app)
+# BẮT BUỘC phải khai báo khi NODE_ENV=production
+APP_DATABASE_URL=postgres://resihub_app:resihub_app_secret@localhost:5433/resihub
 
 # ==============================================================================
-# CẤU HÌNH BACKEND SERVER
+# 2. CẤU HÌNH SERVER & BẢO MẬT JWT
 # ==============================================================================
 PORT=5000
 NODE_ENV=development
-CORS_ORIGIN=http://localhost:3000
 
-# ==============================================================================
-# BẢO MẬT & MÃ HÓA TOKEN (JWT)
-# ==============================================================================
-# Khóa bí mật dùng để ký Access Token (15 phút)
-JWT_SECRET=replace_with_your_super_secret_jwt_key_here
-# Khóa bí mật dùng để ký Refresh Token (7 ngày)
-JWT_REFRESH_SECRET=replace_with_your_super_secret_refresh_key_here
+# Bắt buộc khai báo (server sẽ dừng ngay lúc khởi động nếu để trống)
+JWT_SECRET=replace_with_your_strong_jwt_secret
+JWT_REFRESH_SECRET=replace_with_your_strong_refresh_secret
 JWT_EXPIRES_IN=15m
 REFRESH_TOKEN_EXPIRES_IN=7d
 
+# Bắt buộc header Idempotency-Key cho API ghi dữ liệu (mặc định tự bật khi NODE_ENV=production)
+# REQUIRE_IDEMPOTENCY_KEY=true
+
 # ==============================================================================
-# CẤU HÌNH FRONTEND (Vite)
+# 3. TÍCH HỢP VIETQR & GOOGLE GEMINI AI GATEWAY (TÙY CHỌN)
+# ==============================================================================
+VIETQR_CLIENT_ID=
+VIETQR_API_KEY=
+
+# Khóa Gemini chỉ gọi từ Backend (NFR-007), tuyệt đối không đặt biến VITE_* cho khóa này
+GEMINI_API_KEY=
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+GEMINI_TIMEOUT_MS=20000
+
+# ==============================================================================
+# 4. CẤU HÌNH FRONTEND (VITE)
 # ==============================================================================
 VITE_API_URL=http://localhost:5000
 ```
 
 > [!WARNING]
-> **Quy tắc an toàn:** Tuyệt đối không commit file `.env` chứa mật khẩu thật lên GitHub/GitLab. File `.env` đã được cấu hình trong `.gitignore`.
+> **An toàn bảo mật:** Không bao giờ commit file `.env` chứa khóa thật lên kho mã nguồn, và tuyệt đối không đưa `GEMINI_API_KEY` hay `JWT_SECRET` vào các biến có tiền tố `VITE_` của Frontend.
 
 ---
 
-## 7. Kiến trúc & Danh mục API
+## 7. Kiến trúc bảo mật, Tài khoản Demo & Danh mục API
 
-### 7.1. Kiến trúc hệ thống
-ResiHub được thiết kế theo kiến trúc **3-Tier**:
-1. **Client Tier (Presentation):** React 19 SPA, TailwindCSS, Axios interceptor tự động bắt mã lỗi `401` để làm mới token.
-2. **Application Tier (Business Logic):** Express.js REST API, kiến trúc Controller-Route-Middleware, áp dụng quy chuẩn phân quyền RBAC 2 lớp.
-3. **Data Tier (Persistence):** PostgreSQL 16 với tính năng **Row Level Security (RLS)** để cô lập dữ liệu theo tổ chức (`org_id`) và tòa nhà (`building_id`).
+### 7.1. Điểm nhấn kiến trúc Backend & Database
+1. **Dual Connection Pool & RLS Context (`api/src/db/client.js` & `middleware/auth.js`):**
+   - `adminPool`: Dành riêng cho chạy migration, tiến trình nền hệ thống và bước kiểm tra định danh lúc đăng nhập.
+   - `appPool`: Kết nối qua role `resihub_app` (không có quyền bypass RLS). Mỗi request hợp lệ được cấp kết nối riêng trong `AsyncLocalStorage`, gắn `SELECT set_config('app.current_user_id', userId, false)` và tự động `ROLLBACK` + `RESET` ngay khi kết thúc response.
+2. **Bảo vệ chống gửi trùng (`middleware/idempotency.js`):** Các thao tác nhạy cảm (lập/kích hoạt/chấm dứt hợp đồng, thu/hoàn cọc, phát hành hóa đơn, ghi nhận thanh toán, gửi thông báo) kiểm tra băm SHA-256 của payload theo `Idempotency-Key` và phát lại kết quả an toàn (`Idempotent-Replayed: true`) nếu mạng chập chờn.
+3. **Truy cập tệp đính kèm bảo mật (`routes/attachments.js`):** Ảnh CCCD, bản scan hợp đồng, biên lai chuyển khoản và ảnh nghiệm thu không phơi trực tiếp qua static URL công khai mà phải đi qua `/api/v1/attachments/:id/view` có kiểm tra quyền sở hữu/tòa nhà và ghi nhận nhật ký truy cập.
 
-### 7.2. Danh mục tài khoản thử nghiệm có sẵn
+### 7.2. Danh sách tài khoản Demo (Sau khi chạy `npm run seed`)
 
-Tại màn hình đăng nhập, hệ thống cung cấp các nút bấm nhanh:
+Màn hình đăng nhập (`/login`) đã tích hợp sẵn hộp chọn nhanh các tài khoản dưới đây:
 
-| Vai trò | Email đăng nhập | Mật khẩu | Số điện thoại | Quyền hạn & Chức năng |
+| Vai trò | Email đăng nhập | Mật khẩu | SĐT nhận OTP | Phạm vi dữ liệu & Quyền hạn |
 | :--- | :--- | :--- | :--- | :--- |
-| **OWNER** | `owner@resihub.vn` | `password123` | `0900000002` | Xem báo cáo toàn bộ 25+ tòa nhà; chế độ Read-only. |
-| **MANAGER** | `manager@resihub.vn` | `password123` | `0901234567` | Quản lý tòa Thảo Điền; CRU tòa nhà, tầng, căn hộ, hợp đồng, cọc. |
-| **RESIDENT (Chưa HĐ)** | `resident@resihub.vn` | `password123` | `0900000005` | Khách mới; có phiếu cọc giữ chỗ căn A202; khai báo CCCD; xem phòng trống. |
-| **RESIDENT (Đã ký HĐ)** | `resident_active@resihub.vn` | `password123` | `0907778899` | Đang thuê căn A102; xem tiền thuê, tiền cọc 18 triệu; báo hỏng thiết bị. |
-| **Đăng nhập OTP** | Nhập SĐT bất kỳ | *Mã test:* `123456` | — | Đăng nhập an toàn theo chuẩn số điện thoại Việt Nam. |
+| **SYS_ADMIN** | `admin@resihub.vn` | `Admin@123456` | `0900000001` | Quản trị toàn tổ chức, cấu hình hệ thống/AI, quản lý người dùng, xóa danh mục rỗng. |
+| **OWNER** | `owner.vop@resihub.vn` | `Demo@123456` | `0905000001` | Chủ đầu tư sở hữu cả 3 tòa Vinhomes Ocean Park 1, 2, 3; xem báo cáo tổng hợp & duyệt 4 mắt. |
+| **MANAGER (Tòa 1)** | `manager.vop1@resihub.vn` | `Demo@123456` | `0905000011` | Quản lý vận hành riêng tòa **Vinhomes Ocean Park 1 (`VOP-1`)** — 80 căn hộ. |
+| **MANAGER (Tòa 2)** | `manager.vop2@resihub.vn` | `Demo@123456` | `0905000012` | Quản lý vận hành riêng tòa **Vinhomes Ocean Park 2 (`VOP-2`)** — 80 căn hộ. |
+| **MANAGER (Tòa 3)** | `manager.vop3@resihub.vn` | `Demo@123456` | `0905000013` | Quản lý vận hành riêng tòa **Vinhomes Ocean Park 3 (`VOP-3`)** — 80 căn hộ. |
+| **RESIDENT** | `tenant1@resihub.vn` *(..`tenant276`)* | `Demo@123456` | `0907000001` *(..`0907000276`)* | Cư dân truy cập Cổng Cư Dân (`/resident`): xem hợp đồng, hóa đơn, báo hỏng, đăng ký dịch vụ. |
 
-### 7.3. Các API Endpoints chính
+> [!NOTE]
+> **Lưu ý khi đăng nhập bằng Số điện thoại (OTP) ở môi trường Dev:**
+> Để chống dò quét danh tính (*Anti-Enumeration*), hệ thống chỉ sinh mã OTP cho số điện thoại đã tồn tại trong hồ sơ `person` (ví dụ `0907000001` hoặc SĐT vừa đặt giữ chỗ tại `/explore`). Khi `NODE_ENV !== 'production'`, mã OTP sẽ hiển thị ngay trên hộp gợi ý giao diện đăng nhập, in ra terminal Backend, đồng thời chấp nhận mã kiểm thử nhanh `123456`.
 
-#### Xác thực (`/api/v1/auth`)
-- `POST /api/v1/auth/otp/request` — Yêu cầu gửi mã OTP về số điện thoại (Dev: log console).
-- `POST /api/v1/auth/otp/verify` — Xác thực OTP, sinh Access Token & Refresh Token.
-- `POST /api/v1/auth/login` — Đăng nhập bằng Email & Mật khẩu cho nhân sự nội bộ.
-- `POST /api/v1/auth/refresh` — Cấp lại Access Token mới từ Refresh Token.
+### 7.3. Tổng quan các nhóm API Endpoints (`/api/v1/*`)
 
-#### Bất động sản (`/api/v1/buildings` & `/api/v1/apartments`)
-- `GET /api/v1/buildings` — Lấy danh sách tòa nhà (Owner: xem toàn bộ; Manager: chỉ tòa được gán).
-- `POST /api/v1/buildings` — Tạo tòa nhà mới (Chỉ Manager; tự động gán quyền quản lý).
-- `GET /api/v1/buildings/:id/floor-map` — Lấy sơ đồ phân tầng và trạng thái từng căn hộ.
-- `POST /api/v1/buildings/:id/floors` — Thêm tầng hầm, trệt, lầu (Chặn trùng level).
-- `POST /api/v1/buildings/:id/floors/bulk` — Khởi tạo tầng hàng loạt theo dải tầng hoặc danh sách tùy chỉnh (`dry_run` xem trước, `skip_existing` bỏ qua tầng đã có, lưu nguyên tử kèm `audit_log`).
-- `GET /api/v1/apartments` — Danh sách căn hộ có lọc theo tòa nhà và trạng thái (`AVAILABLE`, `OCCUPIED`, `RESERVED`).
-- `POST /api/v1/apartments` — Tạo căn hộ mới với giá thuê định dạng BigInt.
-- `POST /api/v1/apartments/bulk` — Tạo hàng loạt căn hộ theo mẫu tầng trên 1..n tầng; gửi `dry_run: true` để xem trước mã căn và danh sách trùng.
-- `PATCH /api/v1/apartments/:id` — Cập nhật thông tin căn hộ, giá thuê, tiện nghi.
-
-#### Cọc & Hợp đồng (`/api/v1/reservations`, `/api/v1/contracts`, `/api/v1/deposits`)
-- `POST /api/v1/reservations` — Đặt cọc giữ chỗ (Tự động khóa căn hộ sang `RESERVED`).
-- `POST /api/v1/contracts` — Lập hợp đồng thuê mới (Kiểm tra chặn chống chồng lấn kỳ hạn).
-- `POST /api/v1/contracts/:id/terminate` — Chấm dứt hợp đồng (Tự động mở lại căn hộ sang `AVAILABLE`).
-- `GET /api/v1/deposits` — Truy vấn sổ cọc độc lập của các hợp đồng.
-- `POST /api/v1/deposits/:id/deduct` — Khấu trừ hư hại tài sản vào cọc (Cấm cấn trừ tiền thuê).
-
-#### Cổng Cư Dân (`/api/v1/resident`)
-- `GET /api/v1/resident/overview` — Lấy toàn bộ dữ liệu cá nhân hóa cho cư dân (HĐ đang thuê, cọc giữ chỗ, danh sách phòng trống).
-- `POST /api/v1/resident/rental-application` — Khai báo hồ sơ cư dân tự nhận phòng (FR-012).
-- `POST /api/v1/resident/service-requests` — Báo hỏng, gửi yêu cầu sửa chữa thiết bị (FR-042).
+| Phân hệ | Tiền tố Endpoint | Chức năng tiêu biểu |
+| :--- | :--- | :--- |
+| **Health & Public** | `/api/health`<br>`/api/v1/public` | Kiểm tra trạng thái hệ thống; tra cứu căn hộ trống công khai (`GET /apartments`), gửi OTP & tạo phiếu giữ chỗ trực tuyến (`POST /reservations`). |
+| **Xác thực & Hồ sơ** | `/api/v1/auth` | Yêu cầu & xác thực OTP (`/otp/request`, `/otp/verify`), đăng nhập Email (`/login`), làm mới phiên (`/refresh`), quên/đổi mật khẩu, cập nhật hồ sơ cá nhân (`/profile`). |
+| **Bất động sản (M03)** | `/api/v1/buildings`<br>`/api/v1/apartments` | CRUD tòa nhà, khu (`/zones`), tầng & tạo tầng hàng loạt (`/floors/bulk`), sơ đồ tầng (`/floor-map`), danh mục ngân hàng VietQR (`/banks`); tạo căn hộ lẻ/hàng loạt theo mẫu tầng (`/apartments/bulk`), nghiệm thu bàn giao (`/handover`). |
+| **Cư dân & Giữ chỗ (M04)** | `/api/v1/tenants`<br>`/api/v1/reservations` | Hồ sơ cư dân, kiểm tra trùng (`/check-dup`), tra cứu liên tòa (`/lookup`), gộp hồ sơ (`/merge`), ảnh CCCD (`/id-images`); quản lý giữ chỗ, xác nhận sao kê, hủy/quyết toán hoàn tiền giữ chỗ 4 mắt, chuyển thành hợp đồng (`/convert`). |
+| **Hợp đồng thuê (M05)** | `/api/v1/contracts` | Lập hợp đồng, xuất bản in mẫu (`/template`), tải bản scan (`/scan`), kích hoạt (`/activate`), duyệt giảm giá (`/approve`), thành viên ở cùng (`/occupants`), đơn giá riêng (`/service-prices`), phụ lục (`/amendments`), gia hạn (`/renew`), chuyển phòng (`/transfer-room`), chấm dứt (`/terminate`). |
+| **Sổ cọc độc lập (M06)** | `/api/v1/deposits` | Truy vấn sổ cọc, ghi nhận thu/khấu trừ (`/:id/transactions`), lập & xuất PDF quyết toán (`/:id/settlement`, `/:id/settlement/pdf`), phê duyệt 4 mắt, chi hoàn (`/:id/payout`), xử lý khiếu nại (`/:id/dispute`) & hoàn trả ngân hàng (`/:id/payout-returned`). |
+| **Dịch vụ & Điện nước (M07, M08)** | `/api/v1/service-catalog`<br>`/api/v1/service-subscriptions`<br>`/api/v1/meters` | Quản lý danh mục dịch vụ & gói đăng ký theo hợp đồng; quản lý công tơ, chốt chỉ số lẻ/hàng loạt (`/readings/batch`), xác nhận chỉ số (`/readings/confirm-batch`). |
+| **Hóa đơn & Công nợ (M09, M10)** | `/api/v1/invoices`<br>`/api/v1/payments`<br>`/api/v1/receivables` | Sinh hóa đơn kỳ hàng loạt (`/generate-batch`), quản lý dòng thu nháp, phát hành (`/:id/issue`), điều chỉnh 4 mắt (`/:id/adjust`); ghi nhận & duyệt thanh toán, theo dõi 5 nhóm tuổi nợ (`/receivables`), quản lý & hoàn số dư tín dụng (`/payments/credits`). |
+| **Bảo trì & Thông báo (M11, M13)** | `/api/v1/service-requests`<br>`/api/v1/announcements`<br>`/api/v1/zalo-groups`<br>`/api/v1/notifications` | Tiếp nhận, điều phối trạng thái SLA, áp dụng phân loại AI (`/:id/apply-triage`) & đánh giá sao báo hỏng; soạn gửi thông báo đa phạm vi, đánh dấu đã gửi Zalo (`/:id/mark-zalo-sent`), quản lý nhóm Zalo & hộp thư thông báo in-app. |
+| **Cổng Cư Dân (M12)** | `/api/v1/resident` | Tổng quan cá nhân hóa (`/overview`), nộp hồ sơ thuê (`/rental-application`), tra cứu hóa đơn & báo đã thanh toán (`/payments/report`), đăng ký/hủy dịch vụ, gửi/hủy/mở lại/đánh giá báo hỏng, gửi yêu cầu gia hạn/trả phòng (`/contract-requests`). |
+| **AI Gateway (M15)** | `/api/v1/ai` | Trích xuất CCCD & Hợp đồng (`POST /extract`), đọc chỉ số đồng hồ từ ảnh (`POST /meter-ocr`), phân loại báo hỏng (`POST /classify`), duyệt gợi ý AI (`POST /suggestions/:id/review`) và thống kê chi phí/KPI G6 (`GET /usage`). |
+| **Báo cáo & Quản trị** | `/api/v1/reports`<br>`/api/v1/admin/users`<br>`/api/v1/audit-logs`<br>`/api/v1/settings`<br>`/api/v1/attachments` | Dữ liệu Dashboard & xuất CSV (`/dashboard`, `/summary`, `/deposit-ledger`); quản lý tài khoản & vai trò; tra cứu nhật ký kiểm toán; cấu hình tham số hệ thống, xem lịch sử & kích hoạt thủ công Cron job (`/cron-runs`, `/cron-runs/trigger`); xem tệp bảo mật (`/:id/view`). |
 
 ---
 
-## 8. Kiểm thử và Xử lý lỗi
+## 8. Kiểm thử & Xử lý sự cố (Testing & Troubleshooting)
 
-### 8.1. Chạy các bộ kiểm thử tự động
-Dự án được trang bị 2 bộ kiểm thử tích hợp chuyên sâu, kiểm tra toàn bộ luồng nghiệp vụ:
+### 8.1. Kiểm thử tự động Backend (`api/test/`)
+Dự án có **16 bộ kiểm thử tự động (504 test assertions)** sử dụng `node:test`:
 
 ```bash
 cd api
 
-# 1. Chạy kiểm thử tuân thủ 100% tài liệu PRD Phase 1 (11 nhóm nghiệp vụ lớn)
-node test_phase1_compliance.mjs
+# Chạy toàn bộ 16 bộ kiểm thử (Unit + Integration/UAT) — Yêu cầu PostgreSQL đang chạy và đã migrate/seed
+npm test
 
-# 2. Chạy kiểm thử ma trận phân quyền CRUD Tòa nhà/Căn hộ và Scoping
-node test_crud_scoping.mjs
+# Chỉ chạy riêng 11 bộ Unit Test thuần logic (477 test cases — KHÔNG cần kết nối PostgreSQL)
+node --test test/bugs_*.test.js test/floorBulk.test.js
 ```
 
-**Kết quả kỳ vọng:**
-- `test_phase1_compliance.mjs`: **39/39 PASS (100%)**
-- `test_crud_scoping.mjs`: **21/21 PASS (100%)**
+- **11 bộ Unit Test thuần logic (`477 assertions`):** Kiểm thử toàn diện biên tính tiền pro-rata, năm nhuận, sai số dấu phẩy động, ưu tiên giá 3 tầng, đổi khách giữa tháng trên cùng đồng hồ, quy tắc AI Gateway & ngân sách, lưới an toàn báo hỏng, phân quyền 4 mắt, che giấu PII và định dạng Zalo.
+- **5 bộ Integration & Performance Test (`27 assertions`):** Kiểm thử trực tiếp với PostgreSQL RLS cho tạo tầng hàng loạt nguyên tử, xóa có điều kiện của `SYS_ADMIN`, hiệu năng phản hồi `< 500ms` và đối soát chu kỳ thu phí UAT quy mô lớn.
 
-### 8.2. Kiểm thử Frontend Build
+### 8.2. Kiểm thử Lint, Build Frontend & Giao diện tự động
 ```bash
+# Kiểm tra lỗi tĩnh với Oxlint và đóng gói bản Production trên Frontend
 cd frontend
+npm run lint
 npm run build
+
+# (Tùy chọn) Chạy bộ kiểm thử giao diện tự động đa vai trò & mobile viewport (yêu cầu DB + API + Frontend đang chạy)
+cd ../api
+npm run test:ui
 ```
-Đảm bảo bản build Vite production hoàn tất không có bất kỳ cảnh báo lỗi cú pháp nào.
 
 ### 8.3. Xử lý các sự cố thường gặp (Troubleshooting)
 
-| Sự cố | Nguyên nhân | Hướng khắc phục |
+| Sự cố / Mã lỗi | Nguyên nhân phổ biến | Cách khắc phục |
 | :--- | :--- | :--- |
-| `ECONNREFUSED 127.0.0.1:5433` | PostgreSQL chưa được bật hoặc đang chạy ở cổng khác (`5432`). | Kiểm tra dịch vụ PostgreSQL trong Services của Windows hoặc Docker. Nếu PostgreSQL chạy ở cổng 5432, cập nhật `DB_PORT=5432` trong file `.env`. |
-| `relation "..." does not exist` | Chưa chạy migration cơ sở dữ liệu. | Chạy lệnh `npm run migrate` trong thư mục `api/`. |
-| `Mã OTP không chính xác` | Nhập sai OTP trong môi trường phát triển. | Sử dụng mã OTP Master mặc định cho môi trường Dev: `123456` hoặc xem log tại terminal server backend. |
-| `Lỗi 403 - Khu vực hạn chế quyền` | Truy cập trang không thuộc thẩm quyền vai trò. | Hệ thống sử dụng RBAC nghiêm ngặt: `RESIDENT` chỉ vào được `/resident`; `OWNER` và `MANAGER` quản trị tại `/admin/*`. |
-| `Port 5000 / 3000 already in use` | Tiến trình cũ chưa tắt hẳn. | Trên Windows PowerShell: `Get-Process node \| Stop-Process -Force` để giải phóng cổng. |
+| `ECONNREFUSED 127.0.0.1:5433` | Container PostgreSQL chưa bật hoặc PostgreSQL trên máy đang chạy ở cổng `5432`. | Chạy `docker compose up -d postgres` (cổng `5433`), hoặc đổi `DB_PORT=5432` và cổng trong `DATABASE_URL` / `APP_DATABASE_URL` tại `api/.env`. |
+| `JWT_SECRET / JWT_REFRESH_SECRET bắt buộc` | Chưa tạo file `.env` trong `api/` hoặc để trống khóa ký token. | Chạy `cp api/.env.example api/.env` và điền giá trị cho `JWT_SECRET`, `JWT_REFRESH_SECRET`. |
+| `role "resihub_app" does not exist` hoặc `relation "..." does not exist` | Database mới tạo nhưng chưa chạy migration. | Chạy `cd api && npm run migrate` để khởi tạo role `resihub_app`, 29 bảng và chính sách RLS. |
+| Không nhận được OTP hoặc báo `OTP_NOT_FOUND` khi thử SĐT ngẫu nhiên | Cơ chế chống dò quét danh tính chỉ phát sinh OTP cho SĐT đã có trong bảng `person`. | Dùng SĐT của tài khoản đã seed (VD: `0907000001`, `0905000011`) hoặc đặt giữ chỗ mới tại `/explore` trước khi đăng nhập OTP. |
+| `IDEMPOTENCY_KEY_REQUIRED` (`400`) | Bật `NODE_ENV=production` hoặc `REQUIRE_IDEMPOTENCY_KEY=true` khi gọi API thủ công qua Postman/cURL. | Đính kèm header `Idempotency-Key: <uuid-duy-nhất>` vào các request ghi dữ liệu (trên Frontend Axios đã tự động đính kèm). |
+| Tính năng AI báo lỗi cấu hình / không trích xuất được | Chưa khai báo `GEMINI_API_KEY` hợp lệ hoặc tính năng AI đang tắt trong Cấu hình hệ thống. | Điền `GEMINI_API_KEY` vào `api/.env`, khởi động lại Backend và kiểm tra công tắc AI tại trang **Người dùng & Cấu hình** (`SYS_ADMIN`). |
+| `Port 5000 / 3000 already in use` | Tiến trình Node.js của phiên chạy trước chưa đóng hoàn toàn. | Tắt terminal cũ hoặc giải phóng tiến trình đang chiếm cổng `3000` / `5000` trước khi chạy lại `npm run dev`. |
 
 ---
 
-## 9. Quy chuẩn đóng góp & Giấy phép
+## 9. Tài liệu kỹ thuật & Quy chuẩn đóng góp
 
-### 9.1. Quy trình phát triển (Git Workflow)
-- **Branch chính:**
-  - `main`: Nhánh ổn định, sẵn sàng triển khai Production.
-  - `develop`: Nhánh tích hợp các tính năng mới trong quá trình phát triển.
-- **Quy ước đặt tên nhánh (Branch Naming):**
-  - `feat/feature-name`: Phát triển tính năng mới.
-  - `fix/bug-description`: Sửa lỗi.
-  - `refactor/code-optimization`: Tối ưu hóa cấu trúc mã nguồn.
+### 9.1. Hệ thống tài liệu trong kho mã nguồn
+- **Đặc tả sản phẩm gốc:** [`PRD - Quan ly Can ho va Nha cho thue v2.0.md`](PRD%20-%20Quan%20ly%20Can%20ho%20va%20Nha%20cho%20thue%20v2.0.md)
+- **Báo cáo kỹ thuật Giai đoạn 1 (M01 – M06):** [`docs/BAO_CAO_GIAI_DOAN_1_TUAN_1_4.md`](docs/BAO_CAO_GIAI_DOAN_1_TUAN_1_4.md)
+- **Báo cáo kỹ thuật Giai đoạn 2 (M07 – M15):** [`docs/BAO_CAO_GIAI_DOAN_2_TUAN_5_8.md`](docs/BAO_CAO_GIAI_DOAN_2_TUAN_5_8.md)
+- **Thiết kế chi tiết & Kế hoạch triển khai từng tính năng:** [`docs/superpowers/specs/`](docs/superpowers/specs/) & [`docs/superpowers/plans/`](docs/superpowers/plans/)
 
-### 9.2. Quy ước thông điệp Commit (Conventional Commits)
-Tuân thủ định dạng chuẩn quốc tế:
-```
-<type>(<scope>): <mô tả ngắn gọn bằng tiếng Anh hoặc tiếng Việt>
-```
-Ví dụ:
-- `feat(resident): implement dedicated resident portal for uncontracted and contracted tenants`
-- `feat(rbac): refactor roles to MANAGER, OWNER, RESIDENT and enforce building CRUD scoping`
-- `fix(contracts): prevent overlapping rental dates on same apartment`
-- `docs(readme): add comprehensive system documentation`
+### 9.2. Quy ước phát triển & Commit (Conventional Commits)
+- **Nhánh phát triển:** `feat/<ten-tinh-nang>`, `fix/<mo-ta-loi>`, `refactor/<pham-vi>`, `docs/<noi-dung>`.
+- **Định dạng thông điệp Commit:**
+  ```text
+  <type>(<scope>): <mô tả ngắn gọn thay đổi>
+  ```
+  *Ví dụ:*
+  - `feat(billing): support mid-month service registration invoice sync and next-period pro-rata arrears`
+  - `feat(admin,db): add SYS_ADMIN guarded delete, bulk floor creation, and consolidate RLS migrations`
+  - `docs(readme): update project architecture, modules M01-M15, setup and test instructions`
 
 ### 9.3. Giấy phép (License)
-Dự án được phân phối dưới giấy phép **MIT License**. Bạn được toàn quyền sử dụng, sửa đổi và đóng gói cho mục đích học tập hoặc thương mại.
+Mã nguồn dự án được sử dụng cho mục đích phát triển, đào tạo và vận hành hệ thống **ResiHub**.
 
 ---
 
