@@ -14,20 +14,22 @@ CREATE TABLE IF NOT EXISTS organization (
 );
 
 CREATE TABLE IF NOT EXISTS person (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id       UUID REFERENCES organization(id) ON DELETE CASCADE,
-  full_name    TEXT NOT NULL,
-  phone        TEXT,
-  email        TEXT,
-  dob          DATE,
-  id_number    TEXT,
-  id_images    TEXT[] DEFAULT '{}',
-  avatar_url   TEXT,
-  nationality  TEXT,
-  address      TEXT,
-  created_by   UUID,
-  created_at   TIMESTAMPTZ DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ DEFAULT NOW(),
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id                 UUID REFERENCES organization(id) ON DELETE CASCADE,
+  full_name              TEXT NOT NULL,
+  phone                  TEXT,
+  email                  TEXT,
+  dob                    DATE,
+  id_number              TEXT,
+  id_images              TEXT[] DEFAULT '{}',
+  avatar_url             TEXT,
+  nationality            TEXT,
+  address                TEXT,
+  privacy_consent_at     TIMESTAMPTZ,
+  privacy_policy_version TEXT,
+  created_by             UUID,
+  created_at             TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (org_id, phone)
 );
 
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS app_user (
   person_id     UUID REFERENCES person(id) ON DELETE CASCADE,
   auth_uid      TEXT UNIQUE,
   password_hash TEXT,
+  token_version INT NOT NULL DEFAULT 1,
   status        TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'SUSPENDED')),
   last_login_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ DEFAULT NOW()
@@ -110,6 +113,7 @@ CREATE TABLE IF NOT EXISTS zone (
   building_id UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
   code        TEXT NOT NULL,
   name        TEXT,
+  status      TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE')),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (building_id, code)
@@ -136,19 +140,22 @@ CREATE TABLE IF NOT EXISTS apartment (
 
 -- 3. Tenants, Reservations & Contracts
 CREATE TABLE IF NOT EXISTS tenant (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  person_id           UUID REFERENCES person(id) ON DELETE CASCADE,
-  org_id              UUID REFERENCES organization(id) ON DELETE CASCADE,
-  type                TEXT NOT NULL CHECK (type IN ('primary', 'occupant')),
-  status              TEXT NOT NULL DEFAULT 'PENDING'
-                      CHECK (status IN ('PENDING','APPROVED','REJECTED','MOVED_OUT','MERGED')),
-  desired_building_id UUID REFERENCES building(id) ON DELETE SET NULL,
-  created_by          UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  consent_given       BOOLEAN NOT NULL DEFAULT FALSE,
-  consent_given_at    TIMESTAMPTZ,
-  onboarding_step     TEXT,
-  created_at          TIMESTAMPTZ DEFAULT NOW(),
-  updated_at          TIMESTAMPTZ DEFAULT NOW()
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  person_id            UUID REFERENCES person(id) ON DELETE CASCADE,
+  org_id               UUID REFERENCES organization(id) ON DELETE CASCADE,
+  type                 TEXT NOT NULL CHECK (type IN ('primary', 'occupant')),
+  status               TEXT NOT NULL DEFAULT 'PENDING'
+                       CHECK (status IN ('PENDING','APPROVED','REJECTED','MOVED_OUT','MERGED')),
+  desired_building_id  UUID REFERENCES building(id) ON DELETE SET NULL,
+  desired_apartment_id UUID REFERENCES apartment(id) ON DELETE SET NULL,
+  application_note     TEXT,
+  rejection_reason     TEXT,
+  created_by           UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  consent_given        BOOLEAN NOT NULL DEFAULT FALSE,
+  consent_given_at     TIMESTAMPTZ,
+  onboarding_step      TEXT,
+  created_at           TIMESTAMPTZ DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS reservation (
@@ -204,6 +211,8 @@ CREATE TABLE IF NOT EXISTS contract (
                        'CANCELLED','TERMINATION_PENDING'
                      )),
   parent_contract_id UUID REFERENCES contract(id) ON DELETE SET NULL,
+  is_room_transfer   BOOLEAN NOT NULL DEFAULT FALSE,
+  transfer_deposit   BOOLEAN NOT NULL DEFAULT TRUE,
   terminated_at      DATE,
   termination_reason TEXT,
   note               TEXT,
@@ -243,21 +252,23 @@ CREATE TABLE IF NOT EXISTS contract_service_price (
 );
 
 CREATE TABLE IF NOT EXISTS contract_request (
-  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id             UUID REFERENCES organization(id) ON DELETE CASCADE,
-  building_id        UUID REFERENCES building(id) ON DELETE CASCADE,
-  contract_id        UUID REFERENCES contract(id) ON DELETE CASCADE,
-  type               TEXT NOT NULL CHECK (type IN ('TERMINATION','RENEWAL','TRANSFER_ROOM','AMENDMENT','OTHER')),
-  reason             TEXT,
-  requested_end_date DATE,
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id              UUID REFERENCES organization(id) ON DELETE CASCADE,
+  building_id         UUID REFERENCES building(id) ON DELETE CASCADE,
+  contract_id         UUID REFERENCES contract(id) ON DELETE CASCADE,
+  type                TEXT NOT NULL CHECK (type IN ('TERMINATION','RENEWAL','TRANSFER_ROOM','AMENDMENT','OTHER')),
+  reason              TEXT,
+  desired_date        DATE,
+  requested_end_date  DATE,
   target_apartment_id UUID REFERENCES apartment(id) ON DELETE SET NULL,
-  status             TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED','CANCELLED')),
-  note               TEXT,
-  created_by         UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  approved_by        UUID REFERENCES app_user(id) ON DELETE SET NULL,
-  approved_at        TIMESTAMPTZ,
-  created_at         TIMESTAMPTZ DEFAULT NOW(),
-  updated_at         TIMESTAMPTZ DEFAULT NOW()
+  status              TEXT NOT NULL DEFAULT 'SUBMITTED'
+                      CHECK (status IN ('SUBMITTED','PENDING','APPROVED','REJECTED','CANCELLED')),
+  note                TEXT,
+  created_by          UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  approved_by         UUID REFERENCES app_user(id) ON DELETE SET NULL,
+  approved_at         TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 4. Deposits
@@ -272,7 +283,7 @@ CREATE TABLE IF NOT EXISTS deposit (
                         CHECK (status IN (
                           'HELD','SETTLEMENT_DRAFT','PENDING_APPROVAL',
                           'APPROVED_PENDING_PAYOUT','RETURNED',
-                          'PARTIALLY_REFUNDED','REFUNDED','TRANSFERRED','DISPUTED'
+                          'PARTIALLY_REFUNDED','REFUNDED','DEDUCTED_FULL','TRANSFERRED','DISPUTED'
                         )),
   settlement            JSONB DEFAULT '{}'::jsonb,
   created_at            TIMESTAMPTZ DEFAULT NOW(),
@@ -432,18 +443,23 @@ CREATE TABLE IF NOT EXISTS service_request (
   title                    TEXT NOT NULL,
   description              TEXT,
   category                 TEXT NOT NULL DEFAULT 'OTHER'
-                           CHECK (category IN ('PLUMBING', 'ELECTRICAL', 'APPLIANCE', 'STRUCTURAL', 'OTHER')),
+                           CHECK (category IN ('ELECTRICAL', 'PLUMBING', 'HVAC', 'FURNITURE', 'APPLIANCE', 'STRUCTURAL', 'CLEANING', 'SECURITY', 'OTHER')),
   priority                 TEXT NOT NULL DEFAULT 'NORMAL' CHECK (priority IN ('LOW','NORMAL','HIGH','URGENT')),
   status                   TEXT NOT NULL DEFAULT 'NEW'
                            CHECK (status IN ('NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'RESOLVED', 'REOPENED', 'CLOSED', 'CANCELLED')),
   photos                   TEXT[] DEFAULT '{}',
+  images                   TEXT[] DEFAULT '{}',
+  internal_note            TEXT,
   assigned_to              UUID REFERENCES app_user(id) ON DELETE SET NULL,
   assigned_at              TIMESTAMPTZ,
+  resolved_by              UUID REFERENCES app_user(id) ON DELETE SET NULL,
   resolved_at              TIMESTAMPTZ,
   resolution_notes         TEXT,
   resolution_photos        TEXT[] DEFAULT '{}',
   resident_rating          INTEGER CHECK (resident_rating BETWEEN 1 AND 5),
   resident_feedback        TEXT,
+  rating                   INTEGER CHECK (rating BETWEEN 1 AND 5),
+  rating_note              TEXT,
   sla_target_hours         INTEGER DEFAULT 48,
   sla_breached             BOOLEAN DEFAULT FALSE,
   sla_notified_at          TIMESTAMPTZ,
@@ -462,7 +478,7 @@ CREATE TABLE IF NOT EXISTS service_request (
   reopen_count             INT NOT NULL DEFAULT 0,
   cancelled_reason         TEXT,
   ai_suggestion_id         UUID REFERENCES ai_suggestion(id) ON DELETE SET NULL,
-  ai_triage_status         TEXT CHECK (ai_triage_status IS NULL OR ai_triage_status IN ('SUGGESTED', 'ACCEPTED', 'OVERRIDDEN')),
+  ai_triage_status         TEXT CHECK (ai_triage_status IS NULL OR ai_triage_status IN ('PENDING', 'SUGGESTED', 'NEEDS_MANUAL_REVIEW', 'ACCEPTED', 'OVERRIDDEN', 'FAILED', 'SKIPPED')),
   ai_summary               TEXT,
   ai_suggested_category    TEXT,
   ai_suggested_priority    TEXT,
@@ -531,20 +547,22 @@ CREATE TABLE IF NOT EXISTS service_catalog (
   unit         TEXT NOT NULL,
   unit_price   BIGINT NOT NULL DEFAULT 0,
   description  TEXT,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
   status       TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE')),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS service_subscription (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id         UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-  building_id    UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
-  apartment_id   UUID REFERENCES apartment(id) ON DELETE CASCADE,
-  contract_id    UUID REFERENCES contract(id) ON DELETE SET NULL,
-  service_id     UUID NOT NULL REFERENCES service_catalog(id) ON DELETE RESTRICT,
-  quantity       NUMERIC(12,2) NOT NULL DEFAULT 1,
-  unit_price     BIGINT NOT NULL,
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id          UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  building_id     UUID NOT NULL REFERENCES building(id) ON DELETE CASCADE,
+  apartment_id    UUID REFERENCES apartment(id) ON DELETE CASCADE,
+  contract_id     UUID REFERENCES contract(id) ON DELETE SET NULL,
+  service_id      UUID NOT NULL REFERENCES service_catalog(id) ON DELETE RESTRICT,
+  quantity        NUMERIC(12,2) NOT NULL DEFAULT 1,
+  unit_price      BIGINT NOT NULL,
+  prorata_amount  BIGINT NOT NULL DEFAULT 0,
   vehicle_plates  TEXT[] DEFAULT '{}',
   start_date      DATE NOT NULL,
   end_date        DATE,
@@ -581,7 +599,7 @@ CREATE TABLE IF NOT EXISTS invoice (
   invoice_type         TEXT NOT NULL DEFAULT 'REGULAR'
                        CHECK (invoice_type IN ('REGULAR', 'LATE_FEE_SETTLEMENT')),
   status               TEXT NOT NULL DEFAULT 'DRAFT'
-                       CHECK (status IN ('DRAFT','ISSUED','PARTIALLY_PAID','PAID','OVERDUE','CANCELLED','VOID')),
+                       CHECK (status IN ('DRAFT','ISSUED','PARTIALLY_PAID','PAID','OVERDUE','ADJUSTED','CANCELLED','VOID')),
   immutable_at         TIMESTAMPTZ,
   note                 TEXT,
   created_by           UUID REFERENCES app_user(id) ON DELETE SET NULL,
@@ -589,7 +607,7 @@ CREATE TABLE IF NOT EXISTS invoice (
   issued_at            TIMESTAMPTZ,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT invoice_paid_lte_total_check CHECK (paid_amount <= total_amount)
+  CONSTRAINT invoice_paid_lte_total_check CHECK (paid_amount >= 0 AND total_amount >= 0 AND paid_amount <= total_amount)
 );
 
 CREATE TABLE IF NOT EXISTS invoice_adjustment (
@@ -746,6 +764,7 @@ CREATE TABLE IF NOT EXISTS system_setting (
   key         TEXT NOT NULL,
   value       JSONB NOT NULL DEFAULT '{}',
   description TEXT,
+  updated_by  UUID REFERENCES app_user(id) ON DELETE SET NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (org_id, key)
@@ -767,14 +786,16 @@ CREATE TABLE IF NOT EXISTS cron_job_run (
 CREATE TABLE IF NOT EXISTS idempotency_key (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  actor_id      UUID REFERENCES app_user(id) ON DELETE CASCADE,
   scope_key     TEXT NOT NULL,
   method        TEXT NOT NULL,
   route_path    TEXT NOT NULL,
   idem_key      TEXT NOT NULL,
-  status        TEXT NOT NULL CHECK (status IN ('PROCESSING', 'COMPLETED', 'FAILED')),
-  response_code INT,
+  request_hash  TEXT NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'IN_PROGRESS' CHECK (state IN ('IN_PROGRESS', 'COMPLETED')),
+  status_code   INTEGER,
   response_body JSONB,
-  expires_at    TIMESTAMPTZ NOT NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at    TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
   UNIQUE (org_id, scope_key, method, route_path, idem_key)
 );

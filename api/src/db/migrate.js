@@ -6,11 +6,16 @@ import { adminPool as pool } from './client.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function runMigrations() {
-  const client = await pool.connect();
+export const MIGRATION_ADVISORY_LOCK_KEY = 73918201;
+
+export async function runMigrations({ poolInstance = pool, closePool = true } = {}) {
+  const client = await poolInstance.connect();
+  let locked = false;
   try {
-    console.log('[Migration] Checking database connection...');
-    
+    console.log('[Migration] Checking database connection & acquiring advisory lock...');
+    await client.query(`SELECT pg_advisory_lock(${MIGRATION_ADVISORY_LOCK_KEY})`);
+    locked = true;
+
     // Create migrations tracker table
     await client.query(`
       CREATE TABLE IF NOT EXISTS _migrations (
@@ -21,7 +26,8 @@ async function runMigrations() {
     `);
 
     const migrationsDir = path.join(__dirname, 'migrations');
-    const files = fs.readdirSync(migrationsDir)
+    const files = fs
+      .readdirSync(migrationsDir)
       .filter((file) => file.endsWith('.sql'))
       .sort();
 
@@ -52,12 +58,22 @@ async function runMigrations() {
 
     console.log('[Migration] All migrations completed successfully.');
   } finally {
+    if (locked) {
+      await client.query(`SELECT pg_advisory_unlock(${MIGRATION_ADVISORY_LOCK_KEY})`).catch(() => {});
+    }
     client.release();
-    await pool.end();
+    if (closePool) {
+      await poolInstance.end();
+    }
   }
 }
 
-runMigrations().catch((err) => {
-  console.error('[Migration] Fatal error running migrations:', err.message);
-  process.exit(1);
-});
+const isDirectCli =
+  Boolean(process.argv[1]) && path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isDirectCli) {
+  runMigrations().catch((err) => {
+    console.error('[Migration] Fatal error running migrations:', err.message);
+    process.exit(1);
+  });
+}

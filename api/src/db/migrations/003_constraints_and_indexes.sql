@@ -28,10 +28,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_person_id_number_per_org
   ON person (org_id, id_number)
   WHERE id_number IS NOT NULL AND id_number <> '';
 
--- Contract room transfer request uniqueness (only one open request per contract) (migration 047)
+-- Contract open room transfer uniqueness (only one open transfer child contract per parent contract) (migration 047)
 CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_open_room_transfer
-  ON contract_request(contract_id)
-  WHERE type = 'TRANSFER_ROOM' AND status IN ('PENDING', 'APPROVED');
+  ON contract (parent_contract_id)
+  WHERE is_room_transfer = TRUE AND status IN ('DRAFT', 'PENDING_APPROVAL');
 
 -- Service catalog code uniqueness (org default vs building override) (migration 048)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_service_catalog_org_default_code
@@ -71,7 +71,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_balance_unique_payment
 -- Invoice unique active period guards (migration 048 & 055)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_unique_active_period
   ON invoice (contract_id, period)
-  WHERE status NOT IN ('CANCELLED', 'VOID', 'LATE_FEE_SETTLEMENT');
+  WHERE status NOT IN ('CANCELLED', 'VOID')
+    AND COALESCE(invoice_type, 'REGULAR') <> 'LATE_FEE_SETTLEMENT';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_unique_active_lf_settlement
   ON invoice(contract_id)
