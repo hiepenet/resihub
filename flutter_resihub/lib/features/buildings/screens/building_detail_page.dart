@@ -378,6 +378,13 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
         ? Map<String, dynamic>.from(_building!['payment_account'] as Map)
         : <String, dynamic>{};
 
+    final hasOverlayModal = _zoneModalOpen ||
+        _floorModalOpen ||
+        _deactivateConfirmOpen ||
+        _deleteBuildingOpen ||
+        _deleteZoneTarget != null ||
+        _deleteFloorTarget != null;
+
     return Stack(
       children: [
         // Preserves router test assertions
@@ -829,106 +836,125 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
                   ],
                 ),
               ],
-
-              // Modals
-              if (_zoneModalOpen)
-                AppModal(
-                  onClose: () => setState(() => _zoneModalOpen = false),
-                  title: 'Tạo phân khu (Zone) mới',
-                  size: AppModalSize.sm,
-                  child: Column(
-                    children: [
-                      AppInput(
-                        label: 'Mã khu',
-                        required: true,
-                        controller: _zoneCodeController,
-                        placeholder: 'VD: ZONE-E',
-                      ),
-                      const SizedBox(height: 12),
-                      AppInput(
-                        label: 'Tên phân khu',
-                        required: true,
-                        controller: _zoneNameController,
-                        placeholder: 'VD: Cánh Đông',
-                      ),
-                      const SizedBox(height: 20),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          AppButton(
-                            text: 'Hủy',
-                            variant: AppButtonVariant.outline,
-                            onPressed: () => setState(() => _zoneModalOpen = false),
-                          ),
-                          const SizedBox(width: 8),
-                          AppButton(
-                            text: 'Lưu phân khu',
-                            loading: _savingZone,
-                            onPressed: _handleCreateZone,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-
-              FloorModal(
-                open: _floorModalOpen,
-                onClose: () => setState(() => _floorModalOpen = false),
-                buildingId: widget.buildingId,
-                existingFloors: _floors,
-                initialMode: 'bulk',
-                onCreated: (_) => _loadBuildingData(force: true),
-              ),
-
-              if (_deactivateConfirmOpen)
-                ConfirmDialog(
-                  onClose: () => setState(() => _deactivateConfirmOpen = false),
-                  onConfirm: () => _handleToggleBuildingStatus('INACTIVE'),
-                  loading: _updatingStatus,
-                  variant: ConfirmDialogVariant.danger,
-                  title: 'Xác nhận ngừng khai thác tòa nhà',
-                  confirmLabel: 'Ngừng khai thác',
-                  message: 'Bạn có chắc chắn muốn chuyển tòa nhà "${_building!['code']} — ${_building!['name']}" sang trạng thái Ngừng khai thác (INACTIVE)?',
-                ),
-
-              if (_deleteBuildingOpen)
-                ConfirmDialog(
-                  onClose: () => setState(() => _deleteBuildingOpen = false),
-                  onConfirm: _handleConfirmDeleteBuilding,
-                  loading: _deletingBuilding,
-                  variant: ConfirmDialogVariant.danger,
-                  title: 'Xác nhận xóa vĩnh viễn tòa nhà',
-                  confirmLabel: 'Xóa tòa nhà',
-                  message: 'Bạn có chắc chắn muốn xóa vĩnh viễn tòa nhà "${_building!['code']} — ${_building!['name']}"? Thao tác này không thể hoàn tác.',
-                ),
-
-              if (_deleteZoneTarget != null)
-                ConfirmDialog(
-                  onClose: () => setState(() => _deleteZoneTarget = null),
-                  onConfirm: _handleConfirmDeleteZone,
-                  loading: _deletingZone,
-                  variant: ConfirmDialogVariant.danger,
-                  title: 'Xác nhận xóa phân khu',
-                  confirmLabel: 'Xóa phân khu',
-                  message:
-                      'Bạn có chắc chắn muốn xóa phân khu "${_deleteZoneTarget!['code']} — ${_deleteZoneTarget!['name']}"?',
-                ),
-
-              if (_deleteFloorTarget != null)
-                ConfirmDialog(
-                  onClose: () => setState(() => _deleteFloorTarget = null),
-                  onConfirm: _handleConfirmDeleteFloor,
-                  loading: _deletingFloor,
-                  variant: ConfirmDialogVariant.danger,
-                  title: 'Xác nhận xóa tầng',
-                  confirmLabel: 'Xóa tầng',
-                  message:
-                      'Bạn có chắc chắn muốn xóa vĩnh viễn "${_deleteFloorTarget!['name'] ?? 'Tầng ${_deleteFloorTarget!['level']}'}"?',
-                ),
             ],
           ),
         ),
+
+        // Viewport scrim modal overlay
+        if (hasOverlayModal)
+          Positioned.fill(
+            child: Container(
+              color: AppColors.slate900.withValues(alpha: 0.45),
+              alignment: Alignment.center,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 672),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_zoneModalOpen)
+                        AppModal(
+                          onClose: () => setState(() => _zoneModalOpen = false),
+                          title: 'Tạo phân khu (Zone) mới',
+                          size: AppModalSize.sm,
+                          child: Column(
+                            children: [
+                              AppInput(
+                                label: 'Mã khu',
+                                required: true,
+                                controller: _zoneCodeController,
+                                placeholder: 'VD: ZONE-E',
+                              ),
+                              const SizedBox(height: 12),
+                              AppInput(
+                                label: 'Tên phân khu',
+                                required: true,
+                                controller: _zoneNameController,
+                                placeholder: 'VD: Cánh Đông',
+                              ),
+                              const SizedBox(height: 20),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  AppButton(
+                                    text: 'Hủy',
+                                    variant: AppButtonVariant.outline,
+                                    onPressed: () => setState(() => _zoneModalOpen = false),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  AppButton(
+                                    text: 'Lưu phân khu',
+                                    loading: _savingZone,
+                                    onPressed: _handleCreateZone,
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+
+                      if (_floorModalOpen)
+                        FloorModal(
+                          open: _floorModalOpen,
+                          onClose: () => setState(() => _floorModalOpen = false),
+                          buildingId: widget.buildingId,
+                          existingFloors: _floors,
+                          initialMode: 'bulk',
+                          onCreated: (_) => _loadBuildingData(force: true),
+                        ),
+
+                      if (_deactivateConfirmOpen)
+                        ConfirmDialog(
+                          onClose: () => setState(() => _deactivateConfirmOpen = false),
+                          onConfirm: () => _handleToggleBuildingStatus('INACTIVE'),
+                          loading: _updatingStatus,
+                          variant: ConfirmDialogVariant.danger,
+                          title: 'Xác nhận ngừng khai thác tòa nhà',
+                          confirmLabel: 'Ngừng khai thác',
+                          message: 'Bạn có chắc chắn muốn chuyển tòa nhà "${_building!['code']} — ${_building!['name']}" sang trạng thái Ngừng khai thác (INACTIVE)?',
+                        ),
+
+                      if (_deleteBuildingOpen)
+                        ConfirmDialog(
+                          onClose: () => setState(() => _deleteBuildingOpen = false),
+                          onConfirm: _handleConfirmDeleteBuilding,
+                          loading: _deletingBuilding,
+                          variant: ConfirmDialogVariant.danger,
+                          title: 'Xác nhận xóa vĩnh viễn tòa nhà',
+                          confirmLabel: 'Xóa tòa nhà',
+                          message: 'Bạn có chắc chắn muốn xóa vĩnh viễn tòa nhà "${_building!['code']} — ${_building!['name']}"? Thao tác này không thể hoàn tác.',
+                        ),
+
+                      if (_deleteZoneTarget != null)
+                        ConfirmDialog(
+                          onClose: () => setState(() => _deleteZoneTarget = null),
+                          onConfirm: _handleConfirmDeleteZone,
+                          loading: _deletingZone,
+                          variant: ConfirmDialogVariant.danger,
+                          title: 'Xác nhận xóa phân khu',
+                          confirmLabel: 'Xóa phân khu',
+                          message:
+                              'Bạn có chắc chắn muốn xóa phân khu "${_deleteZoneTarget!['code']} — ${_deleteZoneTarget!['name']}"?',
+                        ),
+
+                      if (_deleteFloorTarget != null)
+                        ConfirmDialog(
+                          onClose: () => setState(() => _deleteFloorTarget = null),
+                          onConfirm: _handleConfirmDeleteFloor,
+                          loading: _deletingFloor,
+                          variant: ConfirmDialogVariant.danger,
+                          title: 'Xác nhận xóa tầng',
+                          confirmLabel: 'Xóa tầng',
+                          message:
+                              'Bạn có chắc chắn muốn xóa vĩnh viễn "${_deleteFloorTarget!['name'] ?? 'Tầng ${_deleteFloorTarget!['level']}'}"?',
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }

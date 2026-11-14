@@ -222,6 +222,8 @@ class _ZoneDetailPageState extends ConsumerState<ZoneDetailPage> {
       );
     }
 
+    final hasOverlayModal = _editOpen;
+
     return Stack(
       children: [
         // Preserves router test assertions
@@ -318,42 +320,61 @@ class _ZoneDetailPageState extends ConsumerState<ZoneDetailPage> {
                   ),
                 ],
               ),
-
-              if (_editOpen)
-                AppModal(
-                  onClose: () => setState(() => _editOpen = false),
-                  title: 'Đổi tên phân khu',
-                  size: AppModalSize.sm,
-                  child: Column(
-                    children: [
-                      AppInput(
-                        label: 'Tên phân khu',
-                        required: true,
-                        controller: _nameController,
-                      ),
-                      const SizedBox(height: 20),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          AppButton(
-                            text: 'Hủy',
-                            variant: AppButtonVariant.outline,
-                            onPressed: () => setState(() => _editOpen = false),
-                          ),
-                          const SizedBox(width: 8),
-                          AppButton(
-                            text: 'Lưu',
-                            loading: _saving,
-                            onPressed: _handleSave,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
             ],
           ),
         ),
+
+        // Viewport scrim modal overlay
+        if (hasOverlayModal)
+          Positioned.fill(
+            child: Container(
+              color: AppColors.slate900.withValues(alpha: 0.45),
+              alignment: Alignment.center,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 448),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_editOpen)
+                        AppModal(
+                          onClose: () => setState(() => _editOpen = false),
+                          title: 'Đổi tên phân khu',
+                          size: AppModalSize.sm,
+                          child: Column(
+                            children: [
+                              AppInput(
+                                label: 'Tên phân khu',
+                                required: true,
+                                controller: _nameController,
+                              ),
+                              const SizedBox(height: 20),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  AppButton(
+                                    text: 'Hủy',
+                                    variant: AppButtonVariant.outline,
+                                    onPressed: () => setState(() => _editOpen = false),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  AppButton(
+                                    text: 'Lưu',
+                                    loading: _saving,
+                                    onPressed: _handleSave,
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }

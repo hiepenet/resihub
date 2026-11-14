@@ -185,7 +185,6 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
             ? null
             : _codePrefixController.text.trim().toUpperCase(),
         'units': _units.map((u) => u.toJson()).toList(),
-        'dry_run': true,
       };
       final res = await service.createApartmentsBulk(payload);
       ref.read(toastProvider.notifier).success(

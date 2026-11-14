@@ -535,6 +535,35 @@ void main() {
         '0988776655',
       );
 
+      // Test invalid date validation: hold_from overlaps active contract (2026-11-10)
+      await tester.enterText(
+        find.descendant(
+          of: find.widgetWithText(AppInput, 'Giữ chỗ từ ngày'),
+          matching: find.byType(TextField),
+        ),
+        '2026-11-10',
+      );
+      await tester.tap(find.text('Xác nhận giữ chỗ'));
+      await tester.pumpAndSettle();
+      // Overlapping busy interval must be rejected without calling API
+      expect(mockService.lastCreatedReservation, isNull);
+
+      // Now restore valid available dates (2026-11-21 to 2026-11-24, avoiding rsv-1 starting 2026-11-25)
+      await tester.enterText(
+        find.descendant(
+          of: find.widgetWithText(AppInput, 'Giữ chỗ từ ngày'),
+          matching: find.byType(TextField),
+        ),
+        '2026-11-21',
+      );
+      await tester.enterText(
+        find.descendant(
+          of: find.widgetWithText(AppInput, 'Đến hết ngày'),
+          matching: find.byType(TextField),
+        ),
+        '2026-11-24',
+      );
+
       // Submit reservation
       await tester.tap(find.text('Xác nhận giữ chỗ'));
       await tester.pumpAndSettle();
@@ -542,6 +571,8 @@ void main() {
       expect(mockService.lastCreatedReservation, isNotNull);
       expect(mockService.lastCreatedReservation!['prospect_name'], 'Pham Van Dong');
       expect(mockService.lastCreatedReservation!['apartment_id'], 'apt-1');
+      expect(mockService.lastCreatedReservation!['hold_from'], '2026-11-21');
+      expect(mockService.lastCreatedReservation!['hold_until'], '2026-11-24');
     });
 
     testWidgets('Role permission enforcement: OWNER is strictly read-only', (tester) async {
@@ -639,6 +670,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(mockService.lastCreatedApartmentsBulk, isNotNull);
+      expect(mockService.lastCreatedApartmentsBulk!['dry_run'], isNot(true));
     });
   });
 

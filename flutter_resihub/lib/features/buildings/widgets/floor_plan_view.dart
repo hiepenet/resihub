@@ -471,12 +471,31 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     }
   }
 
+  List<BusyInterval> _computeBusyIntervals() {
+    final aptDetailOrSelected = _aptDetail ?? _selectedApt;
+    final contractsList = (aptDetailOrSelected?['contracts'] is List)
+        ? (aptDetailOrSelected!['contracts'] as List)
+        : const [];
+    final reservationsList = (aptDetailOrSelected?['reservations'] is List)
+        ? (aptDetailOrSelected!['reservations'] as List)
+        : const [];
+    final todayStr = toDateOnlyStr(DateTime.now());
+    return extractApartmentBusyIntervals(
+      contracts: contractsList,
+      reservations: reservationsList,
+      todayStr: todayStr,
+    );
+  }
+
   Future<void> _handleCreateReservation() async {
     final apt = _selectedApt;
     if (apt == null) return;
     final name = _resProspectNameController.text.trim();
     final phone = _resPhoneController.text.trim();
     final holdAmt = int.tryParse(_resHoldAmountController.text.replaceAll(RegExp(r'\D'), '')) ?? 0;
+    final holdFrom = _resHoldFromController.text.trim();
+    final holdUntil = _resHoldUntilController.text.trim();
+
     if (name.isEmpty) {
       ref.read(toastProvider.notifier).warning('Vui lòng nhập họ tên khách đặt giữ chỗ.');
       return;
@@ -490,6 +509,66 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       return;
     }
 
+    if (holdFrom.isEmpty) {
+      ref.read(toastProvider.notifier).warning('Vui lòng chọn ngày bắt đầu giữ chỗ.');
+      return;
+    }
+    if (holdUntil.isEmpty) {
+      ref.read(toastProvider.notifier).warning('Vui lòng chọn ngày kết thúc giữ chỗ.');
+      return;
+    }
+
+    final todayStr = toDateOnlyStr(DateTime.now());
+    if (holdFrom.compareTo(todayStr) < 0) {
+      ref.read(toastProvider.notifier).warning('Ngày bắt đầu giữ chỗ không được nằm trong quá khứ.');
+      return;
+    }
+    if (apt['status'] == 'MAINTENANCE' && holdFrom.compareTo(todayStr) <= 0) {
+      ref.read(toastProvider.notifier).warning('Căn hộ đang bảo trì, vui lòng chọn ngày giữ chỗ sau hôm nay.');
+      return;
+    }
+
+    final busyIntervals = _computeBusyIntervals();
+    final maxInternalHoldDays = _cancelPolicy['max_hold_days'] is num
+        ? (_cancelPolicy['max_hold_days'] as num).toInt()
+        : 30;
+
+    // Check hold_from against busy intervals
+    final fromHits = findOverlappingBusyIntervals(holdFrom, holdFrom, busyIntervals);
+    if (fromHits.isNotEmpty) {
+      ref.read(toastProvider.notifier).warning(formatBusyOverlapError(fromHits, actionLabel: 'Ngày bắt đầu giữ chỗ'));
+      return;
+    }
+
+    // Check date order
+    final orderErr = getDateOrderError(
+      holdFrom,
+      holdUntil,
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu giữ chỗ',
+      endLabel: 'Ngày kết thúc giữ chỗ',
+    );
+    if (orderErr.isNotEmpty) {
+      ref.read(toastProvider.notifier).warning(orderErr);
+      return;
+    }
+
+    // Check max hold span
+    final span = diffDaysStr(holdFrom, holdUntil);
+    if (span != null && span > maxInternalHoldDays) {
+      ref.read(toastProvider.notifier).warning(
+        'Thời hạn giữ chỗ tối đa không quá $maxInternalHoldDays ngày theo quy định (FR-067).',
+      );
+      return;
+    }
+
+    // Check full span against busy intervals
+    final spanHits = findOverlappingBusyIntervals(holdFrom, holdUntil, busyIntervals);
+    if (spanHits.isNotEmpty) {
+      ref.read(toastProvider.notifier).warning(formatBusyOverlapError(spanHits, actionLabel: 'Khoảng giữ chỗ'));
+      return;
+    }
+
     setState(() => _submitting = true);
     try {
       final service = ref.read(buildingsServiceProvider);
@@ -499,8 +578,8 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
         'phone': phone,
         'hold_amount': holdAmt,
         'method': _resMethod,
-        'hold_from': _resHoldFromController.text.trim().isEmpty ? null : _resHoldFromController.text.trim(),
-        'hold_until': _resHoldUntilController.text.trim(),
+        'hold_from': holdFrom,
+        'hold_until': holdUntil,
         'note': _resNoteController.text.trim(),
       });
       ref.read(toastProvider.notifier).success('Đã ghi nhận đặt cọc giữ chỗ thành công.');
