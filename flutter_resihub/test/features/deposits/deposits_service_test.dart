@@ -18,6 +18,10 @@ import 'package:flutter_resihub/features/deposits/screens/deposits_page.dart';
 import 'package:flutter_resihub/features/deposits/services/deposits_service.dart';
 import 'package:flutter_resihub/features/deposits/widgets/deposit_detail_modal.dart';
 import 'package:flutter_resihub/shared/providers/toast_provider.dart';
+import 'package:flutter_resihub/shared/widgets/common/bank_select.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_input.dart';
+import 'package:flutter_resihub/shared/widgets/ui/file_upload_field.dart';
+import 'package:flutter_resihub/shared/widgets/ui/money_input.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions options) _handler;
@@ -538,12 +542,125 @@ void main() {
       // Drain toast auto-dismiss timer
       await tester.pump(const Duration(seconds: 6));
     });
+
+    testWidgets('propose settlement: FileUploadField evidence required, live draft recalculation, and submitSettlement uses items key with evidence', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 1400));
+
+      const testUser = UserModel(
+        id: 'user-mgr-1',
+        fullName: 'Quản lý Nguyễn',
+        phone: '0900000001',
+        roles: [UserRoleModel(code: 'MANAGER')],
+      );
+
+      late ProviderContainer container;
+
+      await tester.pumpWidget(
+        buildTestApp(
+          user: testUser,
+          initialDepositId: 'dep-001',
+          initialModal: 'settlement',
+          onContainer: (c) => container = c,
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Modal is open for dep-001 (HELD state)
+      expect(find.byType(DepositDetailModal), findsOneWidget);
+
+      // Live draft initial summary: held 10,000,000 - debt 1,000,000 = 9,000,000
+      expect(find.textContaining('9.000.000'), findsWidgets);
+
+      // Tap "+ Thêm khoản khấu trừ"
+      final addDeductBtn = find.text('+ Thêm khoản khấu trừ');
+      expect(addDeductBtn, findsOneWidget);
+      await tester.tap(addDeductBtn);
+      await tester.pumpAndSettle();
+
+      // Dialog is open
+      expect(find.text('Thêm khoản khấu trừ'), findsOneWidget);
+      expect(find.byType(FileUploadField), findsWidgets);
+
+      // Enter amount: 2000000
+      final moneyInputs = find.byType(MoneyInput);
+      await tester.enterText(moneyInputs.first, '2000000');
+      await tester.pumpAndSettle();
+
+      // Enter description: 'Hỏng sofa phòng khách'
+      final textFields = find.byType(TextField);
+      await tester.enterText(textFields.last, 'Hỏng sofa phòng khách');
+      await tester.pumpAndSettle();
+
+      // Try tapping "Thêm" without evidence -> warning toast
+      final submitAddBtn = find.widgetWithText(ElevatedButton, 'Thêm');
+      await tester.tap(submitAddBtn);
+      await tester.pumpAndSettle();
+
+      final toastsBefore = container.read(toastProvider);
+      expect(toastsBefore.any((t) => t.message.contains('bằng chứng') || t.message.contains('FR-023')), isTrue);
+      // Dialog should still be open
+      expect(find.text('Thêm khoản khấu trừ'), findsOneWidget);
+
+      // Bind evidence via FileUploadField
+      final uploadField = tester.widget<FileUploadField>(find.byKey(const ValueKey('deduction_evidence_upload')));
+      uploadField.onChanged?.call(['data:image/png;base64,iVBORw0KGgo=']);
+      await tester.pumpAndSettle();
+
+      // Now tap "Thêm" again
+      await tester.tap(submitAddBtn);
+      await tester.pumpAndSettle();
+
+      // Dialog closed and deduction row is present
+      expect(find.text('Thêm khoản khấu trừ'), findsNothing);
+      expect(find.text('Hỏng sofa phòng khách'), findsOneWidget);
+      expect(find.textContaining('1 minh chứng'), findsOneWidget);
+
+      // Live draft recalculation: 10,000,000 held - 1,000,000 debt - 2,000,000 deduction = 7,000,000
+      expect(find.textContaining('7.000.000'), findsWidgets);
+
+      // Fill bank info
+      final bankSelect = tester.widget<BankSelect>(find.byType(BankSelect));
+      bankSelect.onBankChange?.call('VCB', {'shortName': 'Vietcombank'});
+      await tester.pumpAndSettle();
+
+      final accInputs = find.byType(AppInput);
+      await tester.enterText(accInputs.first, '0123456789'); // account number
+      await tester.pumpAndSettle();
+
+      // Submit settlement proposal
+      final submitSettlementBtn = find.text('Trình duyệt quyết toán 4 mắt');
+      expect(submitSettlementBtn, findsOneWidget);
+      await tester.ensureVisible(submitSettlementBtn);
+      await tester.pumpAndSettle();
+      await tester.tap(submitSettlementBtn);
+      await tester.pumpAndSettle();
+
+      // Verify payload sent to DepositsService.submitSettlement
+      expect(fakeService.lastSubmittedSettlementPayload, isNotNull);
+      final payload = fakeService.lastSubmittedSettlementPayload!;
+      expect(payload.containsKey('items'), isTrue);
+      expect(payload.containsKey('deductions'), isFalse);
+      expect(payload['items'], isA<List>());
+      final items = payload['items'] as List;
+      expect(items.length, 1);
+      final item0 = items[0] as Map;
+      expect(item0['category'], 'DAMAGE');
+      expect(item0['amount'], 2000000);
+      expect(item0['description'], 'Hỏng sofa phòng khách');
+      expect(item0['evidence'], isA<List>());
+      expect((item0['evidence'] as List).isNotEmpty, isTrue);
+
+      // Drain toast timer
+      await tester.pump(const Duration(seconds: 6));
+    });
   });
 }
 
 class FakeDepositsService extends Fake implements DepositsService {
   final List<Map<String, dynamic>> deposits;
   Exception? throwOnApprove;
+  Map<String, dynamic>? lastSubmittedSettlementPayload;
 
   FakeDepositsService(this.deposits);
 
@@ -574,6 +691,16 @@ class FakeDepositsService extends Fake implements DepositsService {
         'calculated_service_debt': 1000000,
         'settlement': dep['settlement'],
       }
+    };
+  }
+
+  @override
+  Future<dynamic> submitSettlement(String id, Map<String, dynamic> payload, [Options? options]) async {
+    lastSubmittedSettlementPayload = payload;
+    return {
+      'success': true,
+      'message': 'Đã trình hồ sơ quyết toán cọc chờ phê duyệt 4 mắt.',
+      'data': {'status': 'PENDING_APPROVAL'},
     };
   }
 

@@ -285,6 +285,26 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
       return;
     }
 
+    for (int i = 0; i < _deductionItems.length; i++) {
+      final it = _deductionItems[i];
+      final amt = it['amount'];
+      final numAmt = amt is num ? amt.toInt() : (int.tryParse(amt?.toString() ?? '') ?? 0);
+      if (numAmt <= 0) {
+        ref.read(toastProvider.notifier).warning('Khoản khấu trừ #${i + 1}: Số tiền phải là số nguyên dương VND.');
+        return;
+      }
+      final desc = it['description']?.toString().trim() ?? '';
+      if (desc.isEmpty) {
+        ref.read(toastProvider.notifier).warning('Khoản khấu trừ #${i + 1}: Vui lòng nhập mô tả chi tiết lý do khấu trừ.');
+        return;
+      }
+      final ev = it['evidence'];
+      if (ev is! List || ev.isEmpty) {
+        ref.read(toastProvider.notifier).warning('Khoản khấu trừ #${i + 1}: Bắt buộc đính kèm ít nhất 01 ảnh bằng chứng (FR-023).');
+        return;
+      }
+    }
+
     if (_refundMethod == 'BANK_TRANSFER') {
       final bName = _bankInfo['bank_name']?.toString().trim() ?? '';
       final accNo = _bankInfo['account_number']?.toString().trim() ?? '';
@@ -300,7 +320,14 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
       final service = ref.read(depositsServiceProvider);
       final payload = {
         'outstanding_debt': _outstandingDebt,
-        'deductions': _deductionItems,
+        'items': _deductionItems.map((it) => {
+          'category': it['category'],
+          'amount': it['amount'] is num
+              ? (it['amount'] as num).toInt()
+              : (int.tryParse(it['amount']?.toString() ?? '') ?? 0),
+          'description': it['description']?.toString().trim() ?? '',
+          'evidence': it['evidence'] is List ? it['evidence'] : [],
+        }).toList(),
         'refund_method': _refundMethod,
         'bank_info': _refundMethod == 'BANK_TRANSFER' ? _bankInfo : null,
         'inspection_evidence': _inspectionEvidence,
@@ -1040,11 +1067,54 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
         ? Map<String, dynamic>.from(_settlementDetail!['settlement'] as Map)
         : (_dep['settlement'] is Map ? Map<String, dynamic>.from(_dep['settlement'] as Map) : null);
 
-    final summary = resolveSettlementPayoutSummary(settlementData ?? {
-      'deposit_refund_amount': _dep['amount_held'],
-      'credit_refund_amount': 0,
-      'total_payout_amount': _dep['amount_held'],
-    });
+    final isDraft = status == 'HELD' || status == 'SETTLEMENT_DRAFT';
+
+    SettlementPayoutSummary summary;
+    if (isDraft) {
+      final held = ((_dep['amount_held'] is num
+              ? _dep['amount_held']
+              : num.tryParse(_dep['amount_held']?.toString() ?? '')) ??
+          0).round();
+      final serviceDebt = _outstandingDebt > 0 ? _outstandingDebt : 0;
+      final itemsTotal = _deductionItems.fold<int>(
+        0,
+        (sum, it) {
+          final amt = it['amount'];
+          final numAmt = amt is num ? amt.round() : (int.tryParse(amt?.toString() ?? '') ?? 0);
+          return sum + (numAmt > 0 ? numAmt : 0);
+        },
+      );
+      final depositRefund = (held - serviceDebt - itemsTotal) > 0 ? (held - serviceDebt - itemsTotal) : 0;
+      final rawCredit = ((_settlementDetail?['credit_balance'] ??
+              settlementData?['credit_refund_amount'] ??
+              settlementData?['credit_balance'] ??
+              _dep['credit_balance']) is num
+          ? (_settlementDetail?['credit_balance'] ??
+              settlementData?['credit_refund_amount'] ??
+              settlementData?['credit_balance'] ??
+              _dep['credit_balance'])
+          : num.tryParse((_settlementDetail?['credit_balance'] ??
+                      settlementData?['credit_refund_amount'] ??
+                      settlementData?['credit_balance'] ??
+                      _dep['credit_balance'])
+                  ?.toString() ??
+              '')) ??
+          0;
+      final creditRefund = rawCredit > 0 ? rawCredit.round() : 0;
+      final totalPayout = depositRefund + creditRefund;
+      summary = SettlementPayoutSummary(
+        depositRefund: depositRefund,
+        creditRefund: creditRefund,
+        totalPayout: totalPayout,
+        requiresUncPayout: totalPayout > 0,
+      );
+    } else {
+      summary = resolveSettlementPayoutSummary(settlementData ?? {
+        'deposit_refund_amount': _dep['amount_held'],
+        'credit_refund_amount': 0,
+        'total_payout_amount': _dep['amount_held'],
+      });
+    }
 
     final canApprove = canActorApproveDepositRow(
       isOwner: permissions.isOwner,
@@ -1231,6 +1301,7 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
           ..._deductionItems.asMap().entries.map((entry) {
             final idx = entry.key;
             final item = entry.value;
+            final evList = item['evidence'] is List ? (item['evidence'] as List) : [];
             return Card(
               margin: const EdgeInsets.only(bottom: 8),
               elevation: 0,
@@ -1244,9 +1315,19 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
                   children: [
                     Expanded(
                       flex: 3,
-                      child: Text(
-                        kCategoryLabels[item['category']] ?? item['category'].toString(),
-                        style: const TextStyle(fontWeight: FontWeight.w500),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            kCategoryLabels[item['category']] ?? item['category'].toString(),
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                          if (evList.isNotEmpty)
+                            Text(
+                              '${evList.length} minh chứng',
+                              style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                            ),
+                        ],
                       ),
                     ),
                     Expanded(
@@ -1265,6 +1346,7 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
                     ),
                     if (canEdit)
                       IconButton(
+                        key: ValueKey('remove_deduction_$idx'),
                         icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.rose500),
                         onPressed: () {
                           setState(() {
@@ -1334,40 +1416,65 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
     String category = 'DAMAGE';
     int? amount;
     final descController = TextEditingController();
+    List<String> evidence = [];
 
     showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('Thêm khoản khấu trừ', style: TextStyle(fontWeight: FontWeight.w600)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AppSelect<String>(
-                label: 'Loại khấu trừ',
-                value: category,
-                options: kDeductCategoryOptions
-                    .map((o) => AppSelectOption<String>(value: o['value']!, label: o['label']!))
-                    .toList(),
-                onChanged: (v) => setDialogState(() => category = v ?? 'DAMAGE'),
-              ),
-              const SizedBox(height: 12),
-              MoneyInput(
-                label: 'Số tiền khấu trừ (VND)',
-                value: amount?.toString(),
-                onChanged: (v) {
-                  amount = int.tryParse(v) ?? 0;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: descController,
-                decoration: const InputDecoration(
-                  labelText: 'Diễn giải lý do khấu trừ',
-                  border: OutlineInputBorder(),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                AppSelect<String>(
+                  label: 'Loại khấu trừ',
+                  value: category,
+                  options: kDeductCategoryOptions
+                      .map((o) => AppSelectOption<String>(value: o['value']!, label: o['label']!))
+                      .toList(),
+                  onChanged: (v) => setDialogState(() => category = v ?? 'DAMAGE'),
                 ),
-              ),
-            ],
+                const SizedBox(height: 12),
+                MoneyInput(
+                  label: 'Số tiền khấu trừ (VND)',
+                  value: amount?.toString(),
+                  onChanged: (v) {
+                    amount = int.tryParse(v) ?? 0;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: descController,
+                  decoration: const InputDecoration(
+                    labelText: 'Diễn giải lý do khấu trừ',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                FileUploadField(
+                  key: const ValueKey('deduction_evidence_upload'),
+                  label: 'Ảnh/chứng từ bằng chứng (Bắt buộc FR-023)',
+                  value: evidence,
+                  multiple: true,
+                  maxFiles: 5,
+                  hint: 'Đính kèm ít nhất 1 ảnh/chứng từ minh chứng hư hỏng/chi phí',
+                  onChanged: (files) {
+                    setDialogState(() {
+                      if (files == null) {
+                        evidence = [];
+                      } else if (files is List) {
+                        evidence = files.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
+                      } else {
+                        final str = files.toString().trim();
+                        evidence = str.isNotEmpty ? [str] : [];
+                      }
+                    });
+                  },
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Hủy')),
@@ -1377,12 +1484,20 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
                   ref.read(toastProvider.notifier).warning('Vui lòng nhập số tiền khấu trừ hợp lệ.');
                   return;
                 }
+                if (descController.text.trim().isEmpty) {
+                  ref.read(toastProvider.notifier).warning('Vui lòng nhập mô tả chi tiết lý do khấu trừ.');
+                  return;
+                }
+                if (evidence.isEmpty) {
+                  ref.read(toastProvider.notifier).warning('Khoản khấu trừ bắt buộc phải có ít nhất 01 ảnh bằng chứng (FR-023).');
+                  return;
+                }
                 setState(() {
                   _deductionItems.add({
                     'category': category,
                     'amount': amount,
                     'description': descController.text.trim(),
-                    'evidence': [],
+                    'evidence': List<String>.from(evidence),
                   });
                 });
                 Navigator.of(ctx).pop();
