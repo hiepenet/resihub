@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -44,7 +44,7 @@ class _AuthPdfViewerState extends ConsumerState<AuthPdfViewer> {
   @override
   void didUpdateWidget(covariant AuthPdfViewer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.bytes != oldWidget.bytes || widget.src != oldWidget.src) {
+    if (!listEquals(widget.bytes, oldWidget.bytes) || widget.src != oldWidget.src) {
       _loadPdf();
     }
   }

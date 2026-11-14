@@ -531,6 +531,41 @@ void main() {
       expect(find.textContaining('PDF Document (4 bytes)'), findsOneWidget);
     });
 
+    testWidgets('AuthPdfViewer updates cleanly when re-pumped with new Uint8List bytes', (tester) async {
+      final initialBytes = Uint8List.fromList([37, 80, 68, 70]); // 4 bytes
+      final updatedBytes = Uint8List.fromList([37, 80, 68, 70, 45, 49, 46, 52]); // 8 bytes (%PDF-1.4)
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AuthPdfViewer(
+              bytes: initialBytes,
+              title: 'HopDong_v1.pdf',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('PDF Document (4 bytes)'), findsOneWidget);
+
+      // Re-pump widget tree with new Uint8List bytes
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AuthPdfViewer(
+              bytes: updatedBytes,
+              title: 'HopDong_v2.pdf',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('PDF Document (8 bytes)'), findsOneWidget);
+      expect(find.textContaining('PDF Document (4 bytes)'), findsNothing);
+    });
+
     testWidgets('renders HtmlPrintPreviewModal in test environment without throwing', (tester) async {
       await tester.pumpWidget(
         const MaterialApp(

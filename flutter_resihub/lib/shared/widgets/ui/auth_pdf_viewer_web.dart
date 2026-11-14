@@ -1,6 +1,6 @@
 import 'dart:js_interop';
-import 'dart:typed_data';
 import 'dart:ui_web' as ui_web;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:web/web.dart' as web;
@@ -23,7 +23,7 @@ class AuthPdfViewerPlatform extends StatefulWidget {
 
 class _AuthPdfViewerPlatformState extends State<AuthPdfViewerPlatform> {
   String? _blobUrl;
-  late final String _viewTypeId;
+  late String _viewTypeId;
 
   @override
   void initState() {
@@ -49,6 +49,18 @@ class _AuthPdfViewerPlatformState extends State<AuthPdfViewerPlatform> {
       iframe.style.height = '100%';
       return iframe;
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant AuthPdfViewerPlatform oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!listEquals(oldWidget.bytes, widget.bytes)) {
+      if (_blobUrl != null) {
+        web.URL.revokeObjectURL(_blobUrl!);
+      }
+      _initBlob();
+      setState(() {});
+    }
   }
 
   @override

@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:pdfx/pdfx.dart';
 
@@ -40,9 +40,10 @@ class _AuthPdfViewerPlatformState extends State<AuthPdfViewerPlatform> {
   @override
   void didUpdateWidget(covariant AuthPdfViewerPlatform oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.bytes != oldWidget.bytes) {
+    if (!listEquals(oldWidget.bytes, widget.bytes)) {
       _controller?.dispose();
       _initController();
+      setState(() {});
     }
   }
 
