@@ -148,13 +148,16 @@ class AppBadge extends StatelessWidget {
           if (child != null)
             child!
           else if (label != null)
-            Text(
-              label!,
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: textCol,
+            Flexible(
+              child: Text(
+                label!,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: textCol,
+                ),
               ),
             ),
         ],

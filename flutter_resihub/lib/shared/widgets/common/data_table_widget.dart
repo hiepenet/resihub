@@ -208,12 +208,15 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
                                       ? MainAxisAlignment.center
                                       : MainAxisAlignment.start,
                               children: [
-                                Text(
-                                  col.label,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: AppColors.slate600,
+                                Flexible(
+                                  child: Text(
+                                    col.label,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.slate600,
+                                    ),
                                   ),
                                 ),
                                 if (col.sortable) ...[
