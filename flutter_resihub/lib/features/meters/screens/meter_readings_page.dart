@@ -1,0 +1,1059 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/billing_helpers.dart';
+import '../../../core/utils/format.dart';
+import '../../../core/utils/validation.dart';
+import '../../../shared/providers/toast_provider.dart';
+import '../../../shared/widgets/common/confirm_dialog.dart';
+import '../../../shared/widgets/common/empty_state.dart';
+import '../../../shared/widgets/common/page_header.dart';
+import '../../../shared/widgets/common/search_bar_widget.dart';
+import '../../../shared/widgets/common/stats_card.dart';
+import '../../../shared/widgets/ui/app_badge.dart';
+import '../../../shared/widgets/ui/app_button.dart';
+import '../../../shared/widgets/ui/app_card.dart';
+import '../../../shared/widgets/ui/app_input.dart';
+import '../../../shared/widgets/ui/app_modal.dart';
+import '../../../shared/widgets/ui/app_select.dart';
+import '../../../shared/widgets/ui/auth_media_viewer.dart';
+import '../../../shared/widgets/ui/file_upload_field.dart';
+import '../../ai_gateway/services/ai_service.dart';
+import '../../auth/providers/auth_provider.dart';
+import '../../auth/providers/permission_provider.dart';
+import '../../buildings/services/buildings_service.dart';
+import '../services/meters_service.dart';
+import '../widgets/meter_batch_photo_import_modal.dart';
+
+const List<Map<String, String>> kMeterTypeOptions = [
+  {'value': '', 'label': 'Tất cả loại đồng hồ'},
+  {'value': 'ELECTRICITY', 'label': 'Điện sinh hoạt'},
+  {'value': 'WATER', 'label': 'Nước sinh hoạt'},
+];
+
+const List<Map<String, String>> kMeterStatusOptions = [
+  {'value': '', 'label': 'Tất cả trạng thái ghi'},
+  {'value': 'UNRECORDED', 'label': 'Chưa ghi chỉ số'},
+  {'value': 'DRAFT', 'label': 'Bản nháp'},
+  {'value': 'FLAGGED', 'label': 'Tạm giữ (>30%)'},
+  {'value': 'CONFIRMED', 'label': 'Đã chốt'},
+];
+
+/// Utility Meters & Readings Page (M08).
+/// Port of `frontend/src/pages/admin/meters/MeterReadingsPage.jsx`.
+class MeterReadingsPage extends ConsumerStatefulWidget {
+  final String? initialMeterId;
+  final String? initialModal;
+
+  const MeterReadingsPage({
+    super.key,
+    this.initialMeterId,
+    this.initialModal,
+  });
+
+  @override
+  ConsumerState<MeterReadingsPage> createState() => _MeterReadingsPageState();
+}
+
+class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
+  List<Map<String, dynamic>> _meters = [];
+  List<Map<String, dynamic>> _buildings = [];
+  bool _loading = true;
+
+  String _selectedBuildingId = '';
+  String _period = getCurrentPeriod();
+  String _meterType = '';
+  String _statusFilter = '';
+  final String _activeContractFilter = '';
+  String _search = '';
+
+  // Local drafts and notes
+  final Map<String, String> _draftReadings = {};
+  final Map<String, String> _abnormalNotes = {};
+  bool _batchSaving = false;
+  bool _deepLinkHandled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedBuildingId = ref.read(authProvider).selectedBuildingId;
+    _loadBuildings();
+    _fetchMeters();
+  }
+
+  Future<void> _loadBuildings() async {
+    try {
+      final res = await ref.read(buildingsServiceProvider).list();
+      final list = (res is Map && res['data'] is List)
+          ? (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : <Map<String, dynamic>>[];
+      if (mounted) {
+        setState(() {
+          _buildings = list;
+          if (_selectedBuildingId.isEmpty && list.isNotEmpty) {
+            _selectedBuildingId = list[0]['id']?.toString() ?? '';
+          }
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _fetchMeters({bool force = false}) async {
+    setState(() => _loading = true);
+
+    final params = buildMeterListQueryParams(
+      buildingId: _selectedBuildingId,
+      meterType: _meterType,
+      statusFilter: _statusFilter == 'UNRECORDED' ? null : _statusFilter,
+      activeContractFilter: _activeContractFilter,
+      period: _period,
+      search: _search,
+    );
+
+    try {
+      final res = await ref.read(metersServiceProvider).list(params, null, force);
+      final list = (res is Map && res['data'] is List)
+          ? (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : (res is List)
+              ? res.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+              : <Map<String, dynamic>>[];
+
+      if (mounted) {
+        setState(() {
+          _meters = list;
+          for (final m in list) {
+            final id = m['id']?.toString() ?? '';
+            if (m['period_current_reading'] != null) {
+              _draftReadings[id] = m['period_current_reading'].toString();
+            }
+            if (m['period_abnormal_note'] != null) {
+              _abnormalNotes[id] = m['period_abnormal_note'].toString();
+            }
+          }
+          _loading = false;
+        });
+        _checkAndTriggerDeepLink();
+      }
+    } catch (err) {
+      if (mounted) {
+        setState(() => _loading = false);
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách công tơ.'),
+            );
+      }
+    }
+  }
+
+  void _checkAndTriggerDeepLink() {
+    if (_deepLinkHandled) return;
+
+    String? meterId = widget.initialMeterId;
+    if (meterId == null || meterId.isEmpty) {
+      try {
+        final routerState = GoRouterState.of(context);
+        meterId = routerState.uri.queryParameters['meter_id'];
+      } catch (_) {}
+    }
+
+    if (meterId == null || meterId.isEmpty) return;
+
+    final matched = _meters.firstWhere(
+      (m) => m['id']?.toString() == meterId,
+      orElse: () => {},
+    );
+
+    if (matched.isNotEmpty) {
+      _deepLinkHandled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openSingleDetailModal(matched);
+      });
+    }
+  }
+
+  List<Map<String, dynamic>> get _filteredMeters {
+    return _meters.where((m) {
+      if (_statusFilter == 'UNRECORDED') {
+        final readingId = m['period_reading_id'];
+        if (readingId != null && readingId.toString().isNotEmpty) return false;
+      }
+      return true;
+    }).toList();
+  }
+
+  void _openBatchImportModal() {
+    MeterBatchPhotoImportModal.show(
+      context: context,
+      initialBuildingId: _selectedBuildingId,
+      period: _period,
+      anomalyThresholdPct: 30,
+      canWriteMeters: ref.read(permissionProvider).canRecordMeters,
+      onSaved: () => _fetchMeters(force: true),
+    );
+  }
+
+  void _openCreateMeterModal() {
+    String buildingId = _selectedBuildingId;
+    String apartmentCode = '';
+    String meterType = 'ELECTRICITY';
+    String meterCode = '';
+    int initialReading = 0;
+    bool saving = false;
+
+    AppModal.show<void>(
+      context: context,
+      title: 'Khởi tạo Công tơ Điện / Nước mới',
+      subtitle: 'Gán đồng hồ đo chỉ số vào căn hộ',
+      size: AppModalSize.md,
+      child: StatefulBuilder(
+        builder: (ctx, setModalState) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppSelect<String>(
+                label: 'Tòa nhà',
+                value: buildingId,
+                options: _buildings.map((b) {
+                  return AppSelectOption(
+                    value: b['id']?.toString() ?? '',
+                    label: '${b['name']} (${b['code']})',
+                  );
+                }).toList(),
+                onChanged: (val) {
+                  if (val != null) setModalState(() => buildingId = val);
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppInput(
+                      label: 'Mã căn hộ',
+                      required: true,
+                      placeholder: 'VD: 101, A204',
+                      initialValue: apartmentCode,
+                      onChanged: (val) => apartmentCode = val.trim(),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppSelect<String>(
+                      label: 'Loại công tơ',
+                      value: meterType,
+                      options: const [
+                        AppSelectOption(value: 'ELECTRICITY', label: 'Điện sinh hoạt (kWh)'),
+                        AppSelectOption(value: 'WATER', label: 'Nước sinh hoạt (m³)'),
+                      ],
+                      onChanged: (val) {
+                        if (val != null) setModalState(() => meterType = val);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppInput(
+                      label: 'Mã số công tơ',
+                      required: true,
+                      placeholder: 'VD: EM-101, WM-101',
+                      initialValue: meterCode,
+                      onChanged: (val) => meterCode = val.trim(),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppInput(
+                      label: 'Chỉ số ban đầu',
+                      placeholder: '0',
+                      initialValue: initialReading.toString(),
+                      onChanged: (val) => initialReading = int.tryParse(val.trim()) ?? 0,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AppButton(
+                    text: 'Hủy bỏ',
+                    variant: AppButtonVariant.outline,
+                    onPressed: saving ? null : () => Navigator.of(ctx).pop(),
+                  ),
+                  const SizedBox(width: 8),
+                  AppButton(
+                    text: 'Tạo công tơ',
+                    variant: AppButtonVariant.primary,
+                    loading: saving,
+                    onPressed: () async {
+                      if (apartmentCode.isEmpty || meterCode.isEmpty) {
+                        ref.read(toastProvider.notifier).warning('Vui lòng nhập đầy đủ mã căn hộ và mã công tơ.');
+                        return;
+                      }
+
+                      setModalState(() => saving = true);
+                      try {
+                        await ref.read(metersServiceProvider).create({
+                          'building_id': buildingId.isNotEmpty ? buildingId : null,
+                          'apartment_code': apartmentCode,
+                          'meter_type': meterType,
+                          'meter_code': meterCode,
+                          'initial_reading': initialReading,
+                        });
+                        ref.read(toastProvider.notifier).success('Đã tạo mới công tơ thành công.');
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                        _fetchMeters(force: true);
+                      } catch (err) {
+                        setModalState(() => saving = false);
+                        ref.read(toastProvider.notifier).error(
+                              extractErrorMessage(err, 'Không thể tạo công tơ.'),
+                            );
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _openSingleDetailModal(Map<String, dynamic> rawMeter) {
+    String? selectedContractId = rawMeter['target_contract_id']?.toString();
+    Map<String, dynamic> activeMeter = resolveMeterSlotView(rawMeter, selectedContractId);
+
+    final meterId = rawMeter['id']?.toString() ?? '';
+    final draftVal = _draftReadings[meterId] ??
+        (activeMeter['period_current_reading'] != null ? activeMeter['period_current_reading'].toString() : '');
+    final noteVal = _abnormalNotes[meterId] ?? (activeMeter['period_abnormal_note']?.toString() ?? '');
+
+    String currentReadingStr = draftVal;
+    String abnormalNote = noteVal;
+    String? proofImage = activeMeter['period_image_url']?.toString();
+    String? aiSuggestionId;
+    bool isAiRunning = false;
+    bool saving = false;
+
+    AppModal.show<void>(
+      context: context,
+      title: 'Ghi chỉ số chi tiết • Căn ${activeMeter['apartment_code']}',
+      subtitle: '${activeMeter['meter_type'] == 'WATER' ? 'Đồng hồ Nước' : 'Đồng hồ Điện'} (${activeMeter['meter_code']}) • Kỳ $_period',
+      size: AppModalSize.lg,
+      child: StatefulBuilder(
+        builder: (ctx, setModalState) {
+          final canWrite = ref.watch(permissionProvider).canRecordMeters;
+          final isLocked = isMeterRowLockedForEdit(activeMeter, canWrite);
+
+          final overlapping = activeMeter['overlapping_contracts'] is List
+              ? (activeMeter['overlapping_contracts'] as List).whereType<Map>().toList()
+              : <Map>[];
+
+          final prevReading = activeMeter['period_previous_reading'] is num
+              ? activeMeter['period_previous_reading'] as num
+              : num.tryParse(activeMeter['period_previous_reading']?.toString() ?? '') ??
+                  (activeMeter['last_known_reading'] is num
+                      ? activeMeter['last_known_reading'] as num
+                      : num.tryParse(activeMeter['last_known_reading']?.toString() ?? '') ?? 0);
+
+          final currentNum = num.tryParse(currentReadingStr.trim());
+          final consumption = currentNum != null && currentNum >= prevReading ? currentNum - prevReading : null;
+          final estimatedMoney = computeMeterEstimatedAmount(consumption?.toDouble(), activeMeter);
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Turnover multi-slot contract switcher
+              if (overlapping.length > 1) ...[
+                const Text(
+                  'Đợt hợp đồng chuyển giao trong kỳ (Turnover):',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate700),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  children: overlapping.map((slot) {
+                    final isSelected = slot['contract_id']?.toString() == selectedContractId;
+                    return ChoiceChip(
+                      label: Text('Đợt ${slot['slot_index']}/${slot['total_slots']} • ${slot['contract_code']} (${slot['tenant_name'] ?? '—'})'),
+                      selected: isSelected,
+                      onSelected: (val) {
+                        if (val) {
+                          setModalState(() {
+                            selectedContractId = slot['contract_id']?.toString();
+                            activeMeter = resolveMeterSlotView(rawMeter, selectedContractId);
+                            currentReadingStr = activeMeter['period_current_reading']?.toString() ?? '';
+                            proofImage = activeMeter['period_image_url']?.toString();
+                          });
+                        }
+                      },
+                    );
+                  }).toList(),
+                ),
+                const Divider(height: 24),
+              ],
+
+              Row(
+                children: [
+                  Expanded(
+                    child: AppCard(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Chỉ số kỳ trước', style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                          const SizedBox(height: 4),
+                          Text(
+                            '$prevReading ${activeMeter['unit'] ?? ''}',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppCard(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Tiêu thụ ước tính', style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                          const SizedBox(height: 4),
+                          Text(
+                            consumption != null ? '$consumption ${activeMeter['unit'] ?? ''}' : '—',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.primary600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppCard(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Thành tiền ước tính', style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                          const SizedBox(height: 4),
+                          Text(
+                            estimatedMoney != null ? formatMoney(estimatedMoney) : '—',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.slate900),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              if (isLocked)
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: AppColors.slate100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.slate300),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(LucideIcons.lock, size: 16, color: AppColors.slate600),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Đợt hợp đồng này đã được lập hóa đơn phát hành hoặc đã quyết toán. Chỉ số đã bị khóa không cho chỉnh sửa.',
+                          style: TextStyle(fontSize: 12, color: AppColors.slate700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              // Reading input
+              AppInput(
+                label: 'Chỉ số mới kỳ $_period (${activeMeter['unit'] ?? ''})',
+                required: true,
+                readOnly: isLocked,
+                initialValue: currentReadingStr,
+                placeholder: '>= $prevReading',
+                onChanged: (val) => setModalState(() => currentReadingStr = val.trim()),
+              ),
+              const SizedBox(height: 12),
+
+              // Abnormal note
+              AppInput(
+                label: 'Ghi chú bất thường / giải trình (nếu có biến động >30%)',
+                readOnly: isLocked,
+                initialValue: abnormalNote,
+                placeholder: 'VD: Khách mới dọn vào sửa nhà, vòi nước rò rỉ đã sửa...',
+                onChanged: (val) => abnormalNote = val.trim(),
+              ),
+              const SizedBox(height: 14),
+
+              // Image proof & single OCR
+              const Text('Ảnh chụp mặt công tơ bằng chứng:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 6),
+              if (!isLocked) ...[
+                FileUploadField(
+                  value: proofImage,
+                  allowPdf: false,
+                  hint: 'Chụp hoặc tải ảnh mặt đồng hồ để lưu bằng chứng & AI OCR',
+                  onChanged: (val) async {
+                    final dataUrl = val?.toString();
+                    setModalState(() => proofImage = dataUrl);
+
+                    if (dataUrl != null && dataUrl.startsWith('data:image/')) {
+                      setModalState(() => isAiRunning = true);
+                      try {
+                        final res = await ref.read(aiServiceProvider).ocrMeterReading({
+                          'period': _period,
+                          'image_base64': dataUrl,
+                          'meter_id': activeMeter['id'],
+                          if (activeMeter['target_contract_id'] != null) 'contract_id': activeMeter['target_contract_id'],
+                        });
+                        final data = res is Map ? (res['data'] is Map ? res['data'] : res) : {};
+                        final out = data['output'] is Map ? data['output'] : {};
+
+                        if (out['reading'] != null) {
+                          setModalState(() {
+                            currentReadingStr = out['reading'].toString();
+                            aiSuggestionId = data['suggestion_id']?.toString();
+                          });
+                          ref.read(toastProvider.notifier).success('AI đã đọc chỉ số: ${out['reading']}');
+                        }
+                      } catch (err) {
+                        ref.read(toastProvider.notifier).error(
+                              extractErrorMessage(err, 'Không thể nhận diện AI từ ảnh này.'),
+                            );
+                      } finally {
+                        setModalState(() => isAiRunning = false);
+                      }
+                    }
+                  },
+                ),
+              ] else if (proofImage != null && proofImage!.isNotEmpty) ...[
+                InkWell(
+                  onTap: () => AuthMediaViewer.show(context, src: proofImage!),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: AuthImage(src: proofImage, width: 120, height: 120, fit: BoxFit.cover),
+                  ),
+                ),
+              ],
+
+              if (isAiRunning)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8.0),
+                  child: Row(
+                    children: [
+                      SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 8),
+                      Text('Đang nhận diện chỉ số bằng AI...', style: TextStyle(fontSize: 12, color: AppColors.primary600)),
+                    ],
+                  ),
+                ),
+
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AppButton(
+                    text: 'Đóng',
+                    variant: AppButtonVariant.outline,
+                    onPressed: saving ? null : () => Navigator.of(ctx).pop(),
+                  ),
+                  if (!isLocked) ...[
+                    const SizedBox(width: 8),
+                    AppButton(
+                      text: 'Lưu nháp',
+                      variant: AppButtonVariant.outline,
+                      loading: saving,
+                      onPressed: () async {
+                        final valNum = num.tryParse(currentReadingStr.trim());
+                        if (valNum == null || valNum < prevReading) {
+                          ref.read(toastProvider.notifier).warning('Chỉ số mới không được nhỏ hơn chỉ số cũ ($prevReading).');
+                          return;
+                        }
+
+                        setModalState(() => saving = true);
+                        try {
+                          await ref.read(metersServiceProvider).recordReading(activeMeter['id'].toString(), {
+                            'period': _period,
+                            'current_reading': valNum,
+                            'status': 'DRAFT',
+                            if (activeMeter['target_contract_id'] != null) 'contract_id': activeMeter['target_contract_id'],
+                            if (abnormalNote.isNotEmpty) 'abnormal_note': abnormalNote,
+                            if (proofImage != null && proofImage!.startsWith('data:image/')) 'image_base64': proofImage,
+                            if (aiSuggestionId != null) 'ai_suggestion_id': aiSuggestionId,
+                          });
+                          ref.read(toastProvider.notifier).success('Đã lưu nháp chỉ số.');
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          _fetchMeters(force: true);
+                        } catch (err) {
+                          setModalState(() => saving = false);
+                          ref.read(toastProvider.notifier).error(
+                                extractErrorMessage(err, 'Không thể lưu chỉ số.'),
+                              );
+                        }
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    AppButton(
+                      text: 'Chốt chỉ số',
+                      variant: AppButtonVariant.primary,
+                      loading: saving,
+                      onPressed: () async {
+                        final valNum = num.tryParse(currentReadingStr.trim());
+                        if (valNum == null || valNum < prevReading) {
+                          ref.read(toastProvider.notifier).warning('Chỉ số mới không được nhỏ hơn chỉ số cũ ($prevReading).');
+                          return;
+                        }
+
+                        setModalState(() => saving = true);
+                        try {
+                          await ref.read(metersServiceProvider).recordReading(activeMeter['id'].toString(), {
+                            'period': _period,
+                            'current_reading': valNum,
+                            'status': 'CONFIRMED',
+                            if (activeMeter['target_contract_id'] != null) 'contract_id': activeMeter['target_contract_id'],
+                            if (abnormalNote.isNotEmpty) 'abnormal_note': abnormalNote,
+                            if (proofImage != null && proofImage!.startsWith('data:image/')) 'image_base64': proofImage,
+                            if (aiSuggestionId != null) 'ai_suggestion_id': aiSuggestionId,
+                          });
+                          ref.read(toastProvider.notifier).success('Đã chốt chỉ số công tơ thành công.');
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          _fetchMeters(force: true);
+                        } catch (err) {
+                          setModalState(() => saving = false);
+                          ref.read(toastProvider.notifier).error(
+                                extractErrorMessage(err, 'Không thể chốt chỉ số.'),
+                              );
+                        }
+                      },
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _handleQuickConfirm(Map<String, dynamic> meter) async {
+    final readingId = meter['period_reading_id']?.toString();
+    if (readingId == null || readingId.isEmpty) return;
+
+    try {
+      await ref.read(metersServiceProvider).confirmReading(readingId);
+      ref.read(toastProvider.notifier).success('Đã chốt nhanh chỉ số công tơ.');
+      _fetchMeters(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể chốt chỉ số.'),
+          );
+    }
+  }
+
+  Future<void> _handleConfirmAllEligible() async {
+    final eligibleIds = _meters
+        .where((m) =>
+            m['period_reading_id'] != null &&
+            m['period_reading_status'] != 'CONFIRMED' &&
+            m['period_reading_billed'] != true)
+        .map((m) => m['period_reading_id'].toString())
+        .toList();
+
+    if (eligibleIds.isEmpty) {
+      ref.read(toastProvider.notifier).info('Không có chỉ số nháp nào cần chốt.');
+      return;
+    }
+
+    final confirmed = await ConfirmDialog.show(
+      context: context,
+      title: 'Chốt chỉ số hàng loạt',
+      message: 'Bạn có chắc chắn muốn chốt toàn bộ ${eligibleIds.length} chỉ số nháp đang hiển thị?',
+      confirmLabel: 'Chốt hàng loạt',
+      variant: ConfirmDialogVariant.primary,
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _batchSaving = true);
+    try {
+      await ref.read(metersServiceProvider).confirmBatch({'reading_ids': eligibleIds});
+      ref.read(toastProvider.notifier).success('Đã chốt thành công ${eligibleIds.length} chỉ số công tơ.');
+      _fetchMeters(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể chốt hàng loạt.'),
+          );
+    } finally {
+      if (mounted) setState(() => _batchSaving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final perms = ref.watch(permissionProvider);
+    final canManage = perms.canRecordMeters;
+    final items = _filteredMeters;
+
+    final totalCount = _meters.length;
+    final confirmedCount = _meters.where((m) => m['period_reading_status'] == 'CONFIRMED').length;
+    final abnormalCount = _meters.where((m) => m['period_is_abnormal'] == true).length;
+    final draftCount = _meters.where((m) => m['period_reading_status'] == 'DRAFT').length;
+
+    return Scaffold(
+      key: const Key('route:/admin/meters'),
+      backgroundColor: AppColors.background,
+      body: RefreshIndicator(
+        onRefresh: () => _fetchMeters(force: true),
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              PageHeader(
+                title: 'Ghi chỉ số Điện / Nước',
+                subtitle: 'Theo dõi chỉ số, đối soát ảnh công tơ bằng AI và giao ca giữa tháng (Turnover)',
+                breadcrumbs: const [
+                  BreadcrumbItem(label: 'Trang chủ', to: '/admin'),
+                  BreadcrumbItem(label: 'Công tơ Điện/Nước'),
+                ],
+                actions: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppButton(
+                      text: 'Import AI từ ảnh chụp',
+                      icon: const Icon(LucideIcons.sparkles, size: 16),
+                      variant: AppButtonVariant.primary,
+                      onPressed: _openBatchImportModal,
+                    ),
+                    if (canManage) ...[
+                      const SizedBox(width: 8),
+                      AppButton(
+                        text: 'Tạo công tơ',
+                        icon: const Icon(LucideIcons.plus, size: 16),
+                        variant: AppButtonVariant.outline,
+                        onPressed: _openCreateMeterModal,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Stats Cards
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final isWide = constraints.maxWidth > 900;
+                  return GridView.count(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisCount: isWide ? 4 : 2,
+                    crossAxisSpacing: 16,
+                    mainAxisSpacing: 16,
+                    childAspectRatio: isWide ? 2.2 : 1.8,
+                    children: [
+                      StatsCard(
+                        title: 'Tổng số công tơ',
+                        value: totalCount.toString(),
+                        icon: LucideIcons.gauge,
+                        color: 'slate',
+                      ),
+                      StatsCard(
+                        title: 'Đã chốt chỉ số',
+                        value: '$confirmedCount / $totalCount',
+                        icon: LucideIcons.checkCircle2,
+                        color: 'emerald',
+                      ),
+                      StatsCard(
+                        title: 'Chỉ số nháp',
+                        value: draftCount.toString(),
+                        icon: LucideIcons.fileEdit,
+                        color: 'sky',
+                      ),
+                      StatsCard(
+                        title: 'Cảnh báo biến động (>30%)',
+                        value: abnormalCount.toString(),
+                        icon: LucideIcons.triangleAlert,
+                        color: 'amber',
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Filter Bar
+              AppCard(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          flex: 2,
+                          child: AppSelect<String>(
+                            label: 'Tòa nhà',
+                            value: _selectedBuildingId,
+                            options: _buildings.map((b) {
+                              return AppSelectOption(
+                                value: b['id']?.toString() ?? '',
+                                label: '${b['name']} (${b['code']})',
+                              );
+                            }).toList(),
+                            onChanged: (val) {
+                              if (val != null) {
+                                setState(() => _selectedBuildingId = val);
+                                _fetchMeters(force: true);
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: AppInput(
+                            label: 'Kỳ chốt (YYYY-MM)',
+                            initialValue: _period,
+                            onChanged: (val) {
+                              _period = val.trim();
+                              _fetchMeters(force: true);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: AppSelect<String>(
+                            label: 'Loại đồng hồ',
+                            value: _meterType,
+                            options: kMeterTypeOptions.map((e) {
+                              return AppSelectOption(value: e['value']!, label: e['label']!);
+                            }).toList(),
+                            onChanged: (val) {
+                              setState(() => _meterType = val ?? '');
+                              _fetchMeters(force: true);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: AppSelect<String>(
+                            label: 'Trạng thái',
+                            value: _statusFilter,
+                            options: kMeterStatusOptions.map((e) {
+                              return AppSelectOption(value: e['value']!, label: e['label']!);
+                            }).toList(),
+                            onChanged: (val) {
+                              setState(() => _statusFilter = val ?? '');
+                              _fetchMeters(force: true);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: SearchBarWidget(
+                            placeholder: 'Tìm theo mã căn hộ, mã công tơ...',
+                            value: _search,
+                            onChanged: (val) {
+                              _search = val;
+                              _fetchMeters();
+                            },
+                          ),
+                        ),
+                        if (canManage && draftCount > 0) ...[
+                          const SizedBox(width: 12),
+                          AppButton(
+                            text: 'Chốt toàn bộ ($draftCount bản nháp)',
+                            icon: const Icon(LucideIcons.checkCheck, size: 16),
+                            variant: AppButtonVariant.primary,
+                            loading: _batchSaving,
+                            onPressed: _handleConfirmAllEligible,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              if (_loading) ...[
+                const Center(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 40),
+                    child: CircularProgressIndicator(),
+                  ),
+                ),
+              ] else if (items.isEmpty) ...[
+                EmptyState(
+                  icon: LucideIcons.gauge,
+                  title: 'Chưa có công tơ nào',
+                  description: 'Không tìm thấy công tơ phù hợp với bộ lọc.',
+                  action: canManage
+                      ? AppButton(
+                          text: 'Tạo công tơ mới',
+                          icon: const Icon(LucideIcons.plus, size: 16),
+                          variant: AppButtonVariant.primary,
+                          onPressed: _openCreateMeterModal,
+                        )
+                      : null,
+                ),
+              ] else ...[
+                AppCard(
+                  padding: EdgeInsets.zero,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: DataTable(
+                      headingRowColor: WidgetStateProperty.all(AppColors.slate50),
+                      columns: const [
+                        DataColumn(label: Text('Căn hộ / Mã đồng hồ', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Loại & Đơn giá', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Chỉ số cũ', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Chỉ số mới', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Tiêu thụ & Tiền', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Trạng thái', style: TextStyle(fontWeight: FontWeight.w600))),
+                        DataColumn(label: Text('Thao tác', style: TextStyle(fontWeight: FontWeight.w600))),
+                      ],
+                      rows: items.map((meter) {
+                        final turnoverBadge = resolveMeterTurnoverBadgeMeta(meter);
+                        final isElec = meter['meter_type'] == 'ELECTRICITY';
+                        final unit = meter['unit'] ?? (isElec ? 'kWh' : 'm³');
+                        final price = meter['effective_unit_price'] ?? meter['unit_price'] ?? 0;
+
+                        final prevReading = meter['period_previous_reading'] ?? meter['last_known_reading'] ?? 0;
+                        final currentReading = meter['period_current_reading'];
+                        final consumption = meter['period_consumption'];
+                        final status = meter['period_reading_status'];
+                        final isAbnormal = meter['period_is_abnormal'] == true;
+                        final isLocked = isMeterRowLockedForEdit(meter, canManage);
+
+                        return DataRow(
+                          cells: [
+                            DataCell(
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Text(
+                                        'Căn ${meter['apartment_code'] ?? '—'}',
+                                        style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.slate900),
+                                      ),
+                                      if (turnoverBadge.isMultiSlot) ...[
+                                        const SizedBox(width: 4),
+                                        AppBadge(
+                                          label: turnoverBadge.slotLabel ?? '',
+                                          variant: AppBadgeVariant.indigo,
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  Text(
+                                    meter['meter_code']?.toString() ?? '',
+                                    style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: AppColors.slate500),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            DataCell(
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  AppBadge(
+                                    label: isElec ? 'Điện ($unit)' : 'Nước ($unit)',
+                                    variant: isElec ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                                    icon: Icon(isElec ? LucideIcons.zap : LucideIcons.droplets, size: 10),
+                                  ),
+                                  Text(
+                                    '${formatMoney(price)}/$unit',
+                                    style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            DataCell(Text(prevReading.toString())),
+                            DataCell(
+                              Text(
+                                currentReading != null ? currentReading.toString() : '—',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            DataCell(
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    consumption != null ? '$consumption $unit' : '—',
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                  ),
+                                  if (isAbnormal)
+                                    const Text(
+                                      'Biến động >30%',
+                                      style: TextStyle(fontSize: 10, color: AppColors.amber600, fontWeight: FontWeight.bold),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            DataCell(
+                              status == 'CONFIRMED'
+                                  ? const AppBadge(label: 'Đã chốt', variant: AppBadgeVariant.emerald, dot: true)
+                                  : status == 'FLAGGED'
+                                      ? const AppBadge(label: 'Tạm giữ', variant: AppBadgeVariant.amber, dot: true)
+                                      : status == 'DRAFT'
+                                          ? const AppBadge(label: 'Bản nháp', variant: AppBadgeVariant.sky, dot: true)
+                                          : const Text('Chưa ghi', style: TextStyle(fontSize: 12, color: AppColors.slate400)),
+                            ),
+                            DataCell(
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(LucideIcons.fileEdit, size: 16, color: AppColors.slate600),
+                                    tooltip: 'Ghi chỉ số & Chi tiết',
+                                    onPressed: () => _openSingleDetailModal(meter),
+                                  ),
+                                  if (canManage && !isLocked && status == 'DRAFT')
+                                    IconButton(
+                                      icon: const Icon(LucideIcons.check, size: 16, color: AppColors.emerald600),
+                                      tooltip: 'Chốt nhanh',
+                                      onPressed: () => _handleQuickConfirm(meter),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
