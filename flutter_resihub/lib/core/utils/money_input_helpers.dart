@@ -70,6 +70,14 @@ String normalizeMoneyPropValue(dynamic value, {bool allowNegative = false}) {
   return isNeg ? '-$stripped' : stripped;
 }
 
+/// Alias của [normalizeMoneyPropValue] cho các component nhập liệu.
+String toNumericInputValue(dynamic value, {bool allowNegative = false}) =>
+    normalizeMoneyPropValue(value, allowNegative: allowNegative);
+
+/// Alias của [normalizeMoneyPropValue] để xử lý chuỗi số thực / thập phân từ backend.
+String normalizeDecimalNumericInputValue(dynamic value, {bool allowNegative = false}) =>
+    normalizeMoneyPropValue(value, allowNegative: allowNegative);
+
 /// Định dạng giá trị tiền tệ sang chuỗi hiển thị phân tách hàng nghìn bằng dấu chấm (VD: "1.000.000").
 String formatMoneyInputDisplay(dynamic value, {bool allowNegative = false}) {
   if (allowNegative && (value?.toString().trim() == '-')) {
@@ -82,6 +90,10 @@ String formatMoneyInputDisplay(dynamic value, {bool allowNegative = false}) {
   }
   return groupDigitsWithDots(clean);
 }
+
+/// Alias của [formatMoneyInputDisplay] dùng cho bản nháp hiển thị số tiền.
+String formatMoneyDraftForDisplay(dynamic value, {bool allowNegative = false}) =>
+    formatMoneyInputDisplay(value, allowNegative: allowNegative);
 
 /// Kết quả phân tích chuỗi nhập tiền tệ của người dùng.
 class MoneyUserEditResult {

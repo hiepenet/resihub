@@ -53,6 +53,20 @@ void main() {
       expect(formatDateTime(DateTime(2026, 11, 14, 18, 45)), equals('14/11/2026 18:45'));
     });
 
+    test('formatDateTime and formatDate convert UTC ISO string to local timezone', () {
+      final utcDt = DateTime.utc(2026, 11, 14, 10, 0);
+      final localDt = utcDt.toLocal();
+      final expectedHour = localDt.hour.toString().padLeft(2, '0');
+      final expectedMinute = localDt.minute.toString().padLeft(2, '0');
+      final expectedDay = localDt.day.toString().padLeft(2, '0');
+      final expectedMonth = localDt.month.toString().padLeft(2, '0');
+      final expectedYear = localDt.year.toString().padLeft(4, '0');
+      final expectedDateTime = '$expectedDay/$expectedMonth/$expectedYear $expectedHour:$expectedMinute';
+
+      expect(formatDateTime(utcDt.toIso8601String()), equals(expectedDateTime));
+      expect(formatDate(utcDt.toIso8601String()), equals('$expectedDay/$expectedMonth/$expectedYear'));
+    });
+
     test('formatRelativeTime handles seconds, minutes, hours, days, and older', () {
       final now = DateTime(2026, 11, 14, 12, 0, 0);
       expect(formatRelativeTime(null, now: now), equals(''));
@@ -168,6 +182,17 @@ void main() {
       expect(formatMoneyInputDisplay(''), equals(''));
       expect(formatMoneyInputDisplay('-', allowNegative: true), equals('-'));
       expect(formatMoneyInputDisplay('-1500000', allowNegative: true), equals('-1.500.000'));
+    });
+
+    test('toNumericInputValue, normalizeDecimalNumericInputValue, and formatMoneyDraftForDisplay aliases match behavior', () {
+      expect(toNumericInputValue('8500000.00'), equals('8500000'));
+      expect(normalizeDecimalNumericInputValue('8500000.00'), equals('8500000'));
+      expect(formatMoneyDraftForDisplay('8500000.00'), equals('8.500.000'));
+
+      expect(toNumericInputValue(1250000), equals('1250000'));
+      expect(normalizeDecimalNumericInputValue('220000.5'), equals('220001'));
+      expect(formatMoneyDraftForDisplay(1250000), equals('1.250.000'));
+      expect(formatMoneyDraftForDisplay('-', allowNegative: true), equals('-'));
     });
 
     test('parseMoneyUserEdit recalculates caret index and clean display text', () {

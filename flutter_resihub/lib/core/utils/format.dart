@@ -44,6 +44,9 @@ String formatDate(dynamic dateVal) {
     dt = DateTime.tryParse(dateVal.toString());
   }
   if (dt == null) return '—';
+  if (dt.isUtc) {
+    dt = dt.toLocal();
+  }
   final day = dt.day.toString().padLeft(2, '0');
   final month = dt.month.toString().padLeft(2, '0');
   final year = dt.year.toString().padLeft(4, '0');
@@ -60,6 +63,9 @@ String formatDateTime(dynamic dateVal) {
     dt = DateTime.tryParse(dateVal.toString());
   }
   if (dt == null) return '—';
+  if (dt.isUtc) {
+    dt = dt.toLocal();
+  }
   final day = dt.day.toString().padLeft(2, '0');
   final month = dt.month.toString().padLeft(2, '0');
   final year = dt.year.toString().padLeft(4, '0');
@@ -78,6 +84,9 @@ String formatRelativeTime(dynamic dateVal, {DateTime? now}) {
     dt = DateTime.tryParse(dateVal.toString());
   }
   if (dt == null) return '';
+  if (dt.isUtc) {
+    dt = dt.toLocal();
+  }
   final current = now ?? DateTime.now();
   final diffSec = (current.millisecondsSinceEpoch - dt.millisecondsSinceEpoch) ~/ 1000;
   if (diffSec < 60) return 'Vừa xong';
