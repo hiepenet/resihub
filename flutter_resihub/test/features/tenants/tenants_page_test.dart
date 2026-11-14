@@ -690,5 +690,135 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets('AI CCCD scan suggestion can be rejected via "Hủy nháp AI"', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      final queryCache = QueryCache();
+
+      final mockTenant = {
+        'id': 't-ai-reject',
+        'full_name': 'Nguyen Van AI',
+        'phone': '0988776655',
+        'status': 'ACTIVE',
+      };
+
+      bool reviewCalled = false;
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path == '/api/v1/tenants/t-ai-reject') {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': mockTenant}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/tenants/t-ai-reject/id-images') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'masked_for_owner': false,
+              'data': [
+                {
+                  'attachment_id': 'att-front',
+                  'side': 'front',
+                  'url': 'http://localhost:3000/api/v1/attachments/att-front',
+                },
+              ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/ai/extract') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'suggestion_id': 'sug-reject-123',
+                'confidence': 0.95,
+                'output': {
+                  'full_name': 'Nguyen Van AI OCR',
+                  'id_number': '079200009999',
+                },
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/ai/suggestions/sug-reject-123/review') {
+          final body = options.data is Map ? options.data : jsonDecode(options.data.toString());
+          if (body['decision'] == 'REJECT') {
+            reviewCalled = true;
+          }
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': {'status': 'REJECTED'}}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+          jsonEncode({'success': true, 'data': []}),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      final managerUser = UserModel(
+        id: 'u-mgr',
+        fullName: 'Ban Quan Ly',
+        phone: '0977777777',
+        roles: const [UserRoleModel(code: 'MANAGER', name: 'Quản lý')],
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          appStorageProvider.overrideWithValue(storage),
+          dioProvider.overrideWithValue(dio),
+          queryCacheProvider.overrideWithValue(queryCache),
+        ],
+      );
+      container.read(authProvider.notifier).setAuthData(
+            accessToken: 'token',
+            refreshToken: 'refresh',
+            user: managerUser,
+          );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: Scaffold(
+              body: TenantDetailPage(tenantId: 't-ai-reject'),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Trigger AI Scan
+      final scanBtn = find.text('Quét nhanh CCCD');
+      expect(scanBtn, findsOneWidget);
+      await tester.tap(scanBtn);
+      await tester.pumpAndSettle();
+
+      // "Hủy nháp AI" button should now be visible
+      final rejectBtn = find.text('Hủy nháp AI');
+      expect(rejectBtn, findsOneWidget);
+
+      await tester.tap(rejectBtn);
+      await tester.pumpAndSettle();
+
+      // reviewSuggestion with REJECT was called and button disappeared
+      expect(reviewCalled, isTrue);
+      expect(find.text('Hủy nháp AI'), findsNothing);
+
+      // Drain toast timer
+      await tester.pump(const Duration(seconds: 5));
+    });
   });
 }

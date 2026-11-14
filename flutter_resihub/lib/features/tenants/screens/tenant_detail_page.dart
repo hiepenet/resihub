@@ -208,7 +208,14 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
   }
 
   Future<void> _handleExtractDetailCccd() async {
-    final files = _aiScanFiles.where((s) => s.isNotEmpty).toList();
+    List<String> files = _aiScanFiles.where((s) => s.isNotEmpty).toList();
+    if (files.isEmpty) {
+      files = _idImages
+          .map((img) => (img is Map ? (img['url'] ?? img['image_url'] ?? img['image_base64'])?.toString() : null))
+          .where((s) => s != null && s.isNotEmpty)
+          .cast<String>()
+          .toList();
+    }
     if (files.isEmpty) {
       ref.read(toastProvider.notifier).warning('Vui lòng chọn hoặc tải lên ít nhất 1 ảnh CCCD để AI trích xuất.');
       return;
@@ -378,6 +385,18 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     }
   }
 
+  Future<void> _handleRejectAiDraft() async {
+    final sid = _cccdAiTracker?['suggestionId']?.toString();
+    setState(() => _cccdAiTracker = null);
+    if (sid != null && sid.isNotEmpty) {
+      try {
+        await ref.read(aiServiceProvider).reviewSuggestion(sid, {'decision': 'REJECT'});
+      } catch (_) {
+        // Ignore network error on draft reject
+      }
+    }
+  }
+
   Widget? _buildActiveModal(bool isMaskedForOwner, bool isPending, bool canManageTenants, Map<String, dynamic> tenant, dynamic latestFrontImg, dynamic latestBackImg) {
     final status = tenant['status']?.toString() ?? 'INACTIVE';
     final fullName = tenant['full_name']?.toString() ?? 'Cư dân';
@@ -385,7 +404,12 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     if (_applicationReviewOpen) {
       return Material(
         color: Colors.transparent,
-        child: AppModal(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 672,
+            maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+          ),
+          child: AppModal(
           title: 'Hồ sơ Định danh & Xét duyệt Cư dân',
           subtitle: '$fullName • SĐT: ${tenant['phone'] ?? '—'}',
           size: AppModalSize.lg,
@@ -581,57 +605,64 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
             ),
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
 
     if (_approvalDialogOpen) {
       return Material(
         color: Colors.transparent,
-        child: AppModal(
-          title: _approvalAction == 'approve' ? 'Phê duyệt hồ sơ cư dân' : 'Từ chối / Yêu cầu bổ sung',
-          subtitle: 'Hồ sơ: $fullName (${tenant['phone'] ?? '—'})',
-          size: AppModalSize.md,
-          onClose: () => setState(() => _approvalDialogOpen = false),
-          footer: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              AppButton(
-                text: 'Hủy bỏ',
-                variant: AppButtonVariant.outline,
-                onPressed: () => setState(() => _approvalDialogOpen = false),
-              ),
-              const SizedBox(width: 10),
-              AppButton(
-                text: _approvalAction == 'approve' ? 'Xác nhận duyệt' : 'Xác nhận từ chối',
-                variant: _approvalAction == 'approve' ? AppButtonVariant.success : AppButtonVariant.danger,
-                loading: _processingApproval,
-                onPressed: _handleConfirmApproval,
-              ),
-            ],
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 512,
+            maxHeight: MediaQuery.sizeOf(context).height * 0.9,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                _approvalAction == 'approve'
-                    ? 'Bạn có chắc chắn muốn duyệt hồ sơ định danh của cư dân này để cho phép lập hợp đồng thuê?'
-                    : 'Vui lòng cung cấp lý do từ chối để gửi thông báo hướng dẫn cư dân cập nhật lại:',
-                style: const TextStyle(fontFamily: 'Inter', fontSize: 13, color: AppColors.slate800),
-              ),
-              if (_approvalAction == 'reject') ...[
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Lý do từ chối',
-                  required: true,
-                  initialValue: _approvalReason,
-                  error: _approvalError.isNotEmpty ? _approvalError : null,
-                  onChanged: (val) => setState(() {
-                    _approvalReason = val;
-                    _approvalError = '';
-                  }),
+          child: AppModal(
+            title: _approvalAction == 'approve' ? 'Phê duyệt hồ sơ cư dân' : 'Từ chối / Yêu cầu bổ sung',
+            subtitle: 'Hồ sơ: $fullName (${tenant['phone'] ?? '—'})',
+            size: AppModalSize.md,
+            onClose: () => setState(() => _approvalDialogOpen = false),
+            footer: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                AppButton(
+                  text: 'Hủy bỏ',
+                  variant: AppButtonVariant.outline,
+                  onPressed: () => setState(() => _approvalDialogOpen = false),
+                ),
+                const SizedBox(width: 10),
+                AppButton(
+                  text: _approvalAction == 'approve' ? 'Xác nhận duyệt' : 'Xác nhận từ chối',
+                  variant: _approvalAction == 'approve' ? AppButtonVariant.success : AppButtonVariant.danger,
+                  loading: _processingApproval,
+                  onPressed: _handleConfirmApproval,
                 ),
               ],
-            ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _approvalAction == 'approve'
+                      ? 'Bạn có chắc chắn muốn duyệt hồ sơ định danh của cư dân này để cho phép lập hợp đồng thuê?'
+                      : 'Vui lòng cung cấp lý do từ chối để gửi thông báo hướng dẫn cư dân cập nhật lại:',
+                  style: const TextStyle(fontFamily: 'Inter', fontSize: 13, color: AppColors.slate800),
+                ),
+                if (_approvalAction == 'reject') ...[
+                  const SizedBox(height: 12),
+                  AppInput(
+                    label: 'Lý do từ chối',
+                    required: true,
+                    initialValue: _approvalReason,
+                    error: _approvalError.isNotEmpty ? _approvalError : null,
+                    onChanged: (val) => setState(() {
+                      _approvalReason = val;
+                      _approvalError = '';
+                    }),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       );
@@ -640,14 +671,17 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     if (_deleteTenantOpen) {
       return Material(
         color: Colors.transparent,
-        child: ConfirmDialog(
-          title: 'Xóa hồ sơ cư dân',
-          message: 'Bạn có chắc chắn muốn xóa hồ sơ cư dân "$fullName"? Thao tác này không thể hoàn tác.',
-          confirmLabel: 'Xóa hồ sơ',
-          cancelLabel: 'Hủy bỏ',
-          variant: ConfirmDialogVariant.danger,
-          onClose: () => setState(() => _deleteTenantOpen = false),
-          onConfirm: _handleConfirmDeleteTenant,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 448),
+          child: ConfirmDialog(
+            title: 'Xóa hồ sơ cư dân',
+            message: 'Bạn có chắc chắn muốn xóa hồ sơ cư dân "$fullName"? Thao tác này không thể hoàn tác.',
+            confirmLabel: 'Xóa hồ sơ',
+            cancelLabel: 'Hủy bỏ',
+            variant: ConfirmDialogVariant.danger,
+            onClose: () => setState(() => _deleteTenantOpen = false),
+            onConfirm: _handleConfirmDeleteTenant,
+          ),
         ),
       );
     }
@@ -655,7 +689,9 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     if (_deleteImageTarget != null) {
       return Material(
         color: Colors.transparent,
-        child: ConfirmDialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 448),
+          child: ConfirmDialog(
           title: 'Xóa ảnh CCCD',
           message: 'Bạn có chắc muốn xóa tệp ảnh định danh này?',
           confirmLabel: 'Xóa ảnh',
@@ -664,8 +700,9 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
           onClose: () => setState(() => _deleteImageTarget = null),
           onConfirm: _handleConfirmDeleteIdImage,
         ),
-      );
-    }
+      ),
+    );
+  }
 
     return null;
   }
@@ -703,12 +740,23 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
       orElse: () => null,
     );
 
+    final activeModal = _buildActiveModal(
+      isMaskedForOwner,
+      isPending,
+      canManageTenants,
+      tenant,
+      latestFrontImg,
+      latestBackImg,
+    );
+
     return Scaffold(
       backgroundColor: AppColors.slate50,
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Page Header with back button & action buttons
             PageHeader(
@@ -1029,18 +1077,41 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  const Row(
+                                  Wrap(
+                                    alignment: WrapAlignment.spaceBetween,
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    spacing: 8,
+                                    runSpacing: 4,
                                     children: [
-                                      Icon(LucideIcons.sparkles, size: 16, color: AppColors.secondary600),
-                                      SizedBox(width: 8),
-                                      Text(
-                                        'Quét nhanh CCCD bằng AI (AI-01)',
-                                        style: TextStyle(
-                                          fontFamily: 'Inter',
-                                          fontWeight: FontWeight.w600,
-                                          color: Color(0xFF1E1B4B),
-                                        ),
+                                      const Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(LucideIcons.sparkles, size: 16, color: AppColors.secondary600),
+                                          SizedBox(width: 8),
+                                          Text(
+                                            'Quét nhanh CCCD bằng AI (AI-01)',
+                                            style: TextStyle(
+                                              fontFamily: 'Inter',
+                                              fontWeight: FontWeight.w600,
+                                              color: Color(0xFF1E1B4B),
+                                            ),
+                                          ),
+                                        ],
                                       ),
+                                      if (_cccdAiTracker?['suggestionId'] != null)
+                                        InkWell(
+                                          onTap: _handleRejectAiDraft,
+                                          child: const Text(
+                                            'Hủy nháp AI',
+                                            style: TextStyle(
+                                              fontFamily: 'Inter',
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                              color: AppColors.rose600,
+                                              decoration: TextDecoration.underline,
+                                            ),
+                                          ),
+                                        ),
                                     ],
                                   ),
                                   const SizedBox(height: 8),
@@ -1297,7 +1368,31 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
           ],
         ),
       ),
-      bottomSheet: _buildActiveModal(isMaskedForOwner, isPending, canManageTenants, tenant, latestFrontImg, latestBackImg),
-    );
+      if (activeModal != null)
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() {
+                _applicationReviewOpen = false;
+                _approvalDialogOpen = false;
+                _deleteTenantOpen = false;
+                _deleteImageTarget = null;
+              });
+            },
+            child: ColoredBox(
+              color: AppColors.slate900.withValues(alpha: 0.45),
+              child: Center(
+                child: GestureDetector(
+                  onTap: () {},
+                  child: activeModal,
+                ),
+              ),
+            ),
+          ),
+        ),
+    ],
+  ),
+);
   }
 }

@@ -511,7 +511,12 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
     if (_createOpen) {
       return Material(
         color: Colors.transparent,
-        child: AppModal(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 672,
+            maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+          ),
+          child: AppModal(
           title: 'Tạo hồ sơ cư dân mới',
           subtitle: 'Nhập thông tin cư dân và tùy chọn quét CCCD bằng AI để tự động điền',
           size: AppModalSize.lg,
@@ -822,12 +827,18 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
             ),
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    if (_editOpen) {
-      return Material(
-        color: Colors.transparent,
+  if (_editOpen) {
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 512,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
         child: AppModal(
           title: 'Chỉnh sửa hồ sơ cư dân',
           subtitle: 'Cập nhật thông tin định danh và liên hệ',
@@ -931,12 +942,18 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
             ),
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    if (_mergeOpen) {
-      return Material(
-        color: Colors.transparent,
+  if (_mergeOpen) {
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 512,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
         child: AppModal(
           title: 'Gộp hồ sơ cư dân trùng lặp (FR-021)',
           subtitle: 'Chuyển toàn bộ lịch sử hợp đồng và công nợ sang hồ sơ đích giữ lại',
@@ -1000,12 +1017,15 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
             ),
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    if (_deleteTarget != null) {
-      return Material(
-        color: Colors.transparent,
+  if (_deleteTarget != null) {
+    return Material(
+      color: Colors.transparent,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 448),
         child: ConfirmDialog(
           title: 'Xóa hồ sơ cư dân',
           message:
@@ -1016,8 +1036,9 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
           onClose: () => setState(() => _deleteTarget = null),
           onConfirm: _handleConfirmDelete,
         ),
-      );
-    }
+      ),
+    );
+  }
 
     return null;
   }
@@ -1367,12 +1388,16 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
       ),
     ];
 
+    final activeModal = _buildActiveModal(mergeableTenants);
+
     return Scaffold(
       backgroundColor: AppColors.slate50,
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+      body: Stack(
+        children: [
+          SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             PageHeader(
               title: 'Hồ sơ cư dân',
@@ -1547,7 +1572,31 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
           ],
         ),
       ),
-      bottomSheet: _buildActiveModal(mergeableTenants),
-    );
+      if (activeModal != null)
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              setState(() {
+                _createOpen = false;
+                _editOpen = false;
+                _mergeOpen = false;
+                _deleteTarget = null;
+              });
+            },
+            child: ColoredBox(
+              color: AppColors.slate900.withValues(alpha: 0.45),
+              child: Center(
+                child: GestureDetector(
+                  onTap: () {},
+                  child: activeModal,
+                ),
+              ),
+            ),
+          ),
+        ),
+    ],
+  ),
+);
   }
 }
