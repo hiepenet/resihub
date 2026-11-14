@@ -148,13 +148,15 @@ class MoneyInputState extends State<MoneyInput> {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                widget.label!,
-                style: const TextStyle(
-                  fontFamily: 'Inter',
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: AppColors.slate700,
+              Flexible(
+                child: Text(
+                  widget.label!,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: AppColors.slate700,
+                  ),
                 ),
               ),
               if (widget.required)
