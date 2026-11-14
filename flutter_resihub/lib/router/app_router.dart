@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/auth/providers/auth_provider.dart';
+import '../../features/auth/screens/forgot_password_page.dart';
+import '../../features/auth/screens/login_page.dart';
 import '../../shared/widgets/layout/admin_shell.dart';
 import 'route_guards.dart';
 
@@ -159,17 +161,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/login',
-        builder: (context, state) => const RoutePlaceholderPage(
-          routeKey: '/login',
-          title: 'Đăng nhập',
+        builder: (context, state) => LoginPage(
+          initialMode: state.uri.queryParameters['mode'],
+          initialPhone: state.uri.queryParameters['phone'],
         ),
       ),
       GoRoute(
         path: '/forgot-password',
-        builder: (context, state) => const RoutePlaceholderPage(
-          routeKey: '/forgot-password',
-          title: 'Quên mật khẩu',
-        ),
+        builder: (context, state) => const ForgotPasswordPage(),
       ),
       GoRoute(
         path: '/resident',
