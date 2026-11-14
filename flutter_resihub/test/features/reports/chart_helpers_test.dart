@@ -10,8 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter_resihub/core/network/query_cache.dart';
 import 'package:flutter_resihub/core/storage/app_storage.dart';
+import 'package:flutter_resihub/core/utils/format.dart';
 import 'package:flutter_resihub/features/audit/services/audit_service.dart';
 import 'package:flutter_resihub/features/audit/widgets/audit_logs_view.dart';
+import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
 import 'package:flutter_resihub/features/reports/screens/dashboard_page.dart';
 import 'package:flutter_resihub/features/reports/screens/reports_page.dart';
 import 'package:flutter_resihub/features/reports/services/reports_service.dart';
@@ -303,8 +305,10 @@ void main() {
     testWidgets('DashboardPage renders with route key and KPIs', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1400, 900));
 
+      final requests = <RequestOptions>[];
       final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        requests.add(options);
         return ResponseBody.fromString(
           jsonEncode({
             'success': true,
@@ -454,13 +458,24 @@ void main() {
       await tester.tap(find.text('Theo nguồn thu'));
       await tester.pumpAndSettle();
       expect(find.byType(RevenueSourceStackedBarChart), findsOneWidget);
+
+      // Verify changing selectedBuildingId triggers fresh fetch with building_id
+      requests.clear();
+      await container.read(authProvider.notifier).setSelectedBuildingId('b-999');
+      await tester.pumpAndSettle();
+      expect(
+        requests.any((r) => r.path.contains('/dashboard') && r.queryParameters['building_id'] == 'b-999'),
+        isTrue,
+      );
     });
 
     testWidgets('ReportsPage renders all 6 tabs including financial-audit and handles ?modal=summary', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1800, 1000));
 
+      final requests = <RequestOptions>[];
       final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        requests.add(options);
         if (options.path.contains('/summary')) {
           return ResponseBody.fromString(
             jsonEncode({
@@ -665,6 +680,102 @@ void main() {
       await tester.tap(find.text('SLA Báo hỏng'));
       await tester.pumpAndSettle();
       expect(find.text('Thời gian xử lý sự cố trung bình theo hạng mục (giờ)'), findsOneWidget);
+
+      // Verify changing selectedBuildingId triggers fresh fetch in ReportsPage
+      requests.clear();
+      await container.read(authProvider.notifier).setSelectedBuildingId('b-777');
+      await tester.pumpAndSettle();
+      expect(
+        requests.any((r) => r.path.contains('/summary') && r.queryParameters['building_id'] == 'b-777'),
+        isTrue,
+      );
+    });
+
+    testWidgets('ReportsPage mounts with ?modal=summary, awaits deposit ledger and displays populated summary metrics', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1800, 1000));
+
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/deposit-ledger')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'summary': {
+                  'opening_held': 100000000,
+                  'closing_held': 120000000,
+                  'collected': 25000000,
+                  'refunded': 5000000,
+                  'deducted': 0,
+                  'overdue_count': 0,
+                  'disputed_count': 0,
+                  'pending_payout_count': 0,
+                },
+                'reservation_summary': {},
+                'items': [],
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+          jsonEncode({
+            'success': true,
+            'data': {
+              'revenue_12m': [],
+              'occupancy_by_building': [],
+              'aging_by_building': [],
+              'sla_by_category': [],
+            },
+          }),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final storage = AppStorage(prefs: prefs, isWeb: true);
+
+      final container = ProviderContainer(
+        overrides: [
+          appStorageProvider.overrideWithValue(storage),
+          reportsServiceProvider.overrideWithValue(ReportsService(dio: dio)),
+          auditServiceProvider.overrideWithValue(AuditService(dio: dio)),
+        ],
+      );
+
+      final router = GoRouter(
+        initialLocation: '/admin/reports?modal=summary',
+        routes: [
+          GoRoute(
+            path: '/admin/reports',
+            builder: (context, state) => ReportsPage(
+              initialTab: state.uri.queryParameters['tab'],
+              initialModal: state.uri.queryParameters['modal'],
+            ),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp.router(
+            routerConfig: router,
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Modal is visible
+      expect(find.text('Tổng hợp Báo cáo Sổ cọc định kỳ (RP-07)'), findsOneWidget);
+      // Metrics are populated from awaited deposit-ledger, NOT empty/zeroed
+      expect(find.text(formatMoney(100000000)), findsOneWidget);
+      expect(find.text(formatMoney(120000000)), findsOneWidget);
+      expect(find.text('+${formatMoney(25000000)}'), findsOneWidget);
     });
   });
 }

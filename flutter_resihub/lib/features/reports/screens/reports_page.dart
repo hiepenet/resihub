@@ -113,11 +113,12 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     super.initState();
     _activeTab = kValidReportTabs.contains(widget.initialTab) ? widget.initialTab! : 'revenue';
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       _fetchSummary();
-      if (_activeTab == 'deposit-ledger') {
-        _fetchDepositLedger();
+      if (_activeTab == 'deposit-ledger' || widget.initialModal == 'summary') {
+        await _fetchDepositLedger();
       }
+      if (!mounted) return;
       if (widget.initialModal == 'summary') {
         _showDepositSummaryModal();
       }
@@ -185,6 +186,20 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       if (_ledgerStatus.isNotEmpty) 'status': _ledgerStatus,
     };
     final service = ref.read(reportsServiceProvider);
+
+    if (!force) {
+      dynamic cached = service.peekDepositLedger(params);
+      if (cached is String) {
+        try {
+          cached = jsonDecode(cached);
+        } catch (_) {}
+      }
+      if (cached != null && cached is Map) {
+        setState(() {
+          _ledgerData = cached['data'] is Map ? (cached['data'] as Map).cast<String, dynamic>() : cached.cast<String, dynamic>();
+        });
+      }
+    }
 
     setState(() => _ledgerLoading = true);
     try {
@@ -396,16 +411,17 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       context: context,
       title: 'Tổng hợp Báo cáo Sổ cọc định kỳ (RP-07)',
       subtitle: 'Kỳ đối soát: ${_ledgerFromDate.isEmpty ? '—' : _ledgerFromDate} → ${_ledgerToDate.isEmpty ? '—' : _ledgerToDate}',
-      size: AppModalSize.md,
-      footer: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
+      size: AppModalSize.lg,
+      footer: Wrap(
+        alignment: WrapAlignment.end,
+        spacing: 8,
+        runSpacing: 8,
         children: [
           AppButton(
             text: 'Đóng',
             variant: AppButtonVariant.outline,
             onPressed: () => Navigator.of(context).pop(),
           ),
-          const SizedBox(width: 8),
           AppButton(
             text: 'Xuất Sổ cọc Excel (.xlsx)',
             variant: AppButtonVariant.primary,
@@ -490,6 +506,18 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(
+      authProvider.select((s) => s.selectedBuildingId),
+      (prev, next) {
+        if (prev != next) {
+          _fetchSummary(force: true);
+          if (_activeTab == 'deposit-ledger') {
+            _fetchDepositLedger(force: true);
+          }
+        }
+      },
+    );
+
     if (_loading && _reportData['revenue_12m'] is List && (_reportData['revenue_12m'] as List).isEmpty) {
       return const PageSkeleton();
     }

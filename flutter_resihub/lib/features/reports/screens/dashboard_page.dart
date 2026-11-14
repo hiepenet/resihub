@@ -96,6 +96,15 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(
+      authProvider.select((s) => s.selectedBuildingId),
+      (prev, next) {
+        if (prev != next) {
+          _loadDashboard(force: true);
+        }
+      },
+    );
+
     if (_loading && _data == null) {
       return const PageSkeleton();
     }
