@@ -51,3 +51,4 @@ backups/
 
 # Superpowers execution workspace
 .superpowers/
+.worktrees/
