@@ -1,0 +1,9 @@
+build/
+.dart_tool/
+.idea/
+android/
+ios/
+linux/
+macos/
+windows/
+coverage/

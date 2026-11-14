@@ -1,0 +1,15 @@
+services:
+  api:
+    environment:
+      CORS_ORIGIN: "http://localhost:3000,http://localhost:3001"
+
+  flutter_web:
+    build:
+      context: ./flutter_resihub
+      dockerfile: Dockerfile
+    container_name: resihub-flutter-web
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+    depends_on:
+      - api

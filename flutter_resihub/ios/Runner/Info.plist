@@ -66,5 +66,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>ResiHub cần quyền truy cập camera để chụp ảnh CCCD, chỉ số công tơ điện/nước, biên nhận thanh toán và báo hỏng kỹ thuật.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ResiHub cần quyền truy cập thư viện ảnh để tải lên ảnh CCCD, công tơ điện/nước, biên nhận thanh toán và báo hỏng kỹ thuật.</string>
 </dict>
 </plist>
