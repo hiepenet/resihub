@@ -12,6 +12,7 @@ import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
 import 'package:flutter_resihub/features/buildings/providers/buildings_lookup_provider.dart';
 import 'package:flutter_resihub/features/buildings/screens/buildings_page.dart';
 import 'package:flutter_resihub/features/buildings/services/buildings_service.dart';
+import 'package:flutter_resihub/shared/providers/toast_provider.dart';
 import 'package:flutter_resihub/shared/widgets/common/search_bar_widget.dart';
 
 class MockBuildingsService extends Fake implements BuildingsService {
@@ -24,6 +25,8 @@ class MockBuildingsService extends Fake implements BuildingsService {
   String? lastStatusUpdatedStatus;
   String? lastCheckedCode;
   String? lastLookupIdentifier;
+  Exception? createError;
+  Exception? updateError;
 
   @override
   dynamic peekList() => null;
@@ -74,6 +77,7 @@ class MockBuildingsService extends Fake implements BuildingsService {
   @override
   Future<dynamic> create(Map<String, dynamic> payload) async {
     lastCreatedPayload = payload;
+    if (createError != null) throw createError!;
     return {'id': 'b-new', ...payload};
   }
 
@@ -81,6 +85,7 @@ class MockBuildingsService extends Fake implements BuildingsService {
   Future<dynamic> update(String id, Map<String, dynamic> payload) async {
     lastUpdatedId = id;
     lastUpdatedPayload = payload;
+    if (updateError != null) throw updateError!;
     return {'id': id, ...payload};
   }
 
@@ -450,6 +455,50 @@ void main() {
       // Verify Live TopBar Sync: queryCache and selector provider for 'buildings' invalidated
       expect(capturedContainer.read(queryCacheProvider).peek('buildings'), isNull);
       expect(capturedContainer.exists(buildingsListProvider), isFalse);
+
+      // Flush toast dismiss timer
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('8. Create/Update failure surfaces extractErrorMessage via toastProvider without swallowing', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final service = MockBuildingsService()
+        ..buildingsData = _sampleBuildings()
+        ..createError = Exception('Mã tòa nhà đã tồn tại trong hệ thống');
+
+      late ProviderContainer capturedContainer;
+      await tester.pumpWidget(_buildTestApp(
+        mockService: service,
+        roleCode: 'MANAGER',
+        storage: storage,
+        onContainerCreated: (c) => capturedContainer = c,
+      ));
+      await tester.pumpAndSettle();
+
+      // Open create modal
+      await tester.tap(find.text('Thêm tòa nhà mới'));
+      await tester.pumpAndSettle();
+
+      // Fill in Name, Code, Address
+      await tester.enterText(findInput(const Key('building_name_input')), 'Tòa Emerald');
+      await tester.enterText(findInput(const Key('building_code_input')), 'EMERALD-1');
+      await tester.enterText(findInput(const Key('building_address_input')), '123 Đường Ngọc Bích');
+
+      // Submit
+      await tester.tap(find.text('Tạo tòa nhà'));
+      await tester.pumpAndSettle();
+
+      // Assert error toast is shown with extractErrorMessage
+      final toasts = capturedContainer.read(toastProvider);
+      expect(toasts, isNotEmpty);
+      expect(toasts.last.variant, ToastVariant.error);
+      expect(toasts.last.message, contains('Mã tòa nhà đã tồn tại trong hệ thống'));
+
+      // Modal is still open because submission failed
+      expect(find.text('Khởi tạo tòa nhà mới'), findsOneWidget);
 
       // Flush toast dismiss timer
       await tester.pump(const Duration(seconds: 5));

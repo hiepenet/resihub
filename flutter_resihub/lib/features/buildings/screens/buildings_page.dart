@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
@@ -86,7 +87,7 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
       if (mounted) {
         setState(() => _loading = false);
         ref.read(toastProvider.notifier).error(
-              'Không thể tải danh sách tòa nhà: $err',
+              extractErrorMessage(err, 'Không thể tải danh sách tòa nhà.'),
             );
       }
     }
@@ -150,7 +151,7 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
       _fetchBuildings(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(
-            'Không thể cập nhật trạng thái tòa nhà: $err',
+            extractErrorMessage(err, 'Không thể cập nhật trạng thái tòa nhà.'),
           );
     }
   }
@@ -180,7 +181,7 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
         _fetchBuildings(force: true);
       } catch (err) {
         ref.read(toastProvider.notifier).error(
-              'Không thể xóa tòa nhà: $err',
+              extractErrorMessage(err, 'Không thể xóa tòa nhà.'),
             );
       }
     }
@@ -780,7 +781,7 @@ class _BuildingCard extends StatelessWidget {
 }
 
 /// Create / Edit Building Modal Dialog.
-class _BuildingFormDialog extends StatefulWidget {
+class _BuildingFormDialog extends ConsumerStatefulWidget {
   final Map<String, dynamic>? initialBuilding;
   final PermissionMatrix permissions;
   final BuildingsService service;
@@ -794,10 +795,10 @@ class _BuildingFormDialog extends StatefulWidget {
   });
 
   @override
-  State<_BuildingFormDialog> createState() => _BuildingFormDialogState();
+  ConsumerState<_BuildingFormDialog> createState() => _BuildingFormDialogState();
 }
 
-class _BuildingFormDialogState extends State<_BuildingFormDialog> {
+class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
   late final TextEditingController _nameController;
   late final TextEditingController _codeController;
   late final TextEditingController _addressController;
@@ -954,7 +955,7 @@ class _BuildingFormDialogState extends State<_BuildingFormDialog> {
         setState(() {
           _ownerPreview = null;
           _ownerId = '';
-          _ownerLookupError = 'Không thể kiểm tra thông tin Chủ đầu tư: $err';
+          _ownerLookupError = extractErrorMessage(err, 'Không thể kiểm tra thông tin Chủ đầu tư.');
           _ownerLookupLoading = false;
         });
       }
@@ -989,6 +990,9 @@ class _BuildingFormDialogState extends State<_BuildingFormDialog> {
     if (!isOwnerReadOnly && _ownerPreview == null && _ownerIdentifierController.text.trim().isNotEmpty) {
       final verified = await _verifyOwnerIdentifier();
       if (verified == null) {
+        ref.read(toastProvider.notifier).warning(
+              'Email/SĐT Chủ đầu tư chưa hợp lệ hoặc không tìm thấy trong hệ thống. Vui lòng kiểm tra lại hoặc xóa trống ô này nếu chưa gắn Chủ đầu tư.',
+            );
         return;
       }
       resolvedOwnerId = verified['id']?.toString() ?? '';
@@ -1040,6 +1044,7 @@ class _BuildingFormDialogState extends State<_BuildingFormDialog> {
     } catch (err) {
       if (mounted) {
         setState(() => _isSaving = false);
+        ref.read(toastProvider.notifier).error(extractErrorMessage(err));
       }
     }
   }
