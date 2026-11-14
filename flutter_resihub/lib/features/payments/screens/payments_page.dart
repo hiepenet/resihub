@@ -315,12 +315,15 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
           _creditsLoading = false;
         });
       }
-    } catch (_) {
+    } catch (err) {
       if (mounted) {
         setState(() {
           _credits = [];
           _creditsLoading = false;
         });
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách số dư tín dụng.'),
+            );
       }
     }
   }
@@ -389,8 +392,13 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
               .toList();
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _openInvoices = []);
+    } catch (err) {
+      if (mounted) {
+        setState(() => _openInvoices = []);
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách hóa đơn đang mở.'),
+            );
+      }
     }
   }
 
@@ -639,6 +647,26 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
     }
   }
 
+  Widget _buildModalOverlay({
+    required Widget child,
+    double maxWidth = 600,
+  }) {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: AppColors.slate900.withValues(alpha: 0.45),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final permissions = ref.watch(permissionProvider);
@@ -684,7 +712,9 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
       (sum, p) => sum + (num.tryParse(p['overpayment_amount']?.toString() ?? '0') ?? 0),
     );
 
-    return SingleChildScrollView(
+    return Stack(
+      children: [
+        SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1624,10 +1654,15 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
               ],
             ),
           ],
+        ],
+      ),
+    ),
 
-          // Modal: Record Payment
-          if (_createOpen)
-            AppModal(
+      // Modal: Record Payment
+      if (_createOpen)
+        _buildModalOverlay(
+          maxWidth: 620,
+          child: AppModal(
               title: 'Ghi nhận phiếu thu / Thanh toán mới',
               subtitle: 'Tự động gạch nợ hóa đơn tương ứng và tính toán tiền thừa (nếu có).',
               onClose: () => setState(() => _createOpen = false),
@@ -1723,10 +1758,13 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Review Payment & Proof Images
-          if (_reviewPayment != null)
-            AppModal(
+      // Modal: Review Payment & Proof Images
+      if (_reviewPayment != null)
+        _buildModalOverlay(
+          maxWidth: 680,
+          child: AppModal(
               title: 'Đối soát chứng từ #${_reviewPayment!['payment_code']}',
               subtitle: 'Căn ${_reviewPayment!['apartment_code'] ?? '—'} • Số tiền báo nộp: ${formatMoney(_reviewPayment!['amount'])}',
               onClose: () => setState(() => _reviewPayment = null),
@@ -1801,10 +1839,12 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 );
               }),
             ),
+          ),
 
-          // Modal: Reject Payment
-          if (_rejectPaymentTarget != null)
-            AppModal(
+      // Modal: Reject Payment
+      if (_rejectPaymentTarget != null)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Từ chối chứng từ thanh toán',
               subtitle: 'Giao dịch #${_rejectPaymentTarget!['payment_code']} — Cư dân sẽ nhận được thông báo lý do từ chối.',
               onClose: () => setState(() => _rejectPaymentTarget = null),
@@ -1834,10 +1874,13 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 onChanged: (val) => setState(() => _rejectPaymentReason = val),
               ),
             ),
+          ),
 
-          // Modal: Request Credit Refund
-          if (_refundRequestTarget != null)
-            AppModal(
+      // Modal: Request Credit Refund
+      if (_refundRequestTarget != null)
+        _buildModalOverlay(
+          maxWidth: 620,
+          child: AppModal(
               title: 'Lập đề nghị hoàn tiền từ Sổ tín dụng',
               subtitle: 'Căn ${_refundRequestTarget!['apartment_code'] ?? '—'} • Khách: ${_refundRequestTarget!['tenant_name'] ?? '—'}',
               onClose: () => setState(() => _refundRequestTarget = null),
@@ -1891,10 +1934,12 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Reject Credit Refund
-          if (_rejectCreditTarget != null)
-            AppModal(
+      // Modal: Reject Credit Refund
+      if (_rejectCreditTarget != null)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Từ chối đề nghị hoàn tiền tín dụng',
               onClose: () => setState(() => _rejectCreditTarget = null),
               footer: Row(
@@ -1923,8 +1968,8 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 onChanged: (val) => setState(() => _rejectCreditReason = val),
               ),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }

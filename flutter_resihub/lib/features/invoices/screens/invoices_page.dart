@@ -191,12 +191,15 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
           _adjustmentsLoading = false;
         });
       }
-    } catch (_) {
+    } catch (err) {
       if (mounted) {
         setState(() {
           _pendingAdjustments = [];
           _adjustmentsLoading = false;
         });
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải hàng đợi điều chỉnh hóa đơn.'),
+            );
       }
     }
   }
@@ -231,8 +234,13 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
               .toList();
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _buildings = []);
+    } catch (err) {
+      if (mounted) {
+        setState(() => _buildings = []);
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách tòa nhà.'),
+            );
+      }
     }
   }
 
@@ -345,6 +353,26 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
     }
   }
 
+  Widget _buildModalOverlay({
+    required Widget child,
+    double maxWidth = 600,
+  }) {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: AppColors.slate900.withValues(alpha: 0.45),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final permissions = ref.watch(permissionProvider);
@@ -354,11 +382,13 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
     final totalUnpaid = num.tryParse(_summary['total_unpaid']?.toString() ?? '0') ?? 0;
     final collectionRate = totalBilled > 0 ? ((totalPaid / totalBilled) * 100).round() : 0;
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+    return Stack(
+      children: [
+        SingleChildScrollView(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
           PageHeader(
             title: 'Quản lý Hóa đơn Kỳ',
             subtitle: 'Tổng hợp tiền thuê, điện, nước, dịch vụ tiện ích và phát hành hóa đơn định kỳ cho cư dân.',
@@ -743,10 +773,15 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
               ),
             ],
           ),
+        ],
+      ),
+    ),
 
-          // Modal: Batch generate
-          if (_batchOpen)
-            AppModal(
+      // Modal: Batch generate
+      if (_batchOpen)
+        _buildModalOverlay(
+          maxWidth: 640,
+          child: AppModal(
               title: 'Sinh hóa đơn hàng loạt theo kỳ',
               subtitle: 'Hệ thống tự động gom Tiền thuê + Chỉ số Điện/Nước đã chốt + Gói dịch vụ ACTIVE của từng hợp đồng.',
               onClose: () => setState(() => _batchOpen = false),
@@ -834,10 +869,13 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Batch result report
-          if (_batchResult != null)
-            AppModal(
+      // Modal: Batch result report
+      if (_batchResult != null)
+        _buildModalOverlay(
+          maxWidth: 680,
+          child: AppModal(
               title: 'Báo cáo kết quả sinh hóa đơn',
               subtitle: 'Kỳ thanh toán: $_batchPeriod',
               onClose: () => setState(() => _batchResult = null),
@@ -973,10 +1011,13 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                 );
               }),
             ),
+          ),
 
-          // Modal: Pending adjustments 4-eyes queue
-          if (_showAdjustmentsModal)
-            AppModal(
+      // Modal: Pending adjustments 4-eyes queue
+      if (_showAdjustmentsModal)
+        _buildModalOverlay(
+          maxWidth: 800,
+          child: AppModal(
               title: 'Hàng đợi Điều chỉnh Hóa đơn chờ duyệt 4 mắt',
               subtitle: 'Danh sách các đề nghị tăng/giảm hoặc hủy hóa đơn (VOID) cần phê duyệt độc lập.',
               onClose: () => setState(() => _showAdjustmentsModal = false),
@@ -1053,8 +1094,8 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                           ),
                         ),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }

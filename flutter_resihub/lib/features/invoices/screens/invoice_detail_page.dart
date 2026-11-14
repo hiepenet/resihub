@@ -171,11 +171,14 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
           _adjustments = [];
         });
       }
-    } catch (_) {
+    } catch (err) {
       if (mounted) {
         setState(() {
           _adjustments = [];
         });
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách điều chỉnh hóa đơn.'),
+            );
       }
     }
   }
@@ -199,12 +202,15 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
           _auditLoading = false;
         });
       }
-    } catch (_) {
+    } catch (err) {
       if (mounted) {
         setState(() {
           _auditLogs = [];
           _auditLoading = false;
         });
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải nhật ký kiểm toán hóa đơn.'),
+            );
       }
     }
   }
@@ -526,6 +532,26 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
     }
   }
 
+  Widget _buildModalOverlay({
+    required Widget child,
+    double maxWidth = 560,
+  }) {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: AppColors.slate900.withValues(alpha: 0.45),
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -589,11 +615,13 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
       reason: _voidReason,
     );
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+    return Stack(
+      children: [
+        SingleChildScrollView(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
           PageHeader(
             title: 'Chi tiết Hóa đơn ${invoice['invoice_code'] ?? ''}',
             subtitle: '${invoice['period'] != null ? 'Kỳ thanh toán ${invoice['period']}' : 'Phí phạt tất toán kỳ cuối'} • Căn ${invoice['apartment_code'] ?? '—'} (${invoice['building_name'] ?? '—'})',
@@ -1164,10 +1192,14 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
               ),
             ),
           ],
+        ],
+      ),
+    ),
 
-          // Modal: Add / Edit Line
-          if (_lineEditOpen)
-            AppModal(
+      // Modal: Add / Edit Line
+      if (_lineEditOpen)
+        _buildModalOverlay(
+          child: AppModal(
               title: _editingLine != null ? 'Chỉnh sửa khoản phí' : 'Thêm khoản phí vào hóa đơn nháp',
               onClose: () => setState(() => _lineEditOpen = false),
               footer: Row(
@@ -1238,10 +1270,12 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Issue Confirmation
-          if (_issueConfirmOpen)
-            AppModal(
+      // Modal: Issue Confirmation
+      if (_issueConfirmOpen)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Xác nhận phát hành hóa đơn',
               subtitle: 'Vui lòng rà soát kỹ số tiền trước khi công bố tới cư dân.',
               onClose: () => setState(() => _issueConfirmOpen = false),
@@ -1285,10 +1319,12 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ),
               ),
             ),
+          ),
 
-          // Modal: 2-Step VOID Confirmation (PRD 16.2)
-          if (_voidOpen)
-            AppModal(
+      // Modal: 2-Step VOID Confirmation (PRD 16.2)
+      if (_voidOpen)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Xác nhận Hủy hóa đơn đã phát hành (VOID)',
               subtitle: 'Yêu cầu kiểm soát 2 bước an toàn để tránh thao tác nhầm lẫn.',
               onClose: () => setState(() => _voidOpen = false),
@@ -1354,10 +1390,12 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: 4-Eyes Adjustment Request
-          if (_adjustOpen)
-            AppModal(
+      // Modal: 4-Eyes Adjustment Request
+      if (_adjustOpen)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Lập đề nghị điều chỉnh hóa đơn',
               subtitle: 'Tạo đề nghị tăng/giảm số tiền hóa đơn để gửi phê duyệt 4 mắt.',
               onClose: () => setState(() => _adjustOpen = false),
@@ -1408,10 +1446,12 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Reject Adjustment
-          if (_rejectAdjTarget != null)
-            AppModal(
+      // Modal: Reject Adjustment
+      if (_rejectAdjTarget != null)
+        _buildModalOverlay(
+          child: AppModal(
               title: 'Từ chối đề nghị điều chỉnh hóa đơn',
               onClose: () => setState(() => _rejectAdjTarget = null),
               footer: Row(
@@ -1448,10 +1488,13 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Quick Pay
-          if (_payOpen)
-            AppModal(
+      // Modal: Quick Pay
+      if (_payOpen)
+        _buildModalOverlay(
+          maxWidth: 620,
+          child: AppModal(
               title: 'Ghi nhận thu tiền nhanh',
               subtitle: 'Hóa đơn ${invoice['invoice_code']} • Căn ${invoice['apartment_code']}',
               onClose: () => setState(() => _payOpen = false),
@@ -1519,26 +1562,29 @@ class _InvoiceDetailPageState extends ConsumerState<InvoiceDetailPage> {
                 ],
               ),
             ),
+          ),
 
-          // Modal: Proof image preview
-          if (_previewProofUrl != null)
-            AppModal(
-              title: 'Ảnh chứng từ',
-              onClose: () => setState(() => _previewProofUrl = null),
-              footer: AppButton(
-                text: 'Đóng',
-                variant: AppButtonVariant.outline,
-                onPressed: () => setState(() => _previewProofUrl = null),
-              ),
-              child: Center(
-                child: SizedBox(
-                  height: 350,
-                  child: AuthImage(src: _previewProofUrl),
-                ),
+      // Modal: Proof image preview
+      if (_previewProofUrl != null)
+        _buildModalOverlay(
+          maxWidth: 600,
+          child: AppModal(
+            title: 'Ảnh chứng từ',
+            onClose: () => setState(() => _previewProofUrl = null),
+            footer: AppButton(
+              text: 'Đóng',
+              variant: AppButtonVariant.outline,
+              onPressed: () => setState(() => _previewProofUrl = null),
+            ),
+            child: Center(
+              child: SizedBox(
+                height: 350,
+                child: AuthImage(src: _previewProofUrl),
               ),
             ),
-        ],
-      ),
-    );
+          ),
+        ),
+    ],
+  );
   }
 }
