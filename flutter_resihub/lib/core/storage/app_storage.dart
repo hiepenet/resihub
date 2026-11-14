@@ -194,18 +194,21 @@ class AppStorage {
     await _prefs?.setBool(_kAiPrivacyConsent, consent);
   }
 
-  /// Clears session tokens and cached user, preserving UI preferences.
+  /// Clears session tokens, user, and selected building ID, preserving UI preferences.
   Future<void> clearSession() async {
     _accessToken = null;
     _refreshToken = null;
     _user = null;
+    _selectedBuildingId = null;
 
     if (isWeb) {
       await _prefs?.remove(_kAccessToken);
       await _prefs?.remove(_kRefreshToken);
+      await _prefs?.remove(_kSelectedBuildingId);
     } else {
       await _secureStorage?.delete(key: _kAccessToken);
       await _secureStorage?.delete(key: _kRefreshToken);
+      await _prefs?.remove(_kSelectedBuildingId);
     }
     await _prefs?.remove(_kUser);
   }

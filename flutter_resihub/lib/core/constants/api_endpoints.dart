@@ -38,10 +38,17 @@ class ApiEndpoints {
   static const String ai = '$prefix/ai';
 
   // Auth sub-routes
+  static const String authPublicConfig = '$auth/public-config';
   static const String authLogin = '$auth/login';
   static const String authLogout = '$auth/logout';
   static const String authMe = '$auth/me';
   static const String authRefresh = '$auth/refresh';
+  static const String authOtpRequest = '$auth/otp/request';
+  static const String authOtpVerify = '$auth/otp/verify';
+  static const String authProfile = '$auth/profile';
+  static const String authChangePassword = '$auth/change-password';
+  static const String authForgotPassword = '$auth/forgot-password';
+  static const String authResetPassword = '$auth/reset-password';
 
   // Resident portal sub-routes
   static const String residentOverview = '$resident/overview';
