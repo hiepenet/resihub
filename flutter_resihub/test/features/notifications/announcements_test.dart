@@ -623,6 +623,74 @@ void main() {
       expect(find.text('Thông báo họp cư dân'), findsOneWidget);
       expect(find.text('Xem nội dung Zalo'), findsOneWidget);
     });
+
+    testWidgets('modal renders as an overlay above the scroll view rather than inside scroll column', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final appStorage = AppStorage(prefs: prefs, isWeb: true);
+      await appStorage.init();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(testDio),
+            appStorageProvider.overrideWithValue(appStorage),
+            notificationsServiceProvider.overrideWithValue(NotificationsService(testDio)),
+            announcementsServiceProvider.overrideWithValue(AnnouncementsService(testDio)),
+            buildingsServiceProvider.overrideWithValue(
+              BuildingsService(dio: testDio),
+            ),
+            authProvider.overrideWith(() {
+              return _FakeAuthNotifier(
+                AuthState(
+                  user: UserModel(
+                    id: 'u-mgr-1',
+                    email: 'mgr@resihub.vn',
+                    fullName: 'Quản Lý Tòa Nhà',
+                    roles: [UserRoleModel(code: 'MANAGER', name: 'Manager')],
+                  ),
+                  isAuthenticated: true,
+                  selectedBuildingId: 'b-101',
+                ),
+              );
+            }),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(
+              body: NotificationsPage(),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Tap 'Sao chép dán Zalo' to open modal overlay
+      final openModalButton = find.text('Sao chép dán Zalo');
+      expect(openModalButton, findsOneWidget);
+      await tester.tap(openModalButton);
+      await tester.pumpAndSettle();
+
+      // Modal content is visible
+      expect(find.text('Sao chép & Dán sang nhóm Zalo vận hành'), findsOneWidget);
+
+      // Verify page root Stack has modal layer rendered above the scroll view
+      final rootStack = find.byType(Stack).first;
+      expect(rootStack, findsOneWidget);
+
+      // Verify the modal is NOT inside the main SingleChildScrollView's Column
+      final scrollView = find.byType(SingleChildScrollView).first;
+      final scrollColumn = find.descendant(of: scrollView, matching: find.byType(Column)).first;
+      final modalInsideScrollColumn = find.descendant(
+        of: scrollColumn,
+        matching: find.text('Sao chép & Dán sang nhóm Zalo vận hành'),
+      );
+      expect(modalInsideScrollColumn, findsNothing);
+    });
   });
 }
 

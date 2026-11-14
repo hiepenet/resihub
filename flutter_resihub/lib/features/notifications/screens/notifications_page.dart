@@ -871,85 +871,149 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
       return true;
     }).toList();
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          PageHeader(
-            title: 'Trung tâm Thông báo & Đồng bộ Nhóm Zalo',
-            subtitle:
-                'Soạn bản tin chuẩn hóa theo Tòa nhà / Tầng / Phòng, theo dõi lượt đọc của cư dân và sao chép 1 chạm sang nhóm Zalo vận hành.',
-            actions: Row(
-              mainAxisSize: MainAxisSize.min,
+    final hasActiveModal = _confirmSendModal != null ||
+        _zaloCopyModal != null ||
+        _groupModalOpen ||
+        _deleteGroupTarget != null;
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (_unreadCount > 0)
-                  AppButton(
-                    text: 'Đọc tất cả ($_unreadCount)',
-                    variant: AppButtonVariant.outline,
-                    icon: const Icon(LucideIcons.checkCheck, size: 16),
-                    onPressed: _handleMarkAllRead,
+                PageHeader(
+                  title: 'Trung tâm Thông báo & Đồng bộ Nhóm Zalo',
+                  subtitle:
+                      'Soạn bản tin chuẩn hóa theo Tòa nhà / Tầng / Phòng, theo dõi lượt đọc của cư dân và sao chép 1 chạm sang nhóm Zalo vận hành.',
+                  actions: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_unreadCount > 0)
+                        AppButton(
+                          text: 'Đọc tất cả ($_unreadCount)',
+                          variant: AppButtonVariant.outline,
+                          icon: const Icon(LucideIcons.checkCheck, size: 16),
+                          onPressed: _handleMarkAllRead,
+                        ),
+                      const SizedBox(width: 8),
+                      AppButton(
+                        text: 'Làm mới',
+                        variant: AppButtonVariant.outline,
+                        icon: const Icon(LucideIcons.refreshCw, size: 16),
+                        onPressed: _fetchAllData,
+                      ),
+                    ],
                   ),
-                const SizedBox(width: 8),
-                AppButton(
-                  text: 'Làm mới',
-                  variant: AppButtonVariant.outline,
-                  icon: const Icon(LucideIcons.refreshCw, size: 16),
-                  onPressed: _fetchAllData,
+                ),
+
+                // Tabs
+                AppCard(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: AppTabs(
+                    activeTab: _activeTab,
+                    onChanged: (tab) => setState(() => _activeTab = tab),
+                    tabs: [
+                      AppTabItem(
+                        id: 'announcements',
+                        label: 'Thông báo & Xuất Zalo',
+                        icon: const Icon(LucideIcons.bellRing, size: 16),
+                        count: filteredAnnouncements.length,
+                      ),
+                      AppTabItem(
+                        id: 'zalo_groups',
+                        label: 'Danh bạ Nhóm Zalo',
+                        icon: const Icon(LucideIcons.messageSquare, size: 16),
+                        count: filteredZaloGroups.length,
+                      ),
+                      AppTabItem(
+                        id: 'inbox',
+                        label: 'Hộp thư đến',
+                        icon: const Icon(LucideIcons.inbox, size: 16),
+                        count: _unreadCount > 0 ? _unreadCount : filteredInbox.length,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // TAB 1: Announcements
+                if (_activeTab == 'announcements')
+                  _buildAnnouncementsTab(canSendNotifications, filteredAnnouncements),
+
+                // TAB 2: Zalo Groups
+                if (_activeTab == 'zalo_groups')
+                  _buildZaloGroupsTab(canManageZaloGroups, canDeleteZaloGroups, filteredZaloGroups),
+
+                // TAB 3: Inbox
+                if (_activeTab == 'inbox') _buildInboxTab(filteredInbox),
+              ],
+            ),
+          ),
+        ),
+
+        // Active Modal Overlay Layer
+        if (hasActiveModal)
+          Positioned.fill(
+            child: Stack(
+              children: [
+                // Semi-transparent scrim backdrop
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      if (_savingAction != 'send' &&
+                          !_markingZalo &&
+                          !_groupSubmitting &&
+                          !_deletingGroup) {
+                        setState(() {
+                          _confirmSendModal = null;
+                          _zaloCopyModal = null;
+                          _groupModalOpen = false;
+                          _deleteGroupTarget = null;
+                        });
+                      }
+                    },
+                    child: Container(
+                      color: AppColors.slate900.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
+                // Centered modal container with responsive constraints
+                Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: _zaloCopyModal != null ? 672 : 512,
+                      ),
+                      child: _buildActiveModalContent(canSendNotifications),
+                    ),
+                  ),
                 ),
               ],
             ),
           ),
-
-          // Tabs
-          AppCard(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: AppTabs(
-              activeTab: _activeTab,
-              onChanged: (tab) => setState(() => _activeTab = tab),
-              tabs: [
-                AppTabItem(
-                  id: 'announcements',
-                  label: 'Thông báo & Xuất Zalo',
-                  icon: const Icon(LucideIcons.bellRing, size: 16),
-                  count: filteredAnnouncements.length,
-                ),
-                AppTabItem(
-                  id: 'zalo_groups',
-                  label: 'Danh bạ Nhóm Zalo',
-                  icon: const Icon(LucideIcons.messageSquare, size: 16),
-                  count: filteredZaloGroups.length,
-                ),
-                AppTabItem(
-                  id: 'inbox',
-                  label: 'Hộp thư đến',
-                  icon: const Icon(LucideIcons.inbox, size: 16),
-                  count: _unreadCount > 0 ? _unreadCount : filteredInbox.length,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 20),
-
-          // TAB 1: Announcements
-          if (_activeTab == 'announcements')
-            _buildAnnouncementsTab(canSendNotifications, filteredAnnouncements),
-
-          // TAB 2: Zalo Groups
-          if (_activeTab == 'zalo_groups')
-            _buildZaloGroupsTab(canManageZaloGroups, canDeleteZaloGroups, filteredZaloGroups),
-
-          // TAB 3: Inbox
-          if (_activeTab == 'inbox') _buildInboxTab(filteredInbox),
-
-          // Modals
-          if (_confirmSendModal != null) _buildConfirm2StepSendModal(),
-          if (_zaloCopyModal != null) _buildZaloCopyModal(canSendNotifications),
-          if (_groupModalOpen) _buildGroupModal(),
-          if (_deleteGroupTarget != null) _buildDeleteGroupDialog(),
-        ],
-      ),
+      ],
     );
+  }
+
+  Widget _buildActiveModalContent(bool canSendNotifications) {
+    if (_confirmSendModal != null) {
+      return _buildConfirm2StepSendModal();
+    }
+    if (_zaloCopyModal != null) {
+      return _buildZaloCopyModal(canSendNotifications);
+    }
+    if (_groupModalOpen) {
+      return _buildGroupModal();
+    }
+    if (_deleteGroupTarget != null) {
+      return _buildDeleteGroupDialog();
+    }
+    return const SizedBox.shrink();
   }
 
   Widget _buildAnnouncementsTab(
@@ -2014,15 +2078,20 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
       subtitle: ann['title']?.toString() ?? '',
       size: AppModalSize.lg,
       onClose: () => setState(() => _zaloCopyModal = null),
-      footer: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      footer: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 8,
+        runSpacing: 8,
         children: [
           AppButton(
             text: 'Đóng',
             variant: AppButtonVariant.outline,
             onPressed: () => setState(() => _zaloCopyModal = null),
           ),
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               AppButton(
                 text: _copiedZaloBody ? 'Đã sao chép!' : 'Sao chép nội dung',
@@ -2030,8 +2099,7 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                 icon: Icon(_copiedZaloBody ? LucideIcons.check : LucideIcons.copy, size: 16),
                 onPressed: () => _handleCopyZaloContent(zaloContent),
               ),
-              if (canSendNotifications) ...[
-                const SizedBox(width: 8),
+              if (canSendNotifications)
                 AppButton(
                   text: 'Xác nhận đã gửi thủ công lên Zalo',
                   variant: AppButtonVariant.primary,
@@ -2039,7 +2107,6 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                   loading: _markingZalo,
                   onPressed: _handleMarkZaloSentSubmit,
                 ),
-              ],
             ],
           ),
         ],
