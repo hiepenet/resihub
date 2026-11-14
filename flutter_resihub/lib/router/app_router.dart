@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/screens/forgot_password_page.dart';
 import '../../features/auth/screens/login_page.dart';
+import '../../features/buildings/screens/buildings_page.dart';
 import '../../shared/widgets/layout/admin_shell.dart';
 import 'route_guards.dart';
 
@@ -200,10 +201,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/buildings',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/buildings',
-                title: 'Bất động sản',
-              ),
+              child: BuildingsPage(),
             ),
           ),
           // MANDATORY STATIC-BEFORE-DYNAMIC ORDER:
