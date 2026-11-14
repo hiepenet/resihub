@@ -136,6 +136,11 @@ class AppStorage {
   String? get userRole => _user?['role']?.toString();
   bool get isAuthenticated => _accessToken != null && _accessToken!.isNotEmpty;
 
+  SharedPreferences? get prefs => _prefs;
+  String? getString(String key) => _prefs?.getString(key);
+  Future<bool> setString(String key, String value) async =>
+      _prefs != null ? await _prefs!.setString(key, value) : false;
+
   /// Updates access and refresh tokens in both RAM and persistent storage.
   Future<void> setTokens({required String accessToken, String? refreshToken}) async {
     _accessToken = accessToken;
