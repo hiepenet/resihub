@@ -24,6 +24,7 @@ import '../../../shared/widgets/ui/app_modal.dart';
 import '../../../shared/widgets/ui/app_select.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../auth/providers/permission_provider.dart';
+import '../../buildings/services/buildings_service.dart';
 import '../services/services_service.dart';
 
 const List<Map<String, String>> kSubscriptionStatusFilters = [
@@ -457,15 +458,41 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
 
   Future<void> _openAssignModal() async {
     try {
-      final catRes = await ref.read(servicesServiceProvider).listCatalog();
+      final selectedBuildingId = ref.read(authProvider).selectedBuildingId;
+      final results = await Future.wait([
+        ref.read(servicesServiceProvider).listCatalog({'active_only': 'true'}),
+        ref.read(buildingsServiceProvider).listApartments(
+          selectedBuildingId.isNotEmpty ? {'building_id': selectedBuildingId} : null,
+        ),
+      ]);
+
+      final catRes = results[0];
+      final aptRes = results[1];
+
       final catList = (catRes is Map && catRes['data'] is List)
-          ? (catRes['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
-          : <Map<String, dynamic>>[];
+          ? (catRes['data'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .where((c) => c['billing_type'] != 'METERED')
+              .toList()
+          : (catRes is List)
+              ? catRes
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .where((c) => c['billing_type'] != 'METERED')
+                  .toList()
+              : <Map<String, dynamic>>[];
+
+      final apartments = (aptRes is Map && aptRes['data'] is List)
+          ? (aptRes['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : (aptRes is List)
+              ? aptRes.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+              : <Map<String, dynamic>>[];
 
       if (!mounted) return;
 
       String selectedServiceId = catList.isNotEmpty ? catList[0]['id'].toString() : '';
-      String apartmentId = '';
+      String apartmentId = apartments.isNotEmpty ? apartments[0]['id'].toString() : '';
       int quantity = 1;
       String startDate = todayVietnamYmd();
       List<String> vehiclePlates = [''];
@@ -495,13 +522,35 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                AppInput(
-                  label: 'Mã căn hộ / ID căn hộ',
-                  required: true,
-                  placeholder: 'Nhập ID hoặc mã căn hộ (VD: 101, 202...)',
-                  initialValue: apartmentId,
-                  onChanged: (val) => apartmentId = val.trim(),
-                ),
+                if (apartments.isNotEmpty)
+                  AppSelect<String>(
+                    label: 'Căn hộ áp dụng',
+                    required: true,
+                    placeholder: '-- Chọn căn hộ áp dụng --',
+                    value: apartmentId.isNotEmpty ? apartmentId : null,
+                    options: apartments.map((a) {
+                      final code = a['code'] ?? a['apartment_code'] ?? a['id'] ?? '';
+                      final bCode = a['building_code'] ?? '';
+                      final prefix = bCode.toString().isNotEmpty ? '$bCode - ' : '';
+                      final status = a['status'] == 'OCCUPIED' ? 'Đang thuê' : (a['status'] ?? '');
+                      final suffix = status.isNotEmpty ? ' ($status)' : '';
+                      return AppSelectOption(
+                        value: a['id']?.toString() ?? '',
+                        label: '${prefix}Căn $code$suffix',
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) setModalState(() => apartmentId = val);
+                    },
+                  )
+                else
+                  AppInput(
+                    label: 'Mã căn hộ / ID căn hộ',
+                    required: true,
+                    placeholder: 'Nhập ID hoặc mã căn hộ (VD: 101, 202...)',
+                    initialValue: apartmentId,
+                    onChanged: (val) => apartmentId = val.trim(),
+                  ),
                 const SizedBox(height: 12),
                 AppSelect<String>(
                   label: 'Chọn dịch vụ từ danh mục',
@@ -601,8 +650,8 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                       variant: AppButtonVariant.primary,
                       loading: saving,
                       onPressed: () async {
-                        if (apartmentId.isEmpty) {
-                          ref.read(toastProvider.notifier).warning('Vui lòng nhập căn hộ đăng ký.');
+                        if (apartmentId.isEmpty || selectedServiceId.isEmpty) {
+                          ref.read(toastProvider.notifier).warning('Vui lòng chọn căn hộ và dịch vụ cần gán.');
                           return;
                         }
 

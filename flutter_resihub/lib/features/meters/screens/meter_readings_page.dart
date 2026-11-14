@@ -98,7 +98,13 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
           }
         });
       }
-    } catch (_) {}
+    } catch (err) {
+      if (mounted) {
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể tải danh sách tòa nhà.'),
+            );
+      }
+    }
   }
 
   Future<void> _fetchMeters({bool force = false}) async {
@@ -194,13 +200,32 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     );
   }
 
-  void _openCreateMeterModal() {
-    String buildingId = _selectedBuildingId;
-    String apartmentCode = '';
+  Future<void> _openCreateMeterModal() async {
+    String apartmentId = '';
     String meterType = 'ELECTRICITY';
     String meterCode = '';
+    int unitPrice = 3800;
     int initialReading = 0;
     bool saving = false;
+
+    List<Map<String, dynamic>> apartments = [];
+    try {
+      final res = await ref.read(buildingsServiceProvider).listApartments(
+        _selectedBuildingId.isNotEmpty ? {'building_id': _selectedBuildingId} : null,
+      );
+      apartments = (res is Map && res['data'] is List)
+          ? (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : (res is List)
+              ? res.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+              : <Map<String, dynamic>>[];
+      if (apartments.isNotEmpty) {
+        apartmentId = apartments.first['id']?.toString() ?? '';
+      }
+    } catch (_) {
+      apartments = [];
+    }
+
+    if (!mounted) return;
 
     AppModal.show<void>(
       context: context,
@@ -213,32 +238,38 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              AppSelect<String>(
-                label: 'Tòa nhà',
-                value: buildingId,
-                options: _buildings.map((b) {
-                  return AppSelectOption(
-                    value: b['id']?.toString() ?? '',
-                    label: '${b['name']} (${b['code']})',
-                  );
-                }).toList(),
-                onChanged: (val) {
-                  if (val != null) setModalState(() => buildingId = val);
-                },
-              ),
+              if (apartments.isNotEmpty)
+                AppSelect<String>(
+                  label: 'Căn hộ áp dụng',
+                  required: true,
+                  placeholder: '-- Chọn căn hộ --',
+                  value: apartmentId.isNotEmpty ? apartmentId : null,
+                  options: apartments.map((a) {
+                    final code = a['code'] ?? a['apartment_code'] ?? a['id'] ?? '';
+                    final bCode = a['building_code'] ?? '';
+                    final prefix = bCode.toString().isNotEmpty ? '$bCode - ' : '';
+                    final status = a['status'] == 'OCCUPIED' ? 'Đang thuê' : (a['status'] ?? '');
+                    final suffix = status.isNotEmpty ? ' ($status)' : '';
+                    return AppSelectOption(
+                      value: a['id']?.toString() ?? '',
+                      label: '${prefix}Căn $code$suffix',
+                    );
+                  }).toList(),
+                  onChanged: (val) {
+                    if (val != null) setModalState(() => apartmentId = val);
+                  },
+                )
+              else
+                AppInput(
+                  label: 'Mã căn hộ / Apartment ID',
+                  required: true,
+                  placeholder: 'Nhập ID hoặc mã căn hộ (VD: 101, 202...)',
+                  initialValue: apartmentId,
+                  onChanged: (val) => apartmentId = val.trim(),
+                ),
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Expanded(
-                    child: AppInput(
-                      label: 'Mã căn hộ',
-                      required: true,
-                      placeholder: 'VD: 101, A204',
-                      initialValue: apartmentCode,
-                      onChanged: (val) => apartmentCode = val.trim(),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
                   Expanded(
                     child: AppSelect<String>(
                       label: 'Loại công tơ',
@@ -248,8 +279,22 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                         AppSelectOption(value: 'WATER', label: 'Nước sinh hoạt (m³)'),
                       ],
                       onChanged: (val) {
-                        if (val != null) setModalState(() => meterType = val);
+                        if (val != null) {
+                          setModalState(() {
+                            meterType = val;
+                            unitPrice = val == 'ELECTRICITY' ? 3800 : 22000;
+                          });
+                        }
                       },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: AppInput(
+                      label: 'Mã số công tơ',
+                      placeholder: 'VD: EM-101, WM-101',
+                      initialValue: meterCode,
+                      onChanged: (val) => meterCode = val.trim(),
                     ),
                   ),
                 ],
@@ -259,11 +304,11 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                 children: [
                   Expanded(
                     child: AppInput(
-                      label: 'Mã số công tơ',
+                      label: 'Đơn giá cơ bản (VNĐ)',
                       required: true,
-                      placeholder: 'VD: EM-101, WM-101',
-                      initialValue: meterCode,
-                      onChanged: (val) => meterCode = val.trim(),
+                      placeholder: '3800',
+                      initialValue: unitPrice.toString(),
+                      onChanged: (val) => unitPrice = int.tryParse(val.trim()) ?? 0,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -292,18 +337,18 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                     variant: AppButtonVariant.primary,
                     loading: saving,
                     onPressed: () async {
-                      if (apartmentCode.isEmpty || meterCode.isEmpty) {
-                        ref.read(toastProvider.notifier).warning('Vui lòng nhập đầy đủ mã căn hộ và mã công tơ.');
+                      if (apartmentId.isEmpty) {
+                        ref.read(toastProvider.notifier).warning('Vui lòng chọn căn hộ cần lắp đặt đồng hồ.');
                         return;
                       }
 
                       setModalState(() => saving = true);
                       try {
                         await ref.read(metersServiceProvider).create({
-                          'building_id': buildingId.isNotEmpty ? buildingId : null,
-                          'apartment_code': apartmentCode,
+                          'apartment_id': apartmentId,
                           'meter_type': meterType,
-                          'meter_code': meterCode,
+                          'meter_code': meterCode.trim().isNotEmpty ? meterCode.trim() : null,
+                          'unit_price': unitPrice,
                           'initial_reading': initialReading,
                         });
                         ref.read(toastProvider.notifier).success('Đã tạo mới công tơ thành công.');

@@ -24,6 +24,7 @@ import 'package:flutter_resihub/features/meters/widgets/meter_batch_photo_import
 import 'package:flutter_resihub/features/services/screens/service_catalog_page.dart';
 import 'package:flutter_resihub/features/services/screens/subscriptions_page.dart';
 import 'package:flutter_resihub/features/services/services/services_service.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_button.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions options) _handler;
@@ -453,8 +454,10 @@ void main() {
     late MetersService metersService;
     late AiService aiService;
     late AppStorage storage;
+    final List<RequestOptions> requests = [];
 
     setUp(() async {
+      requests.clear();
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       storage = AppStorage(prefs: prefs, isWeb: true);
@@ -463,6 +466,7 @@ void main() {
       queryCache = QueryCache();
 
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        requests.add(options);
         if (options.path.contains('/service-catalog')) {
           return ResponseBody.fromString(
             jsonEncode({
@@ -476,6 +480,16 @@ void main() {
                   'billing_type': 'METERED',
                   'unit': 'kWh',
                   'unit_price': 3500,
+                  'is_active': true,
+                },
+                {
+                  'id': 'svc-2',
+                  'code': 'CLEAN',
+                  'name': 'Dọn dẹp căn hộ',
+                  'category': 'CLEANING',
+                  'billing_type': 'FIXED_MONTHLY',
+                  'unit': 'tháng',
+                  'unit_price': 150000,
                   'is_active': true,
                 },
               ],
@@ -511,6 +525,19 @@ void main() {
             headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
           );
         }
+        if (options.path.contains('/apartments')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': [
+                {'id': 'apt-1', 'code': '101', 'building_code': 'B1', 'status': 'OCCUPIED'},
+                {'id': 'apt-2', 'code': '102', 'building_code': 'B1', 'status': 'AVAILABLE'},
+              ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
         if (options.path.contains('/buildings')) {
           return ResponseBody.fromString(
             jsonEncode({
@@ -518,6 +545,17 @@ void main() {
               'data': [
                 {'id': 'b-1', 'code': 'B1', 'name': 'Tòa Park 1'},
               ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path.contains('/meters') && options.method == 'POST') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'message': 'Khởi tạo đồng hồ mới thành công.',
+              'data': {'id': 'm-new-1'},
             }),
             200,
             headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
@@ -669,6 +707,79 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('Tải ảnh chụp (Tối đa'), findsOneWidget);
       expect(find.textContaining('Chưa có ảnh nào được chọn'), findsOneWidget);
+    });
+
+    testWidgets('MeterReadingsPage create meter modal loads apartments and submits exact payload keys', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 900));
+      final container = createContainer();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: MeterReadingsPage(),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Open "Tạo công tơ" modal
+      final openButtons = find.widgetWithText(AppButton, 'Tạo công tơ');
+      expect(openButtons, findsWidgets);
+      await tester.tap(openButtons.first);
+      await tester.pumpAndSettle();
+
+      // Assert modal elements exist
+      expect(find.text('Khởi tạo Công tơ Điện / Nước mới'), findsOneWidget);
+      expect(find.text('Căn hộ áp dụng'), findsOneWidget);
+      expect(find.text('Đơn giá cơ bản (VNĐ)'), findsOneWidget);
+
+      // Submit form
+      final submitButton = find.widgetWithText(AppButton, 'Tạo công tơ').last;
+      await tester.tap(submitButton);
+      await tester.pumpAndSettle();
+
+      // Assert payload keys match MeterReadingsPage.jsx:1126-1132
+      final postMeterReq = requests.lastWhere((r) => r.path == '/api/v1/meters' && r.method == 'POST');
+      expect(postMeterReq.method, 'POST');
+      expect(postMeterReq.path, '/api/v1/meters');
+      final data = postMeterReq.data as Map<String, dynamic>;
+      expect(data['apartment_id'], 'apt-1');
+      expect(data['meter_type'], 'ELECTRICITY');
+      expect(data['unit_price'], 3800);
+      expect(data['initial_reading'], 0);
+      expect(data.containsKey('apartment_code'), isFalse);
+      expect(data.containsKey('building_id'), isFalse);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('SubscriptionsPage assign modal excludes METERED services and loads apartments', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 900));
+      final container = createContainer();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: SubscriptionsPage(),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Open "Đăng ký mới" modal
+      final openAssignBtn = find.widgetWithText(AppButton, 'Đăng ký mới');
+      expect(openAssignBtn, findsOneWidget);
+      await tester.tap(openAssignBtn);
+      await tester.pumpAndSettle();
+
+      // Check modal rendered with apartments select
+      expect(find.text('Đăng ký dịch vụ cho Căn hộ'), findsOneWidget);
+      expect(find.text('Căn hộ áp dụng'), findsOneWidget);
+      // Ensure METERED service 'Điện sinh hoạt' is NOT selected or in options, but 'Dọn dẹp căn hộ' is
+      expect(find.textContaining('Dọn dẹp căn hộ'), findsOneWidget);
     });
   });
 }
