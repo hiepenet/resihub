@@ -5,6 +5,8 @@ import 'billing_helpers.dart' show
     computeMeterEstimatedAmount,
     isMeterRowLockedForEdit;
 
+export 'billing_helpers.dart' show resolveMeterSlotView;
+
 const int kMaxBatchMeterPhotos = 30;
 const int kDefaultOcrConcurrency = 2;
 
