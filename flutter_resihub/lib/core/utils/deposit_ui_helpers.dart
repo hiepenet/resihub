@@ -3,6 +3,7 @@ import 'billing_helpers.dart' show roundVND;
 import 'date_range.dart' show toDateOnlyStr;
 
 export 'billing_helpers.dart' show resolveSettlementPayoutSummary, SettlementPayoutSummary;
+export 'idempotency.dart' show canCollectAdditionalDeposit;
 
 const int kDayMs = 24 * 60 * 60 * 1000;
 

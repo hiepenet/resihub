@@ -356,6 +356,8 @@ class SettlementPayoutSummary {
     required this.totalPayout,
     required this.requiresUncPayout,
   });
+
+  bool get hasCreditRefund => creditRefund > 0;
 }
 
 /// Tách bạch số tiền hoàn cọc và hoàn tín dụng trong quyết toán cuối kỳ (M06 / FR-024 / FR-040).
