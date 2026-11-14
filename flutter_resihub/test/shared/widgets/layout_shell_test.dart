@@ -238,7 +238,7 @@ void main() {
       expect(navigatedRoute, '/admin/invoices');
     });
 
-    testWidgets('Sidebar toggle collapse button toggles collapsed state and persists in AppStorage', (tester) async {
+    testWidgets('Sidebar toggle collapse button immediately changes rendered width and persists in AppStorage', (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -257,13 +257,25 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // Initially expanded (256px)
+      expect(tester.getSize(find.byType(SidebarWidget)).width, 256.0);
+      expect(storage.sidebarCollapsed, isFalse);
+
       // Find collapse toggle button
       final toggleButton = find.byKey(const Key('sidebar-collapse-toggle'));
-      if (toggleButton.evaluate().isNotEmpty) {
-        await tester.tap(toggleButton);
-        await tester.pumpAndSettle();
-        expect(storage.sidebarCollapsed, isTrue);
-      }
+      expect(toggleButton, findsOneWidget);
+      await tester.tap(toggleButton);
+      await tester.pumpAndSettle();
+
+      // Immediately collapsed (72px) without external rebuild
+      expect(tester.getSize(find.byType(SidebarWidget)).width, 72.0);
+      expect(storage.sidebarCollapsed, isTrue);
+
+      // Tap again to re-expand
+      await tester.tap(toggleButton);
+      await tester.pumpAndSettle();
+      expect(tester.getSize(find.byType(SidebarWidget)).width, 256.0);
+      expect(storage.sidebarCollapsed, isFalse);
     });
   });
 
@@ -293,6 +305,62 @@ void main() {
       // Displays dropdown with placeholder 'Tất cả tòa nhà trong phạm vi (2)'
       expect(find.text('Tất cả tòa nhà trong phạm vi (2)'), findsOneWidget);
       expect(find.byType(NotificationBell), findsOneWidget);
+    });
+
+    testWidgets('TopBar allows selecting building and switching back to all buildings', (tester) async {
+      final user = _createUserWithRole('SYS_ADMIN');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      final buildings = [
+        {'id': 'bld-1', 'code': 'B01', 'name': 'Tòa Diamond'},
+        {'id': 'bld-2', 'code': 'B02', 'name': 'Tòa Sapphire'},
+      ];
+
+      late WidgetRef capturedRef;
+
+      await tester.pumpWidget(
+        _wrapWithScope(
+          storage: storage,
+          user: user,
+          buildings: buildings,
+          child: Scaffold(
+            body: Consumer(
+              builder: (ctx, ref, _) {
+                capturedRef = ref;
+                return const TopBar();
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Initial state: selectedBuildingId is empty, selector shows all buildings label
+      expect(find.text('Tất cả tòa nhà trong phạm vi (2)'), findsOneWidget);
+
+      // Open selector dropdown
+      await tester.tap(find.text('Tất cả tòa nhà trong phạm vi (2)'));
+      await tester.pumpAndSettle();
+
+      // Select Tòa Diamond
+      await tester.tap(find.text('B01 — Tòa Diamond').last);
+      await tester.pumpAndSettle();
+
+      // Verify selectedBuildingId became 'bld-1'
+      expect(capturedRef.read(authProvider).selectedBuildingId, 'bld-1');
+      expect(find.text('B01 — Tòa Diamond'), findsOneWidget);
+
+      // Re-open selector to switch back to 'Tất cả tòa nhà trong phạm vi (2)'
+      await tester.tap(find.text('B01 — Tòa Diamond'));
+      await tester.pumpAndSettle();
+
+      // Select 'Tất cả tòa nhà trong phạm vi (2)'
+      await tester.tap(find.text('Tất cả tòa nhà trong phạm vi (2)').last);
+      await tester.pumpAndSettle();
+
+      // Verify selectedBuildingId reverted to empty string
+      expect(capturedRef.read(authProvider).selectedBuildingId, '');
     });
 
     testWidgets('TopBar auto-syncs selectedBuildingId when list changes to single building', (tester) async {

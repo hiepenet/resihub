@@ -8,6 +8,33 @@ import '../../../core/storage/app_storage.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../features/auth/providers/auth_provider.dart';
 
+/// Manages reactive sidebar collapse state persisted in AppStorage.
+class SidebarCollapsedNotifier extends Notifier<bool> {
+  @override
+  bool build() {
+    final storage = ref.watch(appStorageProvider);
+    return storage.sidebarCollapsed;
+  }
+
+  Future<void> toggle() async {
+    final storage = ref.read(appStorageProvider);
+    final next = !state;
+    state = next;
+    await storage.setSidebarCollapsed(next);
+  }
+
+  Future<void> setCollapsed(bool collapsed) async {
+    if (state == collapsed) return;
+    final storage = ref.read(appStorageProvider);
+    state = collapsed;
+    await storage.setSidebarCollapsed(collapsed);
+  }
+}
+
+/// Provider for reactive sidebar collapse state.
+final sidebarCollapsedProvider =
+    NotifierProvider<SidebarCollapsedNotifier, bool>(SidebarCollapsedNotifier.new);
+
 /// Responsive Admin Sidebar supporting desktop rail & mobile drawer,
 /// role-based menu filtering across SYS_ADMIN / OWNER / MANAGER,
 /// route highlighting, and persistent collapse state.
@@ -45,8 +72,8 @@ class SidebarWidget extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authState = ref.watch(authProvider);
-    final storage = ref.watch(appStorageProvider);
-    final isCollapsed = collapsible && storage.sidebarCollapsed && !isDrawer;
+    final collapsedState = ref.watch(sidebarCollapsedProvider);
+    final isCollapsed = collapsible && collapsedState && !isDrawer;
     final primaryRole = authState.primaryRole;
 
     // Filter navigation groups by user roles
@@ -164,7 +191,7 @@ class SidebarWidget extends ConsumerWidget {
                       color: AppColors.slate400,
                     ),
                     onPressed: () {
-                      storage.setSidebarCollapsed(!isCollapsed);
+                      ref.read(sidebarCollapsedProvider.notifier).toggle();
                     },
                     tooltip: isCollapsed ? 'Mở rộng sidebar' : 'Thu gọn sidebar',
                   ),

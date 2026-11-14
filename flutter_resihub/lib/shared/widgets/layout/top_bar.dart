@@ -127,14 +127,23 @@ class _TopBarState extends ConsumerState<TopBar> {
     final canGoBack = (router != null && router.canPop()) ||
         (widget.currentPath != null && widget.currentPath != '/admin/dashboard');
 
-    final buildingOptions = buildings.map((b) {
-      return AppSelectOption<String>(
-        value: b['id'].toString(),
-        label: '${b['code']} — ${b['name']}',
-        badge: b['code']?.toString(),
-        sublabel: b['address']?.toString(),
-      );
-    }).toList();
+    final allBuildingsLabel = 'Tất cả tòa nhà trong phạm vi (${buildings.length})';
+
+    final buildingOptions = <AppSelectOption<String>>[
+      if (buildings.length > 1)
+        AppSelectOption<String>(
+          value: '',
+          label: allBuildingsLabel,
+        ),
+      ...buildings.map((b) {
+        return AppSelectOption<String>(
+          value: b['id'].toString(),
+          label: '${b['code']} — ${b['name']}',
+          badge: b['code']?.toString(),
+          sublabel: b['address']?.toString(),
+        );
+      }),
+    ];
 
     return Container(
       height: 64,
@@ -181,10 +190,10 @@ class _TopBarState extends ConsumerState<TopBar> {
                         maxWidth: isDesktop ? 360 : (isTabletOrDesktop ? 280 : 200),
                       ),
                       child: AppSelect<String>(
-                        value: selectedBuildingId.isNotEmpty ? selectedBuildingId : null,
+                        value: selectedBuildingId,
                         options: buildingOptions,
                         placeholder: buildings.length > 1
-                            ? 'Tất cả tòa nhà trong phạm vi (${buildings.length})'
+                            ? allBuildingsLabel
                             : (buildingOptions.firstOrNull?.label ?? 'Chọn tòa nhà'),
                         searchPlaceholder: 'Tìm nhanh theo mã hoặc tên tòa nhà...',
                         searchable: buildings.length > 3,
