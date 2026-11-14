@@ -17,6 +17,8 @@ import 'package:flutter_resihub/features/resident/screens/resident_portal_page.d
 import 'package:flutter_resihub/features/resident/services/resident_service.dart';
 import 'package:flutter_resihub/features/resident/tabs/contract_tab.dart';
 import 'package:flutter_resihub/features/resident/tabs/invoices_tab.dart';
+import 'package:flutter_resihub/features/resident/tabs/profile_tab.dart';
+import 'package:flutter_resihub/features/resident/tabs/services_tab.dart';
 import 'package:flutter_resihub/shared/widgets/ui/html_print_preview_modal.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
@@ -620,6 +622,237 @@ void main() {
       expect(find.textContaining('2.500.000'), findsWidgets);
       // Meter photo icon / button exists for electricity
       expect(find.textContaining('Ảnh công tơ'), findsWidgets);
+    });
+
+    testWidgets('InvoicesTab renders building payment account, VietQR transfer syntax & credit balance/history',
+        (tester) async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/resident/invoices')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': [
+                {
+                  'invoice_id': 'inv-101',
+                  'invoice_code': 'HD-T11-001',
+                  'period': '2026-11',
+                  'apartment_code': 'P302',
+                  'status': 'ISSUED',
+                  'subtotal_amount': 2500000,
+                  'total_amount': 2500000,
+                  'paid_amount': 0,
+                  'lines': [],
+                }
+              ],
+              'credit_balances': [
+                {
+                  'id': 'cr-1',
+                  'amount': 350000,
+                  'available_amount': 350000,
+                  'status': 'AVAILABLE',
+                  'description': 'Hoàn cọc dịch vụ kỳ trước',
+                  'created_at': '2026-11-01',
+                }
+              ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1200, 1000));
+
+      final overview = {
+        'available_credit_balance': 350000,
+        'payment_account': {
+          'bank': 'Vietcombank',
+          'bank_code': 'VCB',
+          'bank_bin': '970436',
+          'account_no': '1234567890',
+          'account_name': 'BAN QUAN LY APARTMENT',
+          'branch': 'CN Ba Dinh',
+        },
+        'active_contract': {
+          'contract_id': 'c-1',
+          'apartment_code': 'P302',
+        },
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: InvoicesTab(
+                overview: overview,
+                onRefreshOverview: () async {},
+                onNavigateTab: (tab, [extra]) {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Credit balance banner
+      expect(find.textContaining('Số dư tín dụng khả dụng: 350.000'), findsOneWidget);
+      // Credit balance history section
+      expect(find.textContaining('Lịch sử biến động tín dụng'), findsOneWidget);
+      expect(find.textContaining('Hoàn cọc dịch vụ kỳ trước'), findsOneWidget);
+
+      // Building payment account
+      expect(find.textContaining('Tài khoản nhận thanh toán Tòa nhà'), findsOneWidget);
+      expect(find.textContaining('1234567890'), findsOneWidget);
+      expect(find.textContaining('BAN QUAN LY APARTMENT'), findsOneWidget);
+
+      // Copyable VietQR transfer syntax
+      expect(find.textContaining('RESIHUB P302 202611'), findsOneWidget);
+
+      // VietQR modal trigger
+      final qrBtn = find.text('Mã QR thanh toán (VietQR)');
+      expect(qrBtn, findsOneWidget);
+      await tester.tap(qrBtn);
+      await tester.pumpAndSettle();
+      expect(find.text('Mã VietQR Thanh Toán'), findsOneWidget);
+    });
+
+    testWidgets('ProfileTab mounts and disposes cleanly without leaking controllers', (tester) async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        return ResponseBody.fromString(jsonEncode({'success': true, 'data': {}}), 200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+      });
+
+      bool showProfile = true;
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: StatefulBuilder(
+                builder: (context, setState) {
+                  if (!showProfile) {
+                    return const SizedBox.shrink();
+                  }
+                  return ProfileTab(
+                    overview: const {
+                      'user': {
+                        'full_name': 'Nguyen Van A',
+                        'email': 'a@resihub.vn',
+                        'phone': '0901234567',
+                        'id_number': '001200000001',
+                        'address': 'Toa A - P302',
+                      },
+                    },
+                    onRefreshOverview: () async {},
+                    onNavigateTab: (tab, [extra]) {},
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('Nguyen Van A'), findsOneWidget);
+      expect(find.text('0901234567'), findsOneWidget);
+
+      // Unmount ProfileTab by switching flag
+      showProfile = false;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(
+              body: SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('Nguyen Van A'), findsNothing);
+    });
+
+    testWidgets('ServicesTab subscribe modal computes and shows previewSubscriptionProrata', (tester) async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/resident/services')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'subscriptions': [],
+                'catalog': [
+                  {
+                    'id': 'srv-1',
+                    'service_name': 'Vé gửi ô tô',
+                    'service_code': 'PARKING_CAR',
+                    'unit_price': 1200000,
+                  }
+                ],
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: ServicesTab(
+                overview: const {
+                  'active_contract': {'contract_id': 'c-1'},
+                },
+                onRefreshOverview: () async {},
+                onNavigateTab: (tab, [extra]) {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('Vé gửi ô tô'), findsOneWidget);
+      final subBtn = find.text('Đăng ký');
+      expect(subBtn, findsOneWidget);
+      await tester.tap(subBtn);
+      await tester.pumpAndSettle();
+
+      // Prorata preview box is displayed
+      expect(find.textContaining('Phí tạm tính tháng này'), findsOneWidget);
     });
   });
 }

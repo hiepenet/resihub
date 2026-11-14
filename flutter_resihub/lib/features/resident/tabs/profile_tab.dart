@@ -52,6 +52,19 @@ class _ProfileTabState extends ConsumerState<ProfileTab> {
   }
 
   @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
+    _idNumberCtrl.dispose();
+    _addressCtrl.dispose();
+    _currentPwdCtrl.dispose();
+    _newPwdCtrl.dispose();
+    _confirmPwdCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant ProfileTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.overview != widget.overview) {

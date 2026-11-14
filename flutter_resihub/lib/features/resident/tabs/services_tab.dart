@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/billing_helpers.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
@@ -60,14 +61,18 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
     try {
       final res = await ref.read(residentServiceProvider).listServices(_contractId);
       if (mounted) {
-        if (res is Map) {
+        final dataMap = res is Map && res['data'] is Map
+            ? res['data'] as Map
+            : (res is Map ? res : null);
+
+        if (dataMap != null) {
           setState(() {
-            _subscriptions = res['active_subscriptions'] is List
-                ? res['active_subscriptions'] as List
-                : (res['subscriptions'] is List ? res['subscriptions'] as List : []);
-            _catalog = res['catalog'] is List
-                ? res['catalog'] as List
-                : (res['services'] is List ? res['services'] as List : []);
+            _subscriptions = dataMap['active_subscriptions'] is List
+                ? dataMap['active_subscriptions'] as List
+                : (dataMap['subscriptions'] is List ? dataMap['subscriptions'] as List : []);
+            _catalog = dataMap['catalog'] is List
+                ? dataMap['catalog'] as List
+                : (dataMap['services'] is List ? dataMap['services'] as List : []);
             _loading = false;
           });
         } else if (res is List) {
@@ -103,6 +108,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
         serviceCode.contains('MOTO') ||
         serviceCode.contains('BIKE');
 
+    final unitPrice = item['price'] ?? item['unit_price'] ?? 0;
     final qtyCtrl = TextEditingController(text: '1');
     final plateCtrl = TextEditingController();
     bool submitting = false;
@@ -110,26 +116,75 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
     AppModal.show(
       context: context,
       title: 'Đăng ký: $serviceName',
-      subtitle: 'Đơn giá: ${formatMoney(item['price'] ?? item['unit_price'] ?? 0)}/tháng',
+      subtitle: 'Đơn giá: ${formatMoney(unitPrice)}/tháng',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              AppInput(
-                label: 'Số lượng *',
-                controller: qtyCtrl,
-                keyboardType: TextInputType.number,
-              ),
-              if (isVehicleService) ...[
-                const SizedBox(height: 12),
+          final qty = int.tryParse(qtyCtrl.text.trim()) ?? 1;
+          final prorata = previewSubscriptionProrata(
+            unitPrice: unitPrice,
+            quantity: qty,
+            startDate: todayVietnamYmd(),
+          );
+
+          return SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
                 AppInput(
-                  label: 'Biển số xe *',
-                  controller: plateCtrl,
-                  hint: 'Ví dụ: 29A-123.45',
+                  label: 'Số lượng *',
+                  controller: qtyCtrl,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setModalState(() {}),
                 ),
-              ],
-              const SizedBox(height: 20),
+                if (isVehicleService) ...[
+                  const SizedBox(height: 12),
+                  AppInput(
+                    label: 'Biển số xe *',
+                    controller: plateCtrl,
+                    hint: 'Ví dụ: 29A-123.45',
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary50,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.primary200),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(LucideIcons.sparkles, size: 18, color: AppColors.primary600),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Phí tạm tính tháng này (${prorata.daysRatio} ngày): ${prorata.formattedAmount}',
+                              style: const TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.primary900,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              prorata.description,
+                              style: const TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 11,
+                                color: AppColors.primary700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
@@ -181,8 +236,9 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
                 ],
               ),
             ],
-          );
-        },
+          ),
+        );
+      },
       ),
     );
   }

@@ -71,7 +71,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   void initState() {
     super.initState();
     _activeTab = widget.initialTab ?? 'overview';
-    _selectedContractId = widget.contractId;
+    _selectedContractId = widget.contractId ?? widget.targetContractId;
     _actionParam = widget.action;
     _fetchOverviewData(false);
   }
@@ -86,8 +86,11 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       if (qTab != null && kValidResidentTabs.contains(qTab) && widget.initialTab == null) {
         _activeTab = qTab;
       }
-      final qContractId = queryParams['contract_id'];
-      if (qContractId != null && qContractId.isNotEmpty && widget.contractId == null) {
+      final qContractId = queryParams['contract_id'] ?? queryParams['target_contract_id'];
+      if (qContractId != null &&
+          qContractId.isNotEmpty &&
+          widget.contractId == null &&
+          widget.targetContractId == null) {
         if (_selectedContractId != qContractId) {
           _selectedContractId = qContractId;
           _fetchOverviewData(false);
