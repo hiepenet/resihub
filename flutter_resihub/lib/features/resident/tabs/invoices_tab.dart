@@ -199,9 +199,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
       if (inv is Map) {
         final st = inv['status']?.toString().toUpperCase();
         if (st != 'CANCELLED' && st != 'DRAFT' && st != 'VOID') {
-          total += (inv['paid_amount'] is num
-              ? (inv['paid_amount'] as num).toInt()
-              : int.tryParse(inv['paid_amount']?.toString() ?? '') ?? 0);
+          total += num.tryParse(inv['paid_amount']?.toString() ?? '')?.toInt() ?? 0;
         }
       }
     }
@@ -214,9 +212,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
       if (inv is Map) {
         final st = inv['status']?.toString().toUpperCase();
         if (st != 'CANCELLED' && st != 'DRAFT' && st != 'VOID') {
-          total += (inv['total_amount'] is num
-              ? (inv['total_amount'] as num).toInt()
-              : int.tryParse(inv['total_amount']?.toString() ?? '') ?? 0);
+          total += num.tryParse(inv['total_amount']?.toString() ?? '')?.toInt() ?? 0;
         }
       }
     }

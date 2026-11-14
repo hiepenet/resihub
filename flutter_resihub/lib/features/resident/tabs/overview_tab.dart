@@ -464,7 +464,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                             borderRadius: BorderRadius.circular(20),
                           ),
                           child: Text(
-                            contract['status'] == 'ACTIVE' ? 'Đang hiệu lực' : 'Đang xử lý',
+                            (contract['contract_status'] ?? contract['status']) == 'ACTIVE'
+                                ? 'Đang hiệu lực'
+                                : 'Đang xử lý',
                             style: const TextStyle(
                               fontFamily: 'Inter',
                               fontSize: 12,
@@ -496,14 +498,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               ),
                             ],
                           ),
-                        if (contract['monthly_rent'] != null)
+                        if ((contract['rent_amount'] ?? contract['monthly_rent']) != null)
                           Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               const Icon(LucideIcons.wallet, size: 15, color: Color(0xFFCBD5E1)),
                               const SizedBox(width: 6),
                               Text(
-                                'Tiền thuê: ${formatMoney(contract['monthly_rent'])}/tháng',
+                                'Tiền thuê: ${formatMoney(contract['rent_amount'] ?? contract['monthly_rent'])}/tháng',
                                 style: const TextStyle(
                                     fontSize: 12, color: Colors.white, fontFamily: 'Inter'),
                               ),

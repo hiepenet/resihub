@@ -529,9 +529,8 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     }
 
     final busyIntervals = _computeBusyIntervals();
-    final maxInternalHoldDays = _cancelPolicy['max_hold_days'] is num
-        ? (_cancelPolicy['max_hold_days'] as num).toInt()
-        : 30;
+    final maxInternalHoldDays =
+        num.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '')?.toInt() ?? 30;
 
     // Check hold_from against busy intervals
     final fromHits = findOverlappingBusyIntervals(holdFrom, holdFrom, busyIntervals);

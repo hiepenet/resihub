@@ -591,7 +591,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
               DataTableColumn(
                 key: 'invoice_code',
                 label: 'Mã hóa đơn',
-                width: 150,
+                width: 220,
                 render: (row) => Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -604,6 +604,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                       ),
                       child: Text(
                         row['invoice_code']?.toString() ?? '—',
+                        softWrap: false,
                         style: const TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 12,
@@ -733,15 +734,17 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
               DataTableColumn(
                 key: 'actions',
                 label: 'Thao tác',
-                width: 340,
+                width: 260,
                 align: TextAlign.center,
                 render: (row) {
                   final isDraft = row['status'] == 'DRAFT';
                   final isSettlement = row['invoice_type'] == 'LATE_FEE_SETTLEMENT';
                   final isIssuing = _issuingId == row['id'];
 
-                  return Row(
-                    mainAxisSize: MainAxisSize.min,
+                  return Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.center,
                     children: [
                       if (canManageInvoices && isDraft && !isSettlement)
                         AppButton(
@@ -752,7 +755,6 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                           loading: isIssuing,
                           onPressed: () => _handleQuickIssue(row),
                         ),
-                      const SizedBox(width: 6),
                       AppButton(
                         text: 'Chi tiết',
                         icon: const Icon(LucideIcons.eye, size: 14),

@@ -242,7 +242,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                       title: 'Doanh thu tháng này',
                       value: formatCompactMoney(kpis['monthly_revenue'] ?? 0),
                       valueTitle: formatMoney(kpis['monthly_revenue'] ?? 0),
-                      trend: kpis['revenue_growth_pct'] is num ? (kpis['revenue_growth_pct'] as num) : null,
+                      trend: num.tryParse(kpis['revenue_growth_pct']?.toString() ?? ''),
                       subtext:
                           'Thực thu: ${formatMoney(kpis['monthly_revenue'] ?? 0)} · Phát hành: ${formatMoney(kpis['monthly_billed'] ?? 0)}',
                       icon: LucideIcons.trendingUp,

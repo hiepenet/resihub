@@ -208,9 +208,9 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
     int totalOccupied = 0;
     int totalAvailable = 0;
     for (final b in _buildings) {
-      totalApts += ((b['total_apartments'] as num?)?.toInt() ?? 0);
-      totalOccupied += ((b['occupied_apartments'] as num?)?.toInt() ?? 0);
-      totalAvailable += ((b['available_apartments'] as num?)?.toInt() ?? 0);
+      totalApts += num.tryParse(b['total_apartments']?.toString() ?? '')?.toInt() ?? 0;
+      totalOccupied += num.tryParse(b['occupied_apartments']?.toString() ?? '')?.toInt() ?? 0;
+      totalAvailable += num.tryParse(b['available_apartments']?.toString() ?? '')?.toInt() ?? 0;
     }
     final avgOccupancy =
         totalApts > 0 ? (totalOccupied / totalApts * 100).toStringAsFixed(1) : '0.0';
@@ -422,11 +422,11 @@ class _BuildingCard extends StatelessWidget {
     final address = building['address']?.toString() ?? '';
     final status = building['status']?.toString().toUpperCase() ?? 'ACTIVE';
 
-    final totalFloors = (building['total_floors'] as num?)?.toInt() ?? 0;
-    final totalZones = (building['total_zones'] as num?)?.toInt() ?? 0;
-    final totalApts = (building['total_apartments'] as num?)?.toInt() ?? 0;
-    final occApts = (building['occupied_apartments'] as num?)?.toInt() ?? 0;
-    final availApts = (building['available_apartments'] as num?)?.toInt() ?? 0;
+    final totalFloors = num.tryParse(building['total_floors']?.toString() ?? '')?.toInt() ?? 0;
+    final totalZones = num.tryParse(building['total_zones']?.toString() ?? '')?.toInt() ?? 0;
+    final totalApts = num.tryParse(building['total_apartments']?.toString() ?? '')?.toInt() ?? 0;
+    final occApts = num.tryParse(building['occupied_apartments']?.toString() ?? '')?.toInt() ?? 0;
+    final availApts = num.tryParse(building['available_apartments']?.toString() ?? '')?.toInt() ?? 0;
     final rate = totalApts > 0 ? (occApts / totalApts * 100).round() : 0;
 
     final hasChildren = totalFloors > 0 || totalZones > 0 || totalApts > 0;

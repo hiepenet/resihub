@@ -1256,7 +1256,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
       DataTableColumn<dynamic>(
         key: 'actions',
         label: 'Thao tác',
-        width: 100,
+        width: 130,
         align: TextAlign.center,
         render: (row) {
           if (row is! Map) return const SizedBox.shrink();

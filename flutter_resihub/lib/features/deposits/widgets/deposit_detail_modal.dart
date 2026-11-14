@@ -322,9 +322,7 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
         'outstanding_debt': _outstandingDebt,
         'items': _deductionItems.map((it) => {
           'category': it['category'],
-          'amount': it['amount'] is num
-              ? (it['amount'] as num).toInt()
-              : (int.tryParse(it['amount']?.toString() ?? '') ?? 0),
+          'amount': num.tryParse(it['amount']?.toString() ?? '')?.toInt() ?? 0,
           'description': it['description']?.toString().trim() ?? '',
           'evidence': it['evidence'] is List ? it['evidence'] : [],
         }).toList(),

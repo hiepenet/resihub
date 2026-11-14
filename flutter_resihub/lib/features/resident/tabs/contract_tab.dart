@@ -485,6 +485,12 @@ class _ContractTabState extends ConsumerState<ContractTab> {
 
     final rawOccupants = contract['occupants'] is List ? contract['occupants'] as List : const [];
     final occupants = rawOccupants.whereType<Map<String, dynamic>>().toList();
+    final rawContractId = (contract['contract_id'] ?? contract['id'])?.toString() ?? '';
+    final contractCode = contract['contract_code']?.toString() ??
+        (rawContractId.length >= 8
+            ? 'HĐ-${rawContractId.substring(0, 8).toUpperCase()}'
+            : (rawContractId.isNotEmpty ? 'HĐ-$rawContractId' : '---'));
+    final isContractActive = (contract['contract_status'] ?? contract['status']) == 'ACTIVE';
 
     return RefreshIndicator(
       onRefresh: () async {
@@ -512,7 +518,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        'Hợp đồng thuê: ${contract['contract_code'] ?? '---'}',
+                        'Hợp đồng thuê: $contractCode',
                         style: const TextStyle(
                           fontFamily: 'Inter',
                           fontSize: 15,
@@ -542,8 +548,8 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                         ),
                       ),
                       AppBadge(
-                        label: contract['status'] == 'ACTIVE' ? 'Đang hiệu lực' : 'Đang xử lý',
-                        variant: contract['status'] == 'ACTIVE'
+                        label: isContractActive ? 'Đang hiệu lực' : 'Đang xử lý',
+                        variant: isContractActive
                             ? AppBadgeVariant.emerald
                             : AppBadgeVariant.amber,
                       ),
@@ -559,7 +565,8 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                       _buildInfoItem('Ngày bắt đầu', formatDate(contract['start_date'])),
                       _buildInfoItem('Ngày kết thúc', formatDate(contract['end_date'])),
                       _buildInfoItem(
-                          'Giá thuê hàng tháng', formatMoney(contract['monthly_rent'])),
+                          'Giá thuê hàng tháng',
+                          formatMoney(contract['rent_amount'] ?? contract['monthly_rent'])),
                       _buildInfoItem('Tiền cọc quy định', formatMoney(contract['deposit_amount'])),
                     ],
                   ),

@@ -179,9 +179,7 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
         builder: (ctx, ref, _) {
           final canManage = ref.watch(permissionProvider).canManageServices;
           final status = item['status']?.toString() ?? '';
-          final unitPrice = item['unit_price'] is num
-              ? item['unit_price'] as num
-              : num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
+          final unitPrice = num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
           final qty = item['quantity'] ?? 1;
 
           return Column(
@@ -714,8 +712,8 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
     final monthlyTotal = _subscriptions.where((s) => s['status'] == 'ACTIVE').fold<num>(
       0,
       (sum, s) {
-        final p = s['unit_price'] is num ? s['unit_price'] as num : num.tryParse(s['unit_price']?.toString() ?? '0') ?? 0;
-        final q = s['quantity'] is num ? s['quantity'] as num : num.tryParse(s['quantity']?.toString() ?? '1') ?? 1;
+        final p = num.tryParse(s['unit_price']?.toString() ?? '0') ?? 0;
+        final q = num.tryParse(s['quantity']?.toString() ?? '1') ?? 1;
         return sum + (p * q);
       },
     );
@@ -870,9 +868,7 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                       ],
                       rows: items.map((sub) {
                         final status = sub['status']?.toString() ?? '';
-                        final unitPrice = sub['unit_price'] is num
-                            ? sub['unit_price'] as num
-                            : num.tryParse(sub['unit_price']?.toString() ?? '0') ?? 0;
+                        final unitPrice = num.tryParse(sub['unit_price']?.toString() ?? '0') ?? 0;
                         final qty = sub['quantity'] ?? 1;
 
                         return DataRow(

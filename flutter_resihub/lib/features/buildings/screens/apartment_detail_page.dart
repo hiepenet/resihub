@@ -254,9 +254,9 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
         _loading = false;
         _formZoneId = data['zone_id']?.toString() ?? '';
         _formType = data['type']?.toString() ?? '1PN';
-        _formBedrooms = (data['bedrooms'] as num?)?.toInt() ?? 1;
-        _formAreaM2 = (data['area_m2'] as num?)?.toDouble() ?? 0.0;
-        _formBaseRent = (data['base_rent'] as num?)?.toInt() ?? 0;
+        _formBedrooms = num.tryParse(data['bedrooms']?.toString() ?? '')?.toInt() ?? 1;
+        _formAreaM2 = num.tryParse(data['area_m2']?.toString() ?? '')?.toDouble() ?? 0.0;
+        _formBaseRent = num.tryParse(data['base_rent']?.toString() ?? '')?.toInt() ?? 0;
         _formNote = data['note']?.toString() ?? '';
         _formAmenitiesText = amenitiesStr;
       });
@@ -419,8 +419,8 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   // --- Create reservation logic ---
   void _openCreateReservation() {
     final today = toDateOnlyStr(DateTime.now());
-    final defaultAmt = (_cancelPolicy['default_hold_amount'] as num?)?.toInt() ?? 2000000;
-    final maxDays = (_cancelPolicy['max_hold_days'] as num?)?.toInt() ?? 30;
+    final defaultAmt = num.tryParse(_cancelPolicy['default_hold_amount']?.toString() ?? '')?.toInt() ?? 2000000;
+    final maxDays = num.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '')?.toInt() ?? 30;
 
     setState(() {
       _createIdemKey = createIdempotencyKey();
@@ -544,7 +544,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   // --- Cancel settle proposal logic (Step 1) ---
   void _openCancelSettleModal(Map<String, dynamic> rsv) {
     final today = toDateOnlyStr(DateTime.now());
-    final holdAmt = (rsv['hold_amount'] as num?)?.toInt() ?? 0;
+    final holdAmt = num.tryParse(rsv['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
     final suggested = computeSuggestedCancelSplit(
       holdAmount: holdAmt,
       holdUntil: rsv['hold_until'],
@@ -573,7 +573,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   void _onSettleRefundedChanged(String rawVal) {
-    final total = (_settleTargetRsv?['hold_amount'] as num?)?.toInt() ?? 0;
+    final total = num.tryParse(_settleTargetRsv?['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
     final numVal = int.tryParse(rawVal.replaceAll('.', '').replaceAll(',', '').trim()) ?? 0;
     final clamped = numVal.clamp(0, total);
     setState(() {
@@ -585,7 +585,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   Future<void> _handleCancelSettleSubmit() async {
     final id = _settleTargetRsv?['id']?.toString();
     if (id == null) return;
-    final total = (_settleTargetRsv?['hold_amount'] as num?)?.toInt() ?? 0;
+    final total = num.tryParse(_settleTargetRsv?['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
     if (_settleRefundedAmount + _settleForfeitedAmount != total) {
       ref.read(toastProvider.notifier).warning('Tổng tiền hoàn + tiền phạt phải bằng đúng ${formatMoney(total)}.');
       return;
@@ -1521,9 +1521,9 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   Widget _buildReservationAmountCell(Map<String, dynamic> r) {
-    final holdAmt = (r['hold_amount'] as num?)?.toInt() ?? 0;
-    final refAmt = (r['refunded_amount'] as num?)?.toInt() ?? 0;
-    final forfAmt = (r['forfeited_amount'] as num?)?.toInt() ?? 0;
+    final holdAmt = num.tryParse(r['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
+    final refAmt = num.tryParse(r['refunded_amount']?.toString() ?? '')?.toInt() ?? 0;
+    final forfAmt = num.tryParse(r['forfeited_amount']?.toString() ?? '')?.toInt() ?? 0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
@@ -1540,7 +1540,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
 
   Widget _buildReservationActionsCell(Map<String, dynamic> r, PermissionMatrix permissions, String currentUserId) {
     final canConfirm = canManagerConfirmReservationPayment(r, isManager: permissions.isManager);
-    final holdAmt = (r['hold_amount'] as num?)?.toInt() ?? 0;
+    final holdAmt = num.tryParse(r['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
     final canPropose = canProposeReservationCancel(r, isManager: permissions.isManager) && holdAmt > 0;
     final canApprove = canApproveReservationCancel(
       r,
@@ -1865,7 +1865,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   Widget _buildCreateReservationModal() {
-    final maxDays = (_cancelPolicy['max_hold_days'] as num?)?.toInt() ?? 30;
+    final maxDays = num.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '')?.toInt() ?? 30;
 
     return AppModal(
       title: 'Đặt cọc giữ chỗ — Căn ${_apt!['code'] ?? ''}',
@@ -2019,7 +2019,7 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   Widget _buildCancelSettleModal() {
-    final holdAmt = (_settleTargetRsv?['hold_amount'] as num?)?.toInt() ?? 0;
+    final holdAmt = num.tryParse(_settleTargetRsv?['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
 
     return AppModal(
       title: 'Đề xuất thanh lý hủy giữ chỗ (Bước 1 — BQL lập đề xuất)',
@@ -2187,9 +2187,9 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   Widget _buildReviewCancelModal() {
-    final holdAmt = (_reviewTargetRsv?['hold_amount'] as num?)?.toInt() ?? 0;
-    final refAmt = (_reviewTargetRsv?['refunded_amount'] as num?)?.toInt() ?? 0;
-    final forfAmt = (_reviewTargetRsv?['forfeited_amount'] as num?)?.toInt() ?? 0;
+    final holdAmt = num.tryParse(_reviewTargetRsv?['hold_amount']?.toString() ?? '')?.toInt() ?? 0;
+    final refAmt = num.tryParse(_reviewTargetRsv?['refunded_amount']?.toString() ?? '')?.toInt() ?? 0;
+    final forfAmt = num.tryParse(_reviewTargetRsv?['forfeited_amount']?.toString() ?? '')?.toInt() ?? 0;
 
     return AppModal(
       title: _reviewMode == 'reject'
@@ -2313,8 +2313,8 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
   }
 
   Widget _buildPayoutModal() {
-    final refAmt = (_payoutTargetRsv?['refunded_amount'] as num?)?.toInt() ?? 0;
-    final forfAmt = (_payoutTargetRsv?['forfeited_amount'] as num?)?.toInt() ?? 0;
+    final refAmt = num.tryParse(_payoutTargetRsv?['refunded_amount']?.toString() ?? '')?.toInt() ?? 0;
+    final forfAmt = num.tryParse(_payoutTargetRsv?['forfeited_amount']?.toString() ?? '')?.toInt() ?? 0;
 
     return AppModal(
       title: 'Thực chi hoàn tiền giữ chỗ & Tải UNC (Bước 3 — BQL thực chi)',

@@ -401,12 +401,10 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
               ? (activeMeter['overlapping_contracts'] as List).whereType<Map>().toList()
               : <Map>[];
 
-          final prevReading = activeMeter['period_previous_reading'] is num
-              ? activeMeter['period_previous_reading'] as num
-              : num.tryParse(activeMeter['period_previous_reading']?.toString() ?? '') ??
-                  (activeMeter['last_known_reading'] is num
-                      ? activeMeter['last_known_reading'] as num
-                      : num.tryParse(activeMeter['last_known_reading']?.toString() ?? '') ?? 0);
+          final prevReading =
+              num.tryParse(activeMeter['period_previous_reading']?.toString() ?? '') ??
+                  num.tryParse(activeMeter['last_known_reading']?.toString() ?? '') ??
+                  0;
 
           final currentNum = num.tryParse(currentReadingStr.trim());
           final consumption = currentNum != null && currentNum >= prevReading ? currentNum - prevReading : null;

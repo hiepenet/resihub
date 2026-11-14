@@ -151,10 +151,7 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
     final nameCtrl = TextEditingController(text: itemToEdit?['name']?.toString() ?? '');
     final unitCtrl = TextEditingController(text: itemToEdit?['unit']?.toString() ?? 'tháng');
     final descCtrl = TextEditingController(text: itemToEdit?['description']?.toString() ?? '');
-    int unitPrice = (itemToEdit?['unit_price'] is num
-            ? (itemToEdit!['unit_price'] as num).toInt()
-            : int.tryParse(itemToEdit?['unit_price']?.toString() ?? '')) ??
-        0;
+    int unitPrice = num.tryParse(itemToEdit?['unit_price']?.toString() ?? '')?.toInt() ?? 0;
 
     String category = itemToEdit?['category']?.toString() ?? 'UTILITY';
     String billingType = itemToEdit?['billing_type']?.toString() ?? 'FIXED';
@@ -542,9 +539,7 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                             );
 
                         final billingTypeLabel = kBillingTypes[item['billing_type']] ?? item['billing_type'];
-                        final price = item['unit_price'] is num
-                            ? item['unit_price'] as num
-                            : num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
+                        final price = num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
                         final unit = item['unit'] ?? 'tháng';
                         final isActive = item['is_active'] == true;
 

@@ -1058,12 +1058,14 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                 DataTableColumn(
                   key: 'actions',
                   label: 'Thao tác',
-                  width: 480,
+                  width: 250,
                   align: TextAlign.center,
                   render: (row) {
                     final isPending = row['status'] == 'PENDING_CONFIRMATION';
-                    return Row(
-                      mainAxisSize: MainAxisSize.min,
+                    return Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.center,
                       children: [
                         AppButton(
                           text: 'Chi tiết',
@@ -1078,7 +1080,6 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                           },
                         ),
                         if (canManagePayments && isPending) ...[
-                          const SizedBox(width: 6),
                           AppButton(
                             text: 'Xác nhận',
                             icon: const Icon(LucideIcons.check, size: 14),
@@ -1087,7 +1088,6 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                             disabled: _processingAction,
                             onPressed: () => _handleConfirmPayment(row),
                           ),
-                          const SizedBox(width: 6),
                           AppButton(
                             text: 'Từ chối',
                             icon: const Icon(LucideIcons.x, size: 14),
