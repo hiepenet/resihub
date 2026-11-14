@@ -28,8 +28,12 @@ class ProfileModal extends ConsumerStatefulWidget {
   }) {
     return showDialog<void>(
       context: context,
-      builder: (ctx) => ProfileModal(
-        onClose: () => Navigator.of(ctx).pop(),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: ProfileModal(
+          onClose: () => Navigator.of(ctx).pop(),
+        ),
       ),
     );
   }
