@@ -5,7 +5,10 @@ import 'package:go_router/go_router.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/screens/forgot_password_page.dart';
 import '../../features/auth/screens/login_page.dart';
+import '../../features/buildings/screens/building_detail_page.dart';
 import '../../features/buildings/screens/buildings_page.dart';
+import '../../features/buildings/screens/floor_plan_page.dart';
+import '../../features/buildings/screens/zone_detail_page.dart';
 import '../../shared/widgets/layout/admin_shell.dart';
 import 'route_guards.dart';
 
@@ -210,24 +213,18 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/buildings/floor-plan',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/buildings/floor-plan',
-                title: 'Sơ đồ mặt bằng',
-              ),
+              child: FloorPlanPage(),
             ),
           ),
           GoRoute(
             path: '/admin/buildings/:id',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/buildings/:id',
-                  title: 'Chi tiết tòa nhà',
-                  params: {'id': id},
+                child: BuildingDetailPage(
+                  key: ValueKey('$id:'),
+                  buildingId: id,
                 ),
               );
             },
@@ -239,11 +236,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
+                child: ZoneDetailPage(
                   key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/buildings/:id/zones/:zoneId',
-                  title: 'Chi tiết khu vực',
-                  params: {'id': id, 'zoneId': zoneId},
+                  buildingId: id,
+                  zoneId: zoneId,
                 ),
               );
             },
@@ -252,15 +248,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/buildings/:id/floor-plan',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/buildings/:id/floor-plan',
-                  title: 'Sơ đồ mặt bằng tòa nhà',
-                  params: {'id': id},
-                ),
+                child: FloorPlanPage(buildingId: id),
               );
             },
           ),
