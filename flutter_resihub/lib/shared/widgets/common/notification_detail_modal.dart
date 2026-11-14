@@ -27,6 +27,27 @@ class NotificationDetailModal extends StatelessWidget {
     this.onNavigateFallback,
   });
 
+  /// Static helper to display the modal cleanly via [showDialog] root overlay.
+  static Future<void> show({
+    required BuildContext context,
+    required Map<String, dynamic>? notification,
+    String? fallbackUrl,
+    String fallbackLabel = 'Đi tới trang liên quan',
+    ValueChanged<String>? onNavigateFallback,
+  }) {
+    if (notification == null) return Future.value();
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => NotificationDetailModal(
+        notification: notification,
+        fallbackUrl: fallbackUrl,
+        fallbackLabel: fallbackLabel,
+        onNavigateFallback: onNavigateFallback,
+        onClose: () => Navigator.of(ctx).pop(),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!open || notification == null) return const SizedBox.shrink();

@@ -28,9 +28,6 @@ class NotificationBell extends ConsumerStatefulWidget {
 
 class _NotificationBellState extends ConsumerState<NotificationBell> {
   Timer? _pollingTimer;
-  Map<String, dynamic>? _selectedNotification;
-  NotificationActionResult? _selectedAction;
-  bool _showDetailModal = false;
 
   @override
   void initState() {
@@ -70,11 +67,16 @@ class _NotificationBellState extends ConsumerState<NotificationBell> {
         router.go(action.url!);
       }
     } else {
-      setState(() {
-        _selectedNotification = notif;
-        _selectedAction = action;
-        _showDetailModal = true;
-      });
+      NotificationDetailModal.show(
+        context: context,
+        notification: notif,
+        fallbackUrl: action.fallbackUrl,
+        fallbackLabel: action.actionLabel,
+        onNavigateFallback: (url) {
+          final router = GoRouter.maybeOf(context);
+          router?.go(url);
+        },
+      );
     }
   }
 
@@ -330,18 +332,6 @@ class _NotificationBellState extends ConsumerState<NotificationBell> {
                 ),
               ),
             ),
-          ),
-        if (_showDetailModal && _selectedNotification != null)
-          NotificationDetailModal(
-            notification: _selectedNotification,
-            open: _showDetailModal,
-            fallbackUrl: _selectedAction?.fallbackUrl,
-            fallbackLabel: _selectedAction?.actionLabel ?? 'Đi tới trang liên quan',
-            onClose: () => setState(() => _showDetailModal = false),
-            onNavigateFallback: (url) {
-              final router = GoRouter.maybeOf(context);
-              router?.go(url);
-            },
           ),
       ],
     );

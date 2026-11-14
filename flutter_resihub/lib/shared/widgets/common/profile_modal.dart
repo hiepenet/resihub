@@ -22,6 +22,18 @@ class ProfileModal extends ConsumerStatefulWidget {
     this.onClose,
   });
 
+  /// Static helper to display the profile modal cleanly via [showDialog] root overlay.
+  static Future<void> show({
+    required BuildContext context,
+  }) {
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => ProfileModal(
+        onClose: () => Navigator.of(ctx).pop(),
+      ),
+    );
+  }
+
   @override
   ConsumerState<ProfileModal> createState() => _ProfileModalState();
 }

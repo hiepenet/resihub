@@ -6,11 +6,38 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_resihub/core/constants/statuses.dart';
 import 'package:flutter_resihub/core/storage/app_storage.dart';
 import 'package:flutter_resihub/core/utils/notification_navigation.dart';
+import 'package:flutter_resihub/features/notifications/services/notifications_service.dart';
 import 'package:flutter_resihub/shared/providers/notification_provider.dart';
 import 'package:flutter_resihub/shared/widgets/common/bank_select.dart';
 import 'package:flutter_resihub/shared/widgets/common/data_table_widget.dart';
+import 'package:flutter_resihub/shared/widgets/common/notification_bell.dart';
+import 'package:flutter_resihub/shared/widgets/common/notification_detail_modal.dart';
 import 'package:flutter_resihub/shared/widgets/common/service_subscription_meta_fields.dart';
 import 'package:flutter_resihub/shared/widgets/common/status_badge.dart';
+
+class _FakeNotificationsService extends Fake implements NotificationsService {
+  @override
+  Future<dynamic> list() async {
+    return {
+      'data': [
+        {
+          'id': 'notif-bc-1',
+          'type': 'ANNOUNCEMENT',
+          'title': 'Bảo trì thang máy',
+          'content': 'Thang máy sẽ tạm ngừng hoạt động từ 8h đến 12h ngày mai.',
+          'created_at': DateTime.now().toIso8601String(),
+          'read_at': null,
+        }
+      ],
+      'unread_count': 1,
+    };
+  }
+
+  @override
+  Future<dynamic> markRead(dynamic id) async {
+    return {'success': true};
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -268,6 +295,59 @@ void main() {
       expect(find.text('Tên hạng mục'), findsOneWidget);
       expect(find.text('Item A'), findsOneWidget);
       expect(find.text('Item B'), findsOneWidget);
+    });
+
+    testWidgets('NotificationBell mounted in constrained 56px TopBar opens NotificationDetailModal cleanly without overflow', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = AppStorage(isWeb: true);
+      await storage.init();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            appStorageProvider.overrideWithValue(storage),
+            notificationsServiceProvider.overrideWithValue(_FakeNotificationsService()),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              appBar: AppBar(
+                toolbarHeight: 56,
+                actions: const [
+                  SizedBox(
+                    height: 56,
+                    child: NotificationBell(),
+                  ),
+                ],
+              ),
+              body: const SizedBox(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Assert badge renders
+      expect(find.byType(NotificationBell), findsOneWidget);
+      expect(find.text('1'), findsOneWidget);
+
+      // Click bell icon to open bottom sheet
+      await tester.tap(find.byType(IconButton));
+      await tester.pumpAndSettle();
+
+      // Assert notification title in bottom sheet
+      expect(find.text('Bảo trì thang máy'), findsOneWidget);
+
+      // Tap the notification item to open detail modal
+      await tester.tap(find.text('Bảo trì thang máy'));
+      await tester.pumpAndSettle();
+
+      // Assert NotificationDetailModal opened cleanly as dialog overlay with zero layout overflow
+      expect(find.byType(NotificationDetailModal), findsOneWidget);
+      expect(find.text('Chi tiết thông báo'), findsOneWidget);
+      expect(find.text('Thang máy sẽ tạm ngừng hoạt động từ 8h đến 12h ngày mai.'), findsOneWidget);
+
+      // Verify no overflow errors were thrown
+      expect(tester.takeException(), isNull);
     });
   });
 }
