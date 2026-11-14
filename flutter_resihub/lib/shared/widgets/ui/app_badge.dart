@@ -146,15 +146,18 @@ class AppBadge extends StatelessWidget {
             const SizedBox(width: 4),
           ],
           if (child != null)
-            child!
+            Flexible(child: child!)
           else if (label != null)
-            Text(
-              label!,
-              style: TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: textCol,
+            Flexible(
+              child: Text(
+                label!,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: textCol,
+                ),
               ),
             ),
         ],
