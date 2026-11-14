@@ -14,3 +14,5 @@ api/test-artifacts
 docs
 npm-debug.log*
 *.log
+flutter_resihub/
+
