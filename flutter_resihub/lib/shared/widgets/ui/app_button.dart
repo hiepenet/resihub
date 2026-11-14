@@ -121,13 +121,17 @@ class AppButton extends StatelessWidget {
         children.add(child!);
       } else if (text != null) {
         children.add(
-          Text(
-            text!,
-            style: TextStyle(
-              fontFamily: 'Inter',
-              fontSize: fontSize,
-              fontWeight: FontWeight.w500,
-              color: fgColor,
+          Flexible(
+            child: Text(
+              text!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontSize: fontSize,
+                fontWeight: FontWeight.w500,
+                color: fgColor,
+              ),
             ),
           ),
         );

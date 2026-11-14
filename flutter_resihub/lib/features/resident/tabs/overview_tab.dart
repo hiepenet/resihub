@@ -642,15 +642,20 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.slate500,
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: AppColors.slate500,
+                    ),
                   ),
                 ),
+                const SizedBox(width: 4),
                 Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(

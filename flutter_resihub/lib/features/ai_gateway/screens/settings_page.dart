@@ -448,9 +448,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   children: [
                                     Icon(LucideIcons.shieldCheck, size: 16, color: AppColors.primary600),
                                     SizedBox(width: 8),
-                                    Text(
-                                      'Cho phép người tạo tự phê duyệt trong mô hình 1 nhân sự (allow_self_approval)',
-                                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate900),
+                                    Expanded(
+                                      child: Text(
+                                        'Cho phép người tạo tự phê duyệt trong mô hình 1 nhân sự (allow_self_approval)',
+                                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate900),
+                                      ),
                                     ),
                                   ],
                                 ),

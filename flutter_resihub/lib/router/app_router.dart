@@ -2,70 +2,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../features/auth/providers/auth_provider.dart';
-import '../../features/auth/screens/forgot_password_page.dart';
-import '../../features/auth/screens/login_page.dart';
-import '../../features/buildings/screens/building_detail_page.dart';
-import '../../features/buildings/screens/buildings_page.dart';
-import '../../features/buildings/screens/floor_plan_page.dart';
-import '../../features/buildings/screens/zone_detail_page.dart';
-import '../../shared/widgets/layout/admin_shell.dart';
+import '../features/ai_gateway/screens/settings_page.dart';
+import '../features/audit/screens/audit_logs_page.dart';
+import '../features/auth/providers/auth_provider.dart';
+import '../features/auth/screens/forgot_password_page.dart';
+import '../features/auth/screens/login_page.dart';
+import '../features/buildings/screens/apartment_detail_page.dart';
+import '../features/buildings/screens/building_detail_page.dart';
+import '../features/buildings/screens/buildings_page.dart';
+import '../features/buildings/screens/floor_plan_page.dart';
+import '../features/buildings/screens/zone_detail_page.dart';
+import '../features/contracts/screens/contract_detail_page.dart';
+import '../features/contracts/screens/contracts_page.dart';
+import '../features/deposits/screens/deposits_page.dart';
+import '../features/invoices/screens/invoice_detail_page.dart';
+import '../features/invoices/screens/invoices_page.dart';
+import '../features/maintenance/screens/service_requests_page.dart';
+import '../features/meters/screens/meter_readings_page.dart';
+import '../features/notifications/screens/notifications_page.dart';
+import '../features/payments/screens/payments_page.dart';
+import '../features/public/screens/public_explore_page.dart';
+import '../features/reports/screens/dashboard_page.dart';
+import '../features/reports/screens/reports_page.dart';
+import '../features/resident/screens/resident_portal_page.dart';
+import '../features/services/screens/service_catalog_page.dart';
+import '../features/services/screens/subscriptions_page.dart';
+import '../features/tenants/screens/tenant_detail_page.dart';
+import '../features/tenants/screens/tenants_page.dart';
+import '../features/users/screens/users_page.dart';
+import '../shared/widgets/layout/admin_shell.dart';
 import 'route_guards.dart';
-
-/// Lightweight route placeholder widget for screens implemented in upcoming tasks.
-/// Allows tests and navigation inspection to assert route key and extracted parameters cleanly.
-class RoutePlaceholderPage extends StatefulWidget {
-  final String routeKey;
-  final String title;
-  final Map<String, String> params;
-
-  const RoutePlaceholderPage({
-    super.key,
-    required this.routeKey,
-    required this.title,
-    this.params = const {},
-  });
-
-  @override
-  State<RoutePlaceholderPage> createState() => _RoutePlaceholderPageState();
-}
-
-class _RoutePlaceholderPageState extends State<RoutePlaceholderPage> {
-  static int _globalMountCounter = 0;
-  late final int _mountId;
-
-  @override
-  void initState() {
-    super.initState();
-    _globalMountCounter++;
-    _mountId = _globalMountCounter;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              widget.title,
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Text('Route: ${widget.routeKey}'),
-            if (widget.params.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text('Params: ${widget.params}'),
-            ],
-            const SizedBox(height: 4),
-            Text('Mount: $_mountId'),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 /// Fallback redirector widget for unknown routes matching React Router's `<RootRedirect />` fallback.
 class _UnknownRouteRedirector extends ConsumerStatefulWidget {
@@ -155,13 +121,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
-      // Public routes
+      // Public & Resident routes
       GoRoute(
         path: '/explore',
-        builder: (context, state) => const RoutePlaceholderPage(
-          routeKey: '/explore',
-          title: 'Khám phá ResiHub',
-        ),
+        builder: (context, state) => const PublicExplorePage(),
       ),
       GoRoute(
         path: '/login',
@@ -176,9 +139,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/resident',
-        builder: (context, state) => const RoutePlaceholderPage(
-          routeKey: '/resident',
-          title: 'Cổng cư dân',
+        builder: (context, state) => ResidentPortalPage(
+          initialTab: state.uri.queryParameters['tab'],
+          contractId: state.uri.queryParameters['contract_id'],
+          targetContractId: state.uri.queryParameters['target_contract_id'],
+          action: state.uri.queryParameters['action'],
+          invoiceId: state.uri.queryParameters['invoice_id'],
+          requestId: state.uri.queryParameters['request_id'],
+          modal: state.uri.queryParameters['modal'],
         ),
       ),
 
@@ -193,10 +161,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         routes: [
           GoRoute(
             path: '/admin/dashboard',
-            builder: (context, state) => const RoutePlaceholderPage(
-              routeKey: '/admin/dashboard',
-              title: 'Bảng điều khiển',
-            ),
+            builder: (context, state) => const DashboardPage(),
           ),
 
           // Buildings (M03)
@@ -211,9 +176,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           // /admin/buildings/floor-plan MUST be declared BEFORE /admin/buildings/:id
           GoRoute(
             path: '/admin/buildings/floor-plan',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: FloorPlanPage(),
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: FloorPlanPage(
+                highlightPendingConfirm: state.uri.queryParameters['pending_confirm'] == '1',
+              ),
             ),
           ),
           GoRoute(
@@ -250,7 +217,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
               final id = state.pathParameters['id'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: FloorPlanPage(buildingId: id),
+                child: FloorPlanPage(
+                  buildingId: id,
+                  highlightPendingConfirm: state.uri.queryParameters['pending_confirm'] == '1',
+                ),
               );
             },
           ),
@@ -258,14 +228,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/apartments/:id',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/apartments/:id',
-                  title: 'Chi tiết căn hộ',
-                  params: {'id': id},
+                child: ApartmentDetailPage(
+                  key: ValueKey('$id:'),
+                  apartmentId: id,
+                  initialReservationId: state.uri.queryParameters['reservation_id'],
+                  initialModal: state.uri.queryParameters['modal'],
                 ),
               );
             },
@@ -276,24 +245,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/tenants',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/tenants',
-                title: 'Hồ sơ Cư dân',
-              ),
+              child: TenantsPage(),
             ),
           ),
           GoRoute(
             path: '/admin/tenants/:id',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/tenants/:id',
-                  title: 'Chi tiết cư dân',
-                  params: {'id': id},
+                child: TenantDetailPage(
+                  key: ValueKey('$id:'),
+                  tenantId: id,
+                  initialModal: state.uri.queryParameters['modal'],
                 ),
               );
             },
@@ -302,37 +266,32 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           // Contracts (M05) & Deposits (M06)
           GoRoute(
             path: '/admin/contracts',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/contracts',
-                title: 'Hợp đồng thuê',
-              ),
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: ContractsPage(initialTab: state.uri.queryParameters['tab']),
             ),
           ),
           GoRoute(
             path: '/admin/contracts/:id',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/contracts/:id',
-                  title: 'Chi tiết hợp đồng',
-                  params: {'id': id},
+                child: ContractDetailPage(
+                  key: ValueKey('$id:'),
+                  contractId: id,
+                  initialModal: state.uri.queryParameters['modal'],
                 ),
               );
             },
           ),
           GoRoute(
             path: '/admin/deposits',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/deposits',
-                title: 'Quản lý Tiền cọc',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: DepositsPage(
+                initialDepositId: state.uri.queryParameters['deposit_id'],
+                initialModal: state.uri.queryParameters['modal'],
               ),
             ),
           ),
@@ -342,11 +301,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           // /admin/services/subscriptions MUST be declared BEFORE /admin/services
           GoRoute(
             path: '/admin/services/subscriptions',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/services/subscriptions',
-                title: 'Đăng ký dịch vụ',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: SubscriptionsPage(
+                initialSubscriptionId: state.uri.queryParameters['subscription_id'],
+                initialModal: state.uri.queryParameters['modal'],
               ),
             ),
           ),
@@ -354,19 +313,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/services',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/services',
-                title: 'Dịch vụ & Tiện ích',
-              ),
+              child: ServiceCatalogPage(),
             ),
           ),
           GoRoute(
             path: '/admin/meters',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/meters',
-                title: 'Chỉ số Điện / Nước',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: MeterReadingsPage(
+                initialMeterId: state.uri.queryParameters['meter_id'],
+                initialModal: state.uri.queryParameters['modal'],
               ),
             ),
           ),
@@ -376,35 +332,31 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/invoices',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/invoices',
-                title: 'Hóa đơn kỳ',
-              ),
+              child: InvoicesPage(),
             ),
           ),
           GoRoute(
             path: '/admin/invoices/:id',
             builder: (context, state) {
               final id = state.pathParameters['id'] ?? '';
-              final zoneId = state.pathParameters['zoneId'] ?? '';
               return RoleGuard(
                 allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-                child: RoutePlaceholderPage(
-                  key: ValueKey('$id:$zoneId'),
-                  routeKey: '/admin/invoices/:id',
-                  title: 'Chi tiết hóa đơn',
-                  params: {'id': id},
+                child: InvoiceDetailPage(
+                  key: ValueKey('$id:'),
+                  invoiceId: id,
+                  initialModal: state.uri.queryParameters['modal'],
                 ),
               );
             },
           ),
           GoRoute(
             path: '/admin/payments',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/payments',
-                title: 'Thanh toán & Công nợ',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: PaymentsPage(
+                initialTab: state.uri.queryParameters['tab'],
+                initialBucket: state.uri.queryParameters['bucket'],
+                initialPaymentId: state.uri.queryParameters['payment_id'],
               ),
             ),
           ),
@@ -412,39 +364,37 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           // Maintenance (M11) / Service Requests
           GoRoute(
             path: '/admin/maintenance',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/maintenance',
-                title: 'Yêu cầu & Báo hỏng',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: ServiceRequestsPage(
+                initialRequestId: state.uri.queryParameters['request_id'],
               ),
             ),
           ),
           GoRoute(
             path: '/admin/service-requests',
-            redirect: (context, state) => '/admin/maintenance',
+            redirect: (context, state) => state.uri.query.isEmpty
+                ? '/admin/maintenance'
+                : '/admin/maintenance?${state.uri.query}',
           ),
 
           // Notifications (M13)
           GoRoute(
             path: '/admin/notifications',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/notifications',
-                title: 'Thông báo cư dân',
-              ),
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: NotificationsPage(initialTab: state.uri.queryParameters['tab']),
             ),
           ),
 
           // Reports (M14)
           GoRoute(
             path: '/admin/reports',
-            builder: (context, state) => const RoleGuard(
-              allowedRoles: ['SYS_ADMIN', 'OWNER', 'MANAGER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/reports',
-                title: 'Báo cáo thống kê',
+            builder: (context, state) => RoleGuard(
+              allowedRoles: const ['SYS_ADMIN', 'OWNER', 'MANAGER'],
+              child: ReportsPage(
+                initialTab: state.uri.queryParameters['tab'],
+                initialModal: state.uri.queryParameters['modal'],
               ),
             ),
           ),
@@ -454,30 +404,21 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/admin/audit-logs',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN', 'OWNER'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/audit-logs',
-                title: 'Nhật ký hệ thống',
-              ),
+              child: AuditLogsPage(),
             ),
           ),
           GoRoute(
             path: '/admin/settings',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/settings',
-                title: 'Cài đặt hệ thống',
-              ),
+              child: SettingsPage(),
             ),
           ),
           GoRoute(
             path: '/admin/users',
             builder: (context, state) => const RoleGuard(
               allowedRoles: ['SYS_ADMIN'],
-              child: RoutePlaceholderPage(
-                routeKey: '/admin/users',
-                title: 'Người dùng & Cấu hình',
-              ),
+              child: UsersPage(),
             ),
           ),
         ],

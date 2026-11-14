@@ -155,7 +155,12 @@ class PageHeader extends StatelessWidget {
                     titleSection,
                     if (actions != null) ...[
                       const SizedBox(height: 16),
-                      actions!,
+                      actions is Wrap
+                          ? actions!
+                          : SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: actions!,
+                            ),
                     ],
                   ],
                 );
@@ -168,7 +173,17 @@ class PageHeader extends StatelessWidget {
                   Expanded(child: titleSection),
                   if (actions != null) ...[
                     const SizedBox(width: 16),
-                    actions!,
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: constraints.maxWidth * 0.62,
+                      ),
+                      child: actions is Wrap
+                          ? actions!
+                          : SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: actions!,
+                            ),
+                    ),
                   ],
                 ],
               );

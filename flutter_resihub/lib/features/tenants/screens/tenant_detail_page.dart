@@ -1088,12 +1088,14 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                                         children: [
                                           Icon(LucideIcons.sparkles, size: 16, color: AppColors.secondary600),
                                           SizedBox(width: 8),
-                                          Text(
-                                            'Quét nhanh CCCD bằng AI (AI-01)',
-                                            style: TextStyle(
-                                              fontFamily: 'Inter',
-                                              fontWeight: FontWeight.w600,
-                                              color: Color(0xFF1E1B4B),
+                                          Flexible(
+                                            child: Text(
+                                              'Quét nhanh CCCD bằng AI (AI-01)',
+                                              style: TextStyle(
+                                                fontFamily: 'Inter',
+                                                fontWeight: FontWeight.w600,
+                                                color: Color(0xFF1E1B4B),
+                                              ),
                                             ),
                                           ),
                                         ],

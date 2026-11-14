@@ -41,132 +41,161 @@ class StatsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final (iconBg, iconColor, iconBorder) = _resolveIconColors();
     final isPositive = trend != null && trend! >= 0;
+    final hasFooter = trend != null || (subtext != null && subtext!.isNotEmpty);
 
-    final cardContent = Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.slate200),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x08000000),
-            blurRadius: 4,
-            offset: Offset(0, 1),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bounded = constraints.hasBoundedHeight;
+        final maxH = constraints.maxHeight;
+        final isUltraCompact = bounded && maxH < 130;
+        final isCompact = bounded && !isUltraCompact && maxH < 170;
+
+        final outerPadding = isUltraCompact
+            ? const EdgeInsets.symmetric(horizontal: 12, vertical: 8)
+            : (isCompact
+                ? const EdgeInsets.symmetric(horizontal: 16, vertical: 10)
+                : const EdgeInsets.all(18));
+        final iconBoxSize = isUltraCompact ? 24.0 : (isCompact ? 32.0 : 38.0);
+        final iconSize = isUltraCompact ? 13.0 : (isCompact ? 16.0 : 18.0);
+        final titleFontSize = isUltraCompact ? 11.0 : 12.0;
+        final valueFontSize = isUltraCompact ? 16.0 : (isCompact ? 20.0 : 24.0);
+        final gapHeight = isUltraCompact ? 2.0 : (isCompact ? 4.0 : 12.0);
+        final footerTopPad = isUltraCompact ? 3.0 : (isCompact ? 6.0 : 10.0);
+        final subtextFontSize = isUltraCompact ? 10.0 : (isCompact ? 11.0 : 12.0);
+
+        final cardContent = Container(
+          padding: outerPadding,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppColors.slate200),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x08000000),
+                blurRadius: 4,
+                offset: Offset(0, 1),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: bounded ? MainAxisSize.max : MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Expanded(
-                child: Text(
-                  title.toUpperCase(),
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.5,
-                    color: AppColors.slate500,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      title.toUpperCase(),
+                      style: TextStyle(
+                        fontSize: titleFontSize,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5,
+                        color: AppColors.slate500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  if (icon != null) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      width: iconBoxSize,
+                      height: iconBoxSize,
+                      decoration: BoxDecoration(
+                        color: iconBg,
+                        borderRadius: BorderRadius.circular(isUltraCompact ? 8 : 12),
+                        border: Border.all(color: iconBorder),
+                      ),
+                      child: Icon(icon, size: iconSize, color: iconColor),
+                    ),
+                  ],
+                ],
+              ),
+              SizedBox(height: gapHeight),
+              Text(
+                value?.toString() ?? '—',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: valueFontSize,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.slate900,
+                  letterSpacing: -0.5,
                 ),
               ),
-              if (icon != null) ...[
-                const SizedBox(width: 8),
+              if (hasFooter) ...[
+                SizedBox(height: gapHeight),
                 Container(
-                  width: 38,
-                  height: 38,
-                  decoration: BoxDecoration(
-                    color: iconBg,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: iconBorder),
+                  padding: EdgeInsets.only(top: footerTopPad),
+                  decoration: const BoxDecoration(
+                    border: Border(top: BorderSide(color: AppColors.slate100)),
                   ),
-                  child: Icon(icon, size: 18, color: iconColor),
+                  child: Row(
+                    children: [
+                      if (trend != null) ...[
+                        Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: isUltraCompact ? 4 : 6,
+                            vertical: isUltraCompact ? 1 : 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isPositive ? const Color(0xFFECFDF5) : const Color(0xFFFFF1F2),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                isPositive ? LucideIcons.trendingUp : LucideIcons.trendingDown,
+                                size: isUltraCompact ? 11 : 13,
+                                color: isPositive ? const Color(0xFF047857) : const Color(0xFFBE123C),
+                              ),
+                              const SizedBox(width: 2),
+                              Text(
+                                '${isPositive ? '+' : ''}$trend%',
+                                style: TextStyle(
+                                  fontSize: isUltraCompact ? 10 : 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: isPositive ? const Color(0xFF047857) : const Color(0xFFBE123C),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      if (subtext != null && subtext!.isNotEmpty)
+                        Expanded(
+                          child: Text(
+                            subtext!,
+                            style: TextStyle(
+                              fontSize: subtextFontSize,
+                              color: AppColors.slate500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ],
             ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            value?.toString() ?? '—',
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w700,
-              color: AppColors.slate900,
-              letterSpacing: -0.5,
-            ),
-          ),
-          if (trend != null || (subtext != null && subtext!.isNotEmpty)) ...[
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.only(top: 10),
-              decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: AppColors.slate100)),
-              ),
-              child: Row(
-                children: [
-                  if (trend != null) ...[
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: isPositive ? const Color(0xFFECFDF5) : const Color(0xFFFFF1F2),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            isPositive ? LucideIcons.trendingUp : LucideIcons.trendingDown,
-                            size: 13,
-                            color: isPositive ? const Color(0xFF047857) : const Color(0xFFBE123C),
-                          ),
-                          const SizedBox(width: 2),
-                          Text(
-                            '${isPositive ? '+' : ''}$trend%',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: isPositive ? const Color(0xFF047857) : const Color(0xFFBE123C),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                  if (subtext != null && subtext!.isNotEmpty)
-                    Expanded(
-                      child: Text(
-                        subtext!,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppColors.slate500,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
+        );
 
-    if (onClick != null) {
-      return InkWell(
-        onTap: onClick,
-        borderRadius: BorderRadius.circular(16),
-        child: cardContent,
-      );
-    }
-    return cardContent;
+        if (onClick != null) {
+          return InkWell(
+            onTap: onClick,
+            borderRadius: BorderRadius.circular(16),
+            child: cardContent,
+          );
+        }
+        return cardContent;
+      },
+    );
   }
 }
