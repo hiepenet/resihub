@@ -484,6 +484,7 @@ void main() {
       expect(find.text('Nguyen Van Kha (0901234567)'), findsOneWidget);
       expect(find.text('Xác nhận tiền về'), findsOneWidget);
       expect(find.text('Từ chối'), findsOneWidget);
+      expect(find.text('Chi tiết căn'), findsOneWidget);
 
       // Confirm payment
       await tester.tap(find.text('Xác nhận tiền về'));

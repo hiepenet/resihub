@@ -47,12 +47,14 @@ const List<Map<String, String>> kPaymentMethodOptions = [
 class DepositDetailModal extends ConsumerStatefulWidget {
   final Map<String, dynamic> deposit;
   final Map<String, dynamic>? initialDetail;
+  final int initialTabIndex;
   final VoidCallback? onRefresh;
 
   const DepositDetailModal({
     super.key,
     required this.deposit,
     this.initialDetail,
+    this.initialTabIndex = 0,
     this.onRefresh,
   });
 
@@ -60,6 +62,7 @@ class DepositDetailModal extends ConsumerStatefulWidget {
     BuildContext context, {
     required Map<String, dynamic> deposit,
     Map<String, dynamic>? initialDetail,
+    int initialTabIndex = 0,
     VoidCallback? onRefresh,
   }) {
     return showDialog<void>(
@@ -87,6 +90,7 @@ class DepositDetailModal extends ConsumerStatefulWidget {
               child: DepositDetailModal(
                 deposit: deposit,
                 initialDetail: initialDetail,
+                initialTabIndex: initialTabIndex,
                 onRefresh: onRefresh,
               ),
             ),
@@ -142,7 +146,15 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    final safeInitialIndex = (widget.initialTabIndex >= 0 && widget.initialTabIndex < 3)
+        ? widget.initialTabIndex
+        : 0;
+    _tabController = TabController(length: 3, vsync: this, initialIndex: safeInitialIndex);
+    if (safeInitialIndex == 1) {
+      _loadTransactions();
+    } else if (safeInitialIndex == 2) {
+      _loadAuditLogs();
+    }
     _dep = Map<String, dynamic>.from(widget.deposit);
     if (widget.initialDetail != null) {
       _settlementDetail = Map<String, dynamic>.from(widget.initialDetail!);

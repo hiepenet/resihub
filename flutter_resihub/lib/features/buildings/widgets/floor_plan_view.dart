@@ -800,6 +800,17 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                                       },
                                     ),
                                   ],
+                                  AppButton(
+                                    text: 'Chi tiết căn',
+                                    variant: AppButtonVariant.outline,
+                                    size: AppButtonSize.xs,
+                                    onPressed: () {
+                                      final aptId = r['apartment_id']?.toString();
+                                      if (aptId != null && aptId.isNotEmpty) {
+                                        context.push('/admin/apartments/$aptId');
+                                      }
+                                    },
+                                  ),
                                 ],
                               ),
                             ],

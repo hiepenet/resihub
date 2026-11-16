@@ -468,6 +468,7 @@ void main() {
       expect(find.textContaining('Đã hoàn cọc'), findsWidgets);
       expect(find.textContaining('Tranh chấp'), findsWidgets);
       expect(find.text('P101'), findsOneWidget);
+      expect(find.text('Sổ giao dịch'), findsWidgets);
     });
 
     testWidgets('deep links directly to settlement modal when initialDepositId and initialModal=settlement are passed', (tester) async {

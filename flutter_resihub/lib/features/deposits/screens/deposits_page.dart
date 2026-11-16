@@ -130,16 +130,19 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
       _activeTab = 'held';
     }
 
+    final targetModal = widget.initialModal;
+    final tabIdx = (targetModal == 'settlement' || status == 'PENDING_APPROVAL' || status == 'APPROVED_PENDING_PAYOUT') ? 0 : 1;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _openDetailModal(dep);
+      _openDetailModal(dep, initialTabIndex: tabIdx);
     });
   }
 
-  void _openDetailModal(Map<String, dynamic> deposit) {
+  void _openDetailModal(Map<String, dynamic> deposit, {int initialTabIndex = 1}) {
     DepositDetailModal.show(
       context,
       deposit: deposit,
+      initialTabIndex: initialTabIndex,
       onRefresh: () => _fetchDeposits(force: true),
     );
   }
@@ -467,11 +470,11 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                       const SizedBox(width: 8),
                     ],
                     AppButton(
-                      text: 'Chi tiết',
-                      variant: AppButtonVariant.secondary,
+                      text: 'Sổ giao dịch',
+                      variant: AppButtonVariant.outline,
                       size: AppButtonSize.xs,
-                      icon: const Icon(LucideIcons.externalLink, size: 14),
-                      onPressed: () => _openDetailModal(dep),
+                      icon: const Icon(LucideIcons.history, size: 14),
+                      onPressed: () => _openDetailModal(dep, initialTabIndex: 1),
                     ),
                   ],
                 ),
