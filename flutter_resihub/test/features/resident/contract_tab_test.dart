@@ -12,6 +12,7 @@ import 'package:flutter_resihub/core/storage/app_storage.dart';
 import 'package:flutter_resihub/features/contracts/services/contracts_service.dart';
 import 'package:flutter_resihub/features/resident/services/resident_service.dart';
 import 'package:flutter_resihub/features/resident/tabs/contract_tab.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_button.dart';
 import 'package:flutter_resihub/shared/widgets/ui/html_print_preview_modal.dart';
 
 class _MockAdapter implements HttpClientAdapter {
@@ -238,5 +239,97 @@ void main() {
     await tester.tap(find.text('Xem căn hộ trống'));
     await tester.pumpAndSettle();
     expect(navigated, contains('overview'));
+  });
+
+  group('T7 parity — contract request (E1-E3)', () {
+    test('payload uses type/desired_date, never request_type/reason', () {
+      final payload = buildContractRequestPayload(
+        contractId: 'c-1',
+        type: 'TERMINATION',
+        desiredDate: '2026-12-15',
+        note: 'Chuyển công tác',
+      );
+      expect(payload['contract_id'], 'c-1');
+      expect(payload['type'], 'TERMINATION');
+      expect(payload['desired_date'], '2026-12-15');
+      expect(payload['note'], 'Chuyển công tác');
+      expect(payload.containsKey('request_type'), isFalse);
+      expect(payload.containsKey('reason'), isFalse);
+    });
+
+    test('default desired date follows contract end, +30d and max clamp', () {
+      expect(
+        defaultDesiredDateForContractRequest('RENEWAL',
+            today: '2026-11-17', contractEnd: '2026-12-31'),
+        '2027-12-31',
+      );
+      expect(
+        defaultDesiredDateForContractRequest('TERMINATION',
+            today: '2026-11-17',
+            contractStart: '2026-01-01',
+            contractEnd: '2026-12-31'),
+        '2026-12-17',
+      );
+      expect(
+        defaultDesiredDateForContractRequest('TERMINATION',
+            today: '2026-12-20',
+            contractStart: '2026-01-01',
+            contractEnd: '2026-12-31'),
+        '2026-12-31',
+      );
+    });
+
+    test('desired date validation enforces renewal order and termination min/max',
+        () {
+      expect(
+        contractRequestDesiredDateError('RENEWAL', '2026-12-31',
+            today: '2026-11-17', contractEnd: '2026-12-31'),
+        isNotEmpty,
+      );
+      expect(
+        contractRequestDesiredDateError('TERMINATION', '2026-11-01',
+            today: '2026-11-17',
+            contractStart: '2026-01-01',
+            contractEnd: '2026-12-31'),
+        isNotEmpty,
+      );
+      expect(
+        contractRequestDesiredDateError('TERMINATION', '2027-01-01',
+            today: '2026-11-17',
+            contractStart: '2026-01-01',
+            contractEnd: '2026-12-31'),
+        isNotEmpty,
+      );
+      expect(
+        contractRequestDesiredDateError('TERMINATION', '2026-12-15',
+            today: '2026-11-17',
+            contractStart: '2026-01-01',
+            contractEnd: '2026-12-31'),
+        isEmpty,
+      );
+    });
+
+    testWidgets('request modal has 2 options and a date field, no transfer',
+        (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: {
+          'active_contract': {
+            'contract_id': 'c-1',
+            'contract_status': 'ACTIVE',
+            'start_date': '2026-01-01',
+            'end_date': '2026-12-31',
+          },
+        },
+      );
+
+      await tester.tap(find.widgetWithText(AppButton, 'Xin gia hạn HĐ').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Chuyển đổi phòng'), findsNothing);
+      expect(find.text('Loại đề nghị'), findsOneWidget);
+      expect(
+          find.textContaining('Ngày kết thúc mới mong muốn'), findsOneWidget);
+    });
   });
 }

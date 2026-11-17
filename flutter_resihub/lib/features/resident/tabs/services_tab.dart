@@ -88,6 +88,37 @@ List<String> _plates(dynamic sub) {
 
 const Set<String> _kTerminalStatuses = {'CANCELLED', 'REJECTED', 'TERMINATED'};
 
+/// React ServicesTab.jsx:322-332 — payload đăng ký dịch vụ.
+Map<String, dynamic> buildSubscribeServicePayload({
+  required String contractId,
+  required String serviceId,
+  required int quantity,
+  String? startDate,
+  String? note,
+  List<String>? vehiclePlates,
+}) {
+  return {
+    'contract_id': contractId,
+    'service_id': serviceId,
+    'quantity': quantity,
+    'start_date': startDate ?? '',
+    'note': note ?? '',
+    if (vehiclePlates != null && vehiclePlates.isNotEmpty)
+      'vehicle_plates': vehiclePlates,
+  };
+}
+
+/// React ServicesTab.jsx:375-378 — payload hủy dịch vụ.
+Map<String, dynamic> buildCancelServicePayload({
+  String? endDate,
+  String? note,
+}) {
+  return {
+    'end_date': endDate ?? '',
+    'note': note ?? '',
+  };
+}
+
 class ServicesTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
   final Future<void> Function() onRefreshOverview;
@@ -582,16 +613,19 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
                               try {
                                 await ref
                                     .read(residentServiceProvider)
-                                    .subscribeService({
-                                  'contract_id': cid,
-                                  'service_id': serviceId,
-                                  'quantity':
-                                      (billingType == 'FIXED' && !isParking)
-                                          ? 1
-                                          : effQty,
-                                  if (isParking)
-                                    'metadata': {'license_plate': plate},
-                                });
+                                    .subscribeService(
+                                  buildSubscribeServicePayload(
+                                    contractId: cid,
+                                    serviceId: serviceId,
+                                    quantity:
+                                        (billingType == 'FIXED' && !isParking)
+                                            ? 1
+                                            : effQty,
+                                    startDate: startDate,
+                                    note: noteCtrl.text.trim(),
+                                    vehiclePlates: isParking ? [plate] : null,
+                                  ),
+                                );
                                 if (ctx.mounted) Navigator.of(ctx).pop();
                                 ref.read(toastProvider.notifier).success(
                                     'Đã gửi yêu cầu đăng ký dịch vụ, chờ Ban Quản Lý phê duyệt!');
@@ -769,9 +803,13 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
                               try {
                                 await ref
                                     .read(residentServiceProvider)
-                                    .cancelService(subId, {
-                                  'cancellation_reason': reasonCtrl.text.trim(),
-                                });
+                                    .cancelService(
+                                  subId,
+                                  buildCancelServicePayload(
+                                    endDate: endDateCtrl.text.trim(),
+                                    note: reasonCtrl.text.trim(),
+                                  ),
+                                );
                                 if (ctx.mounted) Navigator.of(ctx).pop();
                                 ref.read(toastProvider.notifier).success(
                                     'Đã gửi yêu cầu hủy dịch vụ thành công.');

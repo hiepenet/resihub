@@ -7,6 +7,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/date_range.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
 import '../../../core/utils/file_exporter.dart';
 import '../../../core/utils/format.dart';
@@ -156,6 +157,73 @@ String _formatResidentBankInfo(dynamic info) {
       .where((v) => v != null && v.toString().isNotEmpty)
       .map((v) => v.toString())
       .join(' • ');
+}
+
+/// React ContractTab.jsx:279-300 — ngày mặc định cho đề nghị hợp đồng.
+String defaultDesiredDateForContractRequest(
+  String type, {
+  required String today,
+  String? contractStart,
+  String? contractEnd,
+}) {
+  final end = contractEnd ?? '';
+  if (type == 'RENEWAL') {
+    return addMonthsClampedStr(end.isNotEmpty ? end : today, 12);
+  }
+  final minTerm = maxDateStr([today, contractStart ?? '']);
+  final maxTerm = (end.isNotEmpty && end.compareTo(minTerm) >= 0) ? end : '';
+  final plus30 = addDaysStr(today, 30);
+  if (maxTerm.isNotEmpty && plus30.compareTo(maxTerm) > 0) return maxTerm;
+  return maxDateStr([plus30, minTerm]);
+}
+
+/// React ContractTab.jsx:302-325 — validate thứ tự ngày dự kiến.
+String contractRequestDesiredDateError(
+  String type,
+  String desiredDate, {
+  required String today,
+  String? contractStart,
+  String? contractEnd,
+}) {
+  if (desiredDate.isEmpty) return '';
+  if (type == 'RENEWAL') {
+    final end = contractEnd ?? '';
+    if (end.isNotEmpty) {
+      return getDateOrderError(end, desiredDate,
+          strictAfter: true,
+          startLabel: 'Ngày hết hạn HĐ hiện tại (${formatDateVi(end)})',
+          endLabel: 'Ngày kết thúc mới mong muốn');
+    }
+    return getDateOrderError(today, desiredDate,
+        strictAfter: false,
+        startLabel: 'Hôm nay',
+        endLabel: 'Ngày kết thúc mới mong muốn');
+  }
+  final min = maxDateStr([today, contractStart ?? '']);
+  final end = contractEnd ?? '';
+  final max = (end.isNotEmpty && end.compareTo(min) >= 0) ? end : '';
+  if (min.isNotEmpty && desiredDate.compareTo(min) < 0) {
+    return 'Ngày dự kiến bàn giao không được nhỏ hơn ${formatDateVi(min)}.';
+  }
+  if (max.isNotEmpty && desiredDate.compareTo(max) > 0) {
+    return 'Ngày dự kiến bàn giao không được vượt quá ngày hết hạn HĐ (${formatDateVi(max)}).';
+  }
+  return '';
+}
+
+/// React ContractTab.jsx:349-354 — payload đề nghị hợp đồng.
+Map<String, dynamic> buildContractRequestPayload({
+  required String contractId,
+  required String type,
+  String? desiredDate,
+  String? note,
+}) {
+  return {
+    'contract_id': contractId,
+    'type': type,
+    'desired_date': desiredDate ?? '',
+    'note': note ?? '',
+  };
 }
 
 class ContractTab extends ConsumerStatefulWidget {
@@ -568,9 +636,22 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     final cid = _contractId;
     if (cid == null || cid.isEmpty) return;
 
+    final contract =
+        widget.overview?['active_contract'] ?? widget.overview?['contract'];
+    final contractStart = toDateOnlyStr(contract?['start_date']);
+    final contractEnd = toDateOnlyStr(contract?['end_date']);
+    final today = toInputDate(DateTime.now());
+
     String requestType =
         initialType == 'TERMINATION' ? 'TERMINATION' : 'RENEWAL';
-    final reasonCtrl = TextEditingController();
+    final desiredDateCtrl = TextEditingController(
+      text: defaultDesiredDateForContractRequest(
+        requestType,
+        today: today,
+        contractStart: contractStart,
+        contractEnd: contractEnd,
+      ),
+    );
     final noteCtrl = TextEditingController();
     bool submitting = false;
 
@@ -579,42 +660,65 @@ class _ContractTabState extends ConsumerState<ContractTab> {
       title: requestType == 'TERMINATION'
           ? 'Gửi yêu cầu Xin chấm dứt Hợp đồng trước hạn'
           : 'Gửi yêu cầu Xin gia hạn Hợp đồng',
-      subtitle: 'Gia hạn, đề xuất chấm dứt hoặc chuyển phòng',
+      subtitle: 'Gia hạn hoặc đề xuất chấm dứt hợp đồng',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
+          final desiredDateError = contractRequestDesiredDateError(
+            requestType,
+            desiredDateCtrl.text.trim(),
+            today: today,
+            contractStart: contractStart,
+            contractEnd: contractEnd,
+          );
+          final dateLabel = requestType == 'RENEWAL'
+              ? 'Ngày kết thúc mới mong muốn'
+              : 'Ngày dự kiến bàn giao trả phòng';
           return SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 AppSelect<String>(
-                  label: 'Loại yêu cầu',
+                  label: 'Loại đề nghị',
                   value: requestType,
                   options: const [
                     AppSelectOption(
-                        value: 'RENEWAL', label: 'Gia hạn hợp đồng'),
+                        value: 'RENEWAL',
+                        label: 'Xin gia hạn tiếp hợp đồng thuê'),
                     AppSelectOption(
-                        value: 'TERMINATION', label: 'Chấm dứt trước hạn'),
-                    AppSelectOption(
-                        value: 'TRANSFER_ROOM', label: 'Chuyển đổi phòng'),
+                        value: 'TERMINATION',
+                        label: 'Xin chấm dứt hợp đồng trước hạn'),
                   ],
                   onChanged: (val) {
                     if (val != null) {
-                      setModalState(() => requestType = val);
+                      setModalState(() {
+                        requestType = val;
+                        desiredDateCtrl.text =
+                            defaultDesiredDateForContractRequest(
+                          requestType,
+                          today: today,
+                          contractStart: contractStart,
+                          contractEnd: contractEnd,
+                        );
+                      });
                     }
                   },
                 ),
                 const SizedBox(height: 12),
                 AppInput(
-                  label: 'Lý do yêu cầu *',
-                  controller: reasonCtrl,
-                  hint: 'Nêu rõ lý do hoặc thời gian mong muốn...',
-                  multiline: true,
-                  rows: 3,
+                  label: requestType == 'TERMINATION'
+                      ? '$dateLabel *'
+                      : dateLabel,
+                  controller: desiredDateCtrl,
+                  hint: 'YYYY-MM-DD',
+                  error: desiredDateError.isEmpty ? null : desiredDateError,
+                  onChanged: (_) => setModalState(() {}),
                 ),
                 const SizedBox(height: 12),
                 AppInput(
-                  label: 'Ghi chú thêm',
+                  label: 'Lý do / Ghi chú gửi Ban Quản Lý',
                   controller: noteCtrl,
+                  multiline: true,
+                  rows: 3,
                 ),
                 const SizedBox(height: 20),
                 Row(
@@ -628,16 +732,17 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                     ),
                     const SizedBox(width: 8),
                     AppButton(
-                      text: submitting ? 'Đang gửi...' : 'Gửi yêu cầu',
+                      text: submitting ? 'Đang gửi...' : 'Gửi đề nghị tới BQL',
                       loading: submitting,
-                      onPressed: submitting
+                      disabled: desiredDateError.isNotEmpty,
+                      onPressed: (submitting || desiredDateError.isNotEmpty)
                           ? null
                           : () async {
-                              final reason = reasonCtrl.text.trim();
-                              if (reason.isEmpty) {
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error('Vui lòng nhập lý do.');
+                              final desiredDate = desiredDateCtrl.text.trim();
+                              if (requestType == 'TERMINATION' &&
+                                  desiredDate.isEmpty) {
+                                ref.read(toastProvider.notifier).warning(
+                                    'Vui lòng chọn ngày mong muốn chấm dứt hợp đồng.');
                                 return;
                               }
 
@@ -645,12 +750,13 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                               try {
                                 await ref
                                     .read(residentServiceProvider)
-                                    .createContractRequest({
-                                  'contract_id': cid,
-                                  'request_type': requestType,
-                                  'reason': reason,
-                                  'note': noteCtrl.text.trim(),
-                                });
+                                    .createContractRequest(
+                                        buildContractRequestPayload(
+                                  contractId: cid,
+                                  type: requestType,
+                                  desiredDate: desiredDate,
+                                  note: noteCtrl.text.trim(),
+                                ));
                                 if (ctx.mounted) {
                                   Navigator.of(ctx).pop();
                                 }

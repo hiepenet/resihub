@@ -177,4 +177,45 @@ void main() {
     expect(find.textContaining('Lý do hủy dịch vụ'), findsWidgets);
     expect(find.text('Xác nhận hủy dịch vụ'), findsOneWidget);
   });
+
+  group('T7 parity — service payloads (E4-E5)', () {
+    test('subscribe payload uses start_date/note/vehicle_plates, not metadata',
+        () {
+      final payload = buildSubscribeServicePayload(
+        contractId: 'c-1',
+        serviceId: 'srv-1',
+        quantity: 1,
+        startDate: '2026-11-17',
+        note: 'Gửi xe hầm B1',
+        vehiclePlates: const ['29A-123.45'],
+      );
+      expect(payload['start_date'], '2026-11-17');
+      expect(payload['note'], 'Gửi xe hầm B1');
+      expect(payload['vehicle_plates'], ['29A-123.45']);
+      expect(payload.containsKey('metadata'), isFalse);
+    });
+
+    test('non-parking subscribe omits vehicle_plates', () {
+      final payload = buildSubscribeServicePayload(
+        contractId: 'c-1',
+        serviceId: 'srv-2',
+        quantity: 1,
+        startDate: '2026-11-17',
+        note: '',
+      );
+      expect(payload.containsKey('start_date'), isTrue);
+      expect(payload.containsKey('note'), isTrue);
+      expect(payload.containsKey('vehicle_plates'), isFalse);
+    });
+
+    test('cancel payload uses end_date/note, not cancellation_reason', () {
+      final payload = buildCancelServicePayload(
+        endDate: '2026-11-20',
+        note: 'Không còn nhu cầu',
+      );
+      expect(payload['end_date'], '2026-11-20');
+      expect(payload['note'], 'Không còn nhu cầu');
+      expect(payload.containsKey('cancellation_reason'), isFalse);
+    });
+  });
 }

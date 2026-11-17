@@ -14,6 +14,14 @@ import '../../auth/providers/auth_provider.dart';
 import '../../auth/services/auth_service.dart';
 import '../services/resident_service.dart';
 
+/// React ProfileTab.jsx:186 — payload tải ảnh CCCD.
+Map<String, dynamic> buildIdImagePayload(String side, dynamic data) {
+  return {
+    'side': side,
+    'image_base64': data?.toString() ?? '',
+  };
+}
+
 class ProfileTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
   final Future<void> Function() onRefreshOverview;
@@ -164,7 +172,22 @@ class _ProfileTabState extends ConsumerState<ProfileTab> {
         'address': _addressCtrl.text.trim(),
         'avatar_base64': _avatarBase64 ?? '',
       };
-      await ref.read(residentServiceProvider).updateProfile(payload);
+      final res =
+          await ref.read(residentServiceProvider).updateProfile(payload);
+      final updated = (res is Map && res['data'] is Map)
+          ? Map<String, dynamic>.from(res['data'] as Map)
+          : <String, dynamic>{};
+      final currentAvatar = ref.read(authProvider).user?.avatarUrl;
+      final authPatch = <String, dynamic>{
+        'full_name': updated['full_name'] ?? name,
+        'phone': updated['phone'] ?? payload['phone'],
+        'email': updated['email'] ?? payload['email'],
+      };
+      final avatarUrl = updated['avatar_url'] ?? currentAvatar;
+      if (avatarUrl != null && avatarUrl.toString().isNotEmpty) {
+        authPatch['avatar_url'] = avatarUrl;
+      }
+      await ref.read(authProvider.notifier).updateUser(authPatch);
       if (mounted) setState(() => _avatarBase64 = null);
       ref
           .read(toastProvider.notifier)
@@ -183,10 +206,9 @@ class _ProfileTabState extends ConsumerState<ProfileTab> {
     if (fileData == null) return;
     setState(() => _uploadingSide = side);
     try {
-      await ref.read(residentServiceProvider).uploadIdImage({
-        'side': side,
-        'image_data': fileData.toString(),
-      });
+      await ref.read(residentServiceProvider).uploadIdImage(
+            buildIdImagePayload(side, fileData),
+          );
       ref.read(toastProvider.notifier).success(
           'Đã cập nhật ảnh CCCD mặt ${side == 'front' ? 'trước' : 'sau'}.');
       await widget.onRefreshOverview();
