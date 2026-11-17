@@ -21,7 +21,19 @@ Widget _buildSubject(
   );
 }
 
+/// Task 5 (React parity) hides hero/KPI/quick-actions/invoice cards when there
+/// is no active contract, so every fixture needs a minimal contract to reach
+/// the widgets these assertions target.
+Map<String, dynamic> _minimalContract() => <String, dynamic>{
+      'contract_id': 'c-1',
+      'apartment_code': '11A01',
+      'building_name': 'VOP1',
+      'status': 'ACTIVE',
+      'end_date': '2027-06-30',
+    };
+
 Map<String, dynamic> _fullOverview() => <String, dynamic>{
+      'active_contract': _minimalContract(),
       'current_amount_due': 300000,
       'latest_invoice': <String, dynamic>{
         'invoice_code': 'INV-2026-10-001',
@@ -107,7 +119,9 @@ void main() {
 
   testWidgets('quick actions and card buttons navigate to the right tabs',
       (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    // Contract-backed hero/KPI content is tall; enlarge viewport so the
+    // invoice pay button and manager-support link are actually reachable.
+    await tester.binding.setSurfaceSize(const Size(1440, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     final tabs = <String>[];
@@ -161,7 +175,7 @@ void main() {
   });
 
   testWidgets('pay action is gated on current_amount_due > 0', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    await tester.binding.setSurfaceSize(const Size(1440, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     final overview = _fullOverview();
@@ -192,7 +206,8 @@ void main() {
 
   testWidgets('null-safe fallbacks for empty overview', (tester) async {
     await tester.pumpWidget(
-      _buildSubject(<String, dynamic>{}, (_, [__]) {}),
+      _buildSubject(<String, dynamic>{'active_contract': _minimalContract()},
+          (_, [__]) {}),
     );
     await tester.pumpAndSettle();
 
