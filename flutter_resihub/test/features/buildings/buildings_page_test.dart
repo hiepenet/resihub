@@ -10,6 +10,7 @@ import 'package:flutter_resihub/core/theme/app_theme.dart';
 import 'package:flutter_resihub/features/auth/models/user_model.dart';
 import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
 import 'package:flutter_resihub/features/buildings/providers/buildings_lookup_provider.dart';
+import 'package:flutter_resihub/features/buildings/screens/building_detail_page.dart';
 import 'package:flutter_resihub/features/buildings/screens/buildings_page.dart';
 import 'package:flutter_resihub/features/buildings/services/buildings_service.dart';
 import 'package:flutter_resihub/shared/providers/toast_provider.dart';
@@ -331,7 +332,7 @@ void main() {
       expect(find.text('Đổi / Xóa'), findsOneWidget);
     });
 
-    testWidgets('5. SYS_ADMIN: Full access (Owner NOT locked, can toggle status and delete)', (tester) async {
+    testWidgets('5. SYS_ADMIN: Full access (Owner NOT locked, delete; no list status toggle per React)', (tester) async {
       tester.view.physicalSize = const Size(1280, 900);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
@@ -340,12 +341,12 @@ void main() {
       await tester.pumpWidget(_buildTestApp(mockService: service, roleCode: 'SYS_ADMIN', storage: storage));
       await tester.pumpAndSettle();
 
-      // Add, Edit, Delete, Status Toggle all present
+      // Add, Edit, Delete present; status toggle exists only in BuildingDetailPage (React parity)
       expect(find.text('Thêm tòa nhà mới'), findsOneWidget);
       expect(find.text('Sửa'), findsNWidgets(2));
       expect(find.text('Xóa'), findsNWidgets(2));
-      expect(find.byKey(const Key('building_status_toggle_b-1')), findsOneWidget);
-      expect(find.byKey(const Key('building_status_toggle_b-2')), findsOneWidget);
+      expect(find.byKey(const Key('building_status_toggle_b-1')), findsNothing);
+      expect(find.byKey(const Key('building_status_toggle_b-2')), findsNothing);
 
       // B01 has 10 floors and 50 apts -> Delete button is disabled
       // B02 has 0 floors and 0 apts -> Delete button is enabled
@@ -360,12 +361,6 @@ void main() {
       // Close modal
       await tester.tap(find.text('Hủy bỏ'));
       await tester.pumpAndSettle();
-
-      // Test Status Toggle on B01 (currently ACTIVE -> toggle to INACTIVE)
-      await tester.tap(find.byKey(const Key('building_status_toggle_b-1')));
-      await tester.pumpAndSettle();
-      expect(service.lastStatusUpdatedId, 'b-1');
-      expect(service.lastStatusUpdatedStatus, 'INACTIVE');
 
       // Test Delete on B02 (empty building)
       await tester.tap(find.text('Xóa').last);
@@ -502,6 +497,121 @@ void main() {
 
       // Flush toast dismiss timer
       await tester.pump(const Duration(seconds: 5));
+    });
+  });
+
+  group('T24 (C1-C3) - React logic parity', () {
+    testWidgets('default bank resolved from VietQR list (bin/logo), not hardcoded', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final service = MockBuildingsService()..buildingsData = _sampleBuildings();
+      await tester.pumpWidget(_buildTestApp(mockService: service, roleCode: 'MANAGER', storage: storage));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Thêm tòa nhà mới'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(findInput(const Key('building_name_input')), 'Tòa Test');
+      await tester.enterText(findInput(const Key('building_code_input')), 'TEST-1');
+      await tester.enterText(findInput(const Key('building_address_input')), 'Địa chỉ test');
+      await tester.tap(find.text('Tạo tòa nhà'));
+      await tester.pumpAndSettle();
+
+      final pa = service.lastCreatedPayload!['payment_account'] as Map<String, dynamic>;
+      expect(pa['bank_code'], 'VCB');
+      expect(pa['bank_bin'], '970436');
+      // React lấy logo từ matchVietQrBank thay vì hardcode ''
+      expect(pa['bank_logo'], isNotEmpty);
+
+      // Flush toast dismiss timer
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('owner lookup sends normalized phone (not raw)', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final service = MockBuildingsService()..buildingsData = _sampleBuildings();
+      await tester.pumpWidget(_buildTestApp(mockService: service, roleCode: 'MANAGER', storage: storage));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Sửa').last); // b-2, owner editable
+      await tester.pumpAndSettle();
+
+      await tester.enterText(findInput(const Key('owner_identifier_input')), '+84 912 345 678');
+      await tester.tap(find.text('Kiểm tra'));
+      await tester.pumpAndSettle();
+
+      expect(service.lastLookupIdentifier, '0912345678');
+    });
+
+    testWidgets('owner lookup lowercases email', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final service = MockBuildingsService()..buildingsData = _sampleBuildings();
+      await tester.pumpWidget(_buildTestApp(mockService: service, roleCode: 'MANAGER', storage: storage));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Sửa').last); // b-2, owner editable
+      await tester.pumpAndSettle();
+
+      await tester.enterText(findInput(const Key('owner_identifier_input')), 'OWNER@EXAMPLE.COM');
+      await tester.tap(find.text('Kiểm tra'));
+      await tester.pumpAndSettle();
+
+      expect(service.lastLookupIdentifier, 'owner@example.com');
+    });
+
+    testWidgets('code field uppercases on change', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final service = MockBuildingsService()..buildingsData = _sampleBuildings();
+      await tester.pumpWidget(_buildTestApp(mockService: service, roleCode: 'MANAGER', storage: storage));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Thêm tòa nhà mới'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(findInput(const Key('building_code_input')), 'vop-abc');
+      await tester.pump();
+
+      expect(findInput(const Key('building_code_input')), findsOneWidget);
+      final codeController = tester.widget<EditableText>(findInput(const Key('building_code_input')));
+      expect(codeController.controller.text, 'VOP-ABC');
+    });
+
+    test('payment account falls back to lease_terms.payment_account', () {
+      final resolved = resolveBuildingPaymentAccount({
+        'lease_terms': {
+          'payment_account': {'bank_name': 'Vietcombank', 'account_number': '1234567890'},
+        },
+      });
+      expect(resolved['bank_name'], 'Vietcombank');
+      expect(resolved['account_number'], '1234567890');
+    });
+
+    test('floor count falls back to total_floors when no floors loaded', () {
+      expect(resolveBuildingFloorCount(0, {'total_floors': 12}), 12);
+      expect(resolveBuildingFloorCount(3, {'total_floors': 12}), 3);
+      expect(resolveBuildingFloorCount(0, null), 0);
+    });
+
+    test('tenant apartment code falls back from active_contract', () {
+      expect(
+        resolveTenantApartmentCode({
+          'active_contract': {'apartment_code': 'A-101'},
+          'apartment_code': 'A-999',
+        }),
+        'A-101',
+      );
+      expect(resolveTenantApartmentCode({'apartment_code': 'A-999'}), 'A-999');
     });
   });
 }

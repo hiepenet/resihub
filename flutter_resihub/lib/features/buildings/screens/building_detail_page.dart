@@ -24,6 +24,30 @@ import '../services/buildings_service.dart';
 import '../widgets/floor_modal.dart';
 import '../widgets/floor_plan_view.dart';
 
+/// React: `building.payment_account || building.lease_terms?.payment_account || {}`.
+Map<String, dynamic> resolveBuildingPaymentAccount(Map<String, dynamic>? building) {
+  final primary = building?['payment_account'];
+  if (primary is Map) return Map<String, dynamic>.from(primary);
+  final leaseTerms = building?['lease_terms'];
+  final fallback = leaseTerms is Map ? leaseTerms['payment_account'] : null;
+  if (fallback is Map) return Map<String, dynamic>.from(fallback);
+  return <String, dynamic>{};
+}
+
+/// React: `floors.length || building.total_floors || 0`.
+int resolveBuildingFloorCount(int floorsLength, Map<String, dynamic>? building) {
+  if (floorsLength > 0) return floorsLength;
+  return num.tryParse(building?['total_floors']?.toString() ?? '')?.toInt() ?? 0;
+}
+
+/// React: `active_contract?.apartment_code || apartment_code`.
+String resolveTenantApartmentCode(Map<String, dynamic>? tenant) {
+  final active = tenant?['active_contract'];
+  final activeCode = active is Map ? active['apartment_code']?.toString() : null;
+  if (activeCode != null && activeCode.isNotEmpty) return activeCode;
+  return tenant?['apartment_code']?.toString() ?? '—';
+}
+
 /// Bất động sản (M03 — Phần 2) — `BuildingDetailPage`.
 /// Port of `frontend/src/pages/admin/buildings/BuildingDetailPage.jsx`.
 class BuildingDetailPage extends ConsumerStatefulWidget {
@@ -374,9 +398,7 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
         _floors.isNotEmpty ||
         (int.tryParse(_building!['total_apartments']?.toString() ?? '0') ?? 0) > 0;
 
-    final paymentAccount = (_building!['payment_account'] is Map)
-        ? Map<String, dynamic>.from(_building!['payment_account'] as Map)
-        : <String, dynamic>{};
+    final paymentAccount = resolveBuildingPaymentAccount(_building);
 
     final hasOverlayModal = _zoneModalOpen ||
         _floorModalOpen ||
@@ -492,7 +514,7 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
                                     children: [
                                       const Text('Quy mô tầng',
                                           style: TextStyle(fontSize: 11, color: AppColors.slate400)),
-                                      Text('${_floors.length} tầng',
+                                      Text('${resolveBuildingFloorCount(_floors.length, _building)} tầng',
                                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                                     ],
                                   ),
@@ -547,7 +569,8 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
                             const Text('Tài khoản nhận thanh toán',
                                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                             const SizedBox(height: 12),
-                            if (paymentAccount['bank_name'] != null || paymentAccount['account_number'] != null) ...[
+                            if (paymentAccount['bank_name']?.toString().isNotEmpty == true ||
+                                paymentAccount['account_number']?.toString().isNotEmpty == true) ...[
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
@@ -773,7 +796,7 @@ class _BuildingDetailPageState extends ConsumerState<BuildingDetailPage> {
                       key: 'apartment_code',
                       label: 'Căn hộ',
                       width: 110,
-                      render: (t) => Text(t['apartment_code']?.toString() ?? '—'),
+                      render: (t) => Text(resolveTenantApartmentCode(t)),
                     ),
                     DataTableColumn(
                       key: 'status',

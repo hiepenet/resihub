@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/vietqr_banks.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
@@ -131,28 +132,6 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
             'Đã cập nhật thông tin tòa nhà.',
           );
       _fetchBuildings(force: true);
-    }
-  }
-
-  Future<void> _handleToggleStatus(Map<String, dynamic> building) async {
-    final buildingId = building['id']?.toString() ?? '';
-    final currentStatus = building['status']?.toString().toUpperCase() ?? 'ACTIVE';
-    final nextStatus = currentStatus == 'INACTIVE' ? 'ACTIVE' : 'INACTIVE';
-    final service = ref.read(buildingsServiceProvider);
-
-    try {
-      await service.updateStatus(buildingId, nextStatus);
-      refreshBuildingsSelector(ref);
-      ref.read(toastProvider.notifier).success(
-            nextStatus == 'ACTIVE'
-                ? 'Đã kích hoạt hoạt động tòa nhà.'
-                : 'Đã tạm ngưng hoạt động tòa nhà.',
-          );
-      _fetchBuildings(force: true);
-    } catch (err) {
-      ref.read(toastProvider.notifier).error(
-            extractErrorMessage(err, 'Không thể cập nhật trạng thái tòa nhà.'),
-          );
     }
   }
 
@@ -379,7 +358,6 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
                           onFloorPlan: () => context.push('/admin/buildings/${b['id']}/floor-plan'),
                           onDetail: () => context.push('/admin/buildings/${b['id']}'),
                           onEdit: () => _openEditModal(b),
-                          onToggleStatus: () => _handleToggleStatus(b),
                           onDelete: () => _handleDeleteBuilding(b),
                         ),
                       );
@@ -401,7 +379,6 @@ class _BuildingCard extends StatelessWidget {
   final VoidCallback onFloorPlan;
   final VoidCallback onDetail;
   final VoidCallback onEdit;
-  final VoidCallback onToggleStatus;
   final VoidCallback onDelete;
 
   const _BuildingCard({
@@ -410,13 +387,11 @@ class _BuildingCard extends StatelessWidget {
     required this.onFloorPlan,
     required this.onDetail,
     required this.onEdit,
-    required this.onToggleStatus,
     required this.onDelete,
   });
 
   @override
   Widget build(BuildContext context) {
-    final id = building['id']?.toString() ?? '';
     final code = building['code']?.toString() ?? '';
     final name = building['name']?.toString() ?? '';
     final address = building['address']?.toString() ?? '';
@@ -706,24 +681,6 @@ class _BuildingCard extends StatelessWidget {
                                 onPressed: onEdit,
                               ),
 
-                            // Status Toggle (SYS_ADMIN only)
-                            if (permissions.canManageBuildings)
-                              AppButton(
-                                key: Key('building_status_toggle_$id'),
-                                text: status == 'INACTIVE' ? 'Kích hoạt' : 'Tạm ngưng',
-                                variant: status == 'INACTIVE'
-                                    ? AppButtonVariant.success
-                                    : AppButtonVariant.soft,
-                                size: AppButtonSize.xs,
-                                icon: Icon(
-                                  status == 'INACTIVE'
-                                      ? LucideIcons.checkCircle2
-                                      : LucideIcons.ban,
-                                  size: 13,
-                                ),
-                                onPressed: onToggleStatus,
-                              ),
-
                             // Delete button (SYS_ADMIN only)
                             if (permissions.canManageBuildings)
                               Tooltip(
@@ -814,10 +771,16 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
 
   final FocusNode _codeFocusNode = FocusNode();
 
-  String _bankName = 'Vietcombank';
-  String _bankCode = 'VCB';
-  String _bankBin = '970436';
-  String _bankLogo = '';
+  // React: matchVietQrBank(banks, {bank_code:'VCB', bank_name:'Vietcombank'})
+  static final Map<String, dynamic>? _defaultBank = matchVietQrBank(kFallbackVietQrBanks, {
+    'bank_code': 'VCB',
+    'bank_name': 'Vietcombank',
+  });
+
+  String _bankName = _defaultBank?['shortName']?.toString() ?? 'Vietcombank';
+  String _bankCode = _defaultBank?['code']?.toString() ?? 'VCB';
+  String _bankBin = _defaultBank?['bin']?.toString() ?? '970436';
+  String _bankLogo = _defaultBank?['logo']?.toString() ?? '';
 
   String _ownerId = '';
   Map<String, dynamic>? _ownerPreview;
@@ -849,10 +812,10 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
 
     _bankName = pa['bank_name']?.toString().isNotEmpty == true
         ? pa['bank_name'].toString()
-        : 'Vietcombank';
-    _bankCode = pa['bank_code']?.toString() ?? 'VCB';
-    _bankBin = pa['bank_bin']?.toString() ?? '970436';
-    _bankLogo = pa['bank_logo']?.toString() ?? '';
+        : (_defaultBank?['shortName']?.toString() ?? 'Vietcombank');
+    _bankCode = pa['bank_code']?.toString() ?? (_defaultBank?['code']?.toString() ?? 'VCB');
+    _bankBin = pa['bank_bin']?.toString() ?? (_defaultBank?['bin']?.toString() ?? '970436');
+    _bankLogo = pa['bank_logo']?.toString() ?? (_defaultBank?['logo']?.toString() ?? '');
 
     _ownerId = b?['owner_id']?.toString() ?? '';
     if (b?['owner_preview'] is Map) {
@@ -904,8 +867,7 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
 
     final isEmail = input.contains('@');
     if (isEmail) {
-      final emailRegex = RegExp(r'^[^@]+@[^@]+\.[^@]+$');
-      if (!emailRegex.hasMatch(input)) {
+      if (!isValidEmail(input)) {
         setState(() {
           _ownerLookupError =
               'Định dạng Email không hợp lệ (ví dụ: chudautu@congty.vn).';
@@ -915,8 +877,8 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
         return null;
       }
     } else {
-      final cleanPhone = input.replaceAll(RegExp(r'\D'), '');
-      if (cleanPhone.length != 10 || !cleanPhone.startsWith('0')) {
+      final cleanPhone = normalizePhone(input);
+      if (!isValidPhone(cleanPhone)) {
         setState(() {
           _ownerLookupError =
               'Số điện thoại không đúng định dạng 10 chữ số Việt Nam (ví dụ: 0912345678).';
@@ -933,7 +895,9 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
     });
 
     try {
-      final res = await widget.service.lookupOwner(input);
+      // React: lookupOwner(isEmailInput ? raw.toLowerCase() : normalizePhone(raw))
+      final lookupKey = isEmail ? input.toLowerCase() : normalizePhone(input);
+      final res = await widget.service.lookupOwner(lookupKey);
       if (mounted && res is Map && res['found'] == true && res['owner'] is Map) {
         final owner = Map<String, dynamic>.from(res['owner']);
         setState(() {
@@ -1125,6 +1089,15 @@ class _BuildingFormDialogState extends ConsumerState<_BuildingFormDialog> {
                               focusNode: _codeFocusNode,
                               placeholder: 'VD: VOP-A',
                               controller: _codeController,
+                              onChanged: (val) {
+                                final upper = val.toUpperCase();
+                                if (upper != val) {
+                                  _codeController.value = _codeController.value.copyWith(
+                                    text: upper,
+                                    selection: TextSelection.collapsed(offset: upper.length),
+                                  );
+                                }
+                              },
                             ),
                             if (_codeCheck != null && editing == null) ...[
                               const SizedBox(height: 4),
