@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
+import '../../../core/network/query_cache.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/billing_helpers.dart';
 import '../../../core/utils/date_range.dart';
@@ -199,11 +200,14 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
         return _kTerminalStatuses.contains(status);
       }).toList();
 
-  Future<void> _fetchServices() async {
+  Future<void> _fetchServices({bool force = false}) async {
     setState(() => _loading = true);
     try {
-      final res =
-          await ref.read(residentServiceProvider).listServices(_contractId);
+      final res = await ref.read(queryCacheProvider).cachedFetch<dynamic>(
+            'resident:services:${_contractId ?? ''}',
+            () => ref.read(residentServiceProvider).listServices(_contractId),
+            force: force,
+          );
       if (mounted) {
         final dataMap = res is Map && res['data'] is Map
             ? res['data'] as Map
@@ -694,7 +698,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
                                 if (ctx.mounted) Navigator.of(ctx).pop();
                                 ref.read(toastProvider.notifier).success(
                                     'Đã gửi yêu cầu đăng ký dịch vụ, chờ Ban Quản Lý phê duyệt!');
-                                await _fetchServices();
+                                await _fetchServices(force: true);
                               } catch (err) {
                                 if (ctx.mounted) {
                                   setModalState(() => submitting = false);
@@ -878,7 +882,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
                                 if (ctx.mounted) Navigator.of(ctx).pop();
                                 ref.read(toastProvider.notifier).success(
                                     'Đã gửi yêu cầu hủy dịch vụ thành công.');
-                                await _fetchServices();
+                                await _fetchServices(force: true);
                               } catch (err) {
                                 if (ctx.mounted) {
                                   setModalState(() => submitting = false);
@@ -1106,7 +1110,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
       ref
           .read(toastProvider.notifier)
           .success('Đã rút yêu cầu hủy dịch vụ thành công.');
-      await _fetchServices();
+      await _fetchServices(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(
           extractErrorMessage(err, 'Không thể rút yêu cầu hủy dịch vụ.'));
@@ -1517,7 +1521,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
     return RefreshIndicator(
       onRefresh: () async {
         await widget.onRefreshOverview();
-        await _fetchServices();
+        await _fetchServices(force: true);
       },
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),

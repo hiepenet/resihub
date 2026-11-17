@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
+import '../../../core/network/query_cache.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/billing_helpers.dart';
 import '../../../core/utils/format.dart';
@@ -232,11 +233,18 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     );
   }
 
-  Future<void> _fetchInvoices() async {
+  Future<void> _fetchInvoices({bool force = false}) async {
     setState(() => _loading = true);
     try {
+      // Keep main's cachedFetch (navigation perf) AND the best-effort
+      // building/settings enrichment from the parity work — all three reads
+      // stay inside _settled so a sync provider throw cannot abort initState.
       final results = await Future.wait([
-        _settled(() => ref.read(residentServiceProvider).listInvoices(_contractId)),
+        _settled(() => ref.read(queryCacheProvider).cachedFetch<dynamic>(
+              'resident:invoices:${_contractId ?? ''}',
+              () => ref.read(residentServiceProvider).listInvoices(_contractId),
+              force: force,
+            )),
         _settled(() => ref.read(buildingsServiceProvider).list()),
         _settled(() => ref.read(usersServiceProvider).getSettings()),
       ]);
@@ -667,7 +675,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
                               ref
                                   .read(toastProvider.notifier)
                                   .success('Đã gửi thông báo thanh toán kèm chứng từ thành công!');
-                              await _fetchInvoices();
+                              await _fetchInvoices(force: true);
                               await widget.onRefreshOverview();
                             } catch (err) {
                               setModalState(() => submitting = false);
@@ -931,7 +939,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     return RefreshIndicator(
       onRefresh: () async {
         await widget.onRefreshOverview();
-        await _fetchInvoices();
+        await _fetchInvoices(force: true);
       },
       child: _loading && _invoices.isEmpty
           ? const Center(child: CircularProgressIndicator())

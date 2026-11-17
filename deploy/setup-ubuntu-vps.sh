@@ -77,7 +77,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
   echo "  -> Đã thêm tài khoản '${SUDO_USER}' vào nhóm docker."
 fi
 
-echo "[5/5] Cấu hình tường lửa UFW (mở SSH, HTTP 80, HTTPS/HTTP3 443)..."
+echo "[5/5] Cấu hình tường lửa UFW (mở SSH, HTTP 80, HTTPS/HTTP3 443, Flutter Web 3001)..."
 SSH_PORTS="22"
 if command -v sshd >/dev/null 2>&1; then
   DETECTED_PORTS="$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | tr '\n' ' ' || true)"
@@ -94,6 +94,7 @@ done
 ufw allow 80/tcp comment 'HTTP Caddy'
 ufw allow 443/tcp comment 'HTTPS Caddy'
 ufw allow 443/udp comment 'HTTP3 QUIC Caddy'
+ufw allow 3001/tcp comment 'Flutter Web HTTP'
 ufw --force enable
 
 echo ""

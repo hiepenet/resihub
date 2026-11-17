@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_resihub/core/network/dio_client.dart';
+import 'package:flutter_resihub/core/network/query_cache.dart';
 import 'package:flutter_resihub/features/resident/services/resident_service.dart';
 import 'package:flutter_resihub/features/resident/tabs/services_tab.dart';
 
@@ -113,6 +114,7 @@ void main() {
       ProviderScope(
         overrides: [
           dioProvider.overrideWithValue(dio),
+          queryCacheProvider.overrideWithValue(QueryCache()),
           residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
         ],
         child: MaterialApp(

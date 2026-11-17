@@ -11,9 +11,9 @@ Tài liệu thực chiến dành cho Quản trị viên triển khai hệ thốn
 | **Hệ điều hành** | Ubuntu 22.04 LTS hoặc Ubuntu 24.04 LTS (64-bit) | Ubuntu 24.04 LTS |
 | **CPU / RAM** | 2 vCPU / 2 GB RAM (script tự tạo thêm 2 GB Swap) | 2–4 vCPU / 4 GB RAM |
 | **Ổ cứng** | 25 GB NVMe/SSD | 40+ GB NVMe SSD |
-| **Mạng** | 1 địa chỉ IPv4 Public, mở cổng `22`, `80`, `443` | Hạ tầng datacenter tại Việt Nam (Viettel IDC, VNPT, Vietnix, Azdigi, GreenCloud HN/HCM...) |
+| **Mạng** | 1 địa chỉ IPv4 Public, mở cổng `22`, `80`, `443`, `3001` | Hạ tầng datacenter tại Việt Nam (Viettel IDC, VNPT, Vietnix, Azdigi, GreenCloud HN/HCM...) |
 
-> **Kiến trúc bảo mật 5 container:** Chỉ duy nhất container `web` (Caddy 2) mở cổng `80`/`443` ra Internet. Cổng PostgreSQL (`5432`), Backend API (`5000`), tiến trình `worker` (cron 00:05) và `backup` (cron 02:00) nằm hoàn toàn trong mạng nội bộ cô lập `resihub_internal`.
+> **Kiến trúc bảo mật 6 container:** Container `web` (Caddy 2) mở cổng `80`/`443` phục vụ React Web SPA, container `flutter_web` (Nginx) mở cổng `3001` phục vụ Flutter Web Cư dân (tích hợp reverse proxy `/api/` nội bộ). Cổng PostgreSQL (`5432`), Backend API (`5000`), tiến trình `worker` (cron 00:05) và `backup` (cron 02:00) nằm hoàn toàn trong mạng nội bộ cô lập `resihub_internal`.
 
 ---
 
@@ -35,7 +35,7 @@ Script `setup-ubuntu-vps.sh` hoàn toàn **idempotent** (chạy lại nhiều l�
 1. Chuyển múi giờ máy chủ sang `Asia/Ho_Chi_Minh` (`UTC+7`).
 2. Khởi tạo `/swapfile` `2GB` nếu VPS chưa có Swap (chống tràn RAM khi biên dịch giao diện Vite).
 3. Cài đặt **Docker Engine** và **Docker Compose v2** chính chủ từ kho gói Docker.
-4. Bật tường lửa **UFW** (tự động nhận diện cổng SSH hiện tại để không bao giờ khóa nhầm phiên SSH, đồng thời chỉ mở cổng `80/tcp`, `443/tcp`, `443/udp`).
+4. Bật tường lửa **UFW** (tự động nhận diện cổng SSH hiện tại để không bao giờ khóa nhầm phiên SSH, đồng thời mở cổng `80/tcp`, `443/tcp`, `443/udp`, và `3001/tcp` cho Flutter Web).
 
 ---
 
@@ -72,14 +72,16 @@ cd /opt/resihub
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 ```
 
-Kiểm tra trạng thái 5 dịch vụ (`postgres`, `api`, `worker`, `web`, `backup`):
+Kiểm tra trạng thái 6 dịch vụ (`postgres`, `api`, `worker`, `web`, `flutter_web`, `backup`):
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.production ps
 curl -fsS http://127.0.0.1/api/health
 ```
 
-Kết quả trả về `{"status":"ok","database":"connected",...}` là hệ thống đã sẵn sàng. Mở trình duyệt truy cập `http://<IP_VPS>` và đăng nhập bằng tài khoản `INIT_ADMIN_EMAIL`.
+Kết quả trả về `{"status":"ok","database":"connected",...}` là hệ thống đã sẵn sàng:
+- **Cổng Quản trị React Web**: Mở trình duyệt truy cập `http://<IP_VPS>` và đăng nhập bằng tài khoản `INIT_ADMIN_EMAIL`.
+- **Cổng Cư dân Flutter Web**: Truy cập `http://<IP_VPS>:3001`.
 
 ---
 

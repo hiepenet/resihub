@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
+import '../../../core/network/query_cache.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/date_range.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
@@ -318,19 +319,28 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     return c?['contract_id']?.toString() ?? c?['id']?.toString();
   }
 
-  Future<void> _fetchContractData() async {
+  Future<void> _fetchContractData({bool force = false}) async {
     final cid = _contractId;
     if (cid == null || cid.isEmpty) return;
 
     setState(() => _loading = true);
     final occupantsFuture = ref
         .read(contractsServiceProvider)
-        .listOccupants(cid)
+        .listOccupants(cid, force: force)
         .catchError((Object _) => <dynamic>[]);
     try {
+      final cache = ref.read(queryCacheProvider);
       final res = await Future.wait([
-        ref.read(residentServiceProvider).listDepositTransactions(cid),
-        ref.read(residentServiceProvider).listContractRequests(cid),
+        cache.cachedFetch<dynamic>(
+          'resident:depositTransactions:$cid',
+          () => ref.read(residentServiceProvider).listDepositTransactions(cid),
+          force: force,
+        ),
+        cache.cachedFetch<dynamic>(
+          'resident:contractRequests:$cid',
+          () => ref.read(residentServiceProvider).listContractRequests(cid),
+          force: force,
+        ),
       ]);
 
       final depData = res[0] is Map && res[0]['data'] is List
@@ -678,7 +688,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                               ref
                                   .read(toastProvider.notifier)
                                   .success('Đã gửi khiếu nại cọc thành công.');
-                              await _fetchContractData();
+                              await _fetchContractData(force: true);
                             } catch (err) {
                               setModalState(() => submitting = false);
                               ref.read(toastProvider.notifier).error(
@@ -795,7 +805,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                               }
                               ref.read(toastProvider.notifier).success(
                                   'Đã lưu thông tin tài khoản hoàn cọc.');
-                              await _fetchContractData();
+                              await _fetchContractData(force: true);
                             } catch (err) {
                               setModalState(() => saving = false);
                               ref.read(toastProvider.notifier).error(
@@ -946,7 +956,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                                 ref
                                     .read(toastProvider.notifier)
                                     .success('Đã gửi yêu cầu hợp đồng.');
-                                await _fetchContractData();
+                                await _fetchContractData(force: true);
                               } catch (err) {
                                 setModalState(() => submitting = false);
                                 ref.read(toastProvider.notifier).error(
@@ -1970,7 +1980,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     return RefreshIndicator(
       onRefresh: () async {
         await widget.onRefreshOverview();
-        await _fetchContractData();
+        await _fetchContractData(force: true);
       },
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),

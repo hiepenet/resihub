@@ -96,6 +96,11 @@ class ResidentPortalPage extends ConsumerStatefulWidget {
 
 class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   late String _activeTab;
+  /// Tabs already mounted. An [IndexedStack] keeps each tab's State alive via
+  /// stable [ValueKey]s, so revisiting does not re-enter initState. Widget
+  /// objects are rebuilt each build (not cached) so fresh overview/contract
+  /// props reach didUpdateWidget — otherwise switching apartment would feed
+  /// stale data to an already-visited tab.
   final Set<String> _visitedTabs = {};
   String? _selectedContractId;
   String? _actionParam;
@@ -439,17 +444,16 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       index: activeIdx >= 0 ? activeIdx : 0,
       children: [
         for (final tab in kValidResidentTabs)
-          _visitedTabs.contains(tab)
-              ? _buildSingleTab(tab)
-              : const SizedBox.shrink(),
+          _visitedTabs.contains(tab) ? _createTab(tab) : const SizedBox.shrink(),
       ],
     );
   }
 
-  Widget _buildSingleTab(String tab) {
+  Widget _createTab(String tab) {
     switch (tab) {
       case 'overview':
         return OverviewTab(
+          key: const ValueKey('overview'),
           overview: _overview,
           openRequestsCount: _openRequestsCount,
           onRefreshOverview: () => _fetchOverviewData(true),
@@ -459,6 +463,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'contract':
         return ContractTab(
+          key: const ValueKey('contract'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -467,6 +472,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'invoices':
         return InvoicesTab(
+          key: const ValueKey('invoices'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -476,6 +482,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'services':
         return ServicesTab(
+          key: const ValueKey('services'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -486,6 +493,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'maintenance':
         return MaintenanceTab(
+          key: const ValueKey('maintenance'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -497,24 +505,28 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'notifications':
         return NotificationsTab(
+          key: const ValueKey('notifications'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'contact':
         return ContactTab(
+          key: const ValueKey('contact'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'profile':
         return ProfileTab(
+          key: const ValueKey('profile'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       default:
         return OverviewTab(
+          key: const ValueKey('overview'),
           overview: _overview,
           openRequestsCount: _openRequestsCount,
           onRefreshOverview: () => _fetchOverviewData(true),
