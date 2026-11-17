@@ -63,7 +63,11 @@ void main() {
         return ResponseBody.fromString(
           jsonEncode({
             'success': true,
-            'data': {'id': 'mock-id', 'method': options.method, 'path': options.path},
+            'data': {
+              'id': 'mock-id',
+              'method': options.method,
+              'path': options.path
+            },
           }),
           200,
           headers: {
@@ -85,14 +89,16 @@ void main() {
     });
 
     test('2. submitRentalApplication', () async {
-      await residentService.submitRentalApplication({'desired_apartment_id': 'apt-1'});
+      await residentService
+          .submitRentalApplication({'desired_apartment_id': 'apt-1'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/resident/rental-application');
       expect(lastRequest.data, {'desired_apartment_id': 'apt-1'});
     });
 
     test('3. uploadIdImage', () async {
-      await residentService.uploadIdImage({'side': 'front', 'image_data': 'base64str'});
+      await residentService
+          .uploadIdImage({'side': 'front', 'image_data': 'base64str'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/resident/id-images');
       expect(lastRequest.data, {'side': 'front', 'image_data': 'base64str'});
@@ -179,14 +185,16 @@ void main() {
     });
 
     test('12. subscribeService', () async {
-      await residentService.subscribeService({'service_id': 'srv-1', 'quantity': 1});
+      await residentService
+          .subscribeService({'service_id': 'srv-1', 'quantity': 1});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/resident/services');
       expect(lastRequest.data['service_id'], 'srv-1');
     });
 
     test('13. cancelService', () async {
-      await residentService.cancelService('sub-1', {'cancellation_reason': 'Không ở nữa'});
+      await residentService
+          .cancelService('sub-1', {'cancellation_reason': 'Không ở nữa'});
       expect(lastRequest.method, 'PATCH');
       expect(lastRequest.path, '/api/v1/resident/services/sub-1/cancel');
       expect(lastRequest.data['cancellation_reason'], 'Không ở nữa');
@@ -195,7 +203,8 @@ void main() {
     test('14. withdrawCancelService', () async {
       await residentService.withdrawCancelService('sub-1');
       expect(lastRequest.method, 'PATCH');
-      expect(lastRequest.path, '/api/v1/resident/services/sub-1/withdraw-cancel');
+      expect(
+          lastRequest.path, '/api/v1/resident/services/sub-1/withdraw-cancel');
     });
 
     test('15. updateProfile', () async {
@@ -293,7 +302,8 @@ void main() {
       dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
     });
 
-    testWidgets('Prospect reservation mode shows rental application submission', (tester) async {
+    testWidgets('Prospect reservation mode shows rental application submission',
+        (tester) async {
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
         if (options.path.contains('/resident/overview')) {
           return ResponseBody.fromString(
@@ -315,25 +325,37 @@ void main() {
               },
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
         if (options.path.contains('/resident/service-requests')) {
           return ResponseBody.fromString(
             jsonEncode({'success': true, 'data': []}),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
         if (options.path.contains('/resident/rental-application')) {
           return ResponseBody.fromString(
-            jsonEncode({'success': true, 'data': {'application_id': 'app-99'}}),
+            jsonEncode({
+              'success': true,
+              'data': {'application_id': 'app-99'}
+            }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -343,7 +365,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: const MaterialApp(
             home: ResidentPortalPage(),
@@ -362,11 +385,14 @@ void main() {
       expect(find.textContaining('Nộp hồ sơ thuê'), findsWidgets);
     });
 
-    testWidgets('Multi-contract resident switches units and triggers overview update', (tester) async {
+    testWidgets(
+        'Multi-contract resident switches units and triggers overview update',
+        (tester) async {
       String? queriedContractId;
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
         if (options.path.contains('/resident/overview')) {
-          queriedContractId = options.queryParameters['contract_id']?.toString();
+          queriedContractId =
+              options.queryParameters['contract_id']?.toString();
           return ResponseBody.fromString(
             jsonEncode({
               'success': true,
@@ -385,19 +411,26 @@ void main() {
                 ],
                 'active_contract': {
                   'contract_id': queriedContractId ?? 'c-101',
-                  'apartment_code': queriedContractId == 'c-202' ? 'B.202' : 'A.101',
-                  'building_name': queriedContractId == 'c-202' ? 'Tòa Diamond' : 'Tòa Ruby',
+                  'apartment_code':
+                      queriedContractId == 'c-202' ? 'B.202' : 'A.101',
+                  'building_name':
+                      queriedContractId == 'c-202' ? 'Tòa Diamond' : 'Tòa Ruby',
                 },
                 'current_amount_due': 12000000,
                 'user': {'full_name': 'Cư Dân Vip'},
               },
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -407,7 +440,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: const MaterialApp(
             home: ResidentPortalPage(),
@@ -417,11 +451,13 @@ void main() {
 
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('resident-contract-switcher')), findsOneWidget);
+      expect(
+          find.byKey(const Key('resident-contract-switcher')), findsOneWidget);
       expect(find.textContaining('A.101'), findsWidgets);
     });
 
-    testWidgets('ContractTab A4 preview & 7-day dispute window', (tester) async {
+    testWidgets('ContractTab A4 preview & 7-day dispute window',
+        (tester) async {
       bool contractTemplateCalled = false;
       bool disputeApiCalled = false;
 
@@ -449,32 +485,46 @@ void main() {
                   'settlement': {
                     'refund_amount': 15000000,
                     'deduction_amount': 5000000,
-                    'payout_at': DateTime.now().subtract(const Duration(days: 2)).toIso8601String(),
+                    'payout_at': DateTime.now()
+                        .subtract(const Duration(days: 2))
+                        .toIso8601String(),
                   },
                 }
               ],
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
         if (options.path.contains('/deposits/dep-77/dispute')) {
           disputeApiCalled = true;
           return ResponseBody.fromString(
-            jsonEncode({'success': true, 'data': {'dispute_id': 'disp-1'}}),
+            jsonEncode({
+              'success': true,
+              'data': {'dispute_id': 'disp-1'}
+            }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
         if (options.path.contains('/resident/contract-requests')) {
           return ResponseBody.fromString(
             jsonEncode({'success': true, 'data': []}),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -497,8 +547,10 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
-            contractsServiceProvider.overrideWithValue(ContractsService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
+            contractsServiceProvider
+                .overrideWithValue(ContractsService(dio: dio)),
           ],
           child: MaterialApp(
             home: Scaffold(
@@ -521,7 +573,9 @@ void main() {
       final disputeState = getResidentDisputeWindowState({
         'status': 'PARTIALLY_REFUNDED',
         'settlement': {
-          'payout_at': DateTime.now().subtract(const Duration(days: 2)).toIso8601String(),
+          'payout_at': DateTime.now()
+              .subtract(const Duration(days: 2))
+              .toIso8601String(),
         },
       });
       expect(disputeState.canDispute, isTrue);
@@ -545,7 +599,8 @@ void main() {
       }
     });
 
-    testWidgets('InvoicesTab displays summary, meter photo & report payment', (tester) async {
+    testWidgets('InvoicesTab displays summary, meter photo & report payment',
+        (tester) async {
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
         if (options.path.contains('/resident/invoices')) {
           return ResponseBody.fromString(
@@ -573,18 +628,24 @@ void main() {
                       'item_type': 'WATER',
                       'item_name': 'Tiền nước',
                       'amount': 200000,
-                      'meter_image_url': 'https://resihub.vn/meters/water_302.jpg',
+                      'meter_image_url':
+                          'https://resihub.vn/meters/water_302.jpg',
                     },
                   ],
                 }
               ],
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -593,14 +654,16 @@ void main() {
         'item_type': 'ELECTRICITY',
         'formula_meta': {'image_url': 'https://resihub.vn/meters/elec_302.jpg'},
       };
-      expect(resolveResidentInvoiceLineMeterImage(lineElec), 'https://resihub.vn/meters/elec_302.jpg');
+      expect(resolveResidentInvoiceLineMeterImage(lineElec),
+          'https://resihub.vn/meters/elec_302.jpg');
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: MaterialApp(
             home: Scaffold(
@@ -624,7 +687,8 @@ void main() {
       expect(find.textContaining('Ảnh công tơ'), findsWidgets);
     });
 
-    testWidgets('InvoicesTab renders building payment account, VietQR transfer syntax & credit balance/history',
+    testWidgets(
+        'InvoicesTab renders building payment account, VietQR transfer syntax & credit balance/history',
         (tester) async {
       final dio = Dio();
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
@@ -657,11 +721,16 @@ void main() {
               ],
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 1000));
@@ -687,7 +756,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: MaterialApp(
             home: Scaffold(
@@ -704,13 +774,15 @@ void main() {
       await tester.pumpAndSettle();
 
       // Credit balance banner
-      expect(find.textContaining('Số dư tín dụng khả dụng: 350.000'), findsOneWidget);
+      expect(find.textContaining('Số dư tín dụng khả dụng: 350.000'),
+          findsOneWidget);
       // Credit balance history section
       expect(find.textContaining('Lịch sử biến động tín dụng'), findsOneWidget);
       expect(find.textContaining('Hoàn cọc dịch vụ kỳ trước'), findsOneWidget);
 
       // Building payment account
-      expect(find.textContaining('Tài khoản nhận thanh toán Tòa nhà'), findsOneWidget);
+      expect(find.textContaining('Tài khoản nhận thanh toán Tòa nhà'),
+          findsOneWidget);
       expect(find.textContaining('1234567890'), findsOneWidget);
       expect(find.textContaining('BAN QUAN LY APARTMENT'), findsOneWidget);
 
@@ -725,11 +797,16 @@ void main() {
       expect(find.text('Mã VietQR Thanh Toán'), findsOneWidget);
     });
 
-    testWidgets('ProfileTab mounts and disposes cleanly without leaking controllers', (tester) async {
+    testWidgets(
+        'ProfileTab mounts and disposes cleanly without leaking controllers',
+        (tester) async {
       final dio = Dio();
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': {}}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': {}}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       bool showProfile = true;
@@ -739,7 +816,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: MaterialApp(
             home: Scaffold(
@@ -770,7 +848,8 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('Nguyen Van A'), findsOneWidget);
-      expect(find.text('0901234567'), findsOneWidget);
+      // Value + React's matching hint are both in the tree.
+      expect(find.text('0901234567'), findsWidgets);
 
       // Unmount ProfileTab by switching flag
       showProfile = false;
@@ -779,7 +858,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: const MaterialApp(
             home: Scaffold(
@@ -793,7 +873,86 @@ void main() {
       expect(find.text('Nguyen Van A'), findsNothing);
     });
 
-    testWidgets('ServicesTab subscribe modal computes and shows previewSubscriptionProrata', (tester) async {
+    testWidgets(
+        'ProfileTab parity: extra fields, consent line and visibility toggles',
+        (tester) async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': {}}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: ProfileTab(
+                overview: const {
+                  'user': {
+                    'full_name': 'Nguyen Van A',
+                    'email': 'a@resihub.vn',
+                    'phone': '0901234567',
+                    'id_number': '001200000001',
+                    'address': 'Toa A - P302',
+                    'dob': '1990-05-20',
+                    'nationality': 'Viet Nam',
+                    'avatar_url': 'https://resihub.vn/avatars/a.png',
+                    'privacy_consent_at': '2026-11-01T09:30:00Z',
+                    'privacy_policy_version': 'v1.0',
+                  },
+                  'id_images': [
+                    {'side': 'front', 'url': 'https://resihub.vn/id/front.png'},
+                    {'side': 'back', 'url': 'https://resihub.vn/id/back.png'},
+                  ],
+                },
+                onRefreshOverview: () async {},
+                onNavigateTab: (tab, [extra]) {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Extra fields from React ProfileTab.
+      expect(find.text('Ngày sinh'), findsOneWidget);
+      expect(find.text('Quốc tịch'), findsOneWidget);
+      expect(find.textContaining('Ảnh đại diện'), findsWidgets);
+      expect(
+        find.textContaining('Đã đồng thuận bảo vệ dữ liệu cá nhân lúc'),
+        findsOneWidget,
+      );
+
+      // Three password fields each get a visibility toggle (eye icon).
+      bool isEye(IconButton b) =>
+          b.icon is Icon && (b.icon as Icon).icon == Icons.visibility;
+      expect(find.byWidgetPredicate((w) => w is IconButton && isEye(w)),
+          findsNWidgets(3));
+
+      await tester.tap(
+          find.byWidgetPredicate((w) => w is IconButton && isEye(w)).first);
+      await tester.pumpAndSettle();
+      expect(find.byWidgetPredicate((w) => w is IconButton && isEye(w)),
+          findsNWidgets(2));
+      expect(find.byIcon(Icons.visibility_off), findsNWidgets(1));
+    });
+
+    testWidgets(
+        'ServicesTab subscribe modal computes and shows previewSubscriptionProrata',
+        (tester) async {
       final dio = Dio();
       dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
         if (options.path.contains('/resident/services')) {
@@ -813,11 +972,16 @@ void main() {
               },
             }),
             200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
           );
         }
-        return ResponseBody.fromString(jsonEncode({'success': true, 'data': []}), 200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
       });
 
       await tester.binding.setSurfaceSize(const Size(1200, 900));
@@ -827,7 +991,8 @@ void main() {
           overrides: [
             dioProvider.overrideWithValue(dio),
             appStorageProvider.overrideWithValue(storage),
-            residentServiceProvider.overrideWithValue(ResidentService(dio: dio)),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
           ],
           child: MaterialApp(
             home: Scaffold(
