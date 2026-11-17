@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
+import '../../../core/network/query_cache.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/validation.dart';
@@ -147,12 +148,16 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
   int get _doneCount =>
       _requests.where((r) => _kDoneStatuses.contains(_statusOf(r))).length;
 
-  Future<void> _fetchRequests() async {
+  Future<void> _fetchRequests({bool force = false}) async {
     setState(() => _loading = true);
     try {
-      final res = await ref
-          .read(residentServiceProvider)
-          .listServiceRequests(_contractId);
+      final res = await ref.read(queryCacheProvider).cachedFetch<dynamic>(
+            'resident:serviceRequests:${_contractId ?? ''}',
+            () => ref
+                .read(residentServiceProvider)
+                .listServiceRequests(_contractId),
+            force: force,
+          );
       final list = res is Map && res['data'] is List
           ? res['data'] as List
           : (res is List ? res : []);
@@ -467,7 +472,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                                 ref.read(toastProvider.notifier).success(
                                       _createSuccessMessage(res),
                                     );
-                                await _fetchRequests();
+                                await _fetchRequests(force: true);
                                 widget.onRefreshOverview();
                               } on DioException catch (err) {
                                 final data = err.response?.data;
@@ -656,7 +661,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                               ref
                                   .read(toastProvider.notifier)
                                   .success(_createSuccessMessage(res));
-                              await _fetchRequests();
+                              await _fetchRequests(force: true);
                               widget.onRefreshOverview();
                             } catch (err) {
                               setModalState(() => submitting = false);
@@ -737,7 +742,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                                         ? res['message'].toString()
                                         : 'Đã hủy yêu cầu sửa chữa.',
                                   );
-                              await _fetchRequests();
+                              await _fetchRequests(force: true);
                             } catch (err) {
                               setModalState(() => submitting = false);
                               ref.read(toastProvider.notifier).error(
@@ -828,7 +833,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                                         ? res['message'].toString()
                                         : 'Đã mở lại yêu cầu để Ban quản lý xử lý bổ sung.',
                                   );
-                              await _fetchRequests();
+                              await _fetchRequests(force: true);
                             } catch (err) {
                               setModalState(() => submitting = false);
                               ref.read(toastProvider.notifier).error(
@@ -945,7 +950,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                                         ? res['message'].toString()
                                         : 'Cảm ơn bạn đã nghiệm thu và đánh giá chất lượng xử lý!',
                                   );
-                              await _fetchRequests();
+                              await _fetchRequests(force: true);
                             } catch (err) {
                               setModalState(() => submitting = false);
                               ref.read(toastProvider.notifier).error(
@@ -1122,7 +1127,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
     return RefreshIndicator(
       onRefresh: () async {
         await widget.onRefreshOverview();
-        await _fetchRequests();
+        await _fetchRequests(force: true);
       },
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),

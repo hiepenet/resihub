@@ -11,6 +11,12 @@ import '../../providers/notification_provider.dart';
 import '../common/notification_bell.dart';
 import '../ui/app_select.dart';
 
+/// Shell's notification dependency. Exposed as a function so a widget test can
+/// drive the exact watch the shell uses (the 60s poll flips `loading` without
+/// changing `unreadCount` and must not rebuild the shell).
+int watchShellUnreadCount(WidgetRef ref) =>
+    ref.watch(notificationProvider.select((s) => s.unreadCount));
+
 /// 3-Tier Responsive Resident Shell matching `ResidentLayout.jsx`.
 /// - Desktop (>= 1024px): Left 8-tab sidebar + apartment switcher
 /// - Tablet (768..1023px): Sticky horizontal tab strip of all 8 tabs
@@ -292,9 +298,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
     final isMobile = width < 768;
     final isCompactUp = width >= 640;
 
-    final authState = ref.watch(authProvider);
-    final user = authState.user;
-    final unreadCount = ref.watch(notificationProvider).unreadCount;
+    final user = ref.watch(authProvider.select((s) => s.user));
+    final unreadCount = watchShellUnreadCount(ref);
 
     final mobileNav = resolveResidentMobileNavState(
       activeTab: widget.activeTab,
