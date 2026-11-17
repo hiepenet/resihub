@@ -12,11 +12,13 @@ import '../../../shared/providers/notification_provider.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
 import '../../../shared/widgets/common/status_badge.dart';
+import '../../../shared/widgets/common/empty_state.dart';
 import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
 import '../../../shared/widgets/ui/app_card.dart';
 import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
+import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../services/resident_service.dart';
 
 class OverviewTab extends ConsumerStatefulWidget {
@@ -42,10 +44,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final overview = widget.overview ?? const {};
     final user = overview['user'] is Map ? overview['user'] as Map : const {};
 
-    final fullNameCtrl = TextEditingController(text: user['full_name']?.toString() ?? '');
-    final phoneCtrl = TextEditingController(text: user['phone']?.toString() ?? '');
-    final idNumberCtrl = TextEditingController(text: user['id_number']?.toString() ?? '');
-    final addressCtrl = TextEditingController(text: user['address']?.toString() ?? '');
+    final fullNameCtrl =
+        TextEditingController(text: user['full_name']?.toString() ?? '');
+    final phoneCtrl =
+        TextEditingController(text: user['phone']?.toString() ?? '');
+    final idNumberCtrl =
+        TextEditingController(text: user['id_number']?.toString() ?? '');
+    final addressCtrl =
+        TextEditingController(text: user['address']?.toString() ?? '');
     final jobCtrl = TextEditingController();
     final emergencyNameCtrl = TextEditingController();
     final emergencyPhoneCtrl = TextEditingController();
@@ -55,7 +61,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     AppModal.show(
       context: context,
       title: 'Nộp hồ sơ thuê căn hộ',
-      subtitle: 'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
+      subtitle:
+          'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
           return SingleChildScrollView(
@@ -107,7 +114,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     AppButton(
                       text: 'Hủy',
                       variant: AppButtonVariant.outline,
-                      onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
+                      onPressed:
+                          submitting ? null : () => Navigator.of(ctx).pop(),
                     ),
                     const SizedBox(width: 8),
                     AppButton(
@@ -119,9 +127,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               final name = fullNameCtrl.text.trim();
                               final phone = phoneCtrl.text.trim();
                               if (name.isEmpty || phone.isEmpty) {
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error('Vui lòng điền họ tên và số điện thoại.');
+                                ref.read(toastProvider.notifier).error(
+                                    'Vui lòng điền họ tên và số điện thoại.');
                                 return;
                               }
 
@@ -130,15 +137,18 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await ref
                                     .read(residentServiceProvider)
                                     .submitRentalApplication({
-                                  if (apartmentId != null && apartmentId.isNotEmpty)
+                                  if (apartmentId != null &&
+                                      apartmentId.isNotEmpty)
                                     'desired_apartment_id': apartmentId,
                                   'full_name': name,
                                   'phone': phone,
                                   'id_number': idNumberCtrl.text.trim(),
                                   'address': addressCtrl.text.trim(),
                                   'job_title': jobCtrl.text.trim(),
-                                  'emergency_contact_name': emergencyNameCtrl.text.trim(),
-                                  'emergency_contact_phone': emergencyPhoneCtrl.text.trim(),
+                                  'emergency_contact_name':
+                                      emergencyNameCtrl.text.trim(),
+                                  'emergency_contact_phone':
+                                      emergencyPhoneCtrl.text.trim(),
                                 });
                                 if (ctx.mounted) {
                                   Navigator.of(ctx).pop();
@@ -149,9 +159,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await widget.onRefreshOverview();
                               } catch (err) {
                                 setModalState(() => submitting = false);
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error(extractErrorMessage(err, 'Không thể gửi hồ sơ thuê.'));
+                                ref.read(toastProvider.notifier).error(
+                                    extractErrorMessage(
+                                        err, 'Không thể gửi hồ sơ thuê.'));
                               }
                             },
                     ),
@@ -165,13 +175,17 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
-  void _openReservationBankModal(BuildContext context, Map<String, dynamic> rsv) {
-    final rsvId = rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
+  void _openReservationBankModal(
+      BuildContext context, Map<String, dynamic> rsv) {
+    final rsvId =
+        rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
     String bankName = rsv['bank_name']?.toString() ?? '';
     String? bankCode = rsv['bank_code']?.toString();
     String? bankBin = rsv['bank_bin']?.toString();
-    final accNumCtrl = TextEditingController(text: rsv['account_number']?.toString() ?? '');
-    final accHolderCtrl = TextEditingController(text: rsv['account_holder']?.toString() ?? '');
+    final accNumCtrl =
+        TextEditingController(text: rsv['account_number']?.toString() ?? '');
+    final accHolderCtrl =
+        TextEditingController(text: rsv['account_holder']?.toString() ?? '');
 
     bool saving = false;
 
@@ -224,10 +238,11 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         : () async {
                             final acc = accNumCtrl.text.trim();
                             final holder = accHolderCtrl.text.trim();
-                            if (bankName.isEmpty || acc.isEmpty || holder.isEmpty) {
-                              ref
-                                  .read(toastProvider.notifier)
-                                  .error('Vui lòng điền đầy đủ thông tin ngân hàng.');
+                            if (bankName.isEmpty ||
+                                acc.isEmpty ||
+                                holder.isEmpty) {
+                              ref.read(toastProvider.notifier).error(
+                                  'Vui lòng điền đầy đủ thông tin ngân hàng.');
                               return;
                             }
 
@@ -245,15 +260,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }
-                              ref
-                                  .read(toastProvider.notifier)
-                                  .success('Đã cập nhật thông tin tài khoản hoàn tiền.');
+                              ref.read(toastProvider.notifier).success(
+                                  'Đã cập nhật thông tin tài khoản hoàn tiền.');
                               await widget.onRefreshOverview();
                             } catch (err) {
                               setModalState(() => saving = false);
                               ref.read(toastProvider.notifier).error(
-                                    extractErrorMessage(
-                                        err, 'Không thể cập nhật tài khoản ngân hàng.'),
+                                    extractErrorMessage(err,
+                                        'Không thể cập nhật tài khoản ngân hàng.'),
                                   );
                             }
                           },
@@ -263,6 +277,1172 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  String _reservationStatus(Map r) =>
+      r['reservation_status']?.toString() ?? r['status']?.toString() ?? 'HELD';
+
+  /// Modal chi tiết giữ chỗ / hồ sơ — parity: OverviewTab.jsx:702-828.
+  void _openReservationDetailModal(
+    BuildContext context,
+    Map<String, dynamic> rsv, {
+    bool isApplicationOnly = false,
+  }) {
+    final status = _reservationStatus(rsv);
+    final aptCode = rsv['apartment_code']?.toString() ?? '';
+    final application = rsv['application'] is Map
+        ? rsv['application'] as Map
+        : const <String, dynamic>{};
+    final appStatus = application['status']?.toString() ?? 'PENDING';
+    final desiredCode = application['desired_apartment_code']?.toString() ?? '';
+    final desiredBuilding =
+        application['desired_building_name']?.toString() ?? '';
+    final canUpdateBank = canResidentUpdateReservationBankInfo(rsv);
+
+    final title = isApplicationOnly
+        ? 'Chi tiết Hồ sơ Đăng ký Thuê'
+        : 'Chi tiết Phiếu Giữ chỗ — Căn $aptCode';
+    final subtitle = isApplicationOnly
+        ? (desiredBuilding.isNotEmpty
+            ? desiredBuilding
+            : 'Trạng thái xét duyệt hồ sơ cư dân')
+        : (rsv['building_name']?.toString() ?? '');
+
+    AppModal.show(
+      context: context,
+      title: title,
+      subtitle: subtitle,
+      footer: Wrap(
+        alignment: WrapAlignment.end,
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          AppButton(
+            text: 'Đóng',
+            variant: AppButtonVariant.outline,
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          if (!isApplicationOnly && status == 'HELD')
+            AppButton(
+              text: 'Đăng ký thông tin nhận nhà',
+              icon: const Icon(LucideIcons.send, size: 14),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _openApplicationModal(
+                  context,
+                  apartmentId: rsv['apartment_id']?.toString(),
+                );
+              },
+            ),
+          if (!isApplicationOnly && canUpdateBank)
+            AppButton(
+              text: 'Cập nhật STK nhận hoàn',
+              icon: const Icon(LucideIcons.creditCard, size: 14),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _openReservationBankModal(context, rsv);
+              },
+            ),
+        ],
+      ),
+      child: KeyedSubtree(
+        key: const Key('resident-reservation-detail-modal'),
+        child: isApplicationOnly
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.emerald50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.emerald200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Trạng thái hồ sơ',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.slate800,
+                          ),
+                        ),
+                        AppBadge(
+                          label: appStatus,
+                          variant: appStatus == 'APPROVED'
+                              ? AppBadgeVariant.emerald
+                              : appStatus == 'REJECTED'
+                                  ? AppBadgeVariant.red
+                                  : AppBadgeVariant.amber,
+                          dot: true,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (desiredCode.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Căn hộ đăng ký: Căn $desiredCode'
+                      '${desiredBuilding.isNotEmpty ? ' ($desiredBuilding)' : ''}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 12,
+                        color: AppColors.slate700,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Ban Quản Lý đã tiếp nhận hồ sơ định danh và sẽ liên hệ để hoàn tất hợp đồng thuê.',
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate600,
+                    ),
+                  ),
+                ],
+              )
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.slate50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.slate200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Trạng thái giữ chỗ',
+                              style: TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 12,
+                                color: AppColors.slate500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            StatusBadge(
+                              status: status,
+                              domain: StatusDomain.reservation,
+                            ),
+                          ],
+                        ),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            const Text(
+                              'Tiền cọc giữ chỗ',
+                              style: TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 12,
+                                color: AppColors.slate500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              formatMoney(
+                                  rsv['hold_amount'] ?? rsv['amount'] ?? 0),
+                              style: const TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: AppColors.primary600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.slate200),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Hạn giữ chỗ',
+                                style: TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 12,
+                                  color: AppColors.slate500,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                formatDate(rsv['hold_until']),
+                                style: const TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.slate900,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              const Text(
+                                'Hoàn trả / Khấu trừ',
+                                style: TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 12,
+                                  color: AppColors.slate500,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                formatMoney(rsv['refunded_amount'] ?? 0),
+                                style: const TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.emerald700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if ((rsv['settlement_reason']?.toString() ?? '')
+                      .isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppColors.slate50,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.slate200),
+                      ),
+                      child: Text(
+                        'Ghi chú thanh lý: ${rsv['settlement_reason']}',
+                        style: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 12,
+                          color: AppColors.slate700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _miniInfo(String label, String value, {Color? valueColor}) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: AppColors.slate50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.slate200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 11,
+              color: AppColors.slate500,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: valueColor ?? AppColors.slate900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Danh sách thẻ giữ chỗ (dùng cho cả 2 nhánh có / không hợp đồng).
+  Widget _buildReservationBanners(
+    BuildContext context,
+    List<Map<String, dynamic>> reservations,
+  ) {
+    return Column(
+      children: [
+        for (final r in reservations)
+          _buildReservationCard(context, r, showActionButton: true),
+      ],
+    );
+  }
+
+  /// Thẻ giữ chỗ giàu thông tin — parity: OverviewTab.jsx:903-1079.
+  Widget _buildReservationCard(
+    BuildContext context,
+    Map<String, dynamic> r, {
+    required bool showActionButton,
+  }) {
+    final status = _reservationStatus(r);
+    final isAmber =
+        status == 'PENDING_CONFIRM' || status == 'CANCEL_PENDING_APPROVAL';
+    final isPayout = status == 'APPROVED_PENDING_PAYOUT';
+    final canUpdateBank = canResidentUpdateReservationBankInfo(r);
+    final aptCode = r['apartment_code']?.toString() ?? '';
+    final floorName = r['floor_name']?.toString() ?? '';
+    final buildingName = r['building_name']?.toString() ?? '';
+    final buildingAddress = r['building_address']?.toString() ?? '';
+    final amenities = parseResidentAmenities(r['amenities']);
+    final holdAmount = r['hold_amount'] ?? r['amount'] ?? 0;
+    final note = r['reservation_note']?.toString() ?? '';
+    final statusLabel = switch (status) {
+      'PENDING_CONFIRM' => 'Phiếu đăng ký giữ chỗ đang chờ đối soát',
+      'CANCEL_PENDING_APPROVAL' =>
+        'Đề xuất thanh lý hủy giữ chỗ đang chờ phê duyệt',
+      'APPROVED_PENDING_PAYOUT' =>
+        'Đã duyệt hoàn tiền giữ chỗ — Chờ BQL chuyển khoản',
+      _ => 'Thông tin căn hộ đang giữ chỗ',
+    };
+    final toneIcon = isAmber ? LucideIcons.clock : LucideIcons.shieldCheck;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isAmber ? AppColors.amber200 : AppColors.sky200,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: isAmber ? AppColors.amber100 : AppColors.sky50,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  toneIcon,
+                  size: 20,
+                  color: isAmber ? AppColors.amber700 : AppColors.sky700,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          statusLabel,
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color:
+                                isAmber ? AppColors.amber700 : AppColors.sky700,
+                          ),
+                        ),
+                        StatusBadge(
+                          status: status,
+                          domain: StatusDomain.reservation,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Căn hộ $aptCode${floorName.isNotEmpty ? ' • $floorName' : ''}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.slate900,
+                      ),
+                    ),
+                    if (buildingName.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        '$buildingName'
+                        '${buildingAddress.isNotEmpty ? ' — $buildingAddress' : ''}',
+                        style: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 12,
+                          color: AppColors.slate600,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (status == 'PENDING_CONFIRM') ...[
+            const SizedBox(height: 12),
+            _miniInfo(
+              'Thông báo',
+              'Ban Quản Lý đang đối soát chứng từ chuyển khoản của bạn (SLA 4 giờ làm việc). Căn hộ sẽ chính thức khóa giữ chỗ sau khi BQL xác nhận đã nhận tiền.',
+            ),
+          ],
+          if (status == 'CANCEL_PENDING_APPROVAL') ...[
+            const SizedBox(height: 12),
+            _miniInfo(
+              'Đề xuất thanh lý',
+              'Hoàn khách ${formatMoney(r['refunded_amount'] ?? 0)} • Thu giữ phạt ${formatMoney(r['forfeited_amount'] ?? 0)}',
+            ),
+          ],
+          if (isPayout) ...[
+            const SizedBox(height: 12),
+            _miniInfo(
+              'Chi hoàn tiền',
+              'Chủ nhà đã phê duyệt hoàn trả ${formatMoney(r['refunded_amount'] ?? 0)}. Ban Quản Lý đang thực hiện thủ tục chi hoàn tiền cho bạn.',
+              valueColor: AppColors.emerald700,
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _miniInfo(
+                'Thiết kế & Diện tích',
+                '${r['apartment_type']?.toString().isNotEmpty == true ? r['apartment_type'] : (r['bedrooms'] != null ? '${r['bedrooms']} PN' : 'Tiêu chuẩn')}'
+                    '${r['area_m2'] != null ? ' • ${r['area_m2']} m²' : ''}',
+              ),
+              _miniInfo(
+                'Giá thuê niêm yết',
+                r['base_rent'] != null
+                    ? '${formatMoney(r['base_rent'])}/tháng'
+                    : '—',
+              ),
+              _miniInfo('Tiền cọc giữ chỗ', formatMoney(holdAmount),
+                  valueColor: AppColors.primary600),
+              _miniInfo(
+                'Thời hạn giữ chỗ',
+                '${r['hold_from'] != null ? '${formatDate(r['hold_from'])} → ' : ''}${formatDate(r['hold_until'])}',
+              ),
+            ],
+          ),
+          if (amenities.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final amenity in amenities)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppColors.slate100,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      amenity,
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 11,
+                        color: AppColors.slate700,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          if (note.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Ghi chú phiếu giữ chỗ: $note',
+              style: const TextStyle(
+                fontFamily: 'Inter',
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+                color: AppColors.slate600,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.end,
+            children: [
+              if (canUpdateBank)
+                AppButton(
+                  text: 'Cập nhật STK nhận hoàn',
+                  size: AppButtonSize.sm,
+                  variant: AppButtonVariant.outline,
+                  icon: const Icon(LucideIcons.creditCard, size: 14),
+                  onPressed: () => _openReservationBankModal(context, r),
+                ),
+              if (showActionButton && status == 'HELD')
+                AppButton(
+                  text: 'Nộp hồ sơ thuê',
+                  size: AppButtonSize.sm,
+                  icon: const Icon(LucideIcons.fileText, size: 14),
+                  onPressed: () => _openApplicationModal(
+                    context,
+                    apartmentId: r['apartment_id']?.toString(),
+                  ),
+                ),
+              AppButton(
+                text: 'Xem chi tiết',
+                size: AppButtonSize.sm,
+                variant: AppButtonVariant.ghost,
+                onPressed: () => _openReservationDetailModal(context, r),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Welcome banner + status card + inline form + history + apartments khi
+  /// cư dân chưa có hợp đồng — parity: OverviewTab.jsx:1579-1830.
+  Widget _buildNoContractView(
+    BuildContext context,
+    Map ov,
+    Map user,
+    List<Map<String, dynamic>> reservations,
+    Map? onboardingApplication,
+  ) {
+    final reservation = reservations.isNotEmpty ? reservations.first : null;
+    final hasHeldReservation =
+        reservations.any((r) => _reservationStatus(r) == 'HELD');
+    final showInlineOnboardingForm =
+        hasHeldReservation && onboardingApplication == null;
+
+    final rawName = user['full_name']?.toString().trim() ?? '';
+    final fullName = rawName.isNotEmpty
+        ? rawName
+        : (reservation?['prospect_name']?.toString().trim() ?? '');
+    final greetingName = fullName.isNotEmpty ? fullName : 'Quý khách';
+
+    String message;
+    if (reservation != null) {
+      final rStatus = _reservationStatus(reservation);
+      final apt = reservation['apartment_code']?.toString() ?? '';
+      final bld = reservation['building_name']?.toString() ?? '';
+      message = switch (rStatus) {
+        'PENDING_CONFIRM' =>
+          'Phiếu đặt cọc giữ chỗ căn hộ $apt ($bld) của bạn đang chờ Ban Quản Lý đối soát sao kê ngân hàng.',
+        'CANCEL_PENDING_APPROVAL' =>
+          'Đề xuất thanh lý hủy giữ chỗ căn hộ $apt ($bld) của bạn đang chờ Chủ nhà phê duyệt.',
+        'APPROVED_PENDING_PAYOUT' =>
+          'Phiếu giữ chỗ căn hộ $apt ($bld) đã được duyệt hoàn tiền — vui lòng kiểm tra tài khoản ngân hàng nhận hoàn bên dưới.',
+        _ =>
+          'Bạn đang có phiếu đặt cọc giữ chỗ căn hộ $apt ($bld). Vui lòng kiểm tra thông tin căn hộ và hoàn tất hồ sơ nhận nhà bên dưới.',
+      };
+    } else {
+      message =
+          'Tài khoản của bạn hiện chưa có hợp đồng thuê đang hiệu lực. Bạn có thể theo dõi trạng thái hồ sơ giữ chỗ hoặc chọn căn hộ trống bên dưới để gửi đăng ký thuê trực tuyến.';
+    }
+
+    const activeStatuses = <String>{
+      'HELD',
+      'PENDING_CONFIRM',
+      'CANCEL_PENDING_APPROVAL',
+      'APPROVED_PENDING_PAYOUT',
+      'CONVERTED',
+    };
+    final history = (ov['reservation_history'] is List
+            ? ov['reservation_history'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .where((h) => !activeStatuses.contains(_reservationStatus(h)))
+        .toList();
+    final availableApartments = (ov['available_apartments'] is List
+            ? ov['available_apartments'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final idImages =
+        ov['id_images'] is List ? ov['id_images'] as List : const [];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          key: const Key('resident-onboarding-welcome'),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                AppColors.sky500,
+                AppColors.primary600,
+                const Color(0xFF4338CA),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _heroBadge(
+                icon: LucideIcons.sparkles,
+                label: 'Chào mừng đến với ResiHub',
+                background: Colors.white.withValues(alpha: 0.20),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Xin chào, $greetingName!',
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                message,
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 13,
+                  color: Color(0xFFE0F2FE),
+                ),
+              ),
+              if (!showInlineOnboardingForm) ...[
+                const SizedBox(height: 16),
+                AppButton(
+                  text: hasHeldReservation
+                      ? 'Đăng ký thông tin nhận nhà'
+                      : 'Đăng ký thuê trực tuyến',
+                  variant: AppButtonVariant.outline,
+                  icon: const Icon(LucideIcons.send, size: 14),
+                  onPressed: () => _openApplicationModal(
+                    context,
+                    apartmentId: hasHeldReservation
+                        ? (reservation?['apartment_id']?.toString() ?? '')
+                        : null,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (reservations.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _buildReservationBanners(context, reservations),
+        ],
+        if (onboardingApplication != null) ...[
+          const SizedBox(height: 16),
+          _buildOnboardingStatusCard(context, onboardingApplication),
+        ],
+        if (showInlineOnboardingForm) ...[
+          const SizedBox(height: 16),
+          _InlineOnboardingForm(
+            user: user,
+            reservation: reservation,
+            availableApartments: availableApartments,
+            idImages: idImages,
+            onRefresh: widget.onRefreshOverview,
+          ),
+        ],
+        if (history.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          _buildReservationHistoryCard(history),
+        ],
+        const SizedBox(height: 16),
+        _buildAvailableApartmentsCard(
+            context, availableApartments, reservations),
+      ],
+    );
+  }
+
+  /// Card trạng thái hồ sơ PENDING / APPROVED / REJECTED — parity: 462-582.
+  Widget _buildOnboardingStatusCard(BuildContext context, Map app) {
+    final status = app['status']?.toString() ?? '';
+    final desiredCode = app['desired_apartment_code']?.toString() ?? '';
+    final desiredBuilding = app['desired_building_name']?.toString() ?? '';
+    final desiredLabel = desiredCode.isNotEmpty
+        ? 'căn hộ $desiredCode'
+            '${desiredBuilding.isNotEmpty ? ' ($desiredBuilding)' : ''}'
+        : '';
+    final note = app['application_note']?.toString() ?? '';
+    final submittedAt = formatDateTime(app['updated_at'] ?? app['created_at']);
+
+    final Color bg;
+    final Color iconBg;
+    final IconData icon;
+    final String heading;
+    final String badge;
+    final String body;
+    final AppBadgeVariant badgeVariant;
+    final String? actionLabel;
+    final AppButtonVariant actionVariant;
+
+    switch (status) {
+      case 'REJECTED':
+        bg = AppColors.rose50;
+        iconBg = AppColors.rose100;
+        icon = LucideIcons.xCircle;
+        heading =
+            'Hồ sơ đăng ký thuê ${desiredLabel.isNotEmpty ? 'cho $desiredLabel ' : ''}cần bổ sung thông tin';
+        badge = 'Cần chỉnh sửa';
+        badgeVariant = AppBadgeVariant.red;
+        final reason = app['rejection_reason']?.toString().trim() ?? '';
+        body =
+            'Lý do từ Ban Quản Lý: ${reason.isNotEmpty ? reason : 'Vui lòng kiểm tra và cập nhật lại thông tin giấy tờ tùy thân.'}';
+        actionLabel = 'Chỉnh sửa & Gửi lại hồ sơ';
+        actionVariant = AppButtonVariant.primary;
+        break;
+      case 'APPROVED':
+        bg = AppColors.emerald50;
+        iconBg = AppColors.emerald100;
+        icon = LucideIcons.checkCircle2;
+        heading = 'Hồ sơ cư dân đã được phê duyệt';
+        badge = 'Đã duyệt — Chờ lập HĐ';
+        badgeVariant = AppBadgeVariant.emerald;
+        body = 'Ban Quản Lý đã xác thực thông tin định danh của bạn'
+            '${desiredLabel.isNotEmpty ? ' cho $desiredLabel' : ''} và sẽ liên hệ để ký kết hợp đồng thuê.';
+        actionLabel = null;
+        actionVariant = AppButtonVariant.primary;
+        break;
+      case 'PENDING':
+        bg = AppColors.amber50;
+        iconBg = AppColors.amber100;
+        icon = LucideIcons.clock;
+        heading = 'Hồ sơ đang chờ Ban Quản Lý phê duyệt';
+        badge = 'Chờ phê duyệt';
+        badgeVariant = AppBadgeVariant.amber;
+        body = 'Hồ sơ tự khai của bạn'
+            '${desiredLabel.isNotEmpty ? ' cho $desiredLabel' : ''} gửi lúc $submittedAt đã được ghi nhận. Ban Quản Lý sẽ đối chiếu giấy tờ và hoàn tất hợp đồng thuê.';
+        actionLabel = 'Cập nhật bổ sung thông tin hồ sơ';
+        actionVariant = AppButtonVariant.outline;
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    return Container(
+      key: const Key('resident-onboarding-status-card'),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: bg),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: iconBg,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, size: 20, color: AppColors.slate700),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      heading,
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.slate900,
+                      ),
+                    ),
+                    AppBadge(label: badge, variant: badgeVariant, dot: true),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  body,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate600,
+                  ),
+                ),
+                if (note.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '${status == 'APPROVED' ? 'Ghi chú hồ sơ' : 'Ghi chú của bạn'}: $note',
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (actionLabel != null)
+                      AppButton(
+                        text: actionLabel,
+                        size: AppButtonSize.xs,
+                        variant: actionVariant,
+                        onPressed: () => _openApplicationModal(
+                          context,
+                          apartmentId: app['desired_apartment_id']?.toString(),
+                        ),
+                      ),
+                    AppButton(
+                      text: 'Xem chi tiết',
+                      size: AppButtonSize.xs,
+                      variant: AppButtonVariant.ghost,
+                      onPressed: () => _openReservationDetailModal(
+                        context,
+                        {'application': app},
+                        isApplicationOnly: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReservationHistoryCard(List<Map<String, dynamic>> history) {
+    return AppCard(
+      header: const AppCardHeader(
+        title: 'Lịch sử phiếu đặt cọc giữ chỗ',
+        subtitle:
+            'Các phiếu giữ chỗ đã thanh lý, hoàn trả hoặc từ chối đối soát',
+      ),
+      child: Column(
+        children: [
+          for (final h in history)
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: AppColors.slate50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.slate200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        'Căn ${h['apartment_code'] ?? ''} — ${h['building_name'] ?? ''}',
+                        style: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.slate900,
+                        ),
+                      ),
+                      StatusBadge(
+                        status: _reservationStatus(h),
+                        domain: StatusDomain.reservation,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Số tiền cọc giữ chỗ: ${formatMoney(h['hold_amount'] ?? 0)}'
+                    ' • Hoàn trả: ${formatMoney(h['refunded_amount'] ?? 0)}'
+                    ' • Tịch thu/Khấu trừ: ${formatMoney(h['forfeited_amount'] ?? 0)}',
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate600,
+                    ),
+                  ),
+                  if ((h['settlement_reason']?.toString() ?? '')
+                      .isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Lý do: ${h['settlement_reason']}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 12,
+                        color: AppColors.slate500,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: AppButton(
+                      text: 'Xem chi tiết',
+                      size: AppButtonSize.xs,
+                      variant: AppButtonVariant.ghost,
+                      onPressed: () => _openReservationDetailModal(
+                        context,
+                        h,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAvailableApartmentsCard(
+    BuildContext context,
+    List<Map<String, dynamic>> apartments,
+    List<Map<String, dynamic>> reservations,
+  ) {
+    return AppCard(
+      header: const AppCardHeader(
+        title: 'Căn hộ còn trống khả dụng',
+        subtitle:
+            'Chọn căn hộ phù hợp và gửi hồ sơ đăng ký thuê trực tuyến chỉ trong 1 phút',
+      ),
+      child: apartments.isEmpty
+          ? EmptyState(
+              icon: LucideIcons.building2,
+              title: 'Hiện chưa có căn hộ trống công khai',
+              description:
+                  'Bạn vẫn có thể gửi hồ sơ đăng ký chờ hoặc liên hệ trực tiếp Ban Quản Lý để được tư vấn căn hộ sắp trống.',
+              action: AppButton(
+                text: 'Gửi hồ sơ đăng ký thuê',
+                icon: const Icon(LucideIcons.send, size: 14),
+                onPressed: () => _openApplicationModal(context),
+              ),
+            )
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                const gap = 12.0;
+                final columns = constraints.maxWidth >= 1200
+                    ? 3
+                    : (constraints.maxWidth >= 640 ? 2 : 1);
+                final width = columns == 3
+                    ? (constraints.maxWidth - gap * 2) / 3
+                    : (columns == 2
+                        ? (constraints.maxWidth - gap) / 2
+                        : constraints.maxWidth);
+                return Wrap(
+                  spacing: gap,
+                  runSpacing: gap,
+                  children: [
+                    for (final apt in apartments)
+                      SizedBox(
+                        width: width,
+                        child: _buildAvailableApartmentTile(
+                          context,
+                          apt,
+                          reservations,
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _buildAvailableApartmentTile(
+    BuildContext context,
+    Map<String, dynamic> apt,
+    List<Map<String, dynamic>> reservations,
+  ) {
+    final isReserved = reservations.any((r) =>
+            r['apartment_id']?.toString() == apt['id']?.toString() &&
+            ['HELD', 'CANCEL_PENDING_APPROVAL']
+                .contains(_reservationStatus(r))) ||
+        apt['status']?.toString() == 'RESERVED';
+    final amenities = parseResidentAmenities(apt['amenities']);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isReserved ? AppColors.sky200 : AppColors.slate200,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Căn ${apt['code'] ?? ''}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.slate900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${apt['building_name'] ?? ''}'
+                      '${apt['building_address'] != null ? ' — ${apt['building_address']}' : ''}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 12,
+                        color: AppColors.slate600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              AppBadge(
+                label: isReserved ? 'Đang giữ chỗ' : 'Còn trống',
+                variant:
+                    isReserved ? AppBadgeVariant.sky : AppBadgeVariant.emerald,
+                dot: true,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              Text(
+                apt['area_m2'] != null ? '${apt['area_m2']} m²' : '—',
+                style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate600),
+              ),
+              const Text('•', style: TextStyle(color: AppColors.slate300)),
+              Text(
+                apt['type']?.toString() ?? '${apt['bedrooms'] ?? 1} PN',
+                style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate600),
+              ),
+              if (apt['floor_name'] != null) ...[
+                const Text('•', style: TextStyle(color: AppColors.slate300)),
+                Text(
+                  '${apt['floor_name']}',
+                  style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate600),
+                ),
+              ],
+            ],
+          ),
+          if (amenities.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final amenity in amenities.take(5))
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: AppColors.slate100,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      amenity,
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 11,
+                        color: AppColors.slate600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Giá thuê niêm yết',
+                    style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 11,
+                      color: AppColors.slate400,
+                    ),
+                  ),
+                  Text(
+                    '${formatMoney(apt['base_rent'] ?? 0)}/tháng',
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.primary600,
+                    ),
+                  ),
+                ],
+              ),
+              AppButton(
+                text: isReserved ? 'Đăng ký nhận nhà' : 'Đăng ký thuê',
+                size: AppButtonSize.sm,
+                onPressed: () => _openApplicationModal(
+                  context,
+                  apartmentId: apt['id']?.toString(),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -352,7 +1532,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final ov = widget.overview ?? const {};
     final contract = ov['active_contract'] is Map
         ? ov['active_contract'] as Map<String, dynamic>
-        : (ov['contract'] is Map ? ov['contract'] as Map<String, dynamic> : null);
+        : (ov['contract'] is Map
+            ? ov['contract'] as Map<String, dynamic>
+            : null);
 
     // Hero card values (parity: OverviewTab.jsx:1089-1205).
     final user = ov['user'] is Map ? ov['user'] as Map : const {};
@@ -367,7 +1549,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         : null;
     final floorName = contract?['floor_name']?.toString().trim() ?? '';
     final buildingName = contract?['building_name']?.toString().trim() ?? '';
-    final buildingAddress = contract?['building_address']?.toString().trim() ?? '';
+    final buildingAddress =
+        contract?['building_address']?.toString().trim() ?? '';
     final amenities = contract != null
         ? parseResidentAmenities(contract['amenities'])
         : const <String>[];
@@ -375,13 +1558,39 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final rawReservations = ov['reservations'] is List
         ? ov['reservations'] as List
         : (ov['reservation'] is Map ? [ov['reservation']] : const []);
-    final reservations = rawReservations.whereType<Map<String, dynamic>>().toList();
+    final reservations =
+        rawReservations.whereType<Map<String, dynamic>>().toList();
+
+    // Chưa có hợp đồng → nhánh riêng (React OverviewTab.jsx:1579-1830):
+    // ẩn hero / KPI / quick actions, thay bằng onboarding + giữ chỗ.
+    if (contract == null) {
+      final onboardingApplication = ov['onboarding_application'] is Map
+          ? ov['onboarding_application'] as Map
+          : (ov['pending_application'] is Map
+              ? ov['pending_application'] as Map
+              : null);
+      return RefreshIndicator(
+        onRefresh: widget.onRefreshOverview,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          child: _buildNoContractView(
+            context,
+            ov,
+            user,
+            reservations,
+            onboardingApplication,
+          ),
+        ),
+      );
+    }
 
     final unreadCount = ref.watch(notificationProvider).unreadCount;
     final currentAmountDue = ov['current_amount_due'] is num
         ? ov['current_amount_due'] as num
         : num.tryParse(ov['current_amount_due']?.toString() ?? '0') ?? 0;
-    final latestInvoice = ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
+    final latestInvoice =
+        ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
 
     return RefreshIndicator(
       onRefresh: widget.onRefreshOverview,
@@ -391,113 +1600,13 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Prospect Reservation Banner(s)
+            // Prospect Reservation Banner(s) — parity: OverviewTab.jsx:903-1079
             if (reservations.isNotEmpty) ...[
-              ...reservations.map((r) {
-                final aptCode = r['apartment_code']?.toString() ?? '';
-                final bldName = r['building_name']?.toString() ?? '';
-                final status = r['status']?.toString() ?? r['reservation_status']?.toString() ?? '';
-                final holdAmount = r['amount'] ?? r['hold_amount'] ?? 0;
-                final canUpdateBank = canResidentUpdateReservationBankInfo(r);
-
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.amber.shade50,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.amber.shade200),
-                  ),
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.amber.shade100,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: const Icon(LucideIcons.sparkles,
-                                    size: 20, color: Colors.amber),
-                              ),
-                              const SizedBox(width: 10),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Giữ chỗ căn $aptCode${bldName.isNotEmpty ? ' — $bldName' : ''}',
-                                    style: const TextStyle(
-                                      fontFamily: 'Inter',
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.bold,
-                                      color: AppColors.slate900,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    'Tiền giữ chỗ: ${formatMoney(holdAmount)}',
-                                    style: const TextStyle(
-                                      fontFamily: 'Inter',
-                                      fontSize: 12,
-                                      color: AppColors.slate600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                          AppBadge(
-                            label: status == 'HELD'
-                                ? 'Đang giữ chỗ'
-                                : status == 'PENDING_CONFIRM'
-                                    ? 'Chờ xác nhận'
-                                    : status == 'APPROVED_PENDING_PAYOUT'
-                                        ? 'Chờ hoàn tiền'
-                                        : status,
-                            variant: status == 'HELD'
-                                ? AppBadgeVariant.emerald
-                                : AppBadgeVariant.amber,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          if (canUpdateBank) ...[
-                            AppButton(
-                              text: 'Cập nhật TK hoàn tiền',
-                              size: AppButtonSize.sm,
-                              variant: AppButtonVariant.outline,
-                              icon: const Icon(LucideIcons.creditCard, size: 14),
-                              onPressed: () => _openReservationBankModal(context, r),
-                            ),
-                            const SizedBox(width: 8),
-                          ],
-                          AppButton(
-                            text: 'Nộp hồ sơ thuê',
-                            size: AppButtonSize.sm,
-                            icon: const Icon(LucideIcons.fileText, size: 14),
-                            onPressed: () => _openApplicationModal(
-                              context,
-                              apartmentId: r['apartment_id']?.toString(),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                );
-              }),
+              _buildReservationBanners(context, reservations),
             ],
 
             // Active Resident Apartment Hero Banner (parity: OverviewTab.jsx:1089-1205)
-            if (contract != null) ...[
+            ...[
               Container(
                 key: const Key('resident-overview-hero'),
                 decoration: BoxDecoration(
@@ -577,7 +1686,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         color: Colors.white,
                       ),
                     ),
-                    if (buildingName.isNotEmpty || buildingAddress.isNotEmpty) ...[
+                    if (buildingName.isNotEmpty ||
+                        buildingAddress.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -622,8 +1732,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                    color: const Color(0x33FFFFFF)),
+                                border:
+                                    Border.all(color: const Color(0x33FFFFFF)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -679,7 +1789,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                           _heroSpec(
                             LucideIcons.bedDouble,
                             'Loại phòng',
-                            (contract['apartment_type']?.toString().trim().isNotEmpty ??
+                            (contract['apartment_type']
+                                        ?.toString()
+                                        .trim()
+                                        .isNotEmpty ??
                                     false)
                                 ? contract['apartment_type'].toString().trim()
                                 : (contract['bedrooms'] != null
@@ -714,7 +1827,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         ? (constraints.maxWidth - 12) / 2
                         : constraints.maxWidth);
 
-                final kpiContract = contract ?? const <String, dynamic>{};
+                final kpiContract = contract;
                 final dueNow = currentAmountDue > 0;
                 final dueColor =
                     dueNow ? AppColors.rose600 : AppColors.emerald600;
@@ -1220,7 +2333,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
               AppBadge(
-                variant: isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                variant:
+                    isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
                 label: period.isNotEmpty ? 'Kỳ $period' : 'Phí phạt tất toán',
               ),
               StatusBadge(status: status, domain: StatusDomain.invoice),
@@ -1235,7 +2349,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Hạn thanh toán:',
                 style: TextStyle(
-                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate500),
               ),
               Text(
                 formatDate(invoice['due_date']),
@@ -1254,7 +2370,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Đã trả:',
                 style: TextStyle(
-                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate500),
               ),
               Text(
                 formatMoney(paid),
@@ -1324,8 +2442,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final hotline = contact['technical_hotline']?.toString().trim() ?? '';
     final hours = contact['working_hours']?.toString().trim() ?? '';
 
-    const labelStyle = TextStyle(
-        fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
+    const labelStyle =
+        TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
 
     return AppCard(
       key: const Key('resident-manager-support-card'),
@@ -1358,7 +2476,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                if (phone.isNotEmpty) Text('SĐT Quản lý: $phone', style: labelStyle),
+                if (phone.isNotEmpty)
+                  Text('SĐT Quản lý: $phone', style: labelStyle),
                 if (email.isNotEmpty) Text('Email: $email', style: labelStyle),
                 Text(
                   'Hotline KT: ${hotline.isEmpty ? '1900 6868' : hotline}',
@@ -1384,6 +2503,349 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             size: AppButtonSize.sm,
             fullWidth: true,
             onPressed: () => widget.onNavigateTab('contact'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Form đăng ký nhận nhà inline (khi đang giữ chỗ, chưa có hồ sơ) —
+/// parity: OverviewTab.jsx:1627-1640 + 311-438.
+class _InlineOnboardingForm extends ConsumerStatefulWidget {
+  final Map user;
+  final Map<String, dynamic>? reservation;
+  final List<Map<String, dynamic>> availableApartments;
+  final List idImages;
+  final Future<void> Function() onRefresh;
+
+  const _InlineOnboardingForm({
+    required this.user,
+    required this.reservation,
+    required this.availableApartments,
+    required this.idImages,
+    required this.onRefresh,
+  });
+
+  @override
+  ConsumerState<_InlineOnboardingForm> createState() =>
+      _InlineOnboardingFormState();
+}
+
+class _InlineOnboardingFormState extends ConsumerState<_InlineOnboardingForm> {
+  late final TextEditingController _nameCtrl;
+  late final TextEditingController _idCtrl;
+  late final TextEditingController _dobCtrl;
+  late final TextEditingController _noteCtrl;
+  String? _apartmentId;
+  bool _consent = false;
+  bool _submitting = false;
+  String? _frontData;
+  String? _backData;
+
+  @override
+  void initState() {
+    super.initState();
+    final user = widget.user;
+    final reservation = widget.reservation;
+    final name = user['full_name']?.toString().trim() ?? '';
+    _nameCtrl = TextEditingController(
+      text: name.isNotEmpty
+          ? name
+          : (reservation?['prospect_name']?.toString() ?? ''),
+    );
+    _idCtrl = TextEditingController(text: user['id_number']?.toString() ?? '');
+    _dobCtrl = TextEditingController(text: toInputDate(user['dob']));
+    _noteCtrl = TextEditingController();
+    _apartmentId = reservation?['apartment_id']?.toString() ??
+        (widget.availableApartments.isNotEmpty
+            ? widget.availableApartments.first['id']?.toString()
+            : null);
+    _consent = user['privacy_consent_at'] != null;
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _idCtrl.dispose();
+    _dobCtrl.dispose();
+    _noteCtrl.dispose();
+    super.dispose();
+  }
+
+  List<DropdownMenuItem<String>> _apartmentOptions() {
+    final seen = <String>{};
+    final options = <DropdownMenuItem<String>>[];
+    final r = widget.reservation;
+    if (r != null &&
+        (r['reservation_status'] ?? r['status'] ?? 'HELD') == 'HELD') {
+      final id = r['apartment_id']?.toString();
+      if (id != null && id.isNotEmpty) {
+        seen.add(id);
+        options.add(DropdownMenuItem(
+          value: id,
+          child: Text(
+            'Căn ${r['apartment_code'] ?? ''} — ${r['building_name'] ?? ''} [Đang giữ chỗ]',
+            overflow: TextOverflow.ellipsis,
+          ),
+        ));
+      }
+    }
+    for (final apt in widget.availableApartments) {
+      final id = apt['id']?.toString();
+      if (id == null || id.isEmpty || seen.contains(id)) continue;
+      seen.add(id);
+      options.add(DropdownMenuItem(
+        value: id,
+        child: Text(
+          'Căn ${apt['code'] ?? ''} — ${apt['building_name'] ?? ''}'
+          '${apt['status']?.toString() == 'RESERVED' ? ' [Đang giữ chỗ]' : ''}',
+          overflow: TextOverflow.ellipsis,
+        ),
+      ));
+    }
+    return options;
+  }
+
+  Future<void> _pickDob() async {
+    final initial =
+        DateTime.tryParse(_dobCtrl.text.trim()) ?? DateTime(2000, 1, 1);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(1950),
+      lastDate: DateTime.now(),
+    );
+    if (picked != null && mounted) {
+      setState(() => _dobCtrl.text = toInputDate(picked));
+    }
+  }
+
+  Future<void> _submit() async {
+    final name = _nameCtrl.text.trim();
+    final idNumber = _idCtrl.text.trim();
+    if (name.isEmpty) {
+      ref.read(toastProvider.notifier).error('Vui lòng nhập họ và tên đầy đủ.');
+      return;
+    }
+    if (idNumber.isNotEmpty && !isValidIdNumber(idNumber)) {
+      ref
+          .read(toastProvider.notifier)
+          .error('Số CCCD / Hộ chiếu không hợp lệ (9 hoặc 12 chữ số).');
+      return;
+    }
+    if (!_consent) {
+      ref.read(toastProvider.notifier).warning(
+          'Vui lòng đồng ý với Chính sách bảo vệ dữ liệu cá nhân trước khi gửi hồ sơ.');
+      return;
+    }
+
+    setState(() => _submitting = true);
+    try {
+      final service = ref.read(residentServiceProvider);
+      if (_frontData != null && _frontData!.isNotEmpty) {
+        await service
+            .uploadIdImage({'side': 'front', 'image_base64': _frontData});
+      }
+      if (_backData != null && _backData!.isNotEmpty) {
+        await service
+            .uploadIdImage({'side': 'back', 'image_base64': _backData});
+      }
+      await service.submitRentalApplication({
+        'full_name': name,
+        if (idNumber.isNotEmpty) 'id_number': idNumber,
+        if (_dobCtrl.text.trim().isNotEmpty) 'dob': _dobCtrl.text.trim(),
+        if (_apartmentId != null && _apartmentId!.isNotEmpty)
+          'desired_apartment_id': _apartmentId,
+        if (_noteCtrl.text.trim().isNotEmpty) 'note': _noteCtrl.text.trim(),
+        'privacy_consent': true,
+      });
+      ref
+          .read(toastProvider.notifier)
+          .success('Đã gửi hồ sơ đăng ký nhận nhà thành công!');
+      await widget.onRefresh();
+    } catch (err) {
+      ref
+          .read(toastProvider.notifier)
+          .error(extractErrorMessage(err, 'Không thể gửi hồ sơ đăng ký.'));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Map<String, dynamic>? _existingImage(String side) {
+    for (final img in [...widget.idImages].reversed) {
+      if (img is Map && img['side']?.toString() == side) {
+        return Map<String, dynamic>.from(img);
+      }
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final options = _apartmentOptions();
+    final existingFront = _existingImage('front');
+    final existingBack = _existingImage('back');
+
+    return AppCard(
+      key: const Key('resident-inline-onboarding-form'),
+      header: const AppCardHeader(
+        title: 'Đăng ký thông tin nhận nhà',
+        subtitle:
+            'Khai báo thông tin định danh và tải lên ảnh CCCD 2 mặt để Ban Quản Lý phê duyệt hồ sơ',
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DropdownButtonFormField<String>(
+            value: _apartmentId != null &&
+                    options.any((option) => option.value == _apartmentId)
+                ? _apartmentId
+                : null,
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Căn hộ đăng ký nhận nhà / thuê',
+              hintText: '-- Chọn căn hộ (hoặc để BQL tư vấn) --',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: options,
+            onChanged: (value) => setState(() => _apartmentId = value),
+          ),
+          const SizedBox(height: 12),
+          AppInput(
+            label: 'Họ và tên người đăng ký',
+            required: true,
+            placeholder: 'Nhập họ và tên theo CCCD',
+            controller: _nameCtrl,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: _pickDob,
+                  child: AbsorbPointer(
+                    child: AppInput(
+                      label: 'Ngày sinh',
+                      placeholder: 'YYYY-MM-DD',
+                      controller: _dobCtrl,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: AppInput(
+                  label: 'Số CCCD / Hộ chiếu',
+                  placeholder: '001099112233',
+                  controller: _idCtrl,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            'Ảnh chụp CCCD 2 mặt (Khuyến khích tải đủ mặt trước & mặt sau để duyệt nhanh)',
+            style: TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppColors.slate800,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Ảnh giấy tờ được bảo mật nghiêm ngặt, chỉ Ban Quản Lý tòa nhà được phân quyền mới có thể đối chiếu.',
+            style: TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 11,
+              color: AppColors.slate500,
+            ),
+          ),
+          const SizedBox(height: 10),
+          FileUploadField(
+            label: 'Ảnh CCCD mặt trước',
+            allowPdf: false,
+            hint: existingFront != null
+                ? 'Tải ảnh mới để thay mặt trước'
+                : 'Chọn ảnh mặt trước (≤ 5MB)',
+            onChanged: (value) => _frontData = value?.toString(),
+          ),
+          const SizedBox(height: 12),
+          FileUploadField(
+            label: 'Ảnh CCCD mặt sau',
+            allowPdf: false,
+            hint: existingBack != null
+                ? 'Tải ảnh mới để thay mặt sau'
+                : 'Chọn ảnh mặt sau (≤ 5MB)',
+            onChanged: (value) => _backData = value?.toString(),
+          ),
+          const SizedBox(height: 12),
+          AppInput(
+            label: 'Ghi chú / Nhu cầu nhận phòng',
+            placeholder:
+                'Ví dụ: Ngày dự kiến nhận nhà, số người ở cùng, nhu cầu gửi xe...',
+            controller: _noteCtrl,
+            multiline: true,
+            rows: 2,
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.slate50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.slate200),
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              child: CheckboxListTile(
+                value: _consent,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                onChanged: (checked) =>
+                    setState(() => _consent = checked ?? false),
+                title: RichText(
+                  text: TextSpan(
+                    style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate700,
+                    ),
+                    children: [
+                      const TextSpan(
+                          text:
+                              'Tôi xác nhận thông tin khai báo là chính xác và '),
+                      const TextSpan(
+                        text: 'Đồng ý chính sách bảo vệ dữ liệu cá nhân',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.slate900,
+                        ),
+                      ),
+                      const TextSpan(
+                        text:
+                            ' của ResiHub để phục vụ xác minh hồ sơ, lập hợp đồng thuê và quản lý cư trú.',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Align(
+            alignment: Alignment.centerRight,
+            child: AppButton(
+              text: _submitting ? 'Đang gửi...' : 'Gửi hồ sơ đăng ký',
+              icon: const Icon(LucideIcons.send, size: 14),
+              loading: _submitting,
+              onPressed: _submitting ? null : _submit,
+            ),
           ),
         ],
       ),
