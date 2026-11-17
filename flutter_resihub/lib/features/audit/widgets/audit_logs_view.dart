@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -57,6 +58,13 @@ const List<AppSelectOption<String>> kAuditActionOptions = [
   AppSelectOption(value: 'TERMINATE', label: 'Thanh lý (TERMINATE)'),
   AppSelectOption(value: 'DISPUTE', label: 'Khiếu nại / Tranh chấp (DISPUTE)'),
   AppSelectOption(value: 'RESOLVE_DISPUTE', label: 'Giải quyết khiếu nại (RESOLVE_DISPUTE)'),
+];
+
+/// Số dòng mỗi trang — khớp Select "20/50/100 / trang" trong React.
+const List<AppSelectOption<int>> kAuditLimitOptions = [
+  AppSelectOption(value: 20, label: '20 / trang'),
+  AppSelectOption(value: 50, label: '50 / trang'),
+  AppSelectOption(value: 100, label: '100 / trang'),
 ];
 
 AppBadgeVariant _getActionBadgeVariant(String? action) {
@@ -118,7 +126,7 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
   List<Map<String, dynamic>> _logs = [];
   bool _loading = true;
   int _page = 1;
-  final int _limit = 20;
+  int _limit = 20;
   int _total = 0;
   int _totalPages = 1;
 
@@ -134,6 +142,7 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
 
   bool _exportingCsv = false;
   bool _exportingXlsx = false;
+  bool _queryScopeApplied = false;
 
   String get _effectiveScope => widget.lockedScope ?? _scope;
 
@@ -147,6 +156,20 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // React đọc ?scope= từ URL (lockedScope có độ ưu tiên cao hơn).
+    // Chỉ áp dụng 1 lần lúc mount, không đụng router.
+    if (_queryScopeApplied || widget.lockedScope != null) return;
+    if (GoRouter.maybeOf(context) == null) return;
+    _queryScopeApplied = true;
+    final queryScope = GoRouterState.of(context).uri.queryParameters['scope'];
+    if (queryScope != null && queryScope.isNotEmpty) {
+      setState(() => _scope = queryScope);
+    }
+  }
+
+  @override
   void dispose() {
     _debounceTimer?.cancel();
     super.dispose();
@@ -155,7 +178,7 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
   void _onSearchChanged(String val) {
     _search = val;
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 250), () {
+    _debounceTimer = Timer(const Duration(milliseconds: 200), () {
       if (mounted) {
         setState(() {
           _debouncedSearch = val.trim();
@@ -427,6 +450,21 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
                     ],
                   ),
                 ),
+                SizedBox(
+                  width: 360,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Thiết bị / Trình duyệt (User-Agent)',
+                          style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                      const SizedBox(height: 2),
+                      Text(
+                        log['user_agent']?.toString() ?? '—',
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: AppColors.slate700),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -649,11 +687,15 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
                       },
                     ),
                   ),
+                  // ponytail: validate chặt bằng formatter + toDateOnlyStr thay date picker;
+                  // add showDatePicker khi cần UI lịch đầy đủ như React type=date.
                   SizedBox(
                     width: 140,
                     child: AppInput(
                       placeholder: 'Từ ngày (YYYY-MM-DD)',
                       initialValue: _fromDate,
+                      maxLength: 10,
+                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9-]'))],
                       onChanged: (val) {
                         final synced = syncFilterDateRange(val, _toDate);
                         setState(() {
@@ -670,6 +712,8 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
                     child: AppInput(
                       placeholder: 'Đến ngày (YYYY-MM-DD)',
                       initialValue: _toDate,
+                      maxLength: 10,
+                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9-]'))],
                       onChanged: (val) {
                         final syncedTo = _fromDate.isNotEmpty && val.isNotEmpty && val.compareTo(_fromDate) < 0
                             ? _fromDate
@@ -720,7 +764,12 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
                   Wrap(
                     spacing: 8,
                     children: [
-                      if (_search.isNotEmpty || _selectedEntity != null || _selectedAction != null || _fromDate.isNotEmpty || _toDate.isNotEmpty)
+                      if (_search.isNotEmpty ||
+                          _scope.isNotEmpty ||
+                          _selectedEntity != null ||
+                          _selectedAction != null ||
+                          _fromDate.isNotEmpty ||
+                          _toDate.isNotEmpty)
                         AppButton(
                           text: 'Xóa bộ lọc',
                           size: AppButtonSize.xs,
@@ -775,9 +824,29 @@ class _AuditLogsViewState extends ConsumerState<AuditLogsView> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'Trang $_page / $_totalPages ($_total dòng)',
-                  style: const TextStyle(fontSize: 12, color: AppColors.slate700),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Trang $_page / $_totalPages ($_total dòng)',
+                      style: const TextStyle(fontSize: 12, color: AppColors.slate700),
+                    ),
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: 120,
+                      child: AppSelect<int>(
+                        value: _limit,
+                        options: kAuditLimitOptions,
+                        onChanged: (val) {
+                          setState(() {
+                            _limit = val ?? 20;
+                            _page = 1;
+                          });
+                          _fetchLogs();
+                        },
+                      ),
+                    ),
+                  ],
                 ),
                 Row(
                   mainAxisSize: MainAxisSize.min,
