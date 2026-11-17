@@ -67,11 +67,12 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   bool _loading = true;
   String _error = '';
 
-  /// Tabs already mounted. Keeping their widget instances alive in an
-  /// [IndexedStack] prevents re-entering initState (and re-fetching) every
-  /// time the resident switches back to a visited tab.
+  /// Tabs already mounted. An [IndexedStack] keeps each tab's State alive via
+  /// stable [ValueKey]s, so revisiting does not re-enter initState. Widget
+  /// objects are rebuilt each build (not cached) so fresh overview/contract
+  /// props reach didUpdateWidget — otherwise switching apartment would feed
+  /// stale data to an already-visited tab.
   final List<String> _visitedTabs = [];
-  final Map<String, Widget> _tabWidgets = {};
 
   @override
   void initState() {
@@ -301,15 +302,12 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     }
 
     if (!_visitedTabs.contains(_activeTab)) _visitedTabs.add(_activeTab);
-    for (final tab in _visitedTabs) {
-      _tabWidgets.putIfAbsent(tab, () => _createTab(tab));
-    }
     final activeIdx = kValidResidentTabs.indexOf(_activeTab);
     return IndexedStack(
       index: activeIdx >= 0 ? activeIdx : 0,
       children: [
         for (final tab in kValidResidentTabs)
-          _tabWidgets[tab] ?? const SizedBox.shrink(),
+          _visitedTabs.contains(tab) ? _createTab(tab) : const SizedBox.shrink(),
       ],
     );
   }

@@ -15,7 +15,6 @@ class _CountingResidentService extends Fake implements ResidentService {
   int listInvoicesCalls = 0;
 
   @override
-  @override
   Future<dynamic> listInvoices([String? contractId, Options? options]) async {
     listInvoicesCalls++;
     return {'data': <dynamic>[]};
@@ -70,8 +69,6 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-
-    final beforeVisit = counting.listInvoicesCalls;
 
     // Navigate to invoices via the bottom/side tab, then back, then again.
     final invoicesTab = find.text('Hóa đơn & TT');

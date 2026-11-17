@@ -37,6 +37,10 @@ Người dùng phản ánh chuyển trang Flutter "rất chậm". Điều tra b�
 - Task 4 test dùng helper seam (`watchShellUnreadCount`) — không bắt được nếu ai đó watch trực tiếp trở lại tại callsite. Giữ callsite duy nhất dưới review.
 - Chạy bản release (`flutter build web --release`) khi dùng hàng ngày; debug web chậm hơn nhiều.
 
+## Phạm vi đo / không overclaim
+
+- Số liệu runtime (crash → không-crash, fetch-count, rebuild-count) **chỉ đo ở cổng cư dân (resident)**. Điều hướng admin qua sidebar chưa đo/release A/B; `.select()` ở `sidebar_widget`/`top_bar` chỉ giảm rebuild khi auth/building churn, không chứng minh giảm rebuild khi đổi route admin (go_router vẫn rebuild ShellRoute). Đây là follow-up, không phải kết quả đã đạt.
+
 ## Không làm
 
 - Không sửa `frontend/**` / backend / `pubspec.yaml`.
