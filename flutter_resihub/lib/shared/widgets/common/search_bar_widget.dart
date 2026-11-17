@@ -75,54 +75,58 @@ class _SearchBarWidgetState extends State<SearchBarWidget> {
       height: 38,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: AppColors.slate200),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          const Padding(
-            padding: EdgeInsets.only(left: 10, right: 8),
+      child: TextField(
+        controller: _controller,
+        onChanged: _onTextChanged,
+        style: const TextStyle(
+          fontSize: 13,
+          color: AppColors.slate800,
+        ),
+        decoration: InputDecoration(
+          hintText: widget.placeholder,
+          hintStyle: const TextStyle(
+            fontSize: 13,
+            color: AppColors.slate400,
+          ),
+          prefixIcon: const Padding(
+            padding: EdgeInsets.only(left: 10, right: 6),
             child: Icon(
               LucideIcons.search,
-              size: 16,
+              size: 15,
               color: AppColors.slate400,
             ),
           ),
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              onChanged: _onTextChanged,
-              style: const TextStyle(
-                fontSize: 13,
-                color: AppColors.slate800,
-              ),
-              decoration: InputDecoration(
-                hintText: widget.placeholder,
-                hintStyle: const TextStyle(
-                  fontSize: 13,
-                  color: AppColors.slate400,
-                ),
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(vertical: 8),
-              ),
-            ),
+          prefixIconConstraints: const BoxConstraints(
+            minWidth: 32,
+            minHeight: 32,
           ),
-          if (hasText)
-            InkWell(
-              onTap: _handleClear,
-              borderRadius: BorderRadius.circular(12),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Icon(
-                  LucideIcons.x,
-                  size: 14,
-                  color: AppColors.slate400,
-                ),
-              ),
-            ),
-        ],
+          suffixIcon: hasText
+              ? InkWell(
+                  onTap: _handleClear,
+                  borderRadius: BorderRadius.circular(12),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: Icon(
+                      LucideIcons.x,
+                      size: 14,
+                      color: AppColors.slate400,
+                    ),
+                  ),
+                )
+              : null,
+          suffixIconConstraints: const BoxConstraints(
+            minWidth: 32,
+            minHeight: 32,
+          ),
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 10),
+        ),
       ),
     );
   }

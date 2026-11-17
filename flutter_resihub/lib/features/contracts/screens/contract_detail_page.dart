@@ -1479,7 +1479,7 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
             action: AppButton(
               text: 'Về danh sách hợp đồng',
               variant: AppButtonVariant.primary,
-              onPressed: () => context.push('/admin/contracts'),
+              onPressed: () => context.go('/admin/contracts'),
             ),
           ),
         ),
@@ -1542,6 +1542,12 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                   PageHeader(
                     title: 'Hợp đồng $contractCode — Căn ${_contract['apartment_code'] ?? '—'}',
                     subtitle: 'Tòa nhà: ${_contract['building_name'] ?? '—'} • Khách thuê chính: ${_contract['tenant_name'] ?? '—'}',
+                    showBack: true,
+                    backTo: '/admin/contracts',
+                    breadcrumbs: [
+                      const BreadcrumbItem(label: 'Hợp đồng', to: '/admin/contracts'),
+                      BreadcrumbItem(label: 'HĐ $contractCode'),
+                    ],
                     actions: Wrap(
                       spacing: 8,
                       runSpacing: 8,

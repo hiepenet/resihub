@@ -376,8 +376,8 @@ class _BuildingsPageState extends ConsumerState<BuildingsPage> {
                         child: _BuildingCard(
                           building: b,
                           permissions: permissions,
-                          onFloorPlan: () => context.go('/admin/buildings/${b['id']}/floor-plan'),
-                          onDetail: () => context.go('/admin/buildings/${b['id']}'),
+                          onFloorPlan: () => context.push('/admin/buildings/${b['id']}/floor-plan'),
+                          onDetail: () => context.push('/admin/buildings/${b['id']}'),
                           onEdit: () => _openEditModal(b),
                           onToggleStatus: () => _handleToggleStatus(b),
                           onDelete: () => _handleDeleteBuilding(b),
@@ -518,27 +518,33 @@ class _BuildingCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // Address
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(
-                        LucideIcons.mapPin,
-                        size: 14,
-                        color: AppColors.slate400,
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          address.isNotEmpty ? address : 'Chưa cập nhật địa chỉ',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: AppColors.slate500,
+                  SizedBox(
+                    height: 36,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.only(top: 2),
+                          child: Icon(
+                            LucideIcons.mapPin,
+                            size: 14,
+                            color: AppColors.slate400,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            address.isNotEmpty ? address : 'Chưa cập nhật địa chỉ',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppColors.slate500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
 
                   const SizedBox(height: 14),
@@ -671,76 +677,76 @@ class _BuildingCard extends StatelessWidget {
                   const SizedBox(height: 12),
 
                   // Card Footer Actions
-                  Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 6,
-                    runSpacing: 8,
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          // Sơ đồ tầng
-                          AppButton(
-                            text: 'Sơ đồ tầng',
-                            variant: AppButtonVariant.soft,
-                            size: AppButtonSize.xs,
-                            icon: const Icon(LucideIcons.layoutGrid, size: 13),
-                            onPressed: onFloorPlan,
-                          ),
-
-                          // Edit button (SYS_ADMIN or MANAGER)
-                          if (permissions.canEditRealEstate)
+                      Expanded(
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            // Sơ đồ tầng
                             AppButton(
-                              text: 'Sửa',
-                              variant: AppButtonVariant.ghost,
+                              text: 'Sơ đồ tầng',
+                              variant: AppButtonVariant.soft,
                               size: AppButtonSize.xs,
-                              icon: const Icon(LucideIcons.squarePen, size: 13),
-                              onPressed: onEdit,
+                              icon: const Icon(LucideIcons.layoutGrid, size: 13),
+                              onPressed: onFloorPlan,
                             ),
 
-                          // Status Toggle (SYS_ADMIN only)
-                          if (permissions.canManageBuildings)
-                            AppButton(
-                              key: Key('building_status_toggle_$id'),
-                              text: status == 'INACTIVE' ? 'Kích hoạt' : 'Tạm ngưng',
-                              variant: status == 'INACTIVE'
-                                  ? AppButtonVariant.success
-                                  : AppButtonVariant.soft,
-                              size: AppButtonSize.xs,
-                              icon: Icon(
-                                status == 'INACTIVE'
-                                    ? LucideIcons.checkCircle2
-                                    : LucideIcons.ban,
-                                size: 13,
-                              ),
-                              onPressed: onToggleStatus,
-                            ),
-
-                          // Delete button (SYS_ADMIN only)
-                          if (permissions.canManageBuildings)
-                            Tooltip(
-                              message: hasChildren
-                                  ? 'Chỉ được xóa tòa nhà rỗng (chưa có khu, tầng hoặc căn hộ). Vui lòng dùng Ngừng khai thác nếu đã vận hành.'
-                                  : 'Xóa tòa nhà rỗng',
-                              child: AppButton(
-                                text: 'Xóa',
+                            // Edit button (SYS_ADMIN or MANAGER)
+                            if (permissions.canEditRealEstate)
+                              AppButton(
+                                text: 'Sửa',
                                 variant: AppButtonVariant.ghost,
                                 size: AppButtonSize.xs,
-                                disabled: hasChildren,
-                                icon: const Icon(
-                                  LucideIcons.trash2,
-                                  size: 13,
-                                  color: AppColors.rose600,
-                                ),
-                                onPressed: hasChildren ? null : onDelete,
+                                icon: const Icon(LucideIcons.squarePen, size: 13),
+                                onPressed: onEdit,
                               ),
-                            ),
-                        ],
-                      ),
 
+                            // Status Toggle (SYS_ADMIN only)
+                            if (permissions.canManageBuildings)
+                              AppButton(
+                                key: Key('building_status_toggle_$id'),
+                                text: status == 'INACTIVE' ? 'Kích hoạt' : 'Tạm ngưng',
+                                variant: status == 'INACTIVE'
+                                    ? AppButtonVariant.success
+                                    : AppButtonVariant.soft,
+                                size: AppButtonSize.xs,
+                                icon: Icon(
+                                  status == 'INACTIVE'
+                                      ? LucideIcons.checkCircle2
+                                      : LucideIcons.ban,
+                                  size: 13,
+                                ),
+                                onPressed: onToggleStatus,
+                              ),
+
+                            // Delete button (SYS_ADMIN only)
+                            if (permissions.canManageBuildings)
+                              Tooltip(
+                                message: hasChildren
+                                    ? 'Chỉ được xóa tòa nhà rỗng (chưa có khu, tầng hoặc căn hộ). Vui lòng dùng Ngừng khai thác nếu đã vận hành.'
+                                    : 'Xóa tòa nhà rỗng',
+                                child: AppButton(
+                                  text: 'Xóa',
+                                  variant: AppButtonVariant.ghost,
+                                  size: AppButtonSize.xs,
+                                  disabled: hasChildren,
+                                  icon: const Icon(
+                                    LucideIcons.trash2,
+                                    size: 13,
+                                    color: AppColors.rose600,
+                                  ),
+                                  onPressed: hasChildren ? null : onDelete,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
                       // Chi tiết link
                       InkWell(
                         onTap: onDetail,

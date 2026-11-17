@@ -727,7 +727,7 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(24),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               PageHeader(
                 title: 'Gói đăng ký dịch vụ',
@@ -763,39 +763,42 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
               // Stats Cards
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final isWide = constraints.maxWidth > 900;
-                  return GridView.count(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    crossAxisCount: isWide ? 4 : 2,
-                    crossAxisSpacing: 16,
-                    mainAxisSpacing: 16,
-                    childAspectRatio: isWide ? 2.2 : 1.8,
+                  final cols = constraints.maxWidth > 900
+                      ? 4
+                      : (constraints.maxWidth >= 500 ? 2 : 1);
+                  final itemWidth =
+                      ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                  final cards = [
+                    StatsCard(
+                      title: 'Chờ phê duyệt',
+                      value: pendingApprove.toString(),
+                      icon: LucideIcons.clock,
+                      color: 'amber',
+                    ),
+                    StatsCard(
+                      title: 'Chờ hủy',
+                      value: pendingCancel.toString(),
+                      icon: LucideIcons.ban,
+                      color: 'rose',
+                    ),
+                    StatsCard(
+                      title: 'Đang hoạt động',
+                      value: activeCount.toString(),
+                      icon: LucideIcons.checkCircle2,
+                      color: 'emerald',
+                    ),
+                    StatsCard(
+                      title: 'Doanh thu tháng (ước tính)',
+                      value: formatMoney(monthlyTotal),
+                      icon: LucideIcons.calculator,
+                      color: 'sky',
+                    ),
+                  ];
+                  return Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
                     children: [
-                      StatsCard(
-                        title: 'Chờ phê duyệt',
-                        value: pendingApprove.toString(),
-                        icon: LucideIcons.clock,
-                        color: 'amber',
-                      ),
-                      StatsCard(
-                        title: 'Chờ hủy',
-                        value: pendingCancel.toString(),
-                        icon: LucideIcons.ban,
-                        color: 'rose',
-                      ),
-                      StatsCard(
-                        title: 'Đang hoạt động',
-                        value: activeCount.toString(),
-                        icon: LucideIcons.checkCircle2,
-                        color: 'emerald',
-                      ),
-                      StatsCard(
-                        title: 'Doanh thu tháng (ước tính)',
-                        value: formatMoney(monthlyTotal),
-                        icon: LucideIcons.calculator,
-                        color: 'sky',
-                      ),
+                      for (final card in cards) SizedBox(width: itemWidth, child: card),
                     ],
                   );
                 },
@@ -854,9 +857,14 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
               ] else ...[
                 AppCard(
                   padding: EdgeInsets.zero,
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: DataTable(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final minWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 800.0;
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(minWidth: minWidth),
+                          child: DataTable(
                       headingRowColor: WidgetStateProperty.all(AppColors.slate50),
                       columns: const [
                         DataColumn(label: Text('Căn hộ / Tòa', style: TextStyle(fontWeight: FontWeight.w600))),
@@ -952,7 +960,10 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                           ],
                         );
                       }).toList(),
-                    ),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                 ),
               ],

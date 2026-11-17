@@ -2,14 +2,16 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/network/dio_client.dart';
+import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
 
 /// Comprehensive Resident Portal Service.
 /// Implements exact 22 methods matching `frontend/src/services/resident.service.js`.
 class ResidentService {
   final Dio dio;
+  final QueryCache? queryCache;
 
-  ResidentService({required this.dio});
+  ResidentService({required this.dio, this.queryCache});
 
   Map<String, dynamic>? _withContractParam(String? contractId) {
     if (contractId != null && contractId.isNotEmpty) {
@@ -19,7 +21,24 @@ class ResidentService {
   }
 
   // 1. Get overview
+  dynamic peekOverview([String? contractId]) =>
+      queryCache?.peek<dynamic>('resident:overview:${contractId ?? ''}')?.data;
+
   Future<dynamic> getOverview([String? contractId, Options? options]) {
+    if (queryCache != null) {
+      final key = 'resident:overview:${contractId ?? ''}';
+      return queryCache!.cachedFetch<dynamic>(
+        key,
+        () => dio
+            .get<dynamic>(
+              '/api/v1/resident/overview',
+              queryParameters: _withContractParam(contractId),
+              options: options,
+            )
+            .then((r) => r.data),
+        ttl: const Duration(seconds: 30),
+      );
+    }
     return dio
         .get<dynamic>(
           '/api/v1/resident/overview',
@@ -52,7 +71,24 @@ class ResidentService {
   }
 
   // 4. List service requests
+  dynamic peekServiceRequests([String? contractId]) =>
+      queryCache?.peek<dynamic>('resident:service-requests:${contractId ?? ''}')?.data;
+
   Future<dynamic> listServiceRequests([String? contractId, Options? options]) {
+    if (queryCache != null) {
+      final key = 'resident:service-requests:${contractId ?? ''}';
+      return queryCache!.cachedFetch<dynamic>(
+        key,
+        () => dio
+            .get<dynamic>(
+              '/api/v1/resident/service-requests',
+              queryParameters: _withContractParam(contractId),
+              options: options,
+            )
+            .then((r) => r.data),
+        ttl: const Duration(seconds: 30),
+      );
+    }
     return dio
         .get<dynamic>(
           '/api/v1/resident/service-requests',
@@ -154,6 +190,20 @@ class ResidentService {
 
   // 9. List invoices
   Future<dynamic> listInvoices([String? contractId, Options? options]) {
+    if (queryCache != null && options == null) {
+      final key = 'resident:invoices:${contractId ?? ''}';
+      return queryCache!.cachedFetch<dynamic>(
+        key,
+        () => dio
+            .get<dynamic>(
+              '/api/v1/resident/invoices',
+              queryParameters: _withContractParam(contractId),
+              options: options,
+            )
+            .then((r) => r.data),
+        ttl: const Duration(seconds: 30),
+      );
+    }
     return dio
         .get<dynamic>(
           '/api/v1/resident/invoices',
@@ -176,6 +226,20 @@ class ResidentService {
 
   // 11. List services
   Future<dynamic> listServices([String? contractId, Options? options]) {
+    if (queryCache != null && options == null) {
+      final key = 'resident:services:${contractId ?? ''}';
+      return queryCache!.cachedFetch<dynamic>(
+        key,
+        () => dio
+            .get<dynamic>(
+              '/api/v1/resident/services',
+              queryParameters: _withContractParam(contractId),
+              options: options,
+            )
+            .then((r) => r.data),
+        ttl: const Duration(seconds: 30),
+      );
+    }
     return dio
         .get<dynamic>(
           '/api/v1/resident/services',
@@ -326,5 +390,6 @@ class ResidentService {
 /// Riverpod provider for [ResidentService].
 final residentServiceProvider = Provider<ResidentService>((ref) {
   final dio = ref.watch(dioProvider);
-  return ResidentService(dio: dio);
+  final queryCache = ref.watch(queryCacheProvider);
+  return ResidentService(dio: dio, queryCache: queryCache);
 });

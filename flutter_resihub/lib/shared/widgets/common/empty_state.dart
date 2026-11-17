@@ -23,21 +23,21 @@ class EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 48.0),
+        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Container(
-              width: 48,
-              height: 48,
+              width: 56,
+              height: 56,
               decoration: BoxDecoration(
                 color: AppColors.slate100,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Icon(
                 icon,
-                size: 24,
+                size: 28,
                 color: AppColors.slate400,
               ),
             ),

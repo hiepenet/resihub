@@ -219,53 +219,54 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
               builder: (context, constraints) {
                 final isWide = constraints.maxWidth >= 900;
                 final isMedium = constraints.maxWidth >= 600;
-                final crossAxisCount = isWide ? 4 : (isMedium ? 2 : 1);
+                final cols = isWide ? 4 : (isMedium ? 2 : 1);
+                final itemWidth =
+                    ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                final cards = [
+                  StatsCard(
+                    title: 'Tỷ lệ lấp đầy',
+                    value: '${kpis['occupancy_rate'] ?? 0}%',
+                    subtext:
+                        '${kpis['occupied_apartments'] ?? 0}/${kpis['total_apartments'] ?? 0} căn đang khai thác (${kpis['available_apartments'] ?? 0} trống)',
+                    icon: LucideIcons.building2,
+                    color: 'sky',
+                    onClick: () => context.go('/admin/buildings'),
+                  ),
+                  StatsCard(
+                    title: 'Doanh thu tháng này',
+                    value: formatCompactMoney(kpis['monthly_revenue'] ?? 0),
+                    valueTitle: formatMoney(kpis['monthly_revenue'] ?? 0),
+                    trend: num.tryParse(kpis['revenue_growth_pct']?.toString() ?? ''),
+                    subtext:
+                        'Thực thu: ${formatMoney(kpis['monthly_revenue'] ?? 0)} · Phát hành: ${formatMoney(kpis['monthly_billed'] ?? 0)}',
+                    icon: LucideIcons.trendingUp,
+                    color: 'emerald',
+                    onClick: () => context.go('/admin/invoices'),
+                  ),
+                  StatsCard(
+                    title: 'Công nợ chưa thu',
+                    value: formatCompactMoney(kpis['unpaid_debt'] ?? 0),
+                    valueTitle: formatMoney(kpis['unpaid_debt'] ?? 0),
+                    subtext: 'Tổng dư nợ: ${formatMoney(kpis['unpaid_debt'] ?? 0)}',
+                    icon: LucideIcons.alertCircle,
+                    color: 'rose',
+                    onClick: () => context.go('/admin/payments'),
+                  ),
+                  StatsCard(
+                    title: 'Yêu cầu chờ xử lý',
+                    value: '${kpis['pending_requests'] ?? 0}',
+                    subtext: 'Sự cố kỹ thuật mới / đang xử lý',
+                    icon: LucideIcons.wrench,
+                    color: 'amber',
+                    onClick: () => context.go('/admin/maintenance'),
+                  ),
+                ];
 
-                return GridView.count(
-                  crossAxisCount: crossAxisCount,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  childAspectRatio: isWide ? 1.6 : 2.0,
+                return Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
                   children: [
-                    StatsCard(
-                      title: 'Tỷ lệ lấp đầy',
-                      value: '${kpis['occupancy_rate'] ?? 0}%',
-                      subtext:
-                          '${kpis['occupied_apartments'] ?? 0}/${kpis['total_apartments'] ?? 0} căn đang khai thác (${kpis['available_apartments'] ?? 0} trống)',
-                      icon: LucideIcons.building2,
-                      color: 'sky',
-                      onClick: () => context.go('/admin/buildings'),
-                    ),
-                    StatsCard(
-                      title: 'Doanh thu tháng này',
-                      value: formatCompactMoney(kpis['monthly_revenue'] ?? 0),
-                      valueTitle: formatMoney(kpis['monthly_revenue'] ?? 0),
-                      trend: num.tryParse(kpis['revenue_growth_pct']?.toString() ?? ''),
-                      subtext:
-                          'Thực thu: ${formatMoney(kpis['monthly_revenue'] ?? 0)} · Phát hành: ${formatMoney(kpis['monthly_billed'] ?? 0)}',
-                      icon: LucideIcons.trendingUp,
-                      color: 'emerald',
-                      onClick: () => context.go('/admin/invoices'),
-                    ),
-                    StatsCard(
-                      title: 'Công nợ chưa thu',
-                      value: formatCompactMoney(kpis['unpaid_debt'] ?? 0),
-                      valueTitle: formatMoney(kpis['unpaid_debt'] ?? 0),
-                      subtext: 'Tổng dư nợ: ${formatMoney(kpis['unpaid_debt'] ?? 0)}',
-                      icon: LucideIcons.alertCircle,
-                      color: 'rose',
-                      onClick: () => context.go('/admin/payments'),
-                    ),
-                    StatsCard(
-                      title: 'Yêu cầu chờ xử lý',
-                      value: '${kpis['pending_requests'] ?? 0}',
-                      subtext: 'Sự cố kỹ thuật mới / đang xử lý',
-                      icon: LucideIcons.wrench,
-                      color: 'amber',
-                      onClick: () => context.go('/admin/maintenance'),
-                    ),
+                    for (final card in cards) SizedBox(width: itemWidth, child: card),
                   ],
                 );
               },
@@ -277,93 +278,94 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
               builder: (context, constraints) {
                 final isWide = constraints.maxWidth >= 1000;
                 final isMedium = constraints.maxWidth >= 600;
-                final crossAxisCount = isWide ? 4 : (isMedium ? 2 : 1);
+                final cols = isWide ? 4 : (isMedium ? 2 : 1);
+                final itemWidth =
+                    ((constraints.maxWidth - (cols - 1) * 12) / cols).floorToDouble();
+                final cards = [
+                  _buildAlertCard(
+                    title: 'Chờ duyệt điều chỉnh HĐ',
+                    count: kpis['pending_invoice_adjustments'] ?? 0,
+                    hint: 'Duyệt 4 mắt HĐ →',
+                    icon: LucideIcons.fileText,
+                    bg: const Color(0xFFFAF5FF),
+                    border: const Color(0xFFE9D5FF),
+                    textColor: const Color(0xFF6B21A8),
+                    iconColor: const Color(0xFF9333EA),
+                    onTap: () => context.go('/admin/invoices?status=PENDING_APPROVAL'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Chờ duyệt hoàn tín dụng',
+                    count: kpis['pending_credit_refunds'] ?? 0,
+                    hint: 'Duyệt 4 mắt hoàn tiền →',
+                    icon: LucideIcons.receipt,
+                    bg: const Color(0xFFEEF2FF),
+                    border: const Color(0xFFC7D2FE),
+                    textColor: const Color(0xFF3730A3),
+                    iconColor: const Color(0xFF4F46E5),
+                    onTap: () => context.go('/admin/payments?tab=credits&status=PENDING_DIRECT_REFUND'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Chờ duyệt tất toán cọc',
+                    count: kpis['pending_deposit_approvals'] ?? 0,
+                    hint: 'Duyệt Four-Eyes →',
+                    icon: LucideIcons.clock,
+                    bg: const Color(0xFFFFFBEB),
+                    border: const Color(0xFFFDE68A),
+                    textColor: const Color(0xFF92400E),
+                    iconColor: const Color(0xFFD97706),
+                    onTap: () => context.go('/admin/deposits?tab=pending'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Chờ chi hoàn / Trả lệnh',
+                    count: kpis['pending_deposit_payouts'] ?? 0,
+                    hint: 'Phát hành UNC →',
+                    icon: LucideIcons.wallet,
+                    bg: const Color(0xFFF0F9FF),
+                    border: const Color(0xFFBAE6FD),
+                    textColor: const Color(0xFF075985),
+                    iconColor: const Color(0xFF0284C7),
+                    onTap: () => context.go('/admin/deposits?tab=payout'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Quá hạn hoàn cọc (5 ngày)',
+                    count: kpis['overdue_deposit_refunds'] ?? 0,
+                    hint: 'Xử lý khẩn FR-068 →',
+                    icon: LucideIcons.alertCircle,
+                    bg: const Color(0xFFFFF1F2),
+                    border: const Color(0xFFFECDD3),
+                    textColor: const Color(0xFF9F1239),
+                    iconColor: const Color(0xFFE11D48),
+                    onTap: () => context.go('/admin/deposits?overdue=1'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Sổ cọc đang tranh chấp',
+                    count: kpis['disputed_deposits'] ?? 0,
+                    hint: 'Giải quyết khiếu nại →',
+                    icon: LucideIcons.shieldAlert,
+                    bg: const Color(0xFFFAF5FF),
+                    border: const Color(0xFFE9D5FF),
+                    textColor: const Color(0xFF6B21A8),
+                    iconColor: const Color(0xFF9333EA),
+                    onTap: () => context.go('/admin/deposits?status=DISPUTED'),
+                  ),
+                  _buildAlertCard(
+                    title: 'Giữ chỗ chờ sao kê',
+                    count: kpis['pending_reservation_confirms'] ?? 0,
+                    hint: 'Đối chiếu chuyển khoản →',
+                    icon: LucideIcons.checkCircle2,
+                    bg: const Color(0xFFECFDF5),
+                    border: const Color(0xFFA7F3D0),
+                    textColor: const Color(0xFF065F46),
+                    iconColor: const Color(0xFF059669),
+                    onTap: () => context.go('/admin/buildings/floor-plan?pending_confirm=1'),
+                  ),
+                ];
 
-                return GridView.count(
-                  crossAxisCount: crossAxisCount,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  childAspectRatio: isWide ? 2.5 : 2.8,
+                return Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
                   children: [
-                    _buildAlertCard(
-                      title: 'Chờ duyệt điều chỉnh HĐ',
-                      count: kpis['pending_invoice_adjustments'] ?? 0,
-                      hint: 'Duyệt 4 mắt HĐ →',
-                      icon: LucideIcons.fileText,
-                      bg: const Color(0xFFFAF5FF),
-                      border: const Color(0xFFE9D5FF),
-                      textColor: const Color(0xFF6B21A8),
-                      iconColor: const Color(0xFF9333EA),
-                      onTap: () => context.go('/admin/invoices?status=PENDING_APPROVAL'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Chờ duyệt hoàn tín dụng',
-                      count: kpis['pending_credit_refunds'] ?? 0,
-                      hint: 'Duyệt 4 mắt hoàn tiền →',
-                      icon: LucideIcons.receipt,
-                      bg: const Color(0xFFEEF2FF),
-                      border: const Color(0xFFC7D2FE),
-                      textColor: const Color(0xFF3730A3),
-                      iconColor: const Color(0xFF4F46E5),
-                      onTap: () => context.go('/admin/payments?tab=credits&status=PENDING_DIRECT_REFUND'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Chờ duyệt tất toán cọc',
-                      count: kpis['pending_deposit_approvals'] ?? 0,
-                      hint: 'Duyệt Four-Eyes →',
-                      icon: LucideIcons.clock,
-                      bg: const Color(0xFFFFFBEB),
-                      border: const Color(0xFFFDE68A),
-                      textColor: const Color(0xFF92400E),
-                      iconColor: const Color(0xFFD97706),
-                      onTap: () => context.go('/admin/deposits?tab=pending'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Chờ chi hoàn / Trả lệnh',
-                      count: kpis['pending_deposit_payouts'] ?? 0,
-                      hint: 'Phát hành UNC →',
-                      icon: LucideIcons.wallet,
-                      bg: const Color(0xFFF0F9FF),
-                      border: const Color(0xFFBAE6FD),
-                      textColor: const Color(0xFF075985),
-                      iconColor: const Color(0xFF0284C7),
-                      onTap: () => context.go('/admin/deposits?tab=payout'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Quá hạn hoàn cọc (5 ngày)',
-                      count: kpis['overdue_deposit_refunds'] ?? 0,
-                      hint: 'Xử lý khẩn FR-068 →',
-                      icon: LucideIcons.alertCircle,
-                      bg: const Color(0xFFFFF1F2),
-                      border: const Color(0xFFFECDD3),
-                      textColor: const Color(0xFF9F1239),
-                      iconColor: const Color(0xFFE11D48),
-                      onTap: () => context.go('/admin/deposits?overdue=1'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Sổ cọc đang tranh chấp',
-                      count: kpis['disputed_deposits'] ?? 0,
-                      hint: 'Giải quyết khiếu nại →',
-                      icon: LucideIcons.shieldAlert,
-                      bg: const Color(0xFFFAF5FF),
-                      border: const Color(0xFFE9D5FF),
-                      textColor: const Color(0xFF6B21A8),
-                      iconColor: const Color(0xFF9333EA),
-                      onTap: () => context.go('/admin/deposits?status=DISPUTED'),
-                    ),
-                    _buildAlertCard(
-                      title: 'Giữ chỗ chờ sao kê',
-                      count: kpis['pending_reservation_confirms'] ?? 0,
-                      hint: 'Đối chiếu chuyển khoản →',
-                      icon: LucideIcons.checkCircle2,
-                      bg: const Color(0xFFECFDF5),
-                      border: const Color(0xFFA7F3D0),
-                      textColor: const Color(0xFF065F46),
-                      iconColor: const Color(0xFF059669),
-                      onTap: () => context.go('/admin/buildings/floor-plan?pending_confirm=1'),
-                    ),
+                    for (final card in cards) SizedBox(width: itemWidth, child: card),
                   ],
                 );
               },

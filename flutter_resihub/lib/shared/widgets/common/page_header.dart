@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -41,6 +42,19 @@ class PageHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final hasBack = showBack ?? (backTo != null || breadcrumbs.any((b) => b.to != null || b.onTap != null));
 
+    // Derive logical back target: second-to-last breadcrumb with a route,
+    // or explicit backTo, or fallback to router.pop().
+    String? breadcrumbBackTarget() {
+      if (backTo != null) return backTo;
+      // Walk breadcrumbs from second-to-last backward to find navigable item
+      for (int i = breadcrumbs.length - 2; i >= 0; i--) {
+        if (breadcrumbs[i].to != null) return breadcrumbs[i].to;
+      }
+      return null;
+    }
+
+    final breadcrumbBack = breadcrumbBackTarget();
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 24.0),
       child: Column(
@@ -59,9 +73,15 @@ class PageHeader extends StatelessWidget {
                       size: 14,
                       color: AppColors.slate400,
                     ),
-                  if (breadcrumbs[i].onTap != null)
+                  if (breadcrumbs[i].onTap != null || breadcrumbs[i].to != null)
                     InkWell(
-                      onTap: breadcrumbs[i].onTap,
+                      onTap: () {
+                        if (breadcrumbs[i].onTap != null) {
+                          breadcrumbs[i].onTap!();
+                        } else if (breadcrumbs[i].to != null) {
+                          GoRouter.maybeOf(context)?.go(breadcrumbs[i].to!);
+                        }
+                      },
                       child: Text(
                         breadcrumbs[i].label,
                         style: const TextStyle(
@@ -97,6 +117,15 @@ class PageHeader extends StatelessWidget {
                       onTap: () {
                         if (onBack != null) {
                           onBack!();
+                          return;
+                        }
+                        final router = GoRouter.maybeOf(context);
+                        if (backTo != null && backTo!.isNotEmpty && router != null) {
+                          router.go(backTo!);
+                        } else if (router != null && router.canPop()) {
+                          router.pop();
+                        } else if (breadcrumbBack != null && breadcrumbBack.isNotEmpty && router != null) {
+                          router.go(breadcrumbBack);
                         } else {
                           Navigator.maybePop(context);
                         }

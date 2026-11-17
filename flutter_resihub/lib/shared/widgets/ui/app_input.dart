@@ -83,7 +83,6 @@ class AppInput extends StatelessWidget {
           const SizedBox(height: 6),
         ],
         TextFormField(
-          key: key,
           focusNode: focusNode,
           controller: controller,
           initialValue: controller == null ? initialValue : null,

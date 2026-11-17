@@ -441,21 +441,36 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: AppColors.slate200),
             ),
-            child: GridView.count(
-              crossAxisCount: 2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              childAspectRatio: 2.4,
-              children: [
-                _buildSummaryModalItem('Đầu kỳ đang giữ', formatMoney(summary['opening_held'] ?? 0), AppColors.slate900),
-                _buildSummaryModalItem('Cuối kỳ đang giữ', formatMoney(summary['closing_held'] ?? 0), const Color(0xFF047857)),
-                _buildSummaryModalItem('Thu mới trong kỳ', '+${formatMoney(summary['collected'] ?? 0)}', const Color(0xFF0369A1)),
-                _buildSummaryModalItem(
-                  'Hoàn chi / Khấu trừ',
-                  '-${formatMoney((num.tryParse(summary['refunded']?.toString() ?? '0') ?? 0) + (num.tryParse(summary['deducted']?.toString() ?? '0') ?? 0))}',
-                  const Color(0xFF4338CA),
-                ),
-              ],
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final itemWidth = ((constraints.maxWidth - 12) / 2).floorToDouble();
+                return Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    SizedBox(
+                      width: itemWidth,
+                      child: _buildSummaryModalItem('Đầu kỳ đang giữ', formatMoney(summary['opening_held'] ?? 0), AppColors.slate900),
+                    ),
+                    SizedBox(
+                      width: itemWidth,
+                      child: _buildSummaryModalItem('Cuối kỳ đang giữ', formatMoney(summary['closing_held'] ?? 0), const Color(0xFF047857)),
+                    ),
+                    SizedBox(
+                      width: itemWidth,
+                      child: _buildSummaryModalItem('Thu mới trong kỳ', '+${formatMoney(summary['collected'] ?? 0)}', const Color(0xFF0369A1)),
+                    ),
+                    SizedBox(
+                      width: itemWidth,
+                      child: _buildSummaryModalItem(
+                        'Hoàn chi / Khấu trừ',
+                        '-${formatMoney((num.tryParse(summary['refunded']?.toString() ?? '0') ?? 0) + (num.tryParse(summary['deducted']?.toString() ?? '0') ?? 0))}',
+                        const Color(0xFF4338CA),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
           const SizedBox(height: 12),
@@ -602,45 +617,46 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
               builder: (context, constraints) {
                 final isWide = constraints.maxWidth >= 900;
                 final isMedium = constraints.maxWidth >= 600;
-                final crossAxisCount = isWide ? 4 : (isMedium ? 2 : 1);
+                final cols = isWide ? 4 : (isMedium ? 2 : 1);
+                final itemWidth =
+                    ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                final cards = [
+                  StatsCard(
+                    title: 'Lũy kế phát hành (12T)',
+                    value: formatCompactMoney(totalBilled12m),
+                    subtext: formatMoney(totalBilled12m),
+                    icon: LucideIcons.barChart3,
+                    color: 'sky',
+                  ),
+                  StatsCard(
+                    title: 'Lũy kế thực thu (12T)',
+                    value: formatCompactMoney(totalCollected12m),
+                    valueTitle: formatMoney(totalCollected12m),
+                    subtext: '${formatMoney(totalCollected12m)} • Thu hồi $collectionRate%',
+                    icon: LucideIcons.trendingUp,
+                    color: 'emerald',
+                  ),
+                  StatsCard(
+                    title: 'Tỷ lệ lấp đầy trung bình',
+                    value: '$avgOccupancy%',
+                    subtext: '$totalOcc / $totalApts căn đang khai thác',
+                    icon: LucideIcons.building2,
+                    color: 'indigo',
+                  ),
+                  StatsCard(
+                    title: 'Tổng dư nợ hiện hành',
+                    value: formatCompactMoney(totalDebt),
+                    subtext: formatMoney(totalDebt),
+                    icon: LucideIcons.clock,
+                    color: 'rose',
+                  ),
+                ];
 
-                return GridView.count(
-                  crossAxisCount: crossAxisCount,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  childAspectRatio: isWide ? 1.6 : 2.0,
+                return Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
                   children: [
-                    StatsCard(
-                      title: 'Lũy kế phát hành (12T)',
-                      value: formatCompactMoney(totalBilled12m),
-                      subtext: formatMoney(totalBilled12m),
-                      icon: LucideIcons.barChart3,
-                      color: 'sky',
-                    ),
-                    StatsCard(
-                      title: 'Lũy kế thực thu (12T)',
-                      value: formatCompactMoney(totalCollected12m),
-                      valueTitle: formatMoney(totalCollected12m),
-                      subtext: '${formatMoney(totalCollected12m)} • Thu hồi $collectionRate%',
-                      icon: LucideIcons.trendingUp,
-                      color: 'emerald',
-                    ),
-                    StatsCard(
-                      title: 'Tỷ lệ lấp đầy trung bình',
-                      value: '$avgOccupancy%',
-                      subtext: '$totalOcc / $totalApts căn đang khai thác',
-                      icon: LucideIcons.building2,
-                      color: 'indigo',
-                    ),
-                    StatsCard(
-                      title: 'Tổng dư nợ hiện hành',
-                      value: formatCompactMoney(totalDebt),
-                      subtext: formatMoney(totalDebt),
-                      icon: LucideIcons.clock,
-                      color: 'rose',
-                    ),
+                    for (final card in cards) SizedBox(width: itemWidth, child: card),
                   ],
                 );
               },
@@ -860,108 +876,111 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final isWide = constraints.maxWidth >= 700;
-                    final crossAxisCount = isWide ? 2 : 1;
+                    final cols = isWide ? 2 : 1;
+                    final itemWidth =
+                        ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
 
-                    return GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: crossAxisCount,
-                        crossAxisSpacing: 16,
-                        mainAxisSpacing: 16,
-                        childAspectRatio: isWide ? 2.1 : 2.0,
-                      ),
-                      itemCount: occByBuilding.length,
-                      itemBuilder: (context, idx) {
-                        final b = occByBuilding[idx] as Map;
-                        final rate = num.tryParse(b['occupancy_rate']?.toString() ?? '0')?.toDouble() ?? 0.0;
-                        final barColor = rate >= 85
-                            ? const Color(0xFF10B981)
-                            : rate >= 60
-                                ? const Color(0xFF0EA5E9)
-                                : const Color(0xFFF59E0B);
+                    return Wrap(
+                      spacing: 16,
+                      runSpacing: 16,
+                      children: [
+                        for (final raw in occByBuilding)
+                          Builder(
+                            builder: (context) {
+                              final b = raw as Map;
+                              final rate = num.tryParse(b['occupancy_rate']?.toString() ?? '0')?.toDouble() ?? 0.0;
+                              final barColor = rate >= 85
+                                  ? const Color(0xFF10B981)
+                                  : rate >= 60
+                                      ? const Color(0xFF0EA5E9)
+                                      : const Color(0xFFF59E0B);
 
-                        return Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.slate200),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFFF0F9FF),
-                                            borderRadius: BorderRadius.circular(4),
-                                          ),
-                                          child: Text(
-                                            b['building_code']?.toString() ?? '',
-                                            style: const TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.bold,
-                                              color: AppColors.primary700,
+                              return SizedBox(
+                                width: itemWidth,
+                                child: Container(
+                                  padding: const EdgeInsets.all(16),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: AppColors.slate200),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(0xFFF0F9FF),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                  ),
+                                                  child: Text(
+                                                    b['building_code']?.toString() ?? '',
+                                                    style: const TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight: FontWeight.bold,
+                                                      color: AppColors.primary700,
+                                                    ),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  b['building_name']?.toString() ?? '',
+                                                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          b['building_name']?.toString() ?? '',
-                                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      Text(
-                                        '$rate%',
-                                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                                          Column(
+                                            crossAxisAlignment: CrossAxisAlignment.end,
+                                            children: [
+                                              Text(
+                                                '$rate%',
+                                                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                                              ),
+                                              const Text(
+                                                'Tỷ lệ lấp đầy',
+                                                style: TextStyle(fontSize: 10, color: AppColors.slate500),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
                                       ),
-                                      const Text(
-                                        'Tỷ lệ lấp đầy',
-                                        style: TextStyle(fontSize: 10, color: AppColors.slate500),
+                                      const SizedBox(height: 12),
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(6),
+                                        child: LinearProgressIndicator(
+                                          value: (rate / 100).clamp(0.0, 1.0),
+                                          minHeight: 8,
+                                          backgroundColor: AppColors.slate100,
+                                          valueColor: AlwaysStoppedAnimation<Color>(barColor),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Row(
+                                        children: [
+                                          _buildOccupancyStatBox('Đang thuê', '${b['occupied'] ?? 0}', const Color(0xFFECFDF5), const Color(0xFF065F46)),
+                                          const SizedBox(width: 6),
+                                          _buildOccupancyStatBox('Còn trống', '${b['available'] ?? 0}', const Color(0xFFF0F9FF), const Color(0xFF075985)),
+                                          const SizedBox(width: 6),
+                                          _buildOccupancyStatBox('Giữ chỗ', '${b['reserved'] ?? 0}', const Color(0xFFFFFBEB), const Color(0xFF92400E)),
+                                          const SizedBox(width: 6),
+                                          _buildOccupancyStatBox('Bảo trì', '${b['maintenance'] ?? 0}', const Color(0xFFF1F5F9), const Color(0xFF334155)),
+                                        ],
                                       ),
                                     ],
                                   ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(6),
-                                child: LinearProgressIndicator(
-                                  value: (rate / 100).clamp(0.0, 1.0),
-                                  minHeight: 8,
-                                  backgroundColor: AppColors.slate100,
-                                  valueColor: AlwaysStoppedAnimation<Color>(barColor),
                                 ),
-                              ),
-                              const Spacer(),
-                              Row(
-                                children: [
-                                  _buildOccupancyStatBox('Đang thuê', '${b['occupied'] ?? 0}', const Color(0xFFECFDF5), const Color(0xFF065F46)),
-                                  const SizedBox(width: 6),
-                                  _buildOccupancyStatBox('Còn trống', '${b['available'] ?? 0}', const Color(0xFFF0F9FF), const Color(0xFF075985)),
-                                  const SizedBox(width: 6),
-                                  _buildOccupancyStatBox('Giữ chỗ', '${b['reserved'] ?? 0}', const Color(0xFFFFFBEB), const Color(0xFF92400E)),
-                                  const SizedBox(width: 6),
-                                  _buildOccupancyStatBox('Bảo trì', '${b['maintenance'] ?? 0}', const Color(0xFFF1F5F9), const Color(0xFF334155)),
-                                ],
-                              ),
-                            ],
+                              );
+                            },
                           ),
-                        );
-                      },
+                      ],
                     );
                   },
                 ),
@@ -1193,70 +1212,72 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           builder: (context, constraints) {
             final isWide = constraints.maxWidth >= 1000;
             final isMedium = constraints.maxWidth >= 600;
-            final crossAxisCount = isWide ? 6 : (isMedium ? 3 : 1);
+            final cols = isWide ? 6 : (isMedium ? 3 : 1);
+            final itemWidth =
+                ((constraints.maxWidth - (cols - 1) * 10) / cols).floorToDouble();
 
             final col = toNonNegativeNumber(summary['collected']);
             final tin = toNonNegativeNumber(summary['transfer_in']);
             final ref = toNonNegativeNumber(summary['refunded']);
             final tout = toNonNegativeNumber(summary['transfer_out']);
 
-            return GridView.count(
-              crossAxisCount: crossAxisCount,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              childAspectRatio: isWide ? 1.6 : 2.4,
+            final cards = [
+              _buildLedgerBalanceCard(
+                title: 'Đầu kỳ đang giữ',
+                value: formatMoney(summary['opening_held'] ?? 0),
+                sub: 'Số dư mở sổ',
+                bg: Colors.white,
+                border: AppColors.slate200,
+                textColor: AppColors.slate900,
+              ),
+              _buildLedgerBalanceCard(
+                title: 'Thu mới + Nhận KC',
+                value: '+${formatMoney(col + tin)}',
+                sub: 'Thu: ${formatCompactMoney(col)} • KC đến: ${formatCompactMoney(tin)}',
+                bg: const Color(0xFFECFDF5),
+                border: const Color(0xFFA7F3D0),
+                textColor: const Color(0xFF047857),
+              ),
+              _buildLedgerBalanceCard(
+                title: 'Đã khấu trừ cọc',
+                value: '-${formatMoney(summary['deducted'] ?? 0)}',
+                sub: 'Hư hỏng / Nợ dịch vụ',
+                bg: const Color(0xFFFFFBEB),
+                border: const Color(0xFFFDE68A),
+                textColor: const Color(0xFFB45309),
+              ),
+              _buildLedgerBalanceCard(
+                title: 'Hoàn chi + KC đi',
+                value: '-${formatMoney(ref + tout)}',
+                sub: 'Hoàn: ${formatCompactMoney(ref)} • KC đi: ${formatCompactMoney(tout)}',
+                bg: const Color(0xFFEEF2FF),
+                border: const Color(0xFFC7D2FE),
+                textColor: const Color(0xFF4338CA),
+              ),
+              _buildLedgerBalanceCard(
+                title: 'Cuối kỳ đang giữ',
+                value: formatMoney(summary['closing_held'] ?? 0),
+                sub: 'Khớp cân đối sổ cái',
+                bg: const Color(0xFFF0F9FF),
+                border: const Color(0xFFBAE6FD),
+                textColor: const Color(0xFF0369A1),
+              ),
+              _buildLedgerBalanceCard(
+                title: 'Cảnh báo tồn đọng',
+                value:
+                    '${(num.tryParse(summary['pending_payout_count']?.toString() ?? '0') ?? 0) + (num.tryParse(summary['returned_count']?.toString() ?? '0') ?? 0)} chờ chi',
+                sub: 'Quá hạn: ${summary['overdue_count'] ?? 0} • Tranh chấp: ${summary['disputed_count'] ?? 0}',
+                bg: const Color(0xFFFFF1F2),
+                border: const Color(0xFFFECDD3),
+                textColor: const Color(0xFFBE123C),
+              ),
+            ];
+
+            return Wrap(
+              spacing: 10,
+              runSpacing: 10,
               children: [
-                _buildLedgerBalanceCard(
-                  title: 'Đầu kỳ đang giữ',
-                  value: formatMoney(summary['opening_held'] ?? 0),
-                  sub: 'Số dư mở sổ',
-                  bg: Colors.white,
-                  border: AppColors.slate200,
-                  textColor: AppColors.slate900,
-                ),
-                _buildLedgerBalanceCard(
-                  title: 'Thu mới + Nhận KC',
-                  value: '+${formatMoney(col + tin)}',
-                  sub: 'Thu: ${formatCompactMoney(col)} • KC đến: ${formatCompactMoney(tin)}',
-                  bg: const Color(0xFFECFDF5),
-                  border: const Color(0xFFA7F3D0),
-                  textColor: const Color(0xFF047857),
-                ),
-                _buildLedgerBalanceCard(
-                  title: 'Đã khấu trừ cọc',
-                  value: '-${formatMoney(summary['deducted'] ?? 0)}',
-                  sub: 'Hư hỏng / Nợ dịch vụ',
-                  bg: const Color(0xFFFFFBEB),
-                  border: const Color(0xFFFDE68A),
-                  textColor: const Color(0xFFB45309),
-                ),
-                _buildLedgerBalanceCard(
-                  title: 'Hoàn chi + KC đi',
-                  value: '-${formatMoney(ref + tout)}',
-                  sub: 'Hoàn: ${formatCompactMoney(ref)} • KC đi: ${formatCompactMoney(tout)}',
-                  bg: const Color(0xFFEEF2FF),
-                  border: const Color(0xFFC7D2FE),
-                  textColor: const Color(0xFF4338CA),
-                ),
-                _buildLedgerBalanceCard(
-                  title: 'Cuối kỳ đang giữ',
-                  value: formatMoney(summary['closing_held'] ?? 0),
-                  sub: 'Khớp cân đối sổ cái',
-                  bg: const Color(0xFFF0F9FF),
-                  border: const Color(0xFFBAE6FD),
-                  textColor: const Color(0xFF0369A1),
-                ),
-                _buildLedgerBalanceCard(
-                  title: 'Cảnh báo tồn đọng',
-                  value:
-                      '${(num.tryParse(summary['pending_payout_count']?.toString() ?? '0') ?? 0) + (num.tryParse(summary['returned_count']?.toString() ?? '0') ?? 0)} chờ chi',
-                  sub: 'Quá hạn: ${summary['overdue_count'] ?? 0} • Tranh chấp: ${summary['disputed_count'] ?? 0}',
-                  bg: const Color(0xFFFFF1F2),
-                  border: const Color(0xFFFECDD3),
-                  textColor: const Color(0xFFBE123C),
-                ),
+                for (final card in cards) SizedBox(width: itemWidth, child: card),
               ],
             );
           },
@@ -1277,56 +1298,58 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
               LayoutBuilder(
                 builder: (context, constraints) {
                   final isWide = constraints.maxWidth >= 900;
-                  final crossAxisCount = isWide ? 5 : 2;
+                  final cols = isWide ? 5 : 2;
+                  final itemWidth =
+                      ((constraints.maxWidth - (cols - 1) * 10) / cols).floorToDouble();
 
-                  return GridView.count(
-                    crossAxisCount: crossAxisCount,
-                    crossAxisSpacing: 10,
-                    mainAxisSpacing: 10,
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    childAspectRatio: isWide ? 1.9 : 2.4,
+                  final cards = [
+                    _buildRsvBox(
+                      title: 'Đang giữ chỗ (HELD)',
+                      amount: formatMoney(rsv['active_held_amount'] ?? 0),
+                      note: '${rsv['active_held_count'] ?? 0} phiếu đang khóa phòng',
+                      bg: const Color(0xFFECFDF5),
+                      border: const Color(0xFFA7F3D0),
+                      color: const Color(0xFF065F46),
+                    ),
+                    _buildRsvBox(
+                      title: 'Đã duyệt chờ chi hoàn',
+                      amount: formatMoney(rsv['pending_payout_amount'] ?? 0),
+                      note: '${rsv['pending_payout_count'] ?? 0} phiếu chờ BQL chi',
+                      bg: const Color(0xFFEEF2FF),
+                      border: const Color(0xFFC7D2FE),
+                      color: const Color(0xFF3730A3),
+                    ),
+                    _buildRsvBox(
+                      title: 'Chờ đối chiếu sao kê',
+                      amount: formatMoney(rsv['pending_confirm_amount'] ?? 0),
+                      note: '${rsv['pending_confirm_count'] ?? 0} phiếu chưa hạch toán',
+                      bg: const Color(0xFFFFFBEB),
+                      border: const Color(0xFFFDE68A),
+                      color: const Color(0xFF92400E),
+                    ),
+                    _buildRsvBox(
+                      title: 'Hoàn trả trong kỳ',
+                      amount: formatMoney(rsv['refunded_in_period'] ?? 0),
+                      note: 'Phiếu REFUNDED',
+                      bg: const Color(0xFFF0F9FF),
+                      border: const Color(0xFFBAE6FD),
+                      color: const Color(0xFF075985),
+                    ),
+                    _buildRsvBox(
+                      title: 'Tịch thu trong kỳ',
+                      amount: formatMoney(rsv['forfeited_in_period'] ?? 0),
+                      note: 'Doanh thu phạt hủy',
+                      bg: const Color(0xFFFFF1F2),
+                      border: const Color(0xFFFECDD3),
+                      color: const Color(0xFF9F1239),
+                    ),
+                  ];
+
+                  return Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
                     children: [
-                      _buildRsvBox(
-                        title: 'Đang giữ chỗ (HELD)',
-                        amount: formatMoney(rsv['active_held_amount'] ?? 0),
-                        note: '${rsv['active_held_count'] ?? 0} phiếu đang khóa phòng',
-                        bg: const Color(0xFFECFDF5),
-                        border: const Color(0xFFA7F3D0),
-                        color: const Color(0xFF065F46),
-                      ),
-                      _buildRsvBox(
-                        title: 'Đã duyệt chờ chi hoàn',
-                        amount: formatMoney(rsv['pending_payout_amount'] ?? 0),
-                        note: '${rsv['pending_payout_count'] ?? 0} phiếu chờ BQL chi',
-                        bg: const Color(0xFFEEF2FF),
-                        border: const Color(0xFFC7D2FE),
-                        color: const Color(0xFF3730A3),
-                      ),
-                      _buildRsvBox(
-                        title: 'Chờ đối chiếu sao kê',
-                        amount: formatMoney(rsv['pending_confirm_amount'] ?? 0),
-                        note: '${rsv['pending_confirm_count'] ?? 0} phiếu chưa hạch toán',
-                        bg: const Color(0xFFFFFBEB),
-                        border: const Color(0xFFFDE68A),
-                        color: const Color(0xFF92400E),
-                      ),
-                      _buildRsvBox(
-                        title: 'Hoàn trả trong kỳ',
-                        amount: formatMoney(rsv['refunded_in_period'] ?? 0),
-                        note: 'Phiếu REFUNDED',
-                        bg: const Color(0xFFF0F9FF),
-                        border: const Color(0xFFBAE6FD),
-                        color: const Color(0xFF075985),
-                      ),
-                      _buildRsvBox(
-                        title: 'Tịch thu trong kỳ',
-                        amount: formatMoney(rsv['forfeited_in_period'] ?? 0),
-                        note: 'Doanh thu phạt hủy',
-                        bg: const Color(0xFFFFF1F2),
-                        border: const Color(0xFFFECDD3),
-                        color: const Color(0xFF9F1239),
-                      ),
+                      for (final card in cards) SizedBox(width: itemWidth, child: card),
                     ],
                   );
                 },

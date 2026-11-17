@@ -518,161 +518,166 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                         : constraints.maxWidth > 650
                             ? 2
                             : 1;
+                    final itemWidth =
+                        ((constraints.maxWidth - (crossAxisCount - 1) * 16) / crossAxisCount)
+                            .floorToDouble();
 
-                    return GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: crossAxisCount,
-                        crossAxisSpacing: 16,
-                        mainAxisSpacing: 16,
-                        mainAxisExtent: 210,
-                      ),
-                      itemCount: items.length,
-                      itemBuilder: (context, index) {
-                        final item = items[index];
-                        final catMeta = kServiceCategories[item['category']] ??
-                            (
-                              label: item['category']?.toString() ?? 'Khác',
-                              icon: LucideIcons.package,
-                              badgeVariant: AppBadgeVariant.slate,
-                            );
+                    return Wrap(
+                      spacing: 16,
+                      runSpacing: 16,
+                      children: [
+                        for (final item in items)
+                          Builder(
+                            builder: (context) {
+                              final catMeta = kServiceCategories[item['category']] ??
+                                  (
+                                    label: item['category']?.toString() ?? 'Khác',
+                                    icon: LucideIcons.package,
+                                    badgeVariant: AppBadgeVariant.slate,
+                                  );
 
-                        final billingTypeLabel = kBillingTypes[item['billing_type']] ?? item['billing_type'];
-                        final price = num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
-                        final unit = item['unit'] ?? 'tháng';
-                        final isActive = item['is_active'] == true;
+                              final billingTypeLabel =
+                                  kBillingTypes[item['billing_type']] ?? item['billing_type'];
+                              final price =
+                                  num.tryParse(item['unit_price']?.toString() ?? '0') ?? 0;
+                              final unit = item['unit'] ?? 'tháng';
+                              final isActive = item['is_active'] == true;
 
-                        return AppCard(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Container(
-                                    width: 40,
-                                    height: 40,
-                                    decoration: BoxDecoration(
-                                      color: AppColors.slate100,
-                                      borderRadius: BorderRadius.circular(10),
-                                    ),
-                                    child: Icon(catMeta.icon, color: AppColors.slate700, size: 20),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          item['name']?.toString() ?? '—',
-                                          style: const TextStyle(
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.w600,
-                                            color: AppColors.slate900,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          item['code']?.toString() ?? '',
-                                          style: const TextStyle(
-                                            fontFamily: 'monospace',
-                                            fontSize: 11,
-                                            color: AppColors.slate500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  AppBadge(
-                                    label: isActive ? 'Áp dụng' : 'Tạm dừng',
-                                    variant: isActive ? AppBadgeVariant.emerald : AppBadgeVariant.slate,
-                                    dot: true,
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 16),
-                              Row(
-                                children: [
-                                  AppBadge(
-                                    label: catMeta.label,
-                                    variant: catMeta.badgeVariant,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(
-                                      billingTypeLabel?.toString() ?? '',
-                                      style: const TextStyle(fontSize: 11, color: AppColors.slate500),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Column(
+                              return SizedBox(
+                                width: itemWidth,
+                                child: AppCard(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      const Text(
-                                        'Đơn giá tiêu chuẩn',
-                                        style: TextStyle(fontSize: 11, color: AppColors.slate400),
-                                      ),
                                       Row(
-                                        crossAxisAlignment: CrossAxisAlignment.baseline,
-                                        textBaseline: TextBaseline.alphabetic,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          Text(
-                                            formatMoney(price),
-                                            style: const TextStyle(
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w700,
-                                              color: AppColors.slate900,
+                                          Container(
+                                            width: 40,
+                                            height: 40,
+                                            decoration: BoxDecoration(
+                                              color: AppColors.slate100,
+                                              borderRadius: BorderRadius.circular(10),
+                                            ),
+                                            child: Icon(catMeta.icon, color: AppColors.slate700, size: 20),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  item['name']?.toString() ?? '—',
+                                                  style: const TextStyle(
+                                                    fontSize: 15,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: AppColors.slate900,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  item['code']?.toString() ?? '',
+                                                  style: const TextStyle(
+                                                    fontFamily: 'monospace',
+                                                    fontSize: 11,
+                                                    color: AppColors.slate500,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                          Text(
-                                            ' / $unit',
-                                            style: const TextStyle(
-                                              fontSize: 12,
-                                              color: AppColors.slate500,
+                                          AppBadge(
+                                            label: isActive ? 'Áp dụng' : 'Tạm dừng',
+                                            variant: isActive ? AppBadgeVariant.emerald : AppBadgeVariant.slate,
+                                            dot: true,
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 16),
+                                      Row(
+                                        children: [
+                                          AppBadge(
+                                            label: catMeta.label,
+                                            variant: catMeta.badgeVariant,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: Text(
+                                              billingTypeLabel?.toString() ?? '',
+                                              style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
                                             ),
                                           ),
                                         ],
                                       ),
+                                      const SizedBox(height: 10),
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        crossAxisAlignment: CrossAxisAlignment.end,
+                                        children: [
+                                          Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              const Text(
+                                                'Đơn giá tiêu chuẩn',
+                                                style: TextStyle(fontSize: 11, color: AppColors.slate400),
+                                              ),
+                                              Row(
+                                                crossAxisAlignment: CrossAxisAlignment.baseline,
+                                                textBaseline: TextBaseline.alphabetic,
+                                                children: [
+                                                  Text(
+                                                    formatMoney(price),
+                                                    style: const TextStyle(
+                                                      fontSize: 16,
+                                                      fontWeight: FontWeight.w700,
+                                                      color: AppColors.slate900,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    ' / $unit',
+                                                    style: const TextStyle(
+                                                      fontSize: 12,
+                                                      color: AppColors.slate500,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                          if (canManage)
+                                            Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: isActive ? 'Tạm dừng dịch vụ' : 'Kích hoạt lại dịch vụ',
+                                                  icon: Icon(
+                                                    isActive ? LucideIcons.powerOff : LucideIcons.power,
+                                                    size: 16,
+                                                    color: isActive ? AppColors.amber600 : AppColors.emerald600,
+                                                  ),
+                                                  onPressed: () => _handleToggleActive(item),
+                                                ),
+                                                IconButton(
+                                                  tooltip: 'Chỉnh sửa dịch vụ',
+                                                  icon: const Icon(LucideIcons.pencil, size: 16, color: AppColors.slate600),
+                                                  onPressed: () => _openCatalogFormModal(item),
+                                                ),
+                                              ],
+                                            ),
+                                        ],
+                                      ),
                                     ],
                                   ),
-                                  if (canManage)
-                                    Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: isActive ? 'Tạm dừng dịch vụ' : 'Kích hoạt lại dịch vụ',
-                                          icon: Icon(
-                                            isActive ? LucideIcons.powerOff : LucideIcons.power,
-                                            size: 16,
-                                            color: isActive ? AppColors.amber600 : AppColors.emerald600,
-                                          ),
-                                          onPressed: () => _handleToggleActive(item),
-                                        ),
-                                        IconButton(
-                                          tooltip: 'Chỉnh sửa dịch vụ',
-                                          icon: const Icon(LucideIcons.pencil, size: 16, color: AppColors.slate600),
-                                          onPressed: () => _openCatalogFormModal(item),
-                                        ),
-                                      ],
-                                    ),
-                                ],
-                              ),
-                            ],
+                                ),
+                              );
+                            },
                           ),
-                        );
-                      },
+                      ],
                     );
                   },
                 ),

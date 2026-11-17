@@ -1433,19 +1433,22 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                   // KPI Cards
                   LayoutBuilder(
                     builder: (context, constraints) {
-                      final isWide = constraints.maxWidth >= 900;
-                      return GridView.count(
-                        crossAxisCount: isWide ? 4 : 2,
-                        crossAxisSpacing: 16,
-                        mainAxisSpacing: 16,
-                        childAspectRatio: isWide ? 2.2 : 1.7,
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
+                      final cols = constraints.maxWidth >= 900
+                          ? 4
+                          : (constraints.maxWidth >= 500 ? 2 : 1);
+                      final itemWidth =
+                          ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                      final cards = [
+                        StatsCard(title: 'Đang hiệu lực', value: activeCount, icon: LucideIcons.fileCheck, color: 'emerald'),
+                        StatsCard(title: 'Chờ phê duyệt', value: pendingCount, icon: LucideIcons.clock, color: 'amber'),
+                        StatsCard(title: 'Bản nháp (DRAFT)', value: draftsCount, icon: LucideIcons.fileEdit, color: 'sky'),
+                        StatsCard(title: 'Yêu cầu cư dân', value: pendingReqsCount, icon: LucideIcons.inbox, color: 'rose'),
+                      ];
+                      return Wrap(
+                        spacing: 16,
+                        runSpacing: 16,
                         children: [
-                          StatsCard(title: 'Đang hiệu lực', value: activeCount, icon: LucideIcons.fileCheck, color: 'emerald'),
-                          StatsCard(title: 'Chờ phê duyệt', value: pendingCount, icon: LucideIcons.clock, color: 'amber'),
-                          StatsCard(title: 'Bản nháp (DRAFT)', value: draftsCount, icon: LucideIcons.fileEdit, color: 'sky'),
-                          StatsCard(title: 'Yêu cầu cư dân', value: pendingReqsCount, icon: LucideIcons.inbox, color: 'rose'),
+                          for (final card in cards) SizedBox(width: itemWidth, child: card),
                         ],
                       );
                     },

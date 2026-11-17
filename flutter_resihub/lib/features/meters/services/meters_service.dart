@@ -5,7 +5,7 @@ import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
 
-const Duration kMetersTtl = Duration(milliseconds: 20000);
+const Duration kMetersTtl = Duration(seconds: 60);
 
 Map<String, dynamic> _buildParts(String op, dynamic params) {
   final map = <String, dynamic>{'op': op};

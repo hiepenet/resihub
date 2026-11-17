@@ -897,9 +897,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           ),
                         )
                       else
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: DataTable(
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final minWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 600.0;
+                            return SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: ConstrainedBox(
+                                constraints: BoxConstraints(minWidth: minWidth),
+                                child: DataTable(
                             columns: const [
                               DataColumn(label: Text('Ngày đối soát', style: TextStyle(fontWeight: FontWeight.w600))),
                               DataColumn(label: Text('Trạng thái', style: TextStyle(fontWeight: FontWeight.w600))),
@@ -940,7 +945,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 ],
                               );
                             }).toList(),
-                          ),
+                                ),
+                              ),
+                            );
+                          },
                         ),
                     ],
                   ),

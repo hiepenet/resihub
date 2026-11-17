@@ -281,7 +281,9 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
       if (status == 'NEW' || status == 'REOPENED') newCount++;
       if (status == 'ASSIGNED' ||
           status == 'IN_PROGRESS' ||
-          status == 'ON_HOLD') processingCount++;
+          status == 'ON_HOLD') {
+        processingCount++;
+      }
       if (status == 'RESOLVED' || status == 'CLOSED') doneCount++;
 
       final isOverdue = r['is_sla_overdue'] == true ||
@@ -293,8 +295,9 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
               'OVERDUE';
       if (isOverdue) overdueCount++;
 
-      if (priority == 'URGENT' && kOpenSrStatuses.contains(status))
+      if (priority == 'URGENT' && kOpenSrStatuses.contains(status)) {
         urgentCount++;
+      }
     }
 
     return (

@@ -364,10 +364,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                   child: StatsCard(
                     title: 'Tổng tiền cọc đang giữ',
                     value: formatMoney(totalHeldAmount),
-                    subtext: '$heldCount sổ đang bảo lưu' +
-                        (returnedCount > 0
-                            ? ' • $returnedCount hoàn trả lệnh chi'
-                            : ''),
+                    subtext: '$heldCount sổ đang bảo lưu'
+                        '${returnedCount > 0 ? ' • $returnedCount hoàn trả lệnh chi' : ''}',
                     icon: LucideIcons.wallet,
                     color: 'sky',
                     onClick: () => _selectMainTab('held'),
@@ -440,7 +438,7 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                             ),
                           ),
                           Text(
-                            ': ${_quickFilterLabel} (${_filteredDeposits.length} bản ghi)',
+                            ': $_quickFilterLabel (${_filteredDeposits.length} bản ghi)',
                             style: const TextStyle(
                                 color: AppColors.amber900, fontSize: 13),
                           ),

@@ -13,6 +13,8 @@ class AppToastOverlay extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final toasts = ref.watch(toastProvider);
+    final topPadding = MediaQuery.paddingOf(context).top;
+    final isNarrow = MediaQuery.sizeOf(context).width < 500;
 
     return Directionality(
       textDirection: TextDirection.ltr,
@@ -21,11 +23,13 @@ class AppToastOverlay extends ConsumerWidget {
           child,
           if (toasts.isNotEmpty)
             Positioned(
-              top: 16,
+              top: topPadding + 16,
               right: 16,
-              left: MediaQuery.sizeOf(context).width < 500 ? 16 : null,
-              width: MediaQuery.sizeOf(context).width < 500 ? null : 380,
+              left: isNarrow ? 16 : null,
+              width: isNarrow ? null : 380,
               child: SafeArea(
+                top: false,
+                bottom: false,
                 child: Material(
                   type: MaterialType.transparency,
                   child: Column(

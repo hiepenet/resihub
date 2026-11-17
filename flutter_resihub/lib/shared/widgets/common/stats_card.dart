@@ -33,6 +33,7 @@ class StatsCard extends StatelessWidget {
       'emerald' => (const Color(0xFFECFDF5), const Color(0xFF059669), const Color(0xFFD1FAE5)),
       'amber' => (const Color(0xFFFFFBEB), const Color(0xFFD97706), const Color(0xFFFEF3C7)),
       'rose' => (const Color(0xFFFFF1F2), const Color(0xFFE11D48), const Color(0xFFFFE4E6)),
+      'slate' => (AppColors.slate100, AppColors.slate700, AppColors.slate200),
       _ => (const Color(0xFFF0F9FF), const Color(0xFF0284C7), const Color(0xFFE0F2FE)), // sky
     };
   }
@@ -53,37 +54,25 @@ class StatsCard extends StatelessWidget {
         final outerPadding = isUltraCompact
             ? const EdgeInsets.symmetric(horizontal: 12, vertical: 8)
             : (isCompact
-                ? const EdgeInsets.symmetric(horizontal: 16, vertical: 10)
-                : const EdgeInsets.all(18));
-        final iconBoxSize = isUltraCompact ? 24.0 : (isCompact ? 32.0 : 38.0);
-        final iconSize = isUltraCompact ? 13.0 : (isCompact ? 16.0 : 18.0);
+                ? const EdgeInsets.symmetric(horizontal: 14, vertical: 10)
+                : const EdgeInsets.symmetric(horizontal: 16, vertical: 14));
+        final iconBoxSize = isUltraCompact ? 24.0 : (isCompact ? 30.0 : 34.0);
+        final iconSize = isUltraCompact ? 13.0 : (isCompact ? 15.0 : 17.0);
         final titleFontSize = isUltraCompact ? 11.0 : 12.0;
-        final valueFontSize = isUltraCompact ? 16.0 : (isCompact ? 20.0 : 24.0);
-        final gapHeight = isUltraCompact ? 2.0 : (isCompact ? 4.0 : 12.0);
-        final footerTopPad = isUltraCompact ? 3.0 : (isCompact ? 6.0 : 10.0);
+        final valueFontSize = isUltraCompact ? 16.0 : (isCompact ? 20.0 : 22.0);
+        final gapHeight = isUltraCompact ? 2.0 : (isCompact ? 4.0 : 6.0);
+        final footerTopPad = isUltraCompact ? 3.0 : (isCompact ? 6.0 : 8.0);
         final subtextFontSize = isUltraCompact ? 10.0 : (isCompact ? 11.0 : 12.0);
 
-        final cardContent = Container(
+        final bodyColumn = Padding(
           padding: outerPadding,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: AppColors.slate200),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x08000000),
-                blurRadius: 4,
-                offset: Offset(0, 1),
-              ),
-            ],
-          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: bounded ? MainAxisSize.max : MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.start,
             children: [
               Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Expanded(
@@ -187,14 +176,33 @@ class StatsCard extends StatelessWidget {
           ),
         );
 
-        if (onClick != null) {
-          return InkWell(
-            onTap: onClick,
+        return Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
             borderRadius: BorderRadius.circular(16),
-            child: cardContent,
-          );
-        }
-        return cardContent;
+            border: Border.all(color: AppColors.slate200),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x08000000),
+                blurRadius: 4,
+                offset: Offset(0, 1),
+              ),
+            ],
+          ),
+          child: onClick != null
+              ? Material(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: onClick,
+                    hoverColor: AppColors.slate50.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(16),
+                    child: bodyColumn,
+                  ),
+                )
+              : bodyColumn,
+        );
       },
     );
   }

@@ -9,7 +9,7 @@ import '../../../core/utils/format.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
-import '../../../shared/widgets/common/empty_state.dart';
+import '../../../shared/widgets/common/data_table_widget.dart';
 import '../../../shared/widgets/common/page_header.dart';
 import '../../../shared/widgets/common/search_bar_widget.dart';
 import '../../../shared/widgets/common/stats_card.dart';
@@ -24,6 +24,7 @@ import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../../ai_gateway/services/ai_service.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../auth/providers/permission_provider.dart';
+import '../../buildings/providers/buildings_lookup_provider.dart';
 import '../../buildings/services/buildings_service.dart';
 import '../services/meters_service.dart';
 import '../widgets/meter_batch_photo_import_modal.dart';
@@ -67,7 +68,6 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   String _period = getCurrentPeriod();
   String _meterType = '';
   String _statusFilter = '';
-  final String _activeContractFilter = '';
   String _search = '';
 
   // Local drafts and notes
@@ -80,12 +80,40 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   void initState() {
     super.initState();
     _selectedBuildingId = ref.read(authProvider).selectedBuildingId;
-    _loadBuildings();
+    // Use cached buildings from buildingsListProvider if available to avoid race condition
+    final cachedBuildings = ref.read(buildingsListProvider).valueOrNull;
+    if (cachedBuildings != null && cachedBuildings.isNotEmpty) {
+      _buildings = cachedBuildings;
+      if (_selectedBuildingId.isEmpty) {
+        _selectedBuildingId = _buildings.first['id']?.toString() ?? '';
+      }
+      _fetchMeters(); // safe: buildings already loaded
+    } else {
+      _loadBuildingsThenMeters(); // sequential: buildings first, then meters
+    }
+  }
+
+  Future<void> _loadBuildingsThenMeters() async {
+    await _loadBuildings();
     _fetchMeters();
   }
 
   Future<void> _loadBuildings() async {
     try {
+      // Try cached provider first to avoid a redundant API call
+      final cached = ref.read(buildingsListProvider).valueOrNull;
+      if (cached != null && cached.isNotEmpty) {
+        if (mounted) {
+          setState(() {
+            _buildings = cached;
+            if (_selectedBuildingId.isEmpty && _buildings.isNotEmpty) {
+              _selectedBuildingId = _buildings.first['id']?.toString() ?? '';
+            }
+          });
+        }
+        return;
+      }
+      // Fallback to direct API
       final res = await ref.read(buildingsServiceProvider).list();
       final list = (res is Map && res['data'] is List)
           ? (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
@@ -108,19 +136,44 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   }
 
   Future<void> _fetchMeters({bool force = false}) async {
-    setState(() => _loading = true);
-
     final params = buildMeterListQueryParams(
       buildingId: _selectedBuildingId,
-      meterType: _meterType,
-      statusFilter: _statusFilter == 'UNRECORDED' ? null : _statusFilter,
-      activeContractFilter: _activeContractFilter,
       period: _period,
-      search: _search,
     );
 
+    final metersService = ref.read(metersServiceProvider);
+    if (!force) {
+      final cached = metersService.peekList(params);
+      final cachedList = (cached is Map && cached['data'] is List)
+          ? (cached['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : (cached is List)
+              ? cached.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+              : null;
+      if (cachedList != null) {
+        if (mounted) {
+          setState(() {
+            _meters = cachedList;
+            for (final m in cachedList) {
+              final id = m['id']?.toString() ?? '';
+              if (m['period_current_reading'] != null) {
+                _draftReadings[id] = m['period_current_reading'].toString();
+              }
+              if (m['period_abnormal_note'] != null) {
+                _abnormalNotes[id] = m['period_abnormal_note'].toString();
+              }
+            }
+            _loading = false;
+          });
+          _checkAndTriggerDeepLink();
+        }
+        return;
+      }
+    }
+
+    if (_meters.isEmpty) setState(() => _loading = true);
+
     try {
-      final res = await ref.read(metersServiceProvider).list(params, null, force);
+      final res = await metersService.list(params, null, force);
       final list = (res is Map && res['data'] is List)
           ? (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
           : (res is List)
@@ -180,10 +233,22 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   }
 
   List<Map<String, dynamic>> get _filteredMeters {
+    final q = _search.trim().toLowerCase();
     return _meters.where((m) {
+      if (_meterType.isNotEmpty && m['meter_type']?.toString() != _meterType) {
+        return false;
+      }
       if (_statusFilter == 'UNRECORDED') {
         final readingId = m['period_reading_id'];
         if (readingId != null && readingId.toString().isNotEmpty) return false;
+      } else if (_statusFilter.isNotEmpty) {
+        if (m['period_reading_status']?.toString() != _statusFilter) return false;
+      }
+      if (q.isNotEmpty) {
+        final apt = (m['apartment_code'] ?? '').toString().toLowerCase();
+        final code = (m['meter_code'] ?? '').toString().toLowerCase();
+        final bld = (m['building_code'] ?? '').toString().toLowerCase();
+        if (!apt.contains(q) && !code.contains(q) && !bld.contains(q)) return false;
       }
       return true;
     }).toList();
@@ -768,7 +833,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(24),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               PageHeader(
                 title: 'Ghi chỉ số Điện / Nước',
@@ -803,39 +868,42 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
               // Stats Cards
               LayoutBuilder(
                 builder: (context, constraints) {
-                  final isWide = constraints.maxWidth > 900;
-                  return GridView.count(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    crossAxisCount: isWide ? 4 : 2,
-                    crossAxisSpacing: 16,
-                    mainAxisSpacing: 16,
-                    childAspectRatio: isWide ? 2.2 : 1.8,
+                  final cols = constraints.maxWidth > 900
+                      ? 4
+                      : (constraints.maxWidth >= 500 ? 2 : 1);
+                  final itemWidth =
+                      ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                  final cards = [
+                    StatsCard(
+                      title: 'Tổng số công tơ',
+                      value: totalCount.toString(),
+                      icon: LucideIcons.gauge,
+                      color: 'slate',
+                    ),
+                    StatsCard(
+                      title: 'Đã chốt chỉ số',
+                      value: '$confirmedCount / $totalCount',
+                      icon: LucideIcons.checkCircle2,
+                      color: 'emerald',
+                    ),
+                    StatsCard(
+                      title: 'Chỉ số nháp',
+                      value: draftCount.toString(),
+                      icon: LucideIcons.fileEdit,
+                      color: 'sky',
+                    ),
+                    StatsCard(
+                      title: 'Cảnh báo biến động (>30%)',
+                      value: abnormalCount.toString(),
+                      icon: LucideIcons.triangleAlert,
+                      color: 'amber',
+                    ),
+                  ];
+                  return Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
                     children: [
-                      StatsCard(
-                        title: 'Tổng số công tơ',
-                        value: totalCount.toString(),
-                        icon: LucideIcons.gauge,
-                        color: 'slate',
-                      ),
-                      StatsCard(
-                        title: 'Đã chốt chỉ số',
-                        value: '$confirmedCount / $totalCount',
-                        icon: LucideIcons.checkCircle2,
-                        color: 'emerald',
-                      ),
-                      StatsCard(
-                        title: 'Chỉ số nháp',
-                        value: draftCount.toString(),
-                        icon: LucideIcons.fileEdit,
-                        color: 'sky',
-                      ),
-                      StatsCard(
-                        title: 'Cảnh báo biến động (>30%)',
-                        value: abnormalCount.toString(),
-                        icon: LucideIcons.triangleAlert,
-                        color: 'amber',
-                      ),
+                      for (final card in cards) SizedBox(width: itemWidth, child: card),
                     ],
                   );
                 },
@@ -863,7 +931,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             onChanged: (val) {
                               if (val != null) {
                                 setState(() => _selectedBuildingId = val);
-                                _fetchMeters(force: true);
+                                _fetchMeters();
                               }
                             },
                           ),
@@ -875,7 +943,9 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             initialValue: _period,
                             onChanged: (val) {
                               _period = val.trim();
-                              _fetchMeters(force: true);
+                              if (_period.isEmpty || RegExp(r'^\d{4}-\d{2}$').hasMatch(_period)) {
+                                _fetchMeters();
+                              }
                             },
                           ),
                         ),
@@ -887,10 +957,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             options: kMeterTypeOptions.map((e) {
                               return AppSelectOption(value: e['value']!, label: e['label']!);
                             }).toList(),
-                            onChanged: (val) {
-                              setState(() => _meterType = val ?? '');
-                              _fetchMeters(force: true);
-                            },
+                            onChanged: (val) => setState(() => _meterType = val ?? ''),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -901,10 +968,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             options: kMeterStatusOptions.map((e) {
                               return AppSelectOption(value: e['value']!, label: e['label']!);
                             }).toList(),
-                            onChanged: (val) {
-                              setState(() => _statusFilter = val ?? '');
-                              _fetchMeters(force: true);
-                            },
+                            onChanged: (val) => setState(() => _statusFilter = val ?? ''),
                           ),
                         ),
                       ],
@@ -916,10 +980,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                           child: SearchBarWidget(
                             placeholder: 'Tìm theo mã căn hộ, mã công tơ...',
                             value: _search,
-                            onChanged: (val) {
-                              _search = val;
-                              _fetchMeters();
-                            },
+                            onChanged: (val) => setState(() => _search = val),
                           ),
                         ),
                         if (canManage && draftCount > 0) ...[
@@ -939,160 +1000,187 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
               ),
               const SizedBox(height: 20),
 
-              if (_loading) ...[
-                const Center(
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 40),
-                    child: CircularProgressIndicator(),
-                  ),
-                ),
-              ] else if (items.isEmpty) ...[
-                EmptyState(
-                  icon: LucideIcons.gauge,
-                  title: 'Chưa có công tơ nào',
-                  description: 'Không tìm thấy công tơ phù hợp với bộ lọc.',
-                  action: canManage
-                      ? AppButton(
-                          text: 'Tạo công tơ mới',
-                          icon: const Icon(LucideIcons.plus, size: 16),
-                          variant: AppButtonVariant.primary,
-                          onPressed: _openCreateMeterModal,
-                        )
-                      : null,
-                ),
-              ] else ...[
-                AppCard(
-                  padding: EdgeInsets.zero,
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: DataTable(
-                      headingRowColor: WidgetStateProperty.all(AppColors.slate50),
-                      columns: const [
-                        DataColumn(label: Text('Căn hộ / Mã đồng hồ', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Loại & Đơn giá', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Chỉ số cũ', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Chỉ số mới', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Tiêu thụ & Tiền', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Trạng thái', style: TextStyle(fontWeight: FontWeight.w600))),
-                        DataColumn(label: Text('Thao tác', style: TextStyle(fontWeight: FontWeight.w600))),
-                      ],
-                      rows: items.map((meter) {
-                        final turnoverBadge = resolveMeterTurnoverBadgeMeta(meter);
-                        final isElec = meter['meter_type'] == 'ELECTRICITY';
-                        final unit = meter['unit'] ?? (isElec ? 'kWh' : 'm³');
-                        final price = meter['effective_unit_price'] ?? meter['unit_price'] ?? 0;
-
-                        final prevReading = meter['period_previous_reading'] ?? meter['last_known_reading'] ?? 0;
-                        final currentReading = meter['period_current_reading'];
-                        final consumption = meter['period_consumption'];
-                        final status = meter['period_reading_status'];
-                        final isAbnormal = meter['period_is_abnormal'] == true;
-                        final isLocked = isMeterRowLockedForEdit(meter, canManage);
-
-                        return DataRow(
-                          cells: [
-                            DataCell(
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Text(
-                                        'Căn ${meter['apartment_code'] ?? '—'}',
-                                        style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.slate900),
-                                      ),
-                                      if (turnoverBadge.isMultiSlot) ...[
-                                        const SizedBox(width: 4),
-                                        AppBadge(
-                                          label: turnoverBadge.slotLabel ?? '',
-                                          variant: AppBadgeVariant.indigo,
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                  Text(
-                                    meter['meter_code']?.toString() ?? '',
-                                    style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: AppColors.slate500),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            DataCell(
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  AppBadge(
-                                    label: isElec ? 'Điện ($unit)' : 'Nước ($unit)',
-                                    variant: isElec ? AppBadgeVariant.amber : AppBadgeVariant.sky,
-                                    icon: Icon(isElec ? LucideIcons.zap : LucideIcons.droplets, size: 10),
-                                  ),
-                                  Text(
-                                    '${formatMoney(price)}/$unit',
-                                    style: const TextStyle(fontSize: 11, color: AppColors.slate500),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            DataCell(Text(prevReading.toString())),
-                            DataCell(
+              DataTableWidget<Map<String, dynamic>>(
+                loading: _loading,
+                pageSize: 20,
+                data: items,
+                emptyTitle: 'Chưa có công tơ nào',
+                emptyDescription: 'Không tìm thấy công tơ phù hợp với bộ lọc.',
+                emptyAction: canManage
+                    ? AppButton(
+                        text: 'Tạo công tơ mới',
+                        icon: const Icon(LucideIcons.plus, size: 16),
+                        variant: AppButtonVariant.primary,
+                        onPressed: _openCreateMeterModal,
+                      )
+                    : null,
+                columns: [
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'apartment_code',
+                    label: 'Căn hộ / Mã đồng hồ',
+                    sortable: true,
+                    flex: 2,
+                    sortValue: (m) => m['apartment_code']?.toString() ?? '',
+                    render: (meter) {
+                      final turnoverBadge = resolveMeterTurnoverBadgeMeta(meter);
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Wrap(
+                            spacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
                               Text(
-                                currentReading != null ? currentReading.toString() : '—',
-                                style: const TextStyle(fontWeight: FontWeight.bold),
+                                'Căn ${meter['apartment_code'] ?? '—'}',
+                                style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.slate900),
                               ),
-                            ),
-                            DataCell(
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    consumption != null ? '$consumption $unit' : '—',
-                                    style: const TextStyle(fontWeight: FontWeight.w600),
-                                  ),
-                                  if (isAbnormal)
-                                    const Text(
-                                      'Biến động >30%',
-                                      style: TextStyle(fontSize: 10, color: AppColors.amber600, fontWeight: FontWeight.bold),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            DataCell(
-                              status == 'CONFIRMED'
-                                  ? const AppBadge(label: 'Đã chốt', variant: AppBadgeVariant.emerald, dot: true)
-                                  : status == 'FLAGGED'
-                                      ? const AppBadge(label: 'Tạm giữ', variant: AppBadgeVariant.amber, dot: true)
-                                      : status == 'DRAFT'
-                                          ? const AppBadge(label: 'Bản nháp', variant: AppBadgeVariant.sky, dot: true)
-                                          : const Text('Chưa ghi', style: TextStyle(fontSize: 12, color: AppColors.slate400)),
-                            ),
-                            DataCell(
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(LucideIcons.fileEdit, size: 16, color: AppColors.slate600),
-                                    tooltip: 'Ghi chỉ số & Chi tiết',
-                                    onPressed: () => _openSingleDetailModal(meter),
-                                  ),
-                                  if (canManage && !isLocked && status == 'DRAFT')
-                                    IconButton(
-                                      icon: const Icon(LucideIcons.check, size: 16, color: AppColors.emerald600),
-                                      tooltip: 'Chốt nhanh',
-                                      onPressed: () => _handleQuickConfirm(meter),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        );
-                      }).toList(),
-                    ),
+                              if (turnoverBadge.isMultiSlot)
+                                AppBadge(
+                                  label: turnoverBadge.slotLabel ?? '',
+                                  variant: AppBadgeVariant.indigo,
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            meter['meter_code']?.toString() ?? '',
+                            style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: AppColors.slate500),
+                          ),
+                        ],
+                      );
+                    },
                   ),
-                ),
-              ],
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'meter_type',
+                    label: 'Loại & Đơn giá',
+                    sortable: true,
+                    flex: 2,
+                    sortValue: (m) => m['meter_type']?.toString() ?? '',
+                    render: (meter) {
+                      final isElec = meter['meter_type'] == 'ELECTRICITY';
+                      final unit = meter['unit'] ?? (isElec ? 'kWh' : 'm³');
+                      final price = meter['effective_unit_price'] ?? meter['unit_price'] ?? 0;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          AppBadge(
+                            label: isElec ? 'Điện ($unit)' : 'Nước ($unit)',
+                            variant: isElec ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                            icon: Icon(isElec ? LucideIcons.zap : LucideIcons.droplets, size: 10),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${formatMoney(price)}/$unit',
+                            style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'period_previous_reading',
+                    label: 'Chỉ số cũ',
+                    flex: 1,
+                    render: (meter) {
+                      final prevReading = meter['period_previous_reading'] ?? meter['last_known_reading'] ?? 0;
+                      return Text(prevReading.toString());
+                    },
+                  ),
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'period_current_reading',
+                    label: 'Chỉ số mới',
+                    flex: 1,
+                    render: (meter) {
+                      final currentReading = meter['period_current_reading'];
+                      return Text(
+                        currentReading != null ? currentReading.toString() : '—',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      );
+                    },
+                  ),
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'period_consumption',
+                    label: 'Tiêu thụ & Tiền',
+                    flex: 2,
+                    render: (meter) {
+                      final isElec = meter['meter_type'] == 'ELECTRICITY';
+                      final unit = meter['unit'] ?? (isElec ? 'kWh' : 'm³');
+                      final consumption = meter['period_consumption'];
+                      final isAbnormal = meter['period_is_abnormal'] == true;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            consumption != null ? '$consumption $unit' : '—',
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          if (isAbnormal)
+                            const Text(
+                              'Biến động >30%',
+                              style: TextStyle(fontSize: 10, color: AppColors.amber600, fontWeight: FontWeight.bold),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'period_reading_status',
+                    label: 'Trạng thái',
+                    width: 130,
+                    render: (meter) {
+                      final status = meter['period_reading_status'];
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: status == 'CONFIRMED'
+                            ? const AppBadge(label: 'Đã chốt', variant: AppBadgeVariant.emerald, dot: true)
+                            : status == 'FLAGGED'
+                                ? const AppBadge(label: 'Tạm giữ', variant: AppBadgeVariant.amber, dot: true)
+                                : status == 'DRAFT'
+                                    ? const AppBadge(label: 'Bản nháp', variant: AppBadgeVariant.sky, dot: true)
+                                    : const Text('Chưa ghi', style: TextStyle(fontSize: 12, color: AppColors.slate400)),
+                      );
+                    },
+                  ),
+                  DataTableColumn<Map<String, dynamic>>(
+                    key: 'actions',
+                    label: 'Thao tác',
+                    align: TextAlign.right,
+                    width: 112,
+                    render: (meter) {
+                      final status = meter['period_reading_status'];
+                      final isLocked = isMeterRowLockedForEdit(meter, canManage);
+                      return Align(
+                        alignment: Alignment.centerRight,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              padding: const EdgeInsets.all(6),
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                              icon: const Icon(LucideIcons.fileEdit, size: 16, color: AppColors.slate600),
+                              tooltip: 'Ghi chỉ số & Chi tiết',
+                              onPressed: () => _openSingleDetailModal(meter),
+                            ),
+                            if (canManage && !isLocked && status == 'DRAFT')
+                              IconButton(
+                                padding: const EdgeInsets.all(6),
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                                icon: const Icon(LucideIcons.check, size: 16, color: AppColors.emerald600),
+                                tooltip: 'Chốt nhanh',
+                                onPressed: () => _handleQuickConfirm(meter),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
             ],
           ),
         ),

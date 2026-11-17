@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
-const Duration kTenantsTtl = Duration(milliseconds: 25000);
+const Duration kTenantsTtl = Duration(seconds: 60);
 
 Map<String, dynamic> _buildListParts(dynamic params) {
   final map = <String, dynamic>{'op': 'list'};

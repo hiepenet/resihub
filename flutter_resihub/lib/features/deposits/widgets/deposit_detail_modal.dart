@@ -150,12 +150,15 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
         ? widget.initialTabIndex
         : 0;
     _tabController = TabController(length: 3, vsync: this, initialIndex: safeInitialIndex);
+    // ⚠️ IMPORTANT: _dep MUST be initialized before async loads because
+    // _loadTransactions/_loadAuditLogs access _dep['id'] synchronously
+    // before their first await — causing LateInitializationError otherwise.
+    _dep = Map<String, dynamic>.from(widget.deposit);
     if (safeInitialIndex == 1) {
       _loadTransactions();
     } else if (safeInitialIndex == 2) {
       _loadAuditLogs();
     }
-    _dep = Map<String, dynamic>.from(widget.deposit);
     if (widget.initialDetail != null) {
       _settlementDetail = Map<String, dynamic>.from(widget.initialDetail!);
       _applySettlementDetail();

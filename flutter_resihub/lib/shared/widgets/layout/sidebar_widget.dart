@@ -96,7 +96,7 @@ class SidebarWidget extends ConsumerWidget {
           // Brand Header
           Container(
             height: 64,
-            padding: EdgeInsets.symmetric(horizontal: isCollapsed ? 12 : 16),
+            padding: EdgeInsets.symmetric(horizontal: isCollapsed ? 6 : 16),
             decoration: const BoxDecoration(
               border: Border(
                 bottom: BorderSide(color: AppColors.slate800, width: 1),
@@ -106,76 +106,77 @@ class SidebarWidget extends ConsumerWidget {
               mainAxisAlignment:
                   isCollapsed ? MainAxisAlignment.center : MainAxisAlignment.spaceBetween,
               children: [
-                Expanded(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(10),
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF38BDF8), Color(0xFF4F46E5)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Color.fromRGBO(14, 165, 233, 0.3),
-                              blurRadius: 8,
-                              offset: Offset(0, 2),
+                if (!(isCollapsed && collapsible && !isDrawer))
+                  Flexible(
+                    child: Row(
+                      mainAxisSize: isCollapsed ? MainAxisSize.min : MainAxisSize.max,
+                      children: [
+                        Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF38BDF8), Color(0xFF4F46E5)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
                             ),
-                          ],
-                        ),
-                        child: const Center(
-                          child: Icon(
-                            LucideIcons.home,
-                            size: 18,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                      if (!isCollapsed) ...[
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: const [
-                              Text(
-                                'ResiHub',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontFamily: 'Inter',
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white,
-                                  letterSpacing: -0.2,
-                                  height: 1.1,
-                                ),
-                              ),
-                              SizedBox(height: 2),
-                              Text(
-                                'Property Cloud v2.0',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontFamily: 'Inter',
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w500,
-                                  color: AppColors.primary400,
-                                  height: 1.1,
-                                ),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color.fromRGBO(14, 165, 233, 0.3),
+                                blurRadius: 8,
+                                offset: Offset(0, 2),
                               ),
                             ],
                           ),
+                          child: const Center(
+                            child: Icon(
+                              LucideIcons.home,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                          ),
                         ),
+                        if (!isCollapsed) ...[
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: const [
+                                Text(
+                                  'ResiHub',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white,
+                                    letterSpacing: -0.2,
+                                    height: 1.1,
+                                  ),
+                                ),
+                                SizedBox(height: 2),
+                                Text(
+                                  'Property Cloud v2.0',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                    color: AppColors.primary400,
+                                    height: 1.1,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
                 if (!isCollapsed && isDrawer && onClose != null)
                   IconButton(
                     icon: const Icon(LucideIcons.x, size: 20, color: AppColors.slate400),

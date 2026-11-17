@@ -110,6 +110,10 @@ const List<UrlInvalidationRule> kUrlInvalidationRules = [
     match: '/api/v1/admin/users',
     namespaces: ['users', 'tenants'],
   ),
+  UrlInvalidationRule(
+    match: '/api/v1/resident',
+    namespaces: ['resident', 'contracts', 'invoices', 'services', 'serviceRequests', 'deposits'],
+  ),
 ];
 
 /// Stable deterministic serializer for cache key parameters.

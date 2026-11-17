@@ -502,6 +502,45 @@ void main() {
 
       expect(capturedRef.read(authProvider).isAuthenticated, isFalse);
     });
+
+    testWidgets(
+        'TopBar back button resolves logical parent across level-2 building sub-routes',
+        (tester) async {
+      final user = _createUserWithRole('SYS_ADMIN');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      String? navigatedRoute;
+
+      Future<void> pumpAtPath(String path) async {
+        navigatedRoute = null;
+        await tester.pumpWidget(
+          _wrapWithScope(
+            storage: storage,
+            user: user,
+            buildings: const [],
+            child: Scaffold(
+              body: TopBar(
+                currentPath: path,
+                onNavigate: (r) => navigatedRoute = r,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('topbar-back-button')));
+        await tester.pumpAndSettle();
+      }
+
+      await pumpAtPath('/admin/buildings/bld-1/zones/zone-9');
+      expect(navigatedRoute, '/admin/buildings/bld-1');
+
+      await pumpAtPath('/admin/buildings/bld-1/floor-plan?pending_confirm=1');
+      expect(navigatedRoute, '/admin/buildings/bld-1');
+
+      await pumpAtPath('/admin/services/subscriptions?tab=active');
+      expect(navigatedRoute, '/admin/dashboard');
+    });
   });
 
   group('3. AdminShell Desktop vs Mobile Layout', () {

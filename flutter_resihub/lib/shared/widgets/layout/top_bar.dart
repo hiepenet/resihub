@@ -78,6 +78,45 @@ class _TopBarState extends ConsumerState<TopBar> {
     }
   }
 
+  static String? _logicalParent(String? path) {
+    if (path == null || path.isEmpty) return null;
+    final cleanPath = Uri.tryParse(path)?.path ?? path;
+
+    // Level 2/3 under buildings
+    final zoneMatch = RegExp(r'^/admin/buildings/([^/]+)/zones/[^/]+$').firstMatch(cleanPath);
+    if (zoneMatch != null) {
+      return '/admin/buildings/${zoneMatch.group(1)}';
+    }
+
+    final floorMatch = RegExp(r'^/admin/buildings/([^/]+)/floor-plan$').firstMatch(cleanPath);
+    if (floorMatch != null && floorMatch.group(1) != 'floor-plan') {
+      return '/admin/buildings/${floorMatch.group(1)}';
+    }
+
+    if (cleanPath == '/admin/buildings/floor-plan') {
+      return '/admin/buildings';
+    }
+
+    if (cleanPath.startsWith('/admin/apartments/')) {
+      return '/admin/buildings';
+    }
+
+    // Level 1 detail pages -> their list
+    if (cleanPath.startsWith('/admin/invoices/')) return '/admin/invoices';
+    if (cleanPath.startsWith('/admin/buildings/')) return '/admin/buildings';
+    if (cleanPath.startsWith('/admin/tenants/')) return '/admin/tenants';
+    if (cleanPath.startsWith('/admin/contracts/')) return '/admin/contracts';
+    if (cleanPath.startsWith('/admin/meters/')) return '/admin/meters';
+    if (cleanPath.startsWith('/admin/services/') && cleanPath != '/admin/services/subscriptions') {
+      return '/admin/services';
+    }
+    if (cleanPath.startsWith('/admin/reports/')) return '/admin/reports';
+
+    // Top-level non-dashboard -> dashboard
+    if (cleanPath != '/admin/dashboard') return '/admin/dashboard';
+    return null;
+  }
+
   void _handleBack() {
     if (widget.onBack != null) {
       widget.onBack!();
@@ -86,11 +125,14 @@ class _TopBarState extends ConsumerState<TopBar> {
     final router = GoRouter.maybeOf(context);
     if (router != null && router.canPop()) {
       router.pop();
-    } else if (widget.currentPath != null && widget.currentPath != '/admin/dashboard') {
+      return;
+    }
+    final parent = _logicalParent(widget.currentPath);
+    if (parent != null) {
       if (router != null) {
-        router.go('/admin/dashboard');
+        router.go(parent);
       } else {
-        widget.onNavigate?.call('/admin/dashboard');
+        widget.onNavigate?.call(parent);
       }
     }
   }
@@ -125,7 +167,7 @@ class _TopBarState extends ConsumerState<TopBar> {
 
     final router = GoRouter.maybeOf(context);
     final canGoBack = (router != null && router.canPop()) ||
-        (widget.currentPath != null && widget.currentPath != '/admin/dashboard');
+        _logicalParent(widget.currentPath) != null;
 
     final allBuildingsLabel = 'Tất cả tòa nhà trong phạm vi (${buildings.length})';
 
@@ -187,7 +229,7 @@ class _TopBarState extends ConsumerState<TopBar> {
                   Flexible(
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
-                        maxWidth: isDesktop ? 360 : (isTabletOrDesktop ? 280 : 200),
+                        maxWidth: isDesktop ? 320 : (isTabletOrDesktop ? 240 : 180),
                       ),
                       child: AppSelect<String>(
                         value: selectedBuildingId,
@@ -269,7 +311,9 @@ class _TopBarState extends ConsumerState<TopBar> {
                       if (isSm) ...[
                         const SizedBox(width: 8),
                         ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 160),
+                          constraints: BoxConstraints(
+                            maxWidth: isDesktop ? 200 : 140,
+                          ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisAlignment: MainAxisAlignment.center,

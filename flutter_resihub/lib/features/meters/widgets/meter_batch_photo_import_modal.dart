@@ -533,10 +533,15 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
               border: Border.all(color: AppColors.border),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: SingleChildScrollView(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: DataTable(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final minWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 600.0;
+                return SingleChildScrollView(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(minWidth: minWidth),
+                      child: DataTable(
                   headingRowColor: WidgetStateProperty.all(AppColors.slate50),
                   columns: const [
                     DataColumn(label: Text('Ảnh chụp')),
@@ -675,8 +680,11 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                       ],
                     );
                   }).toList(),
-                ),
-              ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ],

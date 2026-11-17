@@ -156,7 +156,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
       return;
     }
 
-    setState(() => _loading = true);
+    if (_tenants.isEmpty) setState(() => _loading = true);
     try {
       final res = await tenantsService.list(null, null, force);
       final list = (res is Map && res['data'] is List) ? res['data'] as List : [];
@@ -1100,8 +1100,10 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
       return true;
     }).toList();
 
-    // Mergeable tenants
-    final mergeableTenants = _tenants.where((t) => t is Map && t['status'] != 'MERGED').toList();
+    // Mergeable tenants (computed only when merge modal is open)
+    final mergeableTenants = _mergeOpen
+        ? _tenants.where((t) => t is Map && t['status'] != 'MERGED').toList()
+        : const <dynamic>[];
 
     final columns = [
       DataTableColumn<dynamic>(
@@ -1448,39 +1450,42 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
             // KPI Stats row
             LayoutBuilder(
               builder: (context, constraints) {
-                final isWide = constraints.maxWidth >= 900;
-                return GridView.count(
-                  crossAxisCount: isWide ? 4 : 2,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                  childAspectRatio: isWide ? 2.2 : 1.7,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
+                final cols = constraints.maxWidth >= 900
+                    ? 4
+                    : (constraints.maxWidth >= 500 ? 2 : 1);
+                final itemWidth =
+                    ((constraints.maxWidth - (cols - 1) * 16) / cols).floorToDouble();
+                final cards = [
+                  StatsCard(
+                    title: 'Tổng cư dân',
+                    value: activeTenants.length,
+                    icon: LucideIcons.users,
+                    color: 'sky',
+                  ),
+                  StatsCard(
+                    title: 'Đang thuê',
+                    value: activeCount,
+                    icon: LucideIcons.userCheck,
+                    color: 'emerald',
+                  ),
+                  StatsCard(
+                    title: 'Chờ duyệt / Thiếu giấy tờ',
+                    value: pendingCount,
+                    icon: LucideIcons.clock,
+                    color: 'amber',
+                  ),
+                  StatsCard(
+                    title: 'Đã trả phòng',
+                    value: inactiveCount,
+                    icon: LucideIcons.userMinus,
+                    color: 'rose',
+                  ),
+                ];
+                return Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
                   children: [
-                    StatsCard(
-                      title: 'Tổng cư dân',
-                      value: activeTenants.length,
-                      icon: LucideIcons.users,
-                      color: 'sky',
-                    ),
-                    StatsCard(
-                      title: 'Đang thuê',
-                      value: activeCount,
-                      icon: LucideIcons.userCheck,
-                      color: 'emerald',
-                    ),
-                    StatsCard(
-                      title: 'Chờ duyệt / Thiếu giấy tờ',
-                      value: pendingCount,
-                      icon: LucideIcons.clock,
-                      color: 'amber',
-                    ),
-                    StatsCard(
-                      title: 'Đã trả phòng',
-                      value: inactiveCount,
-                      icon: LucideIcons.userMinus,
-                      color: 'rose',
-                    ),
+                    for (final card in cards) SizedBox(width: itemWidth, child: card),
                   ],
                 );
               },

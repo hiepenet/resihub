@@ -91,6 +91,7 @@ class AppSelect<T> extends StatelessWidget {
     if (isWide) {
       showDialog<T>(
         context: context,
+        barrierDismissible: true,
         builder: (ctx) => Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: ConstrainedBox(
@@ -114,6 +115,8 @@ class AppSelect<T> extends StatelessWidget {
       showModalBottomSheet<T>(
         context: context,
         isScrollControlled: true,
+        isDismissible: true,
+        enableDrag: true,
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
         ),
@@ -359,6 +362,8 @@ class _AppSelectContentState<T> extends State<_AppSelectContent<T>> {
                       dense: true,
                       title: Text(
                         opt.label,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontFamily: 'Inter',
                           fontSize: 14,
@@ -369,6 +374,8 @@ class _AppSelectContentState<T> extends State<_AppSelectContent<T>> {
                       subtitle: opt.sublabel != null
                           ? Text(
                               opt.sublabel!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(fontSize: 12, color: AppColors.slate500),
                             )
                           : null,

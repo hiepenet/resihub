@@ -67,6 +67,18 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
   bool _sortAsc = true;
   int _page = 1;
 
+  @override
+  void didUpdateWidget(covariant DataTableWidget<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.data.length != widget.data.length ||
+        oldWidget.pageSize != widget.pageSize) {
+      final maxPage = math.max(1, (widget.data.length / widget.pageSize).ceil());
+      if (_page > maxPage) {
+        _page = 1;
+      }
+    }
+  }
+
   void _handleSort(String colKey, bool sortable) {
     if (!sortable) return;
     setState(() {
@@ -170,103 +182,118 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
     final pagedData = sortedData.sublist(startIndex, endIndex);
 
     return SelectionArea(
-      child: Container(
-        decoration: borderDecor,
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-          // Table layout
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 600),
-              child: Table(
-                defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-                columnWidths: {
-                  for (int i = 0; i < widget.columns.length; i++)
-                    i: widget.columns[i].width != null
-                        ? FixedColumnWidth(widget.columns[i].width!)
-                        : FlexColumnWidth(widget.columns[i].flex.toDouble()),
-                },
-                children: [
-                  // Header Row
-                  TableRow(
-                    decoration: const BoxDecoration(
-                      color: AppColors.slate50,
-                      border: Border(bottom: BorderSide(color: AppColors.slate200)),
-                    ),
+      child: ClipRRect(
+        borderRadius: widget.embedded
+            ? BorderRadius.zero
+            : BorderRadius.circular(16),
+        child: Container(
+          decoration: borderDecor,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+          // Table layout — always fills availableWidth, columns flex proportionally
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final double availableWidth;
+              if (constraints.maxWidth.isFinite && constraints.maxWidth > 0) {
+                availableWidth = constraints.maxWidth;
+              } else {
+                final screenW = MediaQuery.sizeOf(context).width;
+                final sidebarW = screenW >= 1024 ? 240.0 : 0.0;
+                availableWidth = math.max(600.0, screenW - sidebarW - 48.0);
+              }
+
+              // Use FlexColumnWidth so every column is proportional to its
+              // declared width/flex — table never exceeds availableWidth.
+              return SizedBox(
+                width: availableWidth,
+                child: Table(
+                    defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                    columnWidths: {
+                      for (int i = 0; i < widget.columns.length; i++)
+                        i: FlexColumnWidth(
+                          widget.columns[i].width ?? (widget.columns[i].flex * 100.0),
+                        ),
+                    },
                     children: [
-                      for (final col in widget.columns)
-                        InkWell(
-                          onTap: col.sortable ? () => _handleSort(col.key, col.sortable) : null,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                            child: Row(
-                              mainAxisAlignment: col.align == TextAlign.right
-                                  ? MainAxisAlignment.end
-                                  : col.align == TextAlign.center
-                                      ? MainAxisAlignment.center
-                                      : MainAxisAlignment.start,
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    col.label,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.slate600,
+                      // Header Row
+                      TableRow(
+                        decoration: const BoxDecoration(
+                          color: AppColors.slate50,
+                          border: Border(bottom: BorderSide(color: AppColors.slate200)),
+                        ),
+                        children: [
+                          for (final col in widget.columns)
+                            InkWell(
+                              onTap: col.sortable ? () => _handleSort(col.key, col.sortable) : null,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                child: Row(
+                                  mainAxisAlignment: col.align == TextAlign.right
+                                      ? MainAxisAlignment.end
+                                      : col.align == TextAlign.center
+                                          ? MainAxisAlignment.center
+                                          : MainAxisAlignment.start,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        col.label,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.slate600,
+                                        ),
+                                      ),
                                     ),
-                                  ),
+                                    if (col.sortable) ...[
+                                      const SizedBox(width: 4),
+                                      Icon(
+                                        LucideIcons.arrowUpDown,
+                                        size: 13,
+                                        color: _sortCol == col.key
+                                            ? AppColors.primary600
+                                            : AppColors.slate400,
+                                      ),
+                                    ],
+                                  ],
                                 ),
-                                if (col.sortable) ...[
-                                  const SizedBox(width: 4),
-                                  Icon(
-                                    LucideIcons.arrowUpDown,
-                                    size: 13,
-                                    color: _sortCol == col.key
-                                        ? AppColors.primary600
-                                        : AppColors.slate400,
-                                  ),
-                                ],
-                              ],
+                              ),
                             ),
+                        ],
+                      ),
+                      // Data Rows
+                      for (final row in pagedData)
+                        TableRow(
+                          decoration: const BoxDecoration(
+                            border: Border(bottom: BorderSide(color: AppColors.slate100)),
                           ),
+                          children: [
+                            for (final col in widget.columns)
+                              InkWell(
+                                onTap: widget.onRowClick != null ? () => widget.onRowClick!(row) : null,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                  child: col.render != null
+                                      ? col.render!(row)
+                                      : Text(
+                                          col.cellText != null
+                                              ? col.cellText!(row)
+                                              : (row is Map ? row[col.key]?.toString() ?? '—' : '—'),
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            color: AppColors.slate700,
+                                          ),
+                                          textAlign: col.align,
+                                        ),
+                                ),
+                              ),
+                          ],
                         ),
                     ],
                   ),
-                  // Data Rows
-                  for (final row in pagedData)
-                    TableRow(
-                      decoration: const BoxDecoration(
-                        border: Border(bottom: BorderSide(color: AppColors.slate100)),
-                      ),
-                      children: [
-                        for (final col in widget.columns)
-                          InkWell(
-                            onTap: widget.onRowClick != null ? () => widget.onRowClick!(row) : null,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                              child: col.render != null
-                                  ? col.render!(row)
-                                  : Text(
-                                      col.cellText != null
-                                          ? col.cellText!(row)
-                                          : (row is Map ? row[col.key]?.toString() ?? '—' : '—'),
-                                      style: const TextStyle(
-                                        fontSize: 13,
-                                        color: AppColors.slate700,
-                                      ),
-                                      textAlign: col.align,
-                                    ),
-                            ),
-                          ),
-                      ],
-                    ),
-                ],
-              ),
-            ),
+                );
+            },
           ),
           // Pagination footer
           if (sortedData.length > widget.pageSize) ...[
@@ -320,10 +347,11 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
                 ],
               ),
             ),
-          ],
-        ],
-      ),
-    ),
-  );
+          ],         // Column children
+        ],           // Column children list (spread close)  
+      ),             // Column
+    ),               // Container
+  ),                 // ClipRRect
+  );                 // SelectionArea
 }
 }

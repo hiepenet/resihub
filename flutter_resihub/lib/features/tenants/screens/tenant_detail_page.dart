@@ -763,7 +763,14 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
               title: fullName,
               subtitle: 'Mã hồ sơ: ${widget.tenantId} • SĐT: ${tenant['phone'] ?? '—'}',
               showBack: true,
-              onBack: () => context.go('/admin/tenants'),
+              onBack: () {
+                final router = GoRouter.maybeOf(context);
+                if (router != null && router.canPop()) {
+                  router.pop();
+                } else {
+                  context.go('/admin/tenants');
+                }
+              },
               actions: Wrap(
                 spacing: 8,
                 runSpacing: 8,

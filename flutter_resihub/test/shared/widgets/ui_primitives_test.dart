@@ -26,6 +26,7 @@ import 'package:flutter_resihub/shared/widgets/ui/file_upload_field.dart';
 import 'package:flutter_resihub/shared/widgets/ui/html_print_preview_modal.dart';
 import 'package:flutter_resihub/shared/widgets/ui/money_input.dart';
 import 'package:flutter_resihub/shared/widgets/common/data_table_widget.dart';
+import 'package:flutter_resihub/shared/widgets/common/stats_card.dart';
 
 // Minimal 1x1 transparent PNG for mock image tests
 final Uint8List kTransparent1x1Png = base64Decode(
@@ -434,6 +435,58 @@ void main() {
       await tester.tap(find.byType(AppButton));
       expect(tapped, isFalse);
     });
+
+    testWidgets('does not stretch to full width inside Wrap when fullWidth is false', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: Wrap(
+                spacing: 6,
+                children: [
+                  AppButton(
+                    text: 'Sơ đồ tầng',
+                    size: AppButtonSize.xs,
+                    onPressed: () {},
+                  ),
+                  AppButton(
+                    text: 'Sửa',
+                    variant: AppButtonVariant.ghost,
+                    size: AppButtonSize.xs,
+                    onPressed: () {},
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final firstButtonWidth = tester.getSize(find.byType(AppButton).first).width;
+      final secondButtonWidth = tester.getSize(find.byType(AppButton).last).width;
+      expect(firstButtonWidth, lessThan(150.0));
+      expect(secondButtonWidth, lessThan(100.0));
+    });
+
+    testWidgets('stretches to full width when fullWidth is true', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: AppButton(
+                text: 'full',
+                fullWidth: true,
+                onPressed: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.getSize(find.byType(AppButton)).width, 400.0);
+    });
   });
 
   group('10. AppCard, AppInput, AppModal, AppSkeleton', () {
@@ -649,6 +702,63 @@ void main() {
       expect(find.byType(SelectionArea), findsOneWidget);
       expect(find.text('HD-2026-999'), findsOneWidget);
       expect(find.text('15.000.000 ₫'), findsOneWidget);
+    });
+
+    testWidgets('DataTableWidget stretches fixed-width columns to fill container width', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 1100,
+              child: DataTableWidget<Map<String, dynamic>>(
+                columns: const [
+                  DataTableColumn(key: 'code', label: 'Mã khu', width: 120),
+                  DataTableColumn(key: 'name', label: 'Tên khu', width: 200),
+                ],
+                data: const [
+                  {'code': 'A', 'name': 'Khu A'},
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final tableSize = tester.getSize(find.byType(Table));
+      // 1100 container minus 2px border (left + right 1px)
+      expect(tableSize.width, greaterThanOrEqualTo(1090.0));
+    });
+  });
+
+  group('14. StatsCard compact layout & bounded constraints', () {
+    testWidgets('keeps title and value grouped near top without spaceBetween stretching', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: SizedBox(
+                width: 300,
+                height: 200,
+                child: StatsCard(
+                  title: 'Tổng cư dân',
+                  value: 277,
+                  color: 'sky',
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final titleRect = tester.getRect(find.text('TỔNG CƯ DÂN'));
+      final valueRect = tester.getRect(find.text('277'));
+      // Gap between bottom of title and top of value should remain tight (< 24px),
+      // not pushed apart across the 200px bounded box.
+      expect(valueRect.top - titleRect.bottom, lessThan(24.0));
     });
   });
 }

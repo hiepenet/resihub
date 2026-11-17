@@ -101,13 +101,19 @@ class AppButton extends StatelessWidget {
 
     Widget content;
     if (loading) {
-      content = SizedBox(
-        width: iconSize,
-        height: iconSize,
-        child: CircularProgressIndicator(
-          strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(fgColor),
-        ),
+      content = Row(
+        mainAxisSize: fullWidth ? MainAxisSize.max : MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: iconSize,
+            height: iconSize,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(fgColor),
+            ),
+          ),
+        ],
       );
     } else {
       final children = <Widget>[];
@@ -144,36 +150,37 @@ class AppButton extends StatelessWidget {
       }
 
       content = Row(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisSize: fullWidth ? MainAxisSize.max : MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
         children: children,
       );
     }
 
-    Widget button = Material(
-      color: isInteractive ? bgColor : bgColor.withValues(alpha: 0.5),
-      borderRadius: BorderRadius.circular(size == AppButtonSize.xs ? 6 : 8),
-      child: InkWell(
-        onTap: isInteractive ? onPressed : null,
-        borderRadius: BorderRadius.circular(size == AppButtonSize.xs ? 6 : 8),
-        child: Container(
-          height: height,
-          padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(size == AppButtonSize.xs ? 6 : 8),
-            border: Border.all(
-              color: isInteractive ? borderColor : borderColor.withValues(alpha: 0.5),
+    final radius = BorderRadius.circular(size == AppButtonSize.xs ? 6 : 8);
+
+    Widget button = Opacity(
+      opacity: isInteractive ? 1.0 : 0.5,
+      child: Material(
+        color: bgColor,
+        borderRadius: radius,
+        child: InkWell(
+          onTap: isInteractive ? onPressed : null,
+          borderRadius: radius,
+          hoverColor: fgColor.withValues(alpha: 0.08),
+          splashColor: fgColor.withValues(alpha: 0.12),
+          child: Container(
+            height: height,
+            width: fullWidth ? double.infinity : null,
+            padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: borderColor),
             ),
+            child: content,
           ),
-          alignment: Alignment.center,
-          child: content,
         ),
       ),
     );
-
-    if (fullWidth) {
-      button = SizedBox(width: double.infinity, child: button);
-    }
 
     return button;
   }

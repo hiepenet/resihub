@@ -59,6 +59,7 @@ class ResidentPortalPage extends ConsumerStatefulWidget {
 
 class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   late String _activeTab;
+  final Set<String> _visitedTabs = {};
   String? _selectedContractId;
   String? _actionParam;
 
@@ -71,9 +72,60 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   void initState() {
     super.initState();
     _activeTab = widget.initialTab ?? 'overview';
+    _visitedTabs.add(_activeTab);
     _selectedContractId = widget.contractId ?? widget.targetContractId;
     _actionParam = widget.action;
+    _applyCachedOverview();
     _fetchOverviewData(false);
+  }
+
+  void _applyCachedOverview() {
+    try {
+      final residentService = ref.read(residentServiceProvider);
+      final cachedOv = residentService.peekOverview(_selectedContractId);
+      final ovData = cachedOv is Map && cachedOv['data'] is Map
+          ? Map<String, dynamic>.from(cachedOv['data'] as Map)
+          : (cachedOv is Map ? Map<String, dynamic>.from(cachedOv) : null);
+      if (ovData != null) {
+        final activeContract = ovData['active_contract'] ?? ovData['contract'];
+        final contactConfig = ovData['contact_config'] ?? ovData['manager_contact'];
+        _overview = {
+          ...ovData,
+          if (activeContract != null) 'active_contract': activeContract,
+          if (contactConfig != null) 'contact_config': contactConfig,
+        };
+        if (_selectedContractId == null || _selectedContractId!.isEmpty) {
+          final firstCid = activeContract is Map
+              ? activeContract['contract_id']?.toString()
+              : null;
+          if (firstCid != null) {
+            _selectedContractId = firstCid;
+          }
+        }
+        _loading = false;
+      }
+      final cachedSr = residentService.peekServiceRequests(_selectedContractId);
+      if (cachedSr != null) {
+        final srList = cachedSr is Map && cachedSr['data'] is List
+            ? cachedSr['data'] as List
+            : (cachedSr is List ? cachedSr : const []);
+        const openStatuses = {
+          'NEW',
+          'ASSIGNED',
+          'IN_PROGRESS',
+          'ON_HOLD',
+          'REOPENED'
+        };
+        _openRequestsCount = srList.where((r) {
+          if (r is Map) {
+            return openStatuses.contains(r['status']?.toString().toUpperCase());
+          }
+          return false;
+        }).length;
+      }
+    } catch (_) {
+      // Safe fallback in standalone tests
+    }
   }
 
   @override
@@ -87,6 +139,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
           kValidResidentTabs.contains(qTab) &&
           widget.initialTab == null) {
         _activeTab = qTab;
+        _visitedTabs.add(_activeTab);
       }
       final qContractId =
           queryParams['contract_id'] ?? queryParams['target_contract_id'];
@@ -130,7 +183,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   }
 
   Future<void> _fetchOverviewData([bool silent = false]) async {
-    if (!silent) setState(() => _loading = true);
+    if (!silent && _overview == null) setState(() => _loading = true);
     setState(() => _error = '');
 
     try {
@@ -195,6 +248,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     final safeTab = kValidResidentTabs.contains(nextTab) ? nextTab : 'overview';
     setState(() {
       _activeTab = safeTab;
+      _visitedTabs.add(safeTab);
       if (extra != null && extra.containsKey('action')) {
         _actionParam = extra['action']?.toString();
       }
@@ -293,7 +347,21 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       );
     }
 
-    switch (_activeTab) {
+    _visitedTabs.add(_activeTab);
+    final activeIdx = kValidResidentTabs.indexOf(_activeTab);
+    return IndexedStack(
+      index: activeIdx >= 0 ? activeIdx : 0,
+      children: [
+        for (final tab in kValidResidentTabs)
+          _visitedTabs.contains(tab)
+              ? _buildSingleTab(tab)
+              : const SizedBox.shrink(),
+      ],
+    );
+  }
+
+  Widget _buildSingleTab(String tab) {
+    switch (tab) {
       case 'overview':
         return OverviewTab(
           overview: _overview,
