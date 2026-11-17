@@ -8,7 +8,9 @@ import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/date_range.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/service_subscription_meta.dart';
 import '../../../core/utils/validation.dart';
+import '../../../shared/widgets/common/service_subscription_meta_fields.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
 import '../../../shared/widgets/common/data_table_widget.dart';
@@ -72,6 +74,219 @@ const List<AppSelectOption<String>> kRelationshipOptions = [
   AppSelectOption(value: 'friend', label: 'Bạn bè'),
   AppSelectOption(value: 'other', label: 'Khác'),
 ];
+
+/// Dữ liệu form tạo hợp đồng — lớp thuần để validate/test không cần widget hay provider.
+class ContractCreateDraft {
+  final String apartmentId;
+  final String tenantMode;
+  final bool hasLookedUpTenant;
+  final Map<String, dynamic> newTenantForm;
+  final bool duplicateOutOfScope;
+  final String startDate;
+  final String endDate;
+  final String rentAmount;
+  final String depositAmount;
+  final String billingDay;
+  final String paymentDueDays;
+  final List<Map<String, String>> occupants;
+  final Map<String, Map<String, dynamic>> selectedServices;
+  final List<dynamic> serviceCatalog;
+  final List<BusyInterval> busyIntervals;
+  final String apartmentStatus;
+  final String todayStr;
+
+  const ContractCreateDraft({
+    this.apartmentId = 'apt-1',
+    this.tenantMode = 'existing',
+    this.hasLookedUpTenant = true,
+    this.newTenantForm = const {},
+    this.duplicateOutOfScope = false,
+    this.startDate = '2026-11-20',
+    this.endDate = '2027-11-20',
+    this.rentAmount = '10000000',
+    this.depositAmount = '10000000',
+    this.billingDay = '1',
+    this.paymentDueDays = '5',
+    this.occupants = const [],
+    this.selectedServices = const {},
+    this.serviceCatalog = const [],
+    this.busyIntervals = const [],
+    this.apartmentStatus = 'AVAILABLE',
+    this.todayStr = '2026-11-17',
+  });
+}
+
+/// Validate toàn bộ form tạo hợp đồng — port của ContractsPage.jsx:1059-1186.
+/// Trả về map lỗi (key khớp React) để UI hiển thị và chặn submit.
+Map<String, String> validateContractCreateForm(ContractCreateDraft draft) {
+  final errs = <String, String>{};
+
+  if (draft.apartmentId.isEmpty) {
+    errs['apartment_id'] = 'Vui lòng chọn căn hộ trống hoặc đã giữ chỗ.';
+  }
+
+  if (draft.duplicateOutOfScope) {
+    errs['duplicate_identity'] =
+        'SĐT hoặc CCCD này đã đăng ký ngoài phạm vi tòa nhà bạn quản lý — không thể tạo trùng hồ sơ định danh.';
+  }
+
+  if (draft.tenantMode == 'existing') {
+    if (!draft.hasLookedUpTenant) {
+      errs['primary_tenant'] = 'Vui lòng tra cứu và chọn cư dân đại diện hợp đồng.';
+    }
+  } else {
+    final name = draft.newTenantForm['full_name']?.toString().trim() ?? '';
+    final phone = draft.newTenantForm['phone']?.toString().trim() ?? '';
+    final email = draft.newTenantForm['email']?.toString().trim() ?? '';
+    final idNumber = draft.newTenantForm['id_number']?.toString().trim() ?? '';
+    final password = draft.newTenantForm['password']?.toString() ?? '';
+    if (name.isEmpty) errs['new_full_name'] = 'Vui lòng nhập họ và tên khách thuê mới.';
+    if (phone.isEmpty) {
+      errs['new_phone'] = 'Vui lòng nhập số điện thoại khách thuê.';
+    } else if (!isValidPhone(phone)) {
+      errs['new_phone'] = 'Số điện thoại không đúng định dạng 10 chữ số Việt Nam.';
+    }
+    if (email.isNotEmpty && !isValidEmail(email)) {
+      errs['new_email'] = 'Địa chỉ email không hợp lệ.';
+    }
+    if (idNumber.isNotEmpty && !isValidIdNumber(idNumber)) {
+      errs['new_id_number'] = 'Số CCCD (9/12 số) hoặc Hộ chiếu không hợp lệ.';
+    }
+    if (password.isNotEmpty && password.length < 8) {
+      errs['new_password'] = 'Mật khẩu đăng nhập ban đầu phải từ 8 ký tự trở lên.';
+    }
+  }
+
+  final today = toDateOnlyStr(draft.todayStr);
+  final status = draft.apartmentStatus.trim().toUpperCase();
+  final statusBlocksToday = status == 'OCCUPIED' || status == 'MAINTENANCE';
+  final start = toDateOnlyStr(draft.startDate);
+  final end = toDateOnlyStr(draft.endDate);
+
+  String startDateError() {
+    if (start.isEmpty) return 'Chọn ngày bắt đầu.';
+    if (statusBlocksToday && start.compareTo(today) <= 0) {
+      return 'Căn hộ đang có khách thuê / bảo trì, ngày bắt đầu hợp đồng mới phải sau hôm nay.';
+    }
+    final startHits = findOverlappingBusyIntervals(start, start, draft.busyIntervals);
+    if (startHits.isNotEmpty) {
+      return formatBusyOverlapError(startHits, actionLabel: 'Ngày bắt đầu thuê');
+    }
+    return '';
+  }
+
+  final startErr = startDateError();
+  if (startErr.isNotEmpty) errs['start_date'] = startErr;
+
+  if (end.isEmpty) {
+    errs['end_date'] = 'Chọn ngày kết thúc.';
+  } else {
+    final orderErr = getDateOrderError(
+      start,
+      end,
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu thuê',
+      endLabel: 'Ngày kết thúc thuê',
+    );
+    if (orderErr.isNotEmpty) {
+      errs['end_date'] = orderErr;
+    } else if (startErr.isEmpty) {
+      final overlaps = findOverlappingBusyIntervals(start, end, draft.busyIntervals);
+      if (overlaps.isNotEmpty) {
+        errs['end_date'] =
+            formatBusyOverlapError(overlaps, actionLabel: 'Kỳ hạn hợp đồng');
+      }
+    }
+  }
+
+  final rent = num.tryParse(draft.rentAmount) ?? 0;
+  if (rent <= 0) errs['rent_amount'] = 'Giá thuê phải lớn hơn 0.';
+  if (draft.depositAmount.trim().isNotEmpty &&
+      (num.tryParse(draft.depositAmount) ?? 0) < 0) {
+    errs['deposit_amount'] = 'Tiền cọc không được âm.';
+  }
+
+  final dayRaw = num.tryParse(draft.billingDay);
+  if (dayRaw == null || dayRaw != dayRaw.toInt() || dayRaw < 1 || dayRaw > 31) {
+    errs['billing_day'] = 'Ngày phát hành hóa đơn phải từ 1 đến 31.';
+  }
+  final dueRaw = num.tryParse(draft.paymentDueDays);
+  if (dueRaw == null || dueRaw != dueRaw.toInt() || dueRaw < 1 || dueRaw > 60) {
+    errs['payment_due_days'] = 'Thời hạn thanh toán phải từ 1 đến 60 ngày.';
+  }
+
+  final primaryNormPhone = draft.tenantMode == 'new'
+      ? normalizePhone(draft.newTenantForm['phone']?.toString())
+      : '';
+  final seenOccPhones = <String>{};
+  for (var i = 0; i < draft.occupants.length; i++) {
+    final occ = draft.occupants[i];
+    final hasAny = (occ['full_name'] ?? '').isNotEmpty ||
+        (occ['phone'] ?? '').isNotEmpty ||
+        (occ['id_number'] ?? '').isNotEmpty;
+    if (!hasAny) continue;
+
+    if ((occ['full_name'] ?? '').trim().isEmpty) {
+      errs['occ_name_$i'] = 'Nhập họ tên thành viên.';
+    }
+    final normOccPhone = normalizePhone(occ['phone']);
+    if (normOccPhone.isEmpty) {
+      errs['occ_phone_$i'] = 'Nhập SĐT thành viên.';
+    } else if (!isValidPhone(normOccPhone)) {
+      errs['occ_phone_$i'] = 'SĐT phải gồm 10 chữ số.';
+    } else if (primaryNormPhone.isNotEmpty && normOccPhone == primaryNormPhone) {
+      errs['occ_phone_$i'] = 'Trùng SĐT với khách thuê chính.';
+    } else if (seenOccPhones.contains(normOccPhone)) {
+      errs['occ_phone_$i'] = 'Trùng SĐT giữa các thành viên.';
+    } else {
+      seenOccPhones.add(normOccPhone);
+    }
+    final occId = (occ['id_number'] ?? '').trim();
+    if (occId.isNotEmpty && !isValidIdNumber(occId)) {
+      errs['occ_id_$i'] = 'CCCD/Hộ chiếu không hợp lệ.';
+    }
+  }
+
+  for (final entry in draft.selectedServices.entries) {
+    final cfg = entry.value;
+    if (cfg['checked'] != true) continue;
+    final svc = draft.serviceCatalog.firstWhere(
+      (s) => s is Map && s['id']?.toString() == entry.key,
+      orElse: () => null,
+    );
+    final parking = isParkingService(svc);
+    final multi = allowsMultiQuantity(svc);
+    final effQty = multi
+        ? (int.tryParse(cfg['quantity']?.toString() ?? '1') ?? 1)
+        : 1;
+    final meta = validateServiceMetaInput(
+      isParking: parking,
+      quantity: effQty,
+      vehiclePlates: cfg['vehicle_plates'],
+      note: cfg['note'],
+    );
+    if (meta.quantityError.isNotEmpty) {
+      errs['svc_qty_${entry.key}'] = meta.quantityError;
+    }
+    if (meta.plateErrors.any((e) => e.isNotEmpty)) {
+      errs['svc_plates_${entry.key}'] =
+          meta.plateErrors.where((e) => e.isNotEmpty).join('; ');
+    }
+    if (meta.noteError.isNotEmpty) {
+      errs['svc_note_${entry.key}'] = meta.noteError;
+    }
+  }
+
+  return errs;
+}
+
+/// Kẹp giá trị số nguyên trong đoạn [min, max], dùng fallback khi parse lỗi.
+int clampIntField(String? raw, int min, int max, int fallback) {
+  final value = int.tryParse(raw?.trim() ?? '') ?? fallback;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+}
 
 class ContractsPage extends ConsumerStatefulWidget {
   final String? initialTab;
@@ -147,6 +362,12 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
   final Map<String, Map<String, dynamic>> _selectedServices = {};
   String _customElectricityPrice = '';
   String _customWaterPrice = '';
+
+  // Lịch bận của căn hộ đang chọn (B6)
+  List<dynamic> _aptScheduleContracts = [];
+  List<dynamic> _aptScheduleReservations = [];
+  List<BusyInterval> _busyIntervals = [];
+  bool _aptScheduleLoading = false;
 
   // Request Review / Approve / Reject
   dynamic _approveReqTarget;
@@ -244,6 +465,10 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
       _customElectricityPrice = '';
       _customWaterPrice = '';
       _createErrors.clear();
+      _aptScheduleContracts = [];
+      _aptScheduleReservations = [];
+      _busyIntervals = [];
+      _aptScheduleLoading = false;
     });
 
     try {
@@ -309,6 +534,9 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
       _createRentAmount = '';
       _createDepositAmount = '';
       _apartments = [];
+      _aptScheduleContracts = [];
+      _aptScheduleReservations = [];
+      _busyIntervals = [];
     });
 
     if (buildingId == null || buildingId.isEmpty) return;
@@ -347,6 +575,85 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
         _createRentAmount = base;
         _createDepositAmount = base;
       });
+    }
+
+    if (aptId.isNotEmpty) _fetchApartmentSchedule(aptId);
+  }
+
+  String _selectedApartmentStatus() {
+    if (_createApartmentId.isEmpty) return '';
+    final apt = _apartments.firstWhere(
+      (a) => a is Map && a['id']?.toString() == _createApartmentId,
+      orElse: () => null,
+    );
+    return apt is Map ? (apt['status'] ?? '').toString() : '';
+  }
+
+  /// Tải lịch hợp đồng / giữ chỗ của căn hộ, tự chọn ngày trống đầu tiên (B6).
+  Future<void> _fetchApartmentSchedule(String aptId) async {
+    setState(() {
+      _aptScheduleLoading = true;
+      _aptScheduleContracts = [];
+      _aptScheduleReservations = [];
+      _busyIntervals = [];
+    });
+
+    final todayStr = toDateOnlyStr(DateTime.now());
+    try {
+      final res = await ref.read(buildingsServiceProvider).getApartment(aptId);
+      final detail = (res is Map && res['data'] is Map)
+          ? res['data'] as Map
+          : <String, dynamic>{};
+      if (!mounted || _createApartmentId != aptId) return;
+
+      final contracts = (detail['contracts'] is List)
+          ? List<dynamic>.from(detail['contracts'] as List)
+          : <dynamic>[];
+      final reservations = (detail['reservations'] is List)
+          ? List<dynamic>.from(detail['reservations'] as List)
+          : <dynamic>[];
+
+      final activeContracts = contracts
+          .where((c) =>
+              c is Map &&
+              kBlockingContractStatuses.contains((c['status'] ?? '').toString()) &&
+              toDateOnlyStr(c['terminated_at'] ?? c['end_date']).compareTo(todayStr) >= 0)
+          .toList();
+      final heldReservations = reservations
+          .where((r) =>
+              r is Map &&
+              (r['status'] ?? '').toString() == 'HELD' &&
+              toDateOnlyStr(r['hold_until']).compareTo(todayStr) >= 0)
+          .toList();
+
+      final busy = extractApartmentBusyIntervals(
+        contracts: activeContracts,
+        reservations: heldReservations,
+        todayStr: todayStr,
+      );
+
+      setState(() {
+        _aptScheduleContracts = activeContracts;
+        _aptScheduleReservations = heldReservations;
+        _busyIntervals = busy;
+        _aptScheduleLoading = false;
+      });
+
+      final status = (detail['status'] ?? '').toString().toUpperCase();
+      final baseSearch = (status == 'OCCUPIED' || status == 'MAINTENANCE')
+          ? addDaysStr(todayStr, 1)
+          : todayStr;
+      final suggestedStart = findFirstAvailableStartDate(baseSearch, busy, minSpanDays: 2);
+      if (suggestedStart.isNotEmpty) {
+        setState(() {
+          _createStartDate = suggestedStart;
+          _createEndDate = addMonthsClampedStr(suggestedStart, 12);
+          _createErrors.remove('start_date');
+          _createErrors.remove('end_date');
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _aptScheduleLoading = false);
     }
   }
 
@@ -449,39 +756,42 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
   }
 
   Future<void> _handleCreateSubmit() async {
-    final errs = <String, String>{};
+    final draft = ContractCreateDraft(
+      apartmentId: _createApartmentId,
+      tenantMode: _tenantMode,
+      hasLookedUpTenant: _lookedUpTenant != null,
+      newTenantForm: _newTenantForm,
+      duplicateOutOfScope:
+          _dupInfo['isDuplicate'] == true && _dupInfo['inScope'] == false,
+      startDate: _createStartDate,
+      endDate: _createEndDate,
+      rentAmount: _createRentAmount,
+      depositAmount: _createDepositAmount,
+      billingDay: _createBillingDay,
+      paymentDueDays: _createPaymentDueDays,
+      occupants: _inlineOccupants,
+      selectedServices: _selectedServices,
+      serviceCatalog: _serviceCatalog,
+      busyIntervals: _busyIntervals,
+      apartmentStatus: _selectedApartmentStatus(),
+      todayStr: toDateOnlyStr(DateTime.now()),
+    );
+    final errs = validateContractCreateForm(draft);
 
-    if (_createApartmentId.isEmpty) {
-      errs['apartment_id'] = 'Vui lòng chọn căn hộ.';
-    }
-
-    if (_tenantMode == 'existing') {
-      if (_lookedUpTenant == null) {
-        errs['primary_tenant'] = 'Vui lòng tra cứu và chọn cư dân đại diện hợp đồng.';
+    setState(() => _createErrors = errs);
+    if (errs.isNotEmpty) {
+      final firstServiceErr = errs.entries
+          .where((e) => e.key.startsWith('svc_'))
+          .map((e) => e.value)
+          .cast<String>()
+          .toList();
+      if (firstServiceErr.isNotEmpty) {
+        ref.read(toastProvider.notifier).warning(firstServiceErr.first);
       }
-    } else {
-      final name = _newTenantForm['full_name']?.toString().trim() ?? '';
-      final phone = _newTenantForm['phone']?.toString().trim() ?? '';
-      if (name.isEmpty) errs['new_full_name'] = 'Vui lòng nhập họ và tên cư dân.';
-      if (phone.isEmpty) {
-        errs['new_phone'] = 'Vui lòng nhập số điện thoại.';
-      } else if (!isValidPhone(phone)) {
-        errs['new_phone'] = 'Số điện thoại không đúng định dạng 10 số.';
-      }
-    }
-
-    if (_createStartDate.isEmpty) errs['start_date'] = 'Chọn ngày bắt đầu.';
-    if (_createEndDate.isEmpty) errs['end_date'] = 'Chọn ngày kết thúc.';
-    if (_createStartDate.isNotEmpty && _createEndDate.isNotEmpty && _createEndDate.compareTo(_createStartDate) <= 0) {
-      errs['end_date'] = 'Ngày kết thúc phải sau ngày bắt đầu.';
+      return;
     }
 
     final rent = num.tryParse(_createRentAmount) ?? 0;
-    if (rent <= 0) errs['rent_amount'] = 'Giá thuê phải lớn hơn 0.';
-
-    setState(() => _createErrors = errs);
-    if (errs.isNotEmpty) return;
-
     setState(() => _submittingCreate = true);
     try {
       final payload = <String, dynamic>{
@@ -492,8 +802,8 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
         'rent_amount': rent.round(),
         'deposit_amount': (num.tryParse(_createDepositAmount) ?? 0).round(),
         'billing_cycle': _createBillingCycle,
-        'billing_day': int.tryParse(_createBillingDay) ?? 1,
-        'payment_due_days': int.tryParse(_createPaymentDueDays) ?? 5,
+        'billing_day': clampIntField(_createBillingDay, 1, 31, 1),
+        'payment_due_days': clampIntField(_createPaymentDueDays, 1, 60, 5),
         'note': _createNote.trim(),
         if (_tenantMode == 'existing')
           'primary_tenant_id': _lookedUpTenant['id']
@@ -528,19 +838,41 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
               .toList(),
       };
 
-      // Add selected services
+      // Dịch vụ đi kèm: normalize số lượng / đơn giá / biển số / ghi chú theo React.
       final servicesList = <Map<String, dynamic>>[];
       for (final entry in _selectedServices.entries) {
         final cfg = entry.value;
-        if (cfg['checked'] == true) {
-          servicesList.add({
-            'service_id': entry.key,
-            'quantity': cfg['quantity'] ?? 1,
-            'unit_price': cfg['unit_price'] ?? 0,
-            if (cfg['vehicle_plates'] is List) 'vehicle_plates': cfg['vehicle_plates'],
-            if (cfg['note']?.toString().isNotEmpty == true) 'note': cfg['note'],
-          });
-        }
+        if (cfg['checked'] != true) continue;
+        final svc = _serviceCatalog.firstWhere(
+          (s) => s is Map && s['id']?.toString() == entry.key,
+          orElse: () => null,
+        );
+        final parking = isParkingService(svc);
+        final multi = allowsMultiQuantity(svc);
+        final qtyRaw = int.tryParse(cfg['quantity']?.toString() ?? '1') ?? 1;
+        final qty = !multi
+            ? 1
+            : (parking && qtyRaw > kMaxParkingQuantity
+                ? kMaxParkingQuantity
+                : (qtyRaw < 1 ? 1 : qtyRaw));
+        final priceRaw = num.tryParse(cfg['unit_price']?.toString() ?? '') ??
+            num.tryParse(
+                    (svc is Map ? svc['unit_price'] : null)?.toString() ?? '') ??
+                0;
+        final price = (priceRaw < 0 ? 0 : priceRaw).round();
+        final meta = validateServiceMetaInput(
+          isParking: parking,
+          quantity: qty,
+          vehiclePlates: cfg['vehicle_plates'],
+          note: cfg['note'],
+        );
+        servicesList.add({
+          'service_id': entry.key,
+          'quantity': qty,
+          'unit_price': price,
+          if (parking) 'vehicle_plates': meta.cleanPlates,
+          if (meta.cleanNote.isNotEmpty) 'note': meta.cleanNote,
+        });
       }
       if (servicesList.isNotEmpty) {
         payload['services'] = servicesList;
@@ -640,6 +972,331 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
     }
   }
 
+  /// Form "Thành viên ở cùng" với Select quan hệ — port ContractsPage.jsx:2439-2572 (B4).
+  Widget _buildOccupantsBlock() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.slate50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.slate200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Expanded(
+                child: Text(
+                  'Thành viên ở cùng (Tùy chọn)',
+                  style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.slate800),
+                ),
+              ),
+              const SizedBox(width: 10),
+              AppButton(
+                text: 'Thêm thành viên ở cùng',
+                size: AppButtonSize.xs,
+                variant: AppButtonVariant.outline,
+                icon: const Icon(LucideIcons.userPlus, size: 14),
+                onPressed: () => setState(() {
+                  _inlineOccupants.add({
+                    'full_name': '',
+                    'phone': '',
+                    'relationship': 'family',
+                    'id_number': '',
+                  });
+                }),
+              ),
+            ],
+          ),
+          for (var i = 0; i < _inlineOccupants.length; i++) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.slate200),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Thành viên #${i + 1}',
+                        style: const TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.slate700),
+                      ),
+                      AppButton(
+                        text: 'Xóa',
+                        size: AppButtonSize.xs,
+                        variant: AppButtonVariant.ghost,
+                        icon: const Icon(LucideIcons.trash2, size: 13),
+                        onPressed: () => setState(() => _inlineOccupants.removeAt(i)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: AppInput(
+                          label: 'Họ và tên',
+                          required: true,
+                          initialValue: _inlineOccupants[i]['full_name'],
+                          error: _createErrors['occ_name_$i'],
+                          onChanged: (val) => _inlineOccupants[i]['full_name'] = val,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: AppInput(
+                          label: 'Số điện thoại',
+                          required: true,
+                          initialValue: _inlineOccupants[i]['phone'],
+                          error: _createErrors['occ_phone_$i'],
+                          onChanged: (val) => _inlineOccupants[i]['phone'] = val,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: AppSelect<String>(
+                          label: 'Quan hệ',
+                          value: _inlineOccupants[i]['relationship'] ?? 'family',
+                          options: kRelationshipOptions,
+                          onChanged: (val) => setState(() {
+                            _inlineOccupants[i]['relationship'] = val ?? 'family';
+                          }),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: AppInput(
+                          label: 'Số CCCD / Hộ chiếu',
+                          initialValue: _inlineOccupants[i]['id_number'],
+                          error: _createErrors['occ_id_$i'],
+                          onChanged: (val) => _inlineOccupants[i]['id_number'] = val,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Một dòng dịch vụ: chip bật/tắt + cấu hình số lượng / đơn giá / biển số / ghi chú (B5).
+  Widget _buildServiceRow(dynamic svcRaw) {
+    if (svcRaw is! Map) return const SizedBox.shrink();
+    final sId = svcRaw['id']?.toString() ?? '';
+    final parking = isParkingService(svcRaw);
+    final multi = allowsMultiQuantity(svcRaw);
+    final cfg = _selectedServices[sId] ?? <String, dynamic>{};
+    final isChecked = cfg['checked'] == true;
+    final unitPriceDefault = svcRaw['unit_price'] ?? svcRaw['base_price'] ?? 0;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: isChecked ? Colors.white : AppColors.slate50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isChecked ? AppColors.primary300 : AppColors.slate200,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          FilterChip(
+            selected: isChecked,
+            label: Text(
+              '${svcRaw['name'] ?? ''} (${formatMoney(unitPriceDefault)})'
+              '${multi ? ' • theo số lượng' : ' • trọn gói'}',
+            ),
+            onSelected: (val) {
+              setState(() {
+                if (val) {
+                  final plates = parking ? <dynamic>[''] : <dynamic>[];
+                  _selectedServices[sId] = {
+                    'checked': true,
+                    'quantity': '1',
+                    'unit_price': unitPriceDefault,
+                    'vehicle_plates': plates,
+                    'note': '',
+                  };
+                } else {
+                  _selectedServices.remove(sId);
+                }
+              });
+            },
+          ),
+          if (isChecked) ...[
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (multi)
+                  Expanded(
+                    child: AppInput(
+                      label: 'Số lượng${parking ? ' (tối đa $kMaxParkingQuantity)' : ''}',
+                      initialValue: (cfg['quantity'] ?? '1').toString(),
+                      keyboardType: TextInputType.number,
+                      error: _createErrors['svc_qty_$sId'],
+                      onChanged: (val) {
+                        final plates = parking
+                            ? syncVehiclePlatesArray(cfg['vehicle_plates'], val)
+                            : <dynamic>[];
+                        setState(() {
+                          _selectedServices[sId] = {
+                            ...cfg,
+                            'quantity': val,
+                            'vehicle_plates': plates,
+                          };
+                          _createErrors.remove('svc_qty_$sId');
+                          _createErrors.remove('svc_plates_$sId');
+                        });
+                      },
+                    ),
+                  ),
+                if (multi) const SizedBox(width: 12),
+                Expanded(
+                  child: AppInput(
+                    label: 'Đơn giá áp dụng (VND)',
+                    initialValue: (cfg['unit_price'] ?? unitPriceDefault).toString(),
+                    keyboardType: TextInputType.number,
+                    onChanged: (val) {
+                      _selectedServices[sId] = {...cfg, 'unit_price': val};
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            ServiceSubscriptionMetaFields(
+              isParking: parking,
+              quantity: int.tryParse((cfg['quantity'] ?? '1').toString()) ?? 1,
+              vehiclePlates: cfg['vehicle_plates'] is List
+                  ? List<dynamic>.from(cfg['vehicle_plates'] as List)
+                  : <dynamic>[],
+              note: (cfg['note'] ?? '').toString(),
+              plateErrors: _createErrors['svc_plates_$sId']?.isNotEmpty == true
+                  ? _createErrors['svc_plates_$sId']!.split('; ')
+                  : const [],
+              noteError: _createErrors['svc_note_$sId'] ?? '',
+              onPlateChange: (idx, val) {
+                final plates = syncVehiclePlatesArray(
+                  cfg['vehicle_plates'],
+                  cfg['quantity'] ?? '1',
+                );
+                if (idx < plates.length) plates[idx] = val;
+                setState(() {
+                  _selectedServices[sId] = {...cfg, 'vehicle_plates': plates};
+                  _createErrors.remove('svc_plates_$sId');
+                });
+              },
+              onNoteChange: (val) {
+                setState(() {
+                  _selectedServices[sId] = {...cfg, 'note': val};
+                  _createErrors.remove('svc_note_$sId');
+                });
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Hiển thị lịch hợp đồng / giữ chỗ đang chồng lấn khoảng ngày đang chọn (B6).
+  Widget? _buildApartmentScheduleCard() {
+    if (_createApartmentId.isEmpty) return null;
+    if (!_aptScheduleLoading &&
+        _aptScheduleContracts.isEmpty &&
+        _aptScheduleReservations.isEmpty) {
+      return null;
+    }
+    final apt = _apartments.firstWhere(
+      (a) => a is Map && a['id']?.toString() == _createApartmentId,
+      orElse: () => null,
+    );
+    final code = apt is Map ? (apt['code'] ?? '').toString() : '';
+    final overlaps = findOverlappingBusyIntervals(
+      _createStartDate,
+      _createEndDate,
+      _busyIntervals,
+    );
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBE6),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Lịch đã thuê & đang giữ chỗ — Căn $code',
+            style: const TextStyle(
+                fontFamily: 'Inter', fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.slate800),
+          ),
+          const SizedBox(height: 6),
+          if (_aptScheduleLoading)
+            const Text('Đang tải lịch căn hộ...',
+                style: TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.slate500)),
+          for (final c in _aptScheduleContracts)
+            if (c is Map)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  'Hợp đồng (${c['status'] ?? ''}): ${formatDate(c['start_date'])} → ${formatDate(c['terminated_at'] ?? c['end_date'])}${c['tenant_name'] != null ? ' • ${c['tenant_name']}' : ''}',
+                  style: const TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.slate700),
+                ),
+              ),
+          for (final r in _aptScheduleReservations)
+            if (r is Map)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  'Giữ chỗ: ${formatDate(r['hold_from'] ?? r['created_at'])} → ${formatDate(r['hold_until'])}${r['prospect_name'] != null ? ' • ${r['prospect_name']}' : ''}',
+                  style: const TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.slate700),
+                ),
+              ),
+          if (overlaps.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                formatBusyOverlapError(overlaps, actionLabel: 'Kỳ hạn hợp đồng'),
+                style: const TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.rose600),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget? _buildActiveOverlayModal() {
     if (_createOpen) {
       return AppModal(
@@ -715,6 +1372,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.rose600),
                   ),
                 ),
+              _buildApartmentScheduleCard() ?? const SizedBox.shrink(),
               const SizedBox(height: 16),
 
               // 2. Khách thuê chính
@@ -852,6 +1510,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                       child: AppInput(
                         label: 'CCCD / Hộ chiếu',
                         initialValue: _newTenantForm['id_number']?.toString(),
+                        error: _createErrors['new_id_number'],
                         onChanged: (val) {
                           _newTenantForm['id_number'] = val;
                           _onCheckDupTenantRealtime();
@@ -863,7 +1522,23 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                       child: AppInput(
                         label: 'Email',
                         initialValue: _newTenantForm['email']?.toString(),
+                        error: _createErrors['new_email'],
                         onChanged: (val) => _newTenantForm['email'] = val,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: AppInput(
+                        label: 'Mật khẩu đăng nhập ban đầu (tối thiểu 8 ký tự)',
+                        obscureText: true,
+                        initialValue: _newTenantForm['password']?.toString(),
+                        error: _createErrors['new_password'],
+                        onChanged: (val) => _newTenantForm['password'] = val,
                       ),
                     ),
                   ],
@@ -876,7 +1551,19 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                       style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.amber700),
                     ),
                   ),
+                if (_createErrors['duplicate_identity'] != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      _createErrors['duplicate_identity']!,
+                      style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.rose600),
+                    ),
+                  ),
               ],
+              const SizedBox(height: 16),
+
+              // 2b. Thành viên ở cùng (B4) — khai báo sẵn người ở ghép / gia đình
+              _buildOccupantsBlock(),
               const SizedBox(height: 16),
 
               // 3. Thời hạn & Giá thuê
@@ -890,6 +1577,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                 children: [
                   Expanded(
                     child: AppInput(
+                      key: ValueKey('start_$_createStartDate'),
                       label: 'Ngày bắt đầu',
                       required: true,
                       initialValue: _createStartDate,
@@ -900,6 +1588,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: AppInput(
+                      key: ValueKey('end_$_createEndDate'),
                       label: 'Ngày kết thúc',
                       required: true,
                       initialValue: _createEndDate,
@@ -927,6 +1616,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     child: AppInput(
                       label: 'Tiền đặt cọc (VND)',
                       initialValue: _createDepositAmount,
+                      error: _createErrors['deposit_amount'],
                       onChanged: (val) => _createDepositAmount = val,
                     ),
                   ),
@@ -952,6 +1642,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     child: AppInput(
                       label: 'Ngày chốt hóa đơn (1–31)',
                       initialValue: _createBillingDay,
+                      error: _createErrors['billing_day'],
                       onChanged: (val) => _createBillingDay = val,
                     ),
                   ),
@@ -960,6 +1651,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     child: AppInput(
                       label: 'Hạn thanh toán (ngày)',
                       initialValue: _createPaymentDueDays,
+                      error: _createErrors['payment_due_days'],
                       onChanged: (val) => _createPaymentDueDays = val,
                     ),
                   ),
@@ -1009,32 +1701,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                   style: TextStyle(fontFamily: 'Inter', fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.slate900),
                 ),
                 const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _serviceCatalog.map((svc) {
-                    if (svc is! Map) return const SizedBox.shrink();
-                    final sId = svc['id']?.toString() ?? '';
-                    final isChecked = _selectedServices[sId]?['checked'] == true;
-                    return FilterChip(
-                      selected: isChecked,
-                      label: Text('${svc['name'] ?? ''} (${formatMoney(svc['base_price'])})'),
-                      onSelected: (val) {
-                        setState(() {
-                          if (val) {
-                            _selectedServices[sId] = {
-                              'checked': true,
-                              'quantity': 1,
-                              'unit_price': svc['base_price'],
-                            };
-                          } else {
-                            _selectedServices.remove(sId);
-                          }
-                        });
-                      },
-                    );
-                  }).toList(),
-                ),
+                ..._serviceCatalog.map(_buildServiceRow),
               ],
             ],
           ),
