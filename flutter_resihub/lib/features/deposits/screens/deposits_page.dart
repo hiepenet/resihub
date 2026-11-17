@@ -100,6 +100,23 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
     }
   }
 
+  /// Chọn tab chính (kể cả từ KPI): React `handleSelectMainTab` — đổi tab và
+  /// xóa các param lọc nhanh trên URL để banner không còn bị áp dụng lại.
+  void _selectMainTab(String tab) {
+    setState(() {
+      _activeTab = tab;
+      _quickFilter = _DepositQuickFilter.none;
+    });
+    final router = GoRouter.maybeOf(context);
+    if (router == null) return;
+    final params = GoRouterState.of(context).uri.queryParameters;
+    if (params.containsKey('tab') ||
+        params.containsKey('status') ||
+        params.containsKey('overdue')) {
+      router.go('/admin/deposits');
+    }
+  }
+
   void _loadInitialData() {
     try {
       final service = ref.read(depositsServiceProvider);
@@ -297,11 +314,14 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
     });
 
     final tabItems = [
-      AppTabItem(id: 'held', label: 'Đang giữ ($heldCount)'),
-      AppTabItem(id: 'pending', label: 'Chờ duyệt ($pendingCount)'),
-      AppTabItem(id: 'returned', label: 'Ngân hàng trả lại ($returnedCount)'),
-      AppTabItem(id: 'refunded', label: 'Đã hoàn cọc ($refundedCount)'),
-      AppTabItem(id: 'disputed', label: 'Tranh chấp ($disputedCount)'),
+      AppTabItem(id: 'held', label: 'Đang giữ cọc', count: heldCount),
+      AppTabItem(
+          id: 'pending', label: 'Chờ duyệt / Chi hoàn', count: pendingCount),
+      AppTabItem(
+          id: 'returned', label: 'Hoàn trả lệnh chi', count: returnedCount),
+      AppTabItem(
+          id: 'refunded', label: 'Đã hoàn / Tất toán', count: refundedCount),
+      AppTabItem(id: 'disputed', label: 'Tranh chấp', count: disputedCount),
     ];
 
     return Scaffold(
@@ -313,21 +333,21 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
           children: [
             // Page Header
             PageHeader(
-              title: 'Sổ cọc hợp đồng',
+              title: 'Quản lý Tiền đặt cọc & Tất toán',
               subtitle:
-                  'Quản lý độc lập tiền đặt cọc và quy trình quyết toán hoàn cọc 4 mắt.',
+                  'Theo dõi sổ tiền cọc bảo đảm, Chủ nhà / cấp thẩm quyền phê duyệt Four-Eyes và BQL chi hoàn chứng từ UNC (FR-024)',
               actions: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   AppButton(
-                    text: 'Xuất sổ cọc (RP-07)',
+                    text: 'Xuất Excel (RP-07)',
                     variant: AppButtonVariant.outline,
                     icon: const Icon(LucideIcons.fileSpreadsheet, size: 16),
                     onPressed: _exportExcelLedger,
                   ),
                   const SizedBox(width: 8),
                   AppButton(
-                    text: 'Làm mới',
+                    text: 'Làm mới dữ liệu',
                     variant: AppButtonVariant.secondary,
                     icon: const Icon(LucideIcons.refreshCw, size: 16),
                     onPressed: () => _fetchDeposits(force: true),
@@ -337,42 +357,53 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
             ),
             const SizedBox(height: 20),
 
-            // Stats Cards Row
+            // Stats Cards Row — khớp 4 KPI của DepositsPage.jsx
             Row(
               children: [
                 Expanded(
                   child: StatsCard(
                     title: 'Tổng tiền cọc đang giữ',
                     value: formatMoney(totalHeldAmount),
+                    subtext: '$heldCount sổ đang bảo lưu' +
+                        (returnedCount > 0
+                            ? ' • $returnedCount hoàn trả lệnh chi'
+                            : ''),
                     icon: LucideIcons.wallet,
-                    color: 'indigo',
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: StatsCard(
-                    title: 'Sổ cọc đang quản lý',
-                    value: '$heldCount căn',
-                    icon: LucideIcons.building2,
                     color: 'sky',
+                    onClick: () => _selectMainTab('held'),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: StatsCard(
-                    title: 'Chờ duyệt 4 mắt',
-                    value: '$pendingCount hồ sơ',
-                    icon: LucideIcons.shieldAlert,
+                    title: 'Chờ duyệt / Chi hoàn',
+                    value: '$pendingCount',
+                    subtext: 'Chờ Four-Eyes hoặc chờ UNC chi hoàn',
+                    icon: LucideIcons.clock,
                     color: 'amber',
+                    onClick: () => _selectMainTab('pending'),
                   ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: StatsCard(
-                    title: 'Khiếu nại cọc',
-                    value: '$disputedCount hồ sơ',
-                    icon: LucideIcons.messageSquareWarning,
+                    title: 'Đã hoàn / Tất toán',
+                    value: '$refundedCount',
+                    subtext: 'Hoàn đủ, hoàn một phần hoặc cấn trừ hết',
+                    icon: LucideIcons.checkCircle2,
+                    color: 'emerald',
+                    onClick: () => _selectMainTab('refunded'),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: StatsCard(
+                    title: 'Hồ sơ tranh chấp',
+                    value: '$disputedCount',
+                    subtext: 'Đang tạm khóa phê duyệt / chi hoàn',
+                    icon: LucideIcons.shieldAlert,
                     color: 'rose',
+                    onClick: () => _selectMainTab('disputed'),
                   ),
                 ),
               ],
@@ -440,7 +471,7 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                         child: AppTabs(
                           tabs: tabItems,
                           activeTab: _activeTab,
-                          onChanged: (key) => setState(() => _activeTab = key),
+                          onChanged: _selectMainTab,
                         ),
                       ),
                       const SizedBox(width: 16),

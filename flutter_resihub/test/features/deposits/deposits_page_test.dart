@@ -14,6 +14,7 @@ import 'package:flutter_resihub/features/auth/models/user_model.dart';
 import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
 import 'package:flutter_resihub/features/deposits/screens/deposits_page.dart';
 import 'package:flutter_resihub/features/deposits/services/deposits_service.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_tabs.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   @override
@@ -204,5 +205,57 @@ void main() {
     expect(find.textContaining('Đang áp dụng bộ lọc nhanh từ Dashboard'),
         findsNothing);
     expect(find.text('Xóa bộ lọc nhanh'), findsNothing);
+  });
+
+  testWidgets('KPI cards show React copy, subtext and drill down to a tab',
+      (tester) async {
+    await pumpAt(tester, '/admin/deposits');
+
+    // StatsCard renders its title in upper-case.
+    expect(find.text('TỔNG TIỀN CỌC ĐANG GIỮ'), findsOneWidget);
+    expect(find.text('CHỜ DUYỆT / CHI HOÀN'), findsOneWidget);
+    expect(find.text('ĐÃ HOÀN / TẤT TOÁN'), findsOneWidget);
+    expect(find.text('HỒ SƠ TRANH CHẤP'), findsOneWidget);
+
+    expect(find.textContaining('sổ đang bảo lưu'), findsOneWidget);
+    expect(find.text('Chờ Four-Eyes hoặc chờ UNC chi hoàn'), findsOneWidget);
+    expect(
+        find.text('Hoàn đủ, hoàn một phần hoặc cấn trừ hết'), findsOneWidget);
+    expect(find.text('Đang tạm khóa phê duyệt / chi hoàn'), findsOneWidget);
+
+    await tester.tap(find.text('Chờ Four-Eyes hoặc chờ UNC chi hoàn'));
+    await tester.pumpAndSettle();
+    expect(find.text('PAYOUT-1'), findsOneWidget);
+    expect(find.text('HELD-1'), findsNothing);
+  });
+
+  testWidgets('main tabs use the React labels', (tester) async {
+    await pumpAt(tester, '/admin/deposits');
+
+    // Restrict to the tab bar: "Đang giữ cọc" also appears as a row status badge.
+    final tabLabel = (String label) =>
+        find.descendant(of: find.byType(AppTabs), matching: find.text(label));
+
+    expect(tabLabel('Đang giữ cọc'), findsOneWidget);
+    expect(tabLabel('Chờ duyệt / Chi hoàn'), findsOneWidget);
+    expect(tabLabel('Hoàn trả lệnh chi'), findsOneWidget);
+    expect(tabLabel('Đã hoàn / Tất toán'), findsOneWidget);
+  });
+
+  testWidgets('tapping a main tab clears an active quick filter and banner',
+      (tester) async {
+    await pumpAt(tester, '/admin/deposits?overdue=1');
+    expect(find.text('Xóa bộ lọc nhanh'), findsOneWidget);
+    expect(find.text('OVERDUE-1'), findsOneWidget);
+
+    await tester.tap(find.descendant(
+        of: find.byType(AppTabs), matching: find.text('Chờ duyệt / Chi hoàn')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Xóa bộ lọc nhanh'), findsNothing);
+    expect(find.textContaining('Đang áp dụng bộ lọc nhanh từ Dashboard'),
+        findsNothing);
+    expect(find.text('PAYOUT-1'), findsOneWidget);
+    expect(find.text('OVERDUE-1'), findsNothing);
   });
 }

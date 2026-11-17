@@ -107,7 +107,8 @@ void main() {
       expect(peeked, isNotNull);
     });
 
-    test('3. listTransactions sends GET /api/v1/deposits/:id/transactions', () async {
+    test('3. listTransactions sends GET /api/v1/deposits/:id/transactions',
+        () async {
       await depositsService.listTransactions('dep-123');
       expect(lastRequest.method, 'GET');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/transactions');
@@ -119,7 +120,9 @@ void main() {
       expect(lastRequest.path, '/api/v1/deposits/dep-123/audit-logs');
     });
 
-    test('5. createTransaction sends POST /api/v1/deposits/:id/transactions with idempotency header', () async {
+    test(
+        '5. createTransaction sends POST /api/v1/deposits/:id/transactions with idempotency header',
+        () async {
       final payload = {'type': 'collect', 'amount': 5000000};
       await depositsService.createTransaction('dep-123', payload);
       expect(lastRequest.method, 'POST');
@@ -128,13 +131,16 @@ void main() {
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('6. getSettlement sends GET /api/v1/deposits/:id/settlement', () async {
+    test('6. getSettlement sends GET /api/v1/deposits/:id/settlement',
+        () async {
       await depositsService.getSettlement('dep-123');
       expect(lastRequest.method, 'GET');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/settlement');
     });
 
-    test('7. submitSettlement sends POST /api/v1/deposits/:id/settlement with idempotency header', () async {
+    test(
+        '7. submitSettlement sends POST /api/v1/deposits/:id/settlement with idempotency header',
+        () async {
       final payload = {'deductions': [], 'refund_method': 'BANK_TRANSFER'};
       await depositsService.submitSettlement('dep-123', payload);
       expect(lastRequest.method, 'POST');
@@ -142,57 +148,82 @@ void main() {
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('8. approveSettlement sends POST /api/v1/deposits/:id/settlement/approve with idempotency header', () async {
+    test(
+        '8. approveSettlement sends POST /api/v1/deposits/:id/settlement/approve with idempotency header',
+        () async {
       await depositsService.approveSettlement('dep-123');
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/settlement/approve');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('9. rejectSettlement sends POST /api/v1/deposits/:id/settlement/reject with idempotency header', () async {
-      await depositsService.rejectSettlement('dep-123', {'reason': 'Cần kiểm tra lại tiền điện'});
+    test(
+        '9. rejectSettlement sends POST /api/v1/deposits/:id/settlement/reject with idempotency header',
+        () async {
+      await depositsService.rejectSettlement(
+          'dep-123', {'reason': 'Cần kiểm tra lại tiền điện'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/settlement/reject');
       expect(lastRequest.data['reason'], 'Cần kiểm tra lại tiền điện');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('10. dispute sends POST /api/v1/deposits/:id/dispute with idempotency header', () async {
-      await depositsService.dispute('dep-123', {'reason': 'Cư dân không đồng ý phí vệ sinh'});
+    test(
+        '10. dispute sends POST /api/v1/deposits/:id/dispute with idempotency header',
+        () async {
+      await depositsService
+          .dispute('dep-123', {'reason': 'Cư dân không đồng ý phí vệ sinh'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/dispute');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('11. resolveDispute sends POST /api/v1/deposits/:id/resolve-dispute with idempotency header', () async {
-      await depositsService.resolveDispute('dep-123', {'resolution': 'ADJUST', 'reason': 'Chấp nhận giảm 500k'});
+    test(
+        '11. resolveDispute sends POST /api/v1/deposits/:id/resolve-dispute with idempotency header',
+        () async {
+      await depositsService.resolveDispute(
+          'dep-123', {'resolution': 'ADJUST', 'reason': 'Chấp nhận giảm 500k'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/resolve-dispute');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('12. executePayout sends POST /api/v1/deposits/:id/payout with idempotency header', () async {
-      await depositsService.executePayout('dep-123', {'reference_code': 'UNC999', 'evidence': ['https://file.url']});
+    test(
+        '12. executePayout sends POST /api/v1/deposits/:id/payout with idempotency header',
+        () async {
+      await depositsService.executePayout('dep-123', {
+        'reference_code': 'UNC999',
+        'evidence': ['https://file.url']
+      });
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/payout');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('13. markPayoutReturned sends POST /api/v1/deposits/:id/payout-returned with idempotency header', () async {
-      await depositsService.markPayoutReturned('dep-123', {'reason': 'Sai số tài khoản'});
+    test(
+        '13. markPayoutReturned sends POST /api/v1/deposits/:id/payout-returned with idempotency header',
+        () async {
+      await depositsService
+          .markPayoutReturned('dep-123', {'reason': 'Sai số tài khoản'});
       expect(lastRequest.method, 'POST');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/payout-returned');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('14. updateRefundBankInfo sends PATCH /api/v1/deposits/:id/bank-info with idempotency header', () async {
-      await depositsService.updateRefundBankInfo('dep-123', {'bank_info': {'bank_name': 'VCB', 'account_number': '123'}});
+    test(
+        '14. updateRefundBankInfo sends PATCH /api/v1/deposits/:id/bank-info with idempotency header',
+        () async {
+      await depositsService.updateRefundBankInfo('dep-123', {
+        'bank_info': {'bank_name': 'VCB', 'account_number': '123'}
+      });
       expect(lastRequest.method, 'PATCH');
       expect(lastRequest.path, '/api/v1/deposits/dep-123/bank-info');
       expect(lastRequest.headers['Idempotency-Key'], isNotNull);
     });
 
-    test('15. getSettlementPdfHtml sends GET /api/v1/deposits/:id/settlement/pdf with ResponseType.plain', () async {
+    test(
+        '15. getSettlementPdfHtml sends GET /api/v1/deposits/:id/settlement/pdf with ResponseType.plain',
+        () async {
       final html = await depositsService.getSettlementPdfHtml('dep-123');
       expect(html, contains('Bảng kê tất toán'));
       expect(lastRequest.method, 'GET');
@@ -213,7 +244,9 @@ void main() {
     });
   });
 
-  group('resolveSettlementPayoutSummary (separation of deposit refund vs credit refund)', () {
+  group(
+      'resolveSettlementPayoutSummary (separation of deposit refund vs credit refund)',
+      () {
     test('separates deposit refund and credit balance refund clearly', () {
       final summary = resolveSettlementPayoutSummary({
         'deposit_refund_amount': 5000000,
@@ -297,7 +330,9 @@ void main() {
       expect(canApprove, isTrue);
     });
 
-    test('sys_admin CANNOT approve if building HAS active owner (owner must approve)', () {
+    test(
+        'sys_admin CANNOT approve if building HAS active owner (owner must approve)',
+        () {
       final canApprove = canActorApproveDepositRow(
         isSysAdmin: true,
         currentUserId: 'user-admin-1',
@@ -310,7 +345,9 @@ void main() {
   });
 
   group('canCollectAdditionalDeposit gating', () {
-    test('returns true only for HELD deposit with active contract and deposit shortage', () {
+    test(
+        'returns true only for HELD deposit with active contract and deposit shortage',
+        () {
       final valid = canCollectAdditionalDeposit({
         'status': 'HELD',
         'contract_status': 'ACTIVE',
@@ -449,7 +486,8 @@ void main() {
       );
     }
 
-    testWidgets('renders DepositsPage with tabs and stats card', (tester) async {
+    testWidgets('renders DepositsPage with tabs and stats card',
+        (tester) async {
       await tester.binding.setSurfaceSize(const Size(1280, 800));
 
       const testUser = UserModel(
@@ -462,16 +500,18 @@ void main() {
       await tester.pumpWidget(buildTestApp(user: testUser));
       await tester.pumpAndSettle();
 
-      expect(find.text('Sổ cọc hợp đồng'), findsOneWidget);
+      expect(find.text('Quản lý Tiền đặt cọc & Tất toán'), findsOneWidget);
       expect(find.textContaining('Đang giữ'), findsWidgets);
       expect(find.textContaining('Chờ duyệt'), findsWidgets);
-      expect(find.textContaining('Đã hoàn cọc'), findsWidgets);
+      expect(find.textContaining('Đã hoàn / Tất toán'), findsWidgets);
       expect(find.textContaining('Tranh chấp'), findsWidgets);
       expect(find.text('P101'), findsOneWidget);
       expect(find.text('Sổ giao dịch'), findsWidgets);
     });
 
-    testWidgets('deep links directly to settlement modal when initialDepositId and initialModal=settlement are passed', (tester) async {
+    testWidgets(
+        'deep links directly to settlement modal when initialDepositId and initialModal=settlement are passed',
+        (tester) async {
       await tester.binding.setSurfaceSize(const Size(1280, 800));
 
       const testUser = UserModel(
@@ -499,10 +539,12 @@ void main() {
       expect(find.textContaining('500.000'), findsWidgets);
     });
 
-    testWidgets('surfaces API errors via toastProvider on action failure', (tester) async {
+    testWidgets('surfaces API errors via toastProvider on action failure',
+        (tester) async {
       await tester.binding.setSurfaceSize(const Size(1280, 800));
 
-      fakeService.throwOnApprove = Exception('Lỗi từ chối phê duyệt do không đủ quyền');
+      fakeService.throwOnApprove =
+          Exception('Lỗi từ chối phê duyệt do không đủ quyền');
 
       const testUser = UserModel(
         id: 'user-owner-1',
@@ -538,13 +580,19 @@ void main() {
 
       // Toast state should have error
       final toasts = container.read(toastProvider);
-      expect(toasts.any((t) => t.message.contains('Lỗi từ chối phê duyệt') || t.variant == ToastVariant.error), isTrue);
+      expect(
+          toasts.any((t) =>
+              t.message.contains('Lỗi từ chối phê duyệt') ||
+              t.variant == ToastVariant.error),
+          isTrue);
 
       // Drain toast auto-dismiss timer
       await tester.pump(const Duration(seconds: 6));
     });
 
-    testWidgets('propose settlement: FileUploadField evidence required, live draft recalculation, and submitSettlement uses items key with evidence', (tester) async {
+    testWidgets(
+        'propose settlement: FileUploadField evidence required, live draft recalculation, and submitSettlement uses items key with evidence',
+        (tester) async {
       await tester.binding.setSurfaceSize(const Size(1280, 1400));
 
       const testUser = UserModel(
@@ -599,12 +647,16 @@ void main() {
       await tester.pumpAndSettle();
 
       final toastsBefore = container.read(toastProvider);
-      expect(toastsBefore.any((t) => t.message.contains('bằng chứng') || t.message.contains('FR-023')), isTrue);
+      expect(
+          toastsBefore.any((t) =>
+              t.message.contains('bằng chứng') || t.message.contains('FR-023')),
+          isTrue);
       // Dialog should still be open
       expect(find.text('Thêm khoản khấu trừ'), findsOneWidget);
 
       // Bind evidence via FileUploadField
-      final uploadField = tester.widget<FileUploadField>(find.byKey(const ValueKey('deduction_evidence_upload')));
+      final uploadField = tester.widget<FileUploadField>(
+          find.byKey(const ValueKey('deduction_evidence_upload')));
       uploadField.onChanged?.call(['data:image/png;base64,iVBORw0KGgo=']);
       await tester.pumpAndSettle();
 
@@ -669,7 +721,8 @@ class FakeDepositsService extends Fake implements DepositsService {
   dynamic peekList([Map<String, dynamic>? params]) => null;
 
   @override
-  Future<dynamic> list([Map<String, dynamic>? params, bool force = false]) async {
+  Future<dynamic> list(
+      [Map<String, dynamic>? params, bool force = false]) async {
     return {'data': deposits};
   }
 
@@ -685,7 +738,8 @@ class FakeDepositsService extends Fake implements DepositsService {
 
   @override
   Future<dynamic> getSettlement(String id) async {
-    final dep = deposits.firstWhere((d) => d['id'] == id, orElse: () => deposits.first);
+    final dep =
+        deposits.firstWhere((d) => d['id'] == id, orElse: () => deposits.first);
     return {
       'data': {
         ...dep,
@@ -696,7 +750,8 @@ class FakeDepositsService extends Fake implements DepositsService {
   }
 
   @override
-  Future<dynamic> submitSettlement(String id, Map<String, dynamic> payload, [Options? options]) async {
+  Future<dynamic> submitSettlement(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
     lastSubmittedSettlementPayload = payload;
     return {
       'success': true,
@@ -706,43 +761,72 @@ class FakeDepositsService extends Fake implements DepositsService {
   }
 
   @override
-  Future<dynamic> approveSettlement(String id, [Map<String, dynamic>? payload, Options? options]) async {
+  Future<dynamic> approveSettlement(String id,
+      [Map<String, dynamic>? payload, Options? options]) async {
     if (throwOnApprove != null) throw throwOnApprove!;
-    return {'success': true, 'data': {'status': 'APPROVED_PENDING_PAYOUT'}};
+    return {
+      'success': true,
+      'data': {'status': 'APPROVED_PENDING_PAYOUT'}
+    };
   }
 
   @override
-  Future<dynamic> rejectSettlement(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'status': 'SETTLEMENT_DRAFT'}};
+  Future<dynamic> rejectSettlement(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'status': 'SETTLEMENT_DRAFT'}
+    };
   }
 
   @override
-  Future<dynamic> dispute(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'status': 'DISPUTED'}};
+  Future<dynamic> dispute(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'status': 'DISPUTED'}
+    };
   }
 
   @override
-  Future<dynamic> resolveDispute(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'status': 'APPROVED_PENDING_PAYOUT'}};
+  Future<dynamic> resolveDispute(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'status': 'APPROVED_PENDING_PAYOUT'}
+    };
   }
 
   @override
-  Future<dynamic> executePayout(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'status': 'REFUNDED'}};
+  Future<dynamic> executePayout(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'status': 'REFUNDED'}
+    };
   }
 
   @override
-  Future<dynamic> markPayoutReturned(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'status': 'RETURNED'}};
+  Future<dynamic> markPayoutReturned(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'status': 'RETURNED'}
+    };
   }
 
   @override
-  Future<dynamic> updateRefundBankInfo(String id, Map<String, dynamic> payload, [Options? options]) async {
-    return {'success': true, 'data': {'settlement': {}}};
+  Future<dynamic> updateRefundBankInfo(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
+    return {
+      'success': true,
+      'data': {'settlement': {}}
+    };
   }
 
   @override
-  Future<dynamic> createTransaction(String id, Map<String, dynamic> payload, [Options? options]) async {
+  Future<dynamic> createTransaction(String id, Map<String, dynamic> payload,
+      [Options? options]) async {
     return {'success': true, 'data': {}};
   }
 
