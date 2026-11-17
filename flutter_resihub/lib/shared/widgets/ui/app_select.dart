@@ -26,12 +26,46 @@ String _normalizeVnSearch(String input) {
   return str;
 }
 
+Widget _buildSelectLogo(String? logo, {double width = 30, double height = 18}) {
+  if (logo == null || logo.isEmpty) return const SizedBox.shrink();
+  return ClipRRect(
+    borderRadius: BorderRadius.circular(3),
+    child: Image.network(
+      logo,
+      width: width,
+      height: height,
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => SizedBox(width: width, height: height),
+    ),
+  );
+}
+
+Widget _buildSelectBadge(String badge) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+    decoration: BoxDecoration(
+      color: AppColors.slate50,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(
+      badge,
+      style: const TextStyle(
+        fontFamily: 'Inter',
+        fontSize: 10,
+        fontWeight: FontWeight.w600,
+        color: AppColors.slate500,
+      ),
+    ),
+  );
+}
+
 class AppSelectOption<T> {
   final T value;
   final String label;
   final String? sublabel;
   final String? badge;
   final String? logo;
+  final String? searchText;
   final bool disabled;
 
   const AppSelectOption({
@@ -40,6 +74,7 @@ class AppSelectOption<T> {
     this.sublabel,
     this.badge,
     this.logo,
+    this.searchText,
     this.disabled = false,
   });
 }
@@ -54,7 +89,7 @@ class AppSelect<T> extends StatelessWidget {
   final String? hint;
   final bool required;
   final bool disabled;
-  final bool searchable;
+  final bool? searchable;
   final String? searchPlaceholder;
   final String emptyText;
   final Widget? icon;
@@ -70,7 +105,7 @@ class AppSelect<T> extends StatelessWidget {
     this.hint,
     this.required = false,
     this.disabled = false,
-    this.searchable = false,
+    this.searchable,
     this.searchPlaceholder,
     this.emptyText = 'Không tìm thấy mục phù hợp',
     this.icon,
@@ -82,6 +117,23 @@ class AppSelect<T> extends StatelessWidget {
     }
     return null;
   }
+
+  // ponytail: auto clear option only for String-valued selects; other T callers
+  // must supply their own empty option. Lift the cast if that case appears.
+  List<AppSelectOption<T>> get _effectiveOptions {
+    if (placeholder != null &&
+        T == String &&
+        !options.any((opt) => opt.value == '')) {
+      return [
+        AppSelectOption<T>(value: '' as T, label: placeholder!, searchText: placeholder),
+        ...options,
+      ];
+    }
+    return options;
+  }
+
+  bool get _showSearch =>
+      searchable ?? (options.length > 5 || searchPlaceholder != null);
 
   void _openSelectionDialog(BuildContext context) {
     if (disabled || onChanged == null) return;
@@ -98,9 +150,9 @@ class AppSelect<T> extends StatelessWidget {
             constraints: const BoxConstraints(maxWidth: 480, maxHeight: 560),
             child: _AppSelectContent<T>(
               title: label ?? 'Chọn một mục',
-              options: options,
+              options: _effectiveOptions,
               currentValue: value,
-              searchable: searchable || options.length > 5,
+              searchable: _showSearch,
               searchPlaceholder: searchPlaceholder,
               emptyText: emptyText,
               onSelect: (opt) {
@@ -127,9 +179,9 @@ class AppSelect<T> extends StatelessWidget {
             ),
             child: _AppSelectContent<T>(
               title: label ?? 'Chọn một mục',
-              options: options,
+              options: _effectiveOptions,
               currentValue: value,
-              searchable: searchable || options.length > 5,
+              searchable: _showSearch,
               searchPlaceholder: searchPlaceholder,
               emptyText: emptyText,
               onSelect: (opt) {
@@ -148,6 +200,12 @@ class AppSelect<T> extends StatelessWidget {
     final selected = _selectedOption;
     final hasSelection = selected != null;
     final displayText = hasSelection ? selected.label : (placeholder ?? 'Chọn...');
+    final selectedLogo = selected?.logo;
+    final selectedBadge = selected?.badge;
+    final showTriggerLogo = selectedLogo != null && selectedLogo.isNotEmpty;
+    final showTriggerBadge = selectedBadge != null &&
+        selectedBadge.isNotEmpty &&
+        !showTriggerLogo;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -200,22 +258,35 @@ class AppSelect<T> extends StatelessWidget {
             ),
             child: Row(
               children: [
-                if (icon != null) ...[
+                if (showTriggerLogo) ...[
+                  _buildSelectLogo(selectedLogo),
+                  const SizedBox(width: 8),
+                ] else if (icon != null) ...[
                   icon!,
                   const SizedBox(width: 8),
                 ],
                 Expanded(
-                  child: Text(
-                    displayText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: 'Inter',
-                      fontSize: 14,
-                      color: hasSelection
-                          ? (disabled ? AppColors.slate400 : AppColors.slate900)
-                          : AppColors.textMuted,
-                    ),
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          displayText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 14,
+                            color: hasSelection
+                                ? (disabled ? AppColors.slate400 : AppColors.slate900)
+                                : AppColors.textMuted,
+                          ),
+                        ),
+                      ),
+                      if (showTriggerBadge) ...[
+                        const SizedBox(width: 6),
+                        _buildSelectBadge(selectedBadge),
+                      ],
+                    ],
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -284,9 +355,14 @@ class _AppSelectContentState<T> extends State<_AppSelectContent<T>> {
     if (_search.isEmpty) return widget.options;
     final q = _normalizeVnSearch(_search);
     return widget.options.where((opt) {
-      final labelNorm = _normalizeVnSearch(opt.label);
-      final sublabelNorm = opt.sublabel != null ? _normalizeVnSearch(opt.sublabel!) : '';
-      return labelNorm.contains(q) || sublabelNorm.contains(q);
+      final blob = _normalizeVnSearch([
+        opt.label,
+        opt.sublabel,
+        opt.badge,
+        opt.searchText,
+        opt.value.toString(),
+      ].join(' '));
+      return blob.contains(q);
     }).toList();
   }
 
@@ -357,19 +433,33 @@ class _AppSelectContentState<T> extends State<_AppSelectContent<T>> {
                     final opt = filtered[idx];
                     final isSelected = opt.value == widget.currentValue;
 
+                    final hasLogo = opt.logo != null && opt.logo!.isNotEmpty;
+                    final hasBadge = opt.badge != null && opt.badge!.isNotEmpty;
+
                     return ListTile(
                       enabled: !opt.disabled,
                       dense: true,
-                      title: Text(
-                        opt.label,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: 14,
-                          fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                          color: isSelected ? AppColors.primary700 : AppColors.slate800,
-                        ),
+                      leading: hasLogo ? _buildSelectLogo(opt.logo) : null,
+                      title: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              opt.label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 14,
+                                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                                color: isSelected ? AppColors.primary700 : AppColors.slate800,
+                              ),
+                            ),
+                          ),
+                          if (hasBadge) ...[
+                            const SizedBox(width: 6),
+                            _buildSelectBadge(opt.badge!),
+                          ],
+                        ],
                       ),
                       subtitle: opt.sublabel != null
                           ? Text(

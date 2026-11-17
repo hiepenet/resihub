@@ -323,6 +323,97 @@ void main() {
 
       expect(selected, 'bt');
     });
+
+    testWidgets('AppSelect searches by searchText (BIN 970436)', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AppSelect<String>(
+              placeholder: 'Chọn ngân hàng',
+              options: const [
+                AppSelectOption(
+                  value: 'VCB',
+                  label: 'Vietcombank',
+                  sublabel: 'Ngân hàng TMCP Công thương',
+                  badge: 'VCB',
+                  searchText: '970436',
+                ),
+                AppSelectOption(
+                  value: 'TCB',
+                  label: 'Techcombank',
+                  searchText: '970407',
+                ),
+              ],
+              searchable: true,
+              onChanged: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(AppSelect<String>));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), '970436');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Vietcombank'), findsOneWidget);
+      expect(find.text('Techcombank'), findsNothing);
+    });
+
+    testWidgets('AppSelect exposes a clear option with empty value when placeholder is set', (tester) async {
+      String selected = 'VCB';
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => AppSelect<String>(
+                placeholder: 'Chọn ngân hàng',
+                value: selected,
+                options: const [
+                  AppSelectOption(value: 'VCB', label: 'Vietcombank'),
+                  AppSelectOption(value: 'TCB', label: 'Techcombank'),
+                ],
+                onChanged: (val) => setState(() => selected = val ?? ''),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(AppSelect<String>));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Chọn ngân hàng'), findsOneWidget);
+      await tester.tap(find.text('Chọn ngân hàng'));
+      await tester.pumpAndSettle();
+
+      expect(selected, '');
+    });
+
+    testWidgets('AppSelect with searchable:false hides search even with more than 5 options', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AppSelect<String>(
+              placeholder: 'Chọn',
+              options: [
+                for (var i = 0; i < 6; i++)
+                  AppSelectOption(value: 'v$i', label: 'Option $i'),
+              ],
+              searchable: false,
+              onChanged: (_) {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(AppSelect<String>));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Option 5'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+    });
   });
 
   group('6. AppTabs', () {
