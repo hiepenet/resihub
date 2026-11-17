@@ -370,7 +370,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
                 ),
                 const SizedBox(height: 12),
                 AppInput(
-                  label: 'Vị trí sự cố',
+                  label: 'Vị trí cụ thể trong phòng',
                   controller: locationCtrl,
                   placeholder: 'VD: Nhà vệ sinh phụ, Ban công, Bếp...',
                 ),
@@ -545,7 +545,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
 
     AppModal.show(
       context: context,
-      title: 'Trùng lặp yêu cầu',
+      title: 'Phát hiện yêu cầu cùng hạng mục trong 24 giờ qua',
       subtitle:
           'Vui lòng kiểm tra yêu cầu đang mở để tránh tạo phiếu trùng lặp.',
       child: StatefulBuilder(
@@ -1177,9 +1177,13 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
               activeTab: _filterTab,
               onChanged: (tab) => setState(() => _filterTab = tab),
               tabs: [
-                AppTabItem(id: 'all', label: 'Tất cả', count: _requests.length),
+                AppTabItem(
+                    id: 'all',
+                    label: 'Tất cả yêu cầu',
+                    count: _requests.length),
                 AppTabItem(id: 'open', label: 'Đang xử lý', count: _openCount),
-                AppTabItem(id: 'done', label: 'Đã hoàn tất', count: _doneCount),
+                AppTabItem(
+                    id: 'done', label: 'Đã hoàn thành', count: _doneCount),
               ],
             ),
             const SizedBox(height: 16),

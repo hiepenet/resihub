@@ -103,9 +103,9 @@ void main() {
       await tester.pumpWidget(_buildTab(service));
       await tester.pumpAndSettle();
 
-      expect(find.text('Tất cả'), findsOneWidget);
+      expect(find.text('Tất cả yêu cầu'), findsOneWidget);
       expect(find.text('Đang xử lý'), findsOneWidget);
-      expect(find.text('Đã hoàn tất'), findsOneWidget);
+      expect(find.text('Đã hoàn thành'), findsOneWidget);
 
       expect(find.textContaining('Mã tra cứu'), findsWidgets);
       expect(find.textContaining('Khung giờ'), findsWidgets);
@@ -123,7 +123,7 @@ void main() {
       await tester.tap(find.text('Gửi yêu cầu báo hỏng'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vị trí sự cố'), findsOneWidget);
+      expect(find.text('Vị trí cụ thể trong phòng'), findsOneWidget);
       expect(find.textContaining('Khung giờ thuận tiện'), findsWidgets);
       expect(find.text('Hạng mục sự cố'), findsOneWidget);
       expect(find.text('Mức độ khẩn cấp'), findsOneWidget);
@@ -168,7 +168,8 @@ void main() {
       await tester.tap(submit);
       await tester.pumpAndSettle();
 
-      expect(find.text('Trùng lặp yêu cầu'), findsOneWidget);
+      expect(find.text('Phát hiện yêu cầu cùng hạng mục trong 24 giờ qua'),
+          findsOneWidget);
       expect(find.text('Xem yêu cầu đã gửi'), findsOneWidget);
       expect(find.text('Vẫn tiếp tục gửi mới'), findsOneWidget);
       expect(find.textContaining('SR-2026-001'), findsWidgets);
