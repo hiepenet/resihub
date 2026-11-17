@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/date_range.dart';
 import '../../../core/utils/file_exporter.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/idempotency.dart';
@@ -20,6 +22,9 @@ import '../../../shared/widgets/ui/app_tabs.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../services/deposits_service.dart';
 import '../widgets/deposit_detail_modal.dart';
+
+/// Bộ lọc nhanh từ Dashboard (khớp `DepositsPage.jsx`: overdue / tab=payout / status).
+enum _DepositQuickFilter { none, payout, overdue, disputed }
 
 class DepositsPage extends ConsumerStatefulWidget {
   final String? initialDepositId;
@@ -41,11 +46,58 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
   String _activeTab = 'held';
   String _search = '';
   bool _deepLinkHandled = false;
+  _DepositQuickFilter _quickFilter = _DepositQuickFilter.none;
 
   @override
   void initState() {
     super.initState();
     _loadInitialData();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Không có GoRouter (widget test cũ) → bỏ qua bộ lọc nhanh.
+    final params = GoRouter.maybeOf(context) != null
+        ? GoRouterState.of(context).uri.queryParameters
+        : const <String, String>{};
+    final status = params['status'];
+    final tab = params['tab'];
+    final overdue = params['overdue'] == '1';
+
+    // activeTab: khớp useEffect trong React (status > payout > tab hợp lệ).
+    if (status == 'DISPUTED') {
+      _activeTab = 'disputed';
+    } else if (tab == 'payout') {
+      _activeTab = 'pending';
+    } else if (tab != null &&
+        ['held', 'pending', 'returned', 'refunded', 'disputed'].contains(tab)) {
+      _activeTab = tab;
+    }
+
+    // quickFilter: khớp precedence trong filteredDeposits của React (overdue > payout > status).
+    if (overdue) {
+      _quickFilter = _DepositQuickFilter.overdue;
+    } else if (tab == 'payout') {
+      _quickFilter = _DepositQuickFilter.payout;
+    } else if (status == 'DISPUTED') {
+      _quickFilter = _DepositQuickFilter.disputed;
+    } else {
+      _quickFilter = _DepositQuickFilter.none;
+    }
+  }
+
+  String get _quickFilterLabel {
+    switch (_quickFilter) {
+      case _DepositQuickFilter.overdue:
+        return 'Các sổ cọc quá hạn hoàn trả (FR-068)';
+      case _DepositQuickFilter.payout:
+        return 'Các sổ cọc chờ BQL chi hoàn UNC / ngân hàng trả lại';
+      case _DepositQuickFilter.disputed:
+        return 'Trạng thái DISPUTED';
+      case _DepositQuickFilter.none:
+        return '';
+    }
   }
 
   void _loadInitialData() {
@@ -113,7 +165,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
         );
 
     if (dep == null) {
-      ref.read(toastProvider.notifier).info('Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      ref.read(toastProvider.notifier).info(
+          'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
       return;
     }
 
@@ -122,23 +175,34 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
       _activeTab = 'disputed';
     } else if (status == 'RETURNED') {
       _activeTab = 'returned';
-    } else if (status == 'PENDING_APPROVAL' || status == 'APPROVED_PENDING_PAYOUT') {
+    } else if (status == 'PENDING_APPROVAL' ||
+        status == 'APPROVED_PENDING_PAYOUT') {
       _activeTab = 'pending';
-    } else if (['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].contains(status)) {
+    } else if ([
+      'REFUNDED',
+      'PARTIALLY_REFUNDED',
+      'DEDUCTED_FULL',
+      'TRANSFERRED'
+    ].contains(status)) {
       _activeTab = 'refunded';
     } else {
       _activeTab = 'held';
     }
 
     final targetModal = widget.initialModal;
-    final tabIdx = (targetModal == 'settlement' || status == 'PENDING_APPROVAL' || status == 'APPROVED_PENDING_PAYOUT') ? 0 : 1;
+    final tabIdx = (targetModal == 'settlement' ||
+            status == 'PENDING_APPROVAL' ||
+            status == 'APPROVED_PENDING_PAYOUT')
+        ? 0
+        : 1;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _openDetailModal(dep, initialTabIndex: tabIdx);
     });
   }
 
-  void _openDetailModal(Map<String, dynamic> deposit, {int initialTabIndex = 1}) {
+  void _openDetailModal(Map<String, dynamic> deposit,
+      {int initialTabIndex = 1}) {
     DepositDetailModal.show(
       context,
       deposit: deposit,
@@ -160,10 +224,14 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
         const CsvHeader(label: 'Mã hợp đồng', key: 'contract_id'),
       ];
 
-      final bytes = buildUtf8BomCsvBytes(headers: headers, rows: _scopedDeposits);
-      final filename = 'so-coc-rp07-${DateTime.now().toIso8601String().substring(0, 10)}.csv';
+      final bytes =
+          buildUtf8BomCsvBytes(headers: headers, rows: _scopedDeposits);
+      final filename =
+          'so-coc-rp07-${DateTime.now().toIso8601String().substring(0, 10)}.csv';
       await saveOrShareBytes(bytes, fileName: filename, mimeType: 'text/csv');
-      ref.read(toastProvider.notifier).success('Đã xuất Sổ cọc (RP-07) thành công.');
+      ref
+          .read(toastProvider.notifier)
+          .success('Đã xuất Sổ cọc (RP-07) thành công.');
     } catch (err) {
       ref.read(toastProvider.notifier).error(
             extractErrorMessage(err, 'Không thể xuất tệp Sổ cọc (RP-07).'),
@@ -172,33 +240,61 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
   }
 
   List<Map<String, dynamic>> get _scopedDeposits {
-    final selectedBuildingId = ref.watch(authProvider.select((s) => s.selectedBuildingId));
+    final selectedBuildingId =
+        ref.watch(authProvider.select((s) => s.selectedBuildingId));
     if (selectedBuildingId.isEmpty) return _deposits;
-    return _deposits.where((d) => d['building_id']?.toString() == selectedBuildingId).toList();
+    return _deposits
+        .where((d) => d['building_id']?.toString() == selectedBuildingId)
+        .toList();
   }
 
   List<Map<String, dynamic>> get _filteredDeposits {
     final q = _search.trim().toLowerCase();
-    return _scopedDeposits.filterDeposits(activeTab: _activeTab, search: q);
+    return _scopedDeposits.filterDeposits(
+      activeTab: _activeTab,
+      search: q,
+      quickFilter: _quickFilter,
+      todayIso: toDateOnlyStr(DateTime.now()),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final scoped = _scopedDeposits;
 
-    final heldCount = scoped.where((d) => ['HELD', 'SETTLEMENT_DRAFT'].contains(d['status'])).length;
-    final pendingCount = scoped.where((d) => ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].contains(d['status'])).length;
+    final heldCount = scoped
+        .where((d) => ['HELD', 'SETTLEMENT_DRAFT'].contains(d['status']))
+        .length;
+    final pendingCount = scoped
+        .where((d) => ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT']
+            .contains(d['status']))
+        .length;
     final returnedCount = scoped.where((d) => d['status'] == 'RETURNED').length;
-    final refundedCount = scoped.where((d) => ['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].contains(d['status'])).length;
+    final refundedCount = scoped
+        .where((d) => [
+              'REFUNDED',
+              'PARTIALLY_REFUNDED',
+              'DEDUCTED_FULL',
+              'TRANSFERRED'
+            ].contains(d['status']))
+        .length;
     final disputedCount = scoped.where((d) => d['status'] == 'DISPUTED').length;
 
     final totalHeldAmount = scoped
-        .where((d) => ['HELD', 'SETTLEMENT_DRAFT', 'PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT', 'RETURNED', 'DISPUTED'].contains(d['status']))
+        .where((d) => [
+              'HELD',
+              'SETTLEMENT_DRAFT',
+              'PENDING_APPROVAL',
+              'APPROVED_PENDING_PAYOUT',
+              'RETURNED',
+              'DISPUTED'
+            ].contains(d['status']))
         .fold<int>(0, (sum, d) {
-          final amt = d['amount_held'];
-          final numVal = amt is num ? amt : num.tryParse(amt?.toString() ?? '') ?? 0;
-          return sum + numVal.toInt();
-        });
+      final amt = d['amount_held'];
+      final numVal =
+          amt is num ? amt : num.tryParse(amt?.toString() ?? '') ?? 0;
+      return sum + numVal.toInt();
+    });
 
     final tabItems = [
       AppTabItem(id: 'held', label: 'Đang giữ ($heldCount)'),
@@ -218,7 +314,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
             // Page Header
             PageHeader(
               title: 'Sổ cọc hợp đồng',
-              subtitle: 'Quản lý độc lập tiền đặt cọc và quy trình quyết toán hoàn cọc 4 mắt.',
+              subtitle:
+                  'Quản lý độc lập tiền đặt cọc và quy trình quyết toán hoàn cọc 4 mắt.',
               actions: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -282,6 +379,55 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
             ),
             const SizedBox(height: 24),
 
+            // Quick-filter banner (Dashboard drill-down)
+            if (_quickFilter != _DepositQuickFilter.none)
+              Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: AppColors.amber50,
+                  border: Border.all(color: AppColors.amber300),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(LucideIcons.triangleAlert,
+                        size: 16, color: AppColors.amber600),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 4,
+                        children: [
+                          const Text(
+                            'Đang áp dụng bộ lọc nhanh từ Dashboard',
+                            style: TextStyle(
+                              color: AppColors.amber900,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          Text(
+                            ': ${_quickFilterLabel} (${_filteredDeposits.length} bản ghi)',
+                            style: const TextStyle(
+                                color: AppColors.amber900, fontSize: 13),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    AppButton(
+                      text: 'Xóa bộ lọc nhanh',
+                      variant: AppButtonVariant.outline,
+                      size: AppButtonSize.xs,
+                      icon: const Icon(LucideIcons.xCircle, size: 14),
+                      onPressed: () => context.go('/admin/deposits'),
+                    ),
+                  ],
+                ),
+              ),
+
             // Tabs & Search Bar
             AppCard(
               padding: const EdgeInsets.all(16),
@@ -321,7 +467,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                   else if (_filteredDeposits.isEmpty)
                     const EmptyState(
                       title: 'Không tìm thấy sổ cọc nào',
-                      description: 'Không có dữ liệu phù hợp với bộ lọc tìm kiếm hiện tại.',
+                      description:
+                          'Không có dữ liệu phù hợp với bộ lọc tìm kiếm hiện tại.',
                     )
                   else
                     _buildDepositsTable(_filteredDeposits),
@@ -339,7 +486,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       itemCount: items.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.slate200),
+      separatorBuilder: (_, __) =>
+          const Divider(height: 1, color: AppColors.slate200),
       itemBuilder: (context, idx) {
         final dep = items[idx];
         final status = dep['status']?.toString() ?? 'HELD';
@@ -362,7 +510,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                           color: AppColors.secondary50,
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: const Icon(LucideIcons.home, size: 20, color: AppColors.secondary600),
+                        child: const Icon(LucideIcons.home,
+                            size: 20, color: AppColors.secondary600),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -379,7 +528,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                             ),
                             Text(
                               dep['building_name']?.toString() ?? 'Tòa nhà',
-                              style: const TextStyle(fontSize: 12, color: AppColors.slate500),
+                              style: const TextStyle(
+                                  fontSize: 12, color: AppColors.slate500),
                             ),
                           ],
                         ),
@@ -396,11 +546,13 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                     children: [
                       Text(
                         dep['tenant_name']?.toString() ?? 'Khách thuê',
-                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 14),
                       ),
                       Text(
                         dep['tenant_phone']?.toString() ?? '---',
-                        style: const TextStyle(fontSize: 12, color: AppColors.slate500),
+                        style: const TextStyle(
+                            fontSize: 12, color: AppColors.slate500),
                       ),
                     ],
                   ),
@@ -414,11 +566,13 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                     children: [
                       Text(
                         dep['contract_id']?.toString() ?? '---',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                        style: const TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w500),
                       ),
                       Text(
                         dep['contract_status']?.toString() ?? 'N/A',
-                        style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                        style: const TextStyle(
+                            fontSize: 11, color: AppColors.slate500),
                       ),
                     ],
                   ),
@@ -440,7 +594,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                       ),
                       Text(
                         'Quy định: ${formatMoney(dep['deposit_amount'] ?? 0)}',
-                        style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                        style: const TextStyle(
+                            fontSize: 11, color: AppColors.slate500),
                       ),
                     ],
                   ),
@@ -474,7 +629,8 @@ class _DepositsPageState extends ConsumerState<DepositsPage> {
                       variant: AppButtonVariant.outline,
                       size: AppButtonSize.xs,
                       icon: const Icon(LucideIcons.history, size: 14),
-                      onPressed: () => _openDetailModal(dep, initialTabIndex: 1),
+                      onPressed: () =>
+                          _openDetailModal(dep, initialTabIndex: 1),
                     ),
                   ],
                 ),
@@ -537,25 +693,54 @@ extension _DepositFilterExtension on List<Map<String, dynamic>> {
   List<Map<String, dynamic>> filterDeposits({
     required String activeTab,
     required String search,
+    _DepositQuickFilter quickFilter = _DepositQuickFilter.none,
+    String todayIso = '',
   }) {
+    const settled = [
+      'REFUNDED',
+      'PARTIALLY_REFUNDED',
+      'DEDUCTED_FULL',
+      'TRANSFERRED'
+    ];
     return where((d) {
       final st = d['status']?.toString();
-      if (activeTab == 'held' && !['HELD', 'SETTLEMENT_DRAFT'].contains(st)) {
-        return false;
-      }
-      if (activeTab == 'pending' &&
-          !['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT'].contains(st)) {
-        return false;
-      }
-      if (activeTab == 'returned' && st != 'RETURNED') {
-        return false;
-      }
-      if (activeTab == 'refunded' &&
-          !['REFUNDED', 'PARTIALLY_REFUNDED', 'DEDUCTED_FULL', 'TRANSFERRED'].contains(st)) {
-        return false;
-      }
-      if (activeTab == 'disputed' && st != 'DISPUTED') {
-        return false;
+      switch (quickFilter) {
+        case _DepositQuickFilter.overdue:
+          final due = toDateOnlyStr(d['refund_due_date']);
+          if (due.isEmpty ||
+              due.compareTo(todayIso) >= 0 ||
+              settled.contains(st)) {
+            return false;
+          }
+          break;
+        case _DepositQuickFilter.payout:
+          if (!const ['APPROVED_PENDING_PAYOUT', 'RETURNED'].contains(st)) {
+            return false;
+          }
+          break;
+        case _DepositQuickFilter.disputed:
+          if (st != 'DISPUTED') return false;
+          break;
+        case _DepositQuickFilter.none:
+          if (activeTab == 'held' &&
+              !const ['HELD', 'SETTLEMENT_DRAFT'].contains(st)) {
+            return false;
+          }
+          if (activeTab == 'pending' &&
+              !const ['PENDING_APPROVAL', 'APPROVED_PENDING_PAYOUT']
+                  .contains(st)) {
+            return false;
+          }
+          if (activeTab == 'returned' && st != 'RETURNED') {
+            return false;
+          }
+          if (activeTab == 'refunded' && !settled.contains(st)) {
+            return false;
+          }
+          if (activeTab == 'disputed' && st != 'DISPUTED') {
+            return false;
+          }
+          break;
       }
 
       if (search.isNotEmpty) {
