@@ -1,9 +1,11 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/base64_file.dart';
 import '../../../core/utils/billing_helpers.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/validation.dart';
@@ -13,6 +15,7 @@ import '../../../shared/widgets/common/data_table_widget.dart';
 import '../../../shared/widgets/common/page_header.dart';
 import '../../../shared/widgets/common/search_bar_widget.dart';
 import '../../../shared/widgets/common/stats_card.dart';
+import '../../../shared/widgets/ui/ai_suggestion_field.dart';
 import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
 import '../../../shared/widgets/ui/app_card.dart';
@@ -31,17 +34,17 @@ import '../widgets/meter_batch_photo_import_modal.dart';
 
 const List<Map<String, String>> kMeterTypeOptions = [
   {'value': '', 'label': 'Tất cả loại đồng hồ'},
-  {'value': 'ELECTRICITY', 'label': 'Điện sinh hoạt'},
-  {'value': 'WATER', 'label': 'Nước sinh hoạt'},
+  {'value': 'ELECTRICITY', 'label': '⚡ Đồng hồ Điện (kWh)'},
+  {'value': 'WATER', 'label': '💧 Đồng hồ Nước (m³)'},
 ];
 
-const List<Map<String, String>> kMeterStatusOptions = [
-  {'value': '', 'label': 'Tất cả trạng thái ghi'},
-  {'value': 'UNRECORDED', 'label': 'Chưa ghi chỉ số'},
-  {'value': 'DRAFT', 'label': 'Bản nháp'},
-  {'value': 'FLAGGED', 'label': 'Tạm giữ (>30%)'},
-  {'value': 'CONFIRMED', 'label': 'Đã chốt'},
-];
+/// Trạng thái chốt theo React (không có UNRECORDED); nhãn FLAGGED dùng ngưỡng từ API.
+List<Map<String, String>> meterStatusOptions(num anomalyThresholdPct) => [
+      {'value': '', 'label': 'Tất cả trạng thái chốt'},
+      {'value': 'CONFIRMED', 'label': 'Đã chốt (CONFIRMED)'},
+      {'value': 'DRAFT', 'label': 'Bản nháp (DRAFT)'},
+      {'value': 'FLAGGED', 'label': 'Tạm giữ >$anomalyThresholdPct% (FLAGGED)'},
+    ];
 
 /// Utility Meters & Readings Page (M08).
 /// Port of `frontend/src/pages/admin/meters/MeterReadingsPage.jsx`.
@@ -69,10 +72,15 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   String _meterType = '';
   String _statusFilter = '';
   String _search = '';
+  String _activeContractFilter = 'true';
+  bool _abnormalOnly = false;
+  double _anomalyThresholdPct = 30.0;
 
   // Local drafts and notes
   final Map<String, String> _draftReadings = {};
   final Map<String, String> _abnormalNotes = {};
+  // AI OCR suggestion state per row (inline edit), mirrors React aiOcrByMeter.
+  final Map<String, Map<String, dynamic>> _rowOcr = {};
   bool _batchSaving = false;
   bool _deepLinkHandled = false;
 
@@ -139,6 +147,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     final params = buildMeterListQueryParams(
       buildingId: _selectedBuildingId,
       period: _period,
+      activeContractFilter: _activeContractFilter,
     );
 
     final metersService = ref.read(metersServiceProvider);
@@ -153,6 +162,9 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
         if (mounted) {
           setState(() {
             _meters = cachedList;
+            _anomalyThresholdPct = resolveAnomalyThresholdPct(
+              cached is Map ? cached['anomaly_threshold_pct'] : null,
+            );
             for (final m in cachedList) {
               final id = m['id']?.toString() ?? '';
               if (m['period_current_reading'] != null) {
@@ -183,6 +195,9 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
       if (mounted) {
         setState(() {
           _meters = list;
+          _anomalyThresholdPct = resolveAnomalyThresholdPct(
+            res is Map ? res['anomaly_threshold_pct'] : null,
+          );
           for (final m in list) {
             final id = m['id']?.toString() ?? '';
             if (m['period_current_reading'] != null) {
@@ -238,11 +253,12 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
       if (_meterType.isNotEmpty && m['meter_type']?.toString() != _meterType) {
         return false;
       }
-      if (_statusFilter == 'UNRECORDED') {
-        final readingId = m['period_reading_id'];
-        if (readingId != null && readingId.toString().isNotEmpty) return false;
-      } else if (_statusFilter.isNotEmpty) {
-        if (m['period_reading_status']?.toString() != _statusFilter) return false;
+      if (_statusFilter.isNotEmpty &&
+          m['period_reading_status']?.toString() != _statusFilter) {
+        return false;
+      }
+      if (_abnormalOnly && m['period_is_abnormal'] != true) {
+        return false;
       }
       if (q.isNotEmpty) {
         final apt = (m['apartment_code'] ?? '').toString().toLowerCase();
@@ -259,7 +275,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
       context: context,
       initialBuildingId: _selectedBuildingId,
       period: _period,
-      anomalyThresholdPct: 30,
+      anomalyThresholdPct: _anomalyThresholdPct,
       canWriteMeters: ref.read(permissionProvider).canRecordMeters,
       onSaved: () => _fetchMeters(force: true),
     );
@@ -436,7 +452,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     );
   }
 
-  void _openSingleDetailModal(Map<String, dynamic> rawMeter) {
+  Future<void> _openSingleDetailModal(Map<String, dynamic> rawMeter) async {
     String? selectedContractId = rawMeter['target_contract_id']?.toString();
     Map<String, dynamic> activeMeter = resolveMeterSlotView(rawMeter, selectedContractId);
 
@@ -451,6 +467,22 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     String? aiSuggestionId;
     bool isAiRunning = false;
     bool saving = false;
+
+    // Reading history for this meter (React :1597-1666).
+    List<Map<String, dynamic>> history = [];
+    bool historyLoading = true;
+    try {
+      final res = await ref.read(metersServiceProvider).listMeterReadings(meterId);
+      final raw = (res is Map && res['data'] is List)
+          ? res['data'] as List
+          : (res is List ? res : const <dynamic>[]);
+      history = raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    } catch (_) {
+      history = [];
+    } finally {
+      historyLoading = false;
+    }
+    if (!mounted) return;
 
     AppModal.show<void>(
       context: context,
@@ -601,7 +633,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
 
               // Abnormal note
               AppInput(
-                label: 'Ghi chú bất thường / giải trình (nếu có biến động >30%)',
+                label: 'Ghi chú bất thường / giải trình (nếu có biến động >${_anomalyThresholdPct.round()}%)',
                 readOnly: isLocked,
                 initialValue: abnormalNote,
                 placeholder: 'VD: Khách mới dọn vào sửa nhà, vòi nước rò rỉ đã sửa...',
@@ -672,6 +704,8 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                   ),
                 ),
 
+              const SizedBox(height: 16),
+              _buildReadingHistory(history, historyLoading),
               const SizedBox(height: 24),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
@@ -718,34 +752,36 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                     ),
                     const SizedBox(width: 8),
                     AppButton(
-                      text: 'Chốt chỉ số',
+                      text: 'Xác nhận chốt',
                       variant: AppButtonVariant.primary,
                       loading: saving,
                       onPressed: () async {
-                        final valNum = num.tryParse(currentReadingStr.trim());
-                        if (valNum == null || valNum < prevReading) {
-                          ref.read(toastProvider.notifier).warning('Chỉ số mới không được nhỏ hơn chỉ số cũ ($prevReading).');
+                        final readingId = activeMeter['period_reading_id']?.toString();
+                        if (readingId == null || readingId.isEmpty) {
+                          ref.read(toastProvider.notifier).warning(
+                                'Chỉ số chưa được lưu. Vui lòng lưu nháp trước khi xác nhận chốt.',
+                              );
+                          return;
+                        }
+                        if (activeMeter['period_is_abnormal'] == true && abnormalNote.trim().isEmpty) {
+                          ref.read(toastProvider.notifier).warning(
+                                'Vui lòng nhập ghi chú giải trình bất thường trước khi xác nhận chốt.',
+                              );
                           return;
                         }
 
                         setModalState(() => saving = true);
                         try {
-                          await ref.read(metersServiceProvider).recordReading(activeMeter['id'].toString(), {
-                            'period': _period,
-                            'current_reading': valNum,
-                            'status': 'CONFIRMED',
-                            if (activeMeter['target_contract_id'] != null) 'contract_id': activeMeter['target_contract_id'],
-                            if (abnormalNote.isNotEmpty) 'abnormal_note': abnormalNote,
-                            if (proofImage != null && proofImage!.startsWith('data:image/')) 'image_base64': proofImage,
-                            if (aiSuggestionId != null) 'ai_suggestion_id': aiSuggestionId,
+                          await ref.read(metersServiceProvider).confirmReading(readingId, {
+                            if (abnormalNote.trim().isNotEmpty) 'abnormal_note': abnormalNote.trim(),
                           });
-                          ref.read(toastProvider.notifier).success('Đã chốt chỉ số công tơ thành công.');
+                          ref.read(toastProvider.notifier).success('Đã xác nhận chốt chỉ số công tơ.');
                           if (ctx.mounted) Navigator.of(ctx).pop();
                           _fetchMeters(force: true);
                         } catch (err) {
                           setModalState(() => saving = false);
                           ref.read(toastProvider.notifier).error(
-                                extractErrorMessage(err, 'Không thể chốt chỉ số.'),
+                                extractErrorMessage(err, 'Không thể xác nhận chốt chỉ số.'),
                               );
                         }
                       },
@@ -764,8 +800,21 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     final readingId = meter['period_reading_id']?.toString();
     if (readingId == null || readingId.isEmpty) return;
 
+    final meterId = meter['id']?.toString() ?? '';
+    final note = (_abnormalNotes[meterId] ?? meter['period_abnormal_note'] ?? '').toString().trim();
+    final isAbnormal = meter['period_is_abnormal'] == true;
+    if (isAbnormal && note.isEmpty) {
+      ref.read(toastProvider.notifier).warning(
+            'Công tơ ${meter['meter_code'] ?? ''} có biến động >${_anomalyThresholdPct.round()}%. '
+            'Vui lòng nhập ghi chú giải trình trước khi xác nhận chốt.',
+          );
+      return;
+    }
+
     try {
-      await ref.read(metersServiceProvider).confirmReading(readingId);
+      await ref.read(metersServiceProvider).confirmReading(readingId, {
+        if (note.isNotEmpty) 'abnormal_note': note,
+      });
       ref.read(toastProvider.notifier).success('Đã chốt nhanh chỉ số công tơ.');
       _fetchMeters(force: true);
     } catch (err) {
@@ -801,12 +850,243 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
 
     setState(() => _batchSaving = true);
     try {
-      await ref.read(metersServiceProvider).confirmBatch({'reading_ids': eligibleIds});
+      await ref.read(metersServiceProvider).confirmBatch({
+        'period': _period,
+        'building_id': _selectedBuildingId,
+        'reading_ids': eligibleIds,
+      });
       ref.read(toastProvider.notifier).success('Đã chốt thành công ${eligibleIds.length} chỉ số công tơ.');
       _fetchMeters(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(
             extractErrorMessage(err, 'Không thể chốt hàng loạt.'),
+          );
+    } finally {
+      if (mounted) setState(() => _batchSaving = false);
+    }
+  }
+
+  /// Reading history table shown in the single-meter detail modal.
+  Widget _buildReadingHistory(List<Map<String, dynamic>> history, bool loading) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text(
+          'Lịch sử ghi chỉ số của công tơ này',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate700),
+        ),
+        const SizedBox(height: 6),
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text('Đang tải lịch sử...', style: TextStyle(fontSize: 12, color: AppColors.slate400)),
+          )
+        else if (history.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text('Chưa có lịch sử ghi nhận nào.', style: TextStyle(fontSize: 12, color: AppColors.slate400)),
+          )
+        else
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: AppColors.slate200),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              children: history.map((h) {
+                final status = h['status']?.toString() ?? 'CONFIRMED';
+                final abnormal = h['is_abnormal'] == true;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 92,
+                        child: Text(
+                          h['period']?.toString() ?? '—',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          '${h['previous_reading'] ?? 0} → ${h['current_reading'] ?? 0} '
+                          '(${h['consumption'] ?? 0})',
+                          style: const TextStyle(fontSize: 12, color: AppColors.slate700),
+                        ),
+                      ),
+                      if (abnormal)
+                        const AppBadge(label: 'Bất thường', variant: AppBadgeVariant.amber),
+                      const SizedBox(width: 6),
+                      AppBadge(
+                        label: status == 'CONFIRMED'
+                            ? 'Đã chốt'
+                            : status == 'FLAGGED'
+                                ? 'Tạm giữ'
+                                : status == 'DRAFT'
+                                    ? 'Nháp'
+                                    : status,
+                        variant: status == 'CONFIRMED'
+                            ? AppBadgeVariant.emerald
+                            : status == 'FLAGGED'
+                                ? AppBadgeVariant.amber
+                                : AppBadgeVariant.sky,
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Inline "Chỉ số mới" editor. Validates current reading >= previous reading
+  /// and wraps the field in [AISuggestionField] for AI OCR confirm/dismiss.
+  Widget _buildInlineReadingCell(Map<String, dynamic> meter) {
+    final id = meter['id']?.toString() ?? '';
+    final prev = num.tryParse(
+          (meter['period_previous_reading'] ?? meter['last_known_reading'] ?? 0).toString(),
+        ) ??
+        0;
+    final locked = isMeterRowLockedForEdit(meter, ref.read(permissionProvider).canRecordMeters);
+    final draft = _draftReadings[id] ?? '';
+    final valNum = num.tryParse(draft.trim());
+    final invalid = draft.trim().isNotEmpty && (valNum == null || valNum < prev);
+    final ocr = _rowOcr[id];
+
+    return AISuggestionField(
+      active: ocr?['active'] == true,
+      confirmed: ocr?['confirmed'] == true,
+      edited: ocr?['edited'] == true,
+      confidence: ocr?['confidence'],
+      onConfirm: () {
+        if (ocr == null) return;
+        setState(() {
+          _draftReadings[id] = ocr['reading']?.toString() ?? draft;
+          _rowOcr[id] = {...ocr, 'confirmed': true, 'edited': false};
+        });
+      },
+      onDismiss: () => setState(() => _rowOcr.remove(id)),
+      child: AppInput(
+        key: Key('meter-inline-reading-$id'),
+        initialValue: draft,
+        readOnly: locked,
+        placeholder: '>= $prev',
+        error: invalid ? '< $prev' : null,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        onChanged: (val) => setState(() {
+          _draftReadings[id] = val.trim();
+          if (ocr != null) {
+            _rowOcr[id] = {
+              ...ocr,
+              'edited': num.tryParse(val.trim()) != num.tryParse(ocr['reading']?.toString() ?? ''),
+            };
+          }
+        }),
+      ),
+    );
+  }
+
+  /// AI OCR for a single table row: pick image, call OCR, seed inline draft + suggestion.
+  Future<void> _scanRowOcr(Map<String, dynamic> meter) async {
+    final id = meter['id']?.toString() ?? '';
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+      final file = result?.files.single;
+      final bytes = file?.bytes;
+      if (file == null || bytes == null) return;
+      final mime = file.name.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+      final dataUrl = encodeBytesToDataUrl(bytes, mimeType: mime);
+      final res = await ref.read(aiServiceProvider).ocrMeterReading({
+        'period': _period,
+        'image_base64': dataUrl,
+        'meter_id': id,
+        if (meter['target_contract_id'] != null) 'contract_id': meter['target_contract_id'],
+      });
+      final data = res is Map ? (res['data'] is Map ? res['data'] : res) : {};
+      final out = data['output'] is Map ? data['output'] : {};
+      final reading = out['reading'];
+      if (reading == null) return;
+      if (!mounted) return;
+      setState(() {
+        _draftReadings[id] = reading.toString();
+        _rowOcr[id] = {
+          'active': true,
+          'reading': reading,
+          'confidence': out['confidence'],
+          'confirmed': false,
+          'edited': false,
+        };
+      });
+      ref.read(toastProvider.notifier).success('AI đã đọc chỉ số: $reading');
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể nhận diện AI từ ảnh này.'),
+          );
+    }
+  }
+
+  /// Batch record dirty inline drafts with status DRAFT or CONFIRMED.
+  Future<void> _handleSaveBatch(String targetStatus) async {
+    if (!ref.read(permissionProvider).canRecordMeters) return;
+
+    final dirty = _meters.where((m) {
+      final id = m['id']?.toString() ?? '';
+      final draft = _draftReadings[id]?.trim() ?? '';
+      if (draft.isEmpty) return false;
+      return draft != (m['period_current_reading']?.toString() ?? '');
+    }).toList();
+
+    if (dirty.isEmpty) {
+      ref.read(toastProvider.notifier).info('Chưa có thay đổi chỉ số mới nào cần lưu.');
+      return;
+    }
+
+    for (final m in dirty) {
+      final id = m['id']?.toString() ?? '';
+      final prev = num.tryParse(
+            (m['period_previous_reading'] ?? m['last_known_reading'] ?? 0).toString(),
+          ) ??
+          0;
+      final valNum = num.tryParse(_draftReadings[id]!.trim());
+      if (valNum == null || valNum < prev) {
+        ref.read(toastProvider.notifier).warning(
+              'Có dòng nhập chỉ số mới nhỏ hơn chỉ số cũ. Vui lòng kiểm tra các ô màu đỏ.',
+            );
+        return;
+      }
+    }
+
+    setState(() => _batchSaving = true);
+    try {
+      final readings = dirty.map((m) {
+        final id = m['id']?.toString() ?? '';
+        final ocr = _rowOcr[id];
+        final dataUrl = ocr?['imageBase64']?.toString();
+        return <String, dynamic>{
+          'meter_id': id,
+          'period': _period,
+          if (m['target_contract_id'] != null) 'contract_id': m['target_contract_id'],
+          'status': targetStatus,
+          'current_reading': num.tryParse(_draftReadings[id]!.trim()),
+          'abnormal_note': (_abnormalNotes[id] ?? m['period_abnormal_note'] ?? '').toString().trim(),
+          if (ocr?['suggestionId'] != null) 'ai_suggestion_id': ocr!['suggestionId'],
+          if (dataUrl != null) 'image_base64': dataUrl,
+        };
+      }).toList();
+
+      await ref.read(metersServiceProvider).recordBatch({
+        'period': _period,
+        'status': targetStatus,
+        'readings': readings,
+      });
+      ref.read(toastProvider.notifier).success('Đã lưu thành công ${readings.length} chỉ số.');
+      _fetchMeters(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể lưu chỉ số hàng loạt.'),
           );
     } finally {
       if (mounted) setState(() => _batchSaving = false);
@@ -893,7 +1173,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                       color: 'sky',
                     ),
                     StatsCard(
-                      title: 'Cảnh báo biến động (>30%)',
+                      title: 'Cảnh báo biến động (>${_anomalyThresholdPct.round()}%)',
                       value: abnormalCount.toString(),
                       icon: LucideIcons.triangleAlert,
                       color: 'amber',
@@ -965,10 +1245,47 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                           child: AppSelect<String>(
                             label: 'Trạng thái',
                             value: _statusFilter,
-                            options: kMeterStatusOptions.map((e) {
+                            options: meterStatusOptions(_anomalyThresholdPct).map((e) {
                               return AppSelectOption(value: e['value']!, label: e['label']!);
                             }).toList(),
                             onChanged: (val) => setState(() => _statusFilter = val ?? ''),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: AppSelect<String>(
+                            label: 'Hợp đồng',
+                            value: _activeContractFilter,
+                            options: kMeterContractFilterOptions.map((e) {
+                              return AppSelectOption(value: e['value']!, label: e['label']!);
+                            }).toList(),
+                            onChanged: (val) {
+                              setState(() => _activeContractFilter = val ?? '');
+                              _fetchMeters();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          flex: 2,
+                          child: Row(
+                            children: [
+                              Checkbox(
+                                value: _abnormalOnly,
+                                onChanged: (val) =>
+                                    setState(() => _abnormalOnly = val ?? false),
+                              ),
+                              Expanded(
+                                child: Text(
+                                  'Chỉ hiện bất thường (>${_anomalyThresholdPct.round()}%)',
+                                  style: const TextStyle(fontSize: 12, color: AppColors.slate700),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -983,8 +1300,26 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             onChanged: (val) => setState(() => _search = val),
                           ),
                         ),
-                        if (canManage && draftCount > 0) ...[
+                        if (canManage) ...[
                           const SizedBox(width: 12),
+                          AppButton(
+                            text: 'Lưu nháp',
+                            icon: const Icon(LucideIcons.save, size: 16),
+                            variant: AppButtonVariant.outline,
+                            loading: _batchSaving,
+                            onPressed: () => _handleSaveBatch('DRAFT'),
+                          ),
+                          const SizedBox(width: 8),
+                          AppButton(
+                            text: 'Lưu & Chốt chỉ số',
+                            icon: const Icon(LucideIcons.checkCheck, size: 16),
+                            variant: AppButtonVariant.primary,
+                            loading: _batchSaving,
+                            onPressed: () => _handleSaveBatch('CONFIRMED'),
+                          ),
+                        ],
+                        if (canManage && draftCount > 0) ...[
+                          const SizedBox(width: 8),
                           AppButton(
                             text: 'Chốt toàn bộ ($draftCount bản nháp)',
                             icon: const Icon(LucideIcons.checkCheck, size: 16),
@@ -1092,13 +1427,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                     key: 'period_current_reading',
                     label: 'Chỉ số mới',
                     flex: 1,
-                    render: (meter) {
-                      final currentReading = meter['period_current_reading'];
-                      return Text(
-                        currentReading != null ? currentReading.toString() : '—',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      );
-                    },
+                    render: _buildInlineReadingCell,
                   ),
                   DataTableColumn<Map<String, dynamic>>(
                     key: 'period_consumption',
@@ -1118,9 +1447,9 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             style: const TextStyle(fontWeight: FontWeight.w600),
                           ),
                           if (isAbnormal)
-                            const Text(
-                              'Biến động >30%',
-                              style: TextStyle(fontSize: 10, color: AppColors.amber600, fontWeight: FontWeight.bold),
+                            Text(
+                              'Biến động >${_anomalyThresholdPct.round()}%',
+                              style: const TextStyle(fontSize: 10, color: AppColors.amber600, fontWeight: FontWeight.bold),
                             ),
                         ],
                       );
@@ -1148,7 +1477,7 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                     key: 'actions',
                     label: 'Thao tác',
                     align: TextAlign.right,
-                    width: 112,
+                    width: 150,
                     render: (meter) {
                       final status = meter['period_reading_status'];
                       final isLocked = isMeterRowLockedForEdit(meter, canManage);
@@ -1157,6 +1486,15 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            if (canManage && !isLocked)
+                              IconButton(
+                                padding: const EdgeInsets.all(6),
+                                visualDensity: VisualDensity.compact,
+                                constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                                icon: const Icon(LucideIcons.sparkles, size: 16, color: AppColors.amber600),
+                                tooltip: 'AI OCR chỉ số',
+                                onPressed: () => _scanRowOcr(meter),
+                              ),
                             IconButton(
                               padding: const EdgeInsets.all(6),
                               visualDensity: VisualDensity.compact,
