@@ -5,10 +5,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/resident_overview_helpers.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/notification_provider.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
+import '../../../shared/widgets/common/status_badge.dart';
 import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
 import '../../../shared/widgets/ui/app_card.dart';
@@ -264,12 +266,110 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
+  Widget _heroBadge({
+    required IconData icon,
+    required String label,
+    required Color background,
+    Color foreground = Colors.white,
+    Color border = const Color(0x40FFFFFF),
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: foreground),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'Inter',
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: foreground,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _heroSpec(IconData icon, String label, String value) {
+    return SizedBox(
+      width: 150,
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, size: 16, color: const Color(0xFFE0F2FE)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 11,
+                    color: Color(0xFFBAE6FD),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final ov = widget.overview ?? const {};
     final contract = ov['active_contract'] is Map
         ? ov['active_contract'] as Map<String, dynamic>
         : (ov['contract'] is Map ? ov['contract'] as Map<String, dynamic> : null);
+
+    // Hero card values (parity: OverviewTab.jsx:1089-1205).
+    final user = ov['user'] is Map ? ov['user'] as Map : const {};
+    final fullName = user['full_name']?.toString().trim() ?? '';
+    final contractStatus = contract?['contract_status']?.toString() ??
+        contract?['status']?.toString() ??
+        '';
+    final isFutureContract = contract?['is_future_contract'] == true ||
+        contract?['is_future_contract']?.toString().toLowerCase() == 'true';
+    final daysRemaining = contract != null
+        ? getResidentDaysRemaining(contract['end_date'])
+        : null;
+    final floorName = contract?['floor_name']?.toString().trim() ?? '';
+    final buildingName = contract?['building_name']?.toString().trim() ?? '';
+    final buildingAddress = contract?['building_address']?.toString().trim() ?? '';
+    final amenities = contract != null
+        ? parseResidentAmenities(contract['amenities'])
+        : const <String>[];
 
     final rawReservations = ov['reservations'] is List
         ? ov['reservations'] as List
@@ -395,9 +495,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               }),
             ],
 
-            // Active Resident Apartment Hero Banner
+            // Active Resident Apartment Hero Banner (parity: OverviewTab.jsx:1089-1205)
             if (contract != null) ...[
               Container(
+                key: const Key('resident-overview-hero'),
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
                     colors: [AppColors.primary600, AppColors.secondary600],
@@ -417,101 +518,182 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    // Status badges — Wrap keeps them on multiple lines at 390px.
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        Row(
-                          children: [
-                            Container(
-                              width: 44,
-                              height: 44,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.2),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: const Icon(LucideIcons.home, color: Colors.white, size: 24),
-                            ),
-                            const SizedBox(width: 12),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Căn hộ ${contract['apartment_code'] ?? '---'}',
-                                  style: const TextStyle(
-                                    fontFamily: 'Inter',
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  contract['building_name']?.toString() ?? 'Tòa nhà ResiHub',
-                                  style: const TextStyle(
-                                    fontFamily: 'Inter',
-                                    fontSize: 13,
-                                    color: Color(0xFFE2E8F0),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
+                        _heroBadge(
+                          icon: LucideIcons.home,
+                          label: isFutureContract
+                              ? 'Hợp đồng sắp hiệu lực (${formatDate(contract['start_date'])})'
+                              : contractStatus == 'TERMINATION_PENDING'
+                                  ? 'Căn hộ đang chờ bàn giao / thanh lý'
+                                  : 'Căn hộ đang cư trú',
+                          background: Colors.white.withValues(alpha: 0.20),
                         ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.25),
-                            borderRadius: BorderRadius.circular(20),
+                        StatusBadge(status: contractStatus, dot: false),
+                        if (contractStatus == 'TERMINATION_PENDING' &&
+                            contract['terminated_at'] != null)
+                          _heroBadge(
+                            icon: LucideIcons.clock,
+                            label:
+                                'Dự kiến trả phòng: ${formatDate(contract['terminated_at'])}',
+                            background: const Color(0xFFFBBF24),
+                            foreground: const Color(0xFF0F172A),
+                            border: Colors.transparent,
+                          )
+                        else if (daysRemaining != null &&
+                            daysRemaining >= 0 &&
+                            daysRemaining <= 30)
+                          _heroBadge(
+                            icon: LucideIcons.circleAlert,
+                            label: 'Còn $daysRemaining ngày hết hạn HĐ',
+                            background: const Color(0xFFFBBF24),
+                            foreground: const Color(0xFF0F172A),
+                            border: Colors.transparent,
                           ),
-                          child: Text(
-                            (contract['contract_status'] ?? contract['status']) == 'ACTIVE'
-                                ? 'Đang hiệu lực'
-                                : 'Đang xử lý',
-                            style: const TextStyle(
-                              fontFamily: 'Inter',
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
                       ],
                     ),
-                    const SizedBox(height: 16),
-                    const Divider(color: Colors.white24, height: 1),
                     const SizedBox(height: 14),
-                    Wrap(
-                      spacing: 24,
-                      runSpacing: 10,
-                      children: [
-                        if (contract['end_date'] != null)
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(LucideIcons.calendarClock,
-                                  size: 15, color: Color(0xFFCBD5E1)),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Hạn HĐ: ${formatDate(contract['end_date'])}',
-                                style: const TextStyle(
-                                    fontSize: 12, color: Colors.white, fontFamily: 'Inter'),
+                    Text(
+                      'Xin chào, ${fullName.isEmpty ? 'Cư dân' : fullName}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 14,
+                        color: Color(0xFFE0F2FE),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Căn hộ ${contract['apartment_code'] ?? '---'}'
+                      '${floorName.isNotEmpty ? ' • $floorName' : ''}',
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    if (buildingName.isNotEmpty || buildingAddress.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(LucideIcons.building2,
+                              size: 16, color: Color(0xFFBAE6FD)),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '$buildingName'
+                              '${buildingAddress.isNotEmpty ? ' — $buildingAddress' : ''}',
+                              style: const TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 13,
+                                color: Color(0xFFE0F2FE),
                               ),
-                            ],
+                            ),
                           ),
-                        if ((contract['rent_amount'] ?? contract['monthly_rent']) != null)
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(LucideIcons.wallet, size: 15, color: Color(0xFFCBD5E1)),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Tiền thuê: ${formatMoney(contract['rent_amount'] ?? contract['monthly_rent'])}/tháng',
-                                style: const TextStyle(
-                                    fontSize: 12, color: Colors.white, fontFamily: 'Inter'),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    const Text(
+                      'TIỆN NGHI BÀN GIAO CĂN HỘ',
+                      style: TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFBAE6FD),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    if (amenities.isNotEmpty)
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final amenity in amenities)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                    color: const Color(0x33FFFFFF)),
                               ),
-                            ],
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(LucideIcons.checkCircle2,
+                                      size: 14, color: Color(0xFF6EE7B7)),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    amenity,
+                                    style: const TextStyle(
+                                      fontFamily: 'Inter',
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      )
+                    else
+                      const Text(
+                        'Danh mục tiện nghi theo biên bản bàn giao căn hộ.',
+                        style: TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                          color: Color(0xFFE2E8F0),
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0x26FFFFFF)),
+                      ),
+                      child: Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          _heroSpec(
+                            LucideIcons.maximize2,
+                            'Diện tích',
+                            (contract['area_m2'] == null ||
+                                    contract['area_m2'].toString().isEmpty)
+                                ? '—'
+                                : '${contract['area_m2']} m²',
                           ),
-                      ],
+                          _heroSpec(
+                            LucideIcons.bedDouble,
+                            'Loại phòng',
+                            (contract['apartment_type']?.toString().trim().isNotEmpty ??
+                                    false)
+                                ? contract['apartment_type'].toString().trim()
+                                : (contract['bedrooms'] != null
+                                    ? '${contract['bedrooms']} Phòng ngủ'
+                                    : 'Tiêu chuẩn'),
+                          ),
+                          _heroSpec(
+                            LucideIcons.calendarClock,
+                            'Thời hạn HĐ',
+                            contract['start_date'] != null
+                                ? '${formatDate(contract['start_date'])} → ${formatDate(contract['end_date'])}'
+                                : formatDate(contract['end_date']),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
