@@ -325,4 +325,70 @@ void main() {
           reason: 'phải tự chọn ngày trống đầu tiên, không phải ngày đang bận');
     });
   });
+
+  group('B1 - dropdown labels & apartment options (React parity)', () {
+    test('contract/request status labels match React', () {
+      expect(kContractStatusLabels['PENDING_ALL'],
+          'Tất cả chờ phê duyệt (Giá / Gia hạn / Chấm dứt)');
+      expect(kContractStatusLabels['PENDING_APPROVAL'],
+          'Chờ phê duyệt giá (PENDING_APPROVAL)');
+      expect(kRequestStatusLabels['SUBMITTED'], 'Chờ xử lý (SUBMITTED)');
+    });
+
+    test('getAptSelectStatusLabel matches React', () {
+      expect(getAptSelectStatusLabel('AVAILABLE'), 'Còn trống');
+      expect(getAptSelectStatusLabel('RESERVED'), 'Đã giữ chỗ');
+      expect(getAptSelectStatusLabel('OCCUPIED'),
+          'Đang có khách thuê (Tạo HĐ nối tiếp)');
+      expect(getAptSelectStatusLabel('MAINTENANCE'),
+          'Đang bảo trì (Tạo HĐ tương lai)');
+    });
+
+    test('apartment option carries status, price, sublabel and badge counts', () {
+      final opt = buildApartmentSelectOption({
+        'id': 'apt-1',
+        'code': 'A-101',
+        'status': 'AVAILABLE',
+        'base_rent': 10000000,
+        'building_name': 'Toa A',
+        'floor_name': 'Tang 1',
+        'active_contracts_count': 2,
+        'held_reservations_count': 1,
+      });
+      expect(opt.value, 'apt-1');
+      expect(opt.label, contains('A-101'));
+      expect(opt.label, contains('Còn trống'));
+      expect(opt.label, contains('Niêm yết:'));
+      expect(opt.sublabel, 'Toa A · Tang 1');
+      expect(opt.badge, '2 HĐ · 1 giữ chỗ');
+    });
+  });
+
+  group('B8 - AI contract scan mapping', () {
+    test('maps AI output to draft fields and matches apartment by code', () {
+      final mapped = mapContractAiOutputToDraft(
+        {
+          'apartment_code': 'a-101',
+          'start_date': '2026-12-01T00:00:00.000Z',
+          'end_date': '2027-12-01',
+          'rent_amount': '10000000.6',
+          'deposit_amount': '0',
+          'billing_day': '5',
+          'payment_due_days': '10',
+          'terms_note': '  Điều khoản thanh toán  ',
+          'tenant_phone': '0912345678',
+        },
+        [
+          {'id': 'apt-1', 'code': 'A-101', 'building_id': 'b1'},
+        ],
+      );
+      expect(mapped['start_date'], '2026-12-01');
+      expect(mapped['rent_amount'], '10000001');
+      expect(mapped['deposit_amount'], '0');
+      expect(mapped['note'], 'Điều khoản thanh toán');
+      expect(mapped['apartment_id'], 'apt-1');
+      expect(mapped['building_id'], 'b1');
+      expect(mapped['tenant_phone'], '0912345678');
+    });
+  });
 }

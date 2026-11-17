@@ -1096,4 +1096,47 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
   });
+
+  group('C17 - tenant detail React parity helpers', () {
+    test('resolveDisplayTenantStatus maps statuses like React', () {
+      expect(
+        resolveDisplayTenantStatus({'status': 'MERGED'}),
+        'MERGED',
+      );
+      expect(
+        resolveDisplayTenantStatus({'status': 'REJECTED'}),
+        'REJECTED',
+      );
+      expect(
+        resolveDisplayTenantStatus({
+          'status': 'PENDING',
+          'contracts': [
+            {'status': 'ACTIVE'}
+          ]
+        }),
+        'ACTIVE',
+      );
+      expect(
+        resolveDisplayTenantStatus({'status': 'PENDING'}),
+        'PENDING',
+      );
+      expect(
+        resolveDisplayTenantStatus({'status': 'INACTIVE', 'has_past_contract': true}),
+        'MOVED_OUT',
+      );
+      expect(
+        resolveDisplayTenantStatus({'status': 'APPROVED'}),
+        'APPROVED',
+      );
+    });
+
+    test('relationship labels match React RELATIONSHIP_LABELS', () {
+      expect(kRelationshipLabels['family'], 'Gia đình / Người thân');
+      expect(kRelationshipLabels['spouse'], 'Vợ / Chồng');
+      expect(kRelationshipLabels['child'], 'Con cái');
+      expect(kRelationshipLabels['roommate'], 'Bạn cùng phòng');
+      expect(kRelationshipLabels['friend'], 'Bạn bè');
+      expect(kRelationshipLabels['other'], 'Khác');
+    });
+  });
 }

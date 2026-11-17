@@ -27,6 +27,38 @@ import '../../../shared/widgets/ui/app_tabs.dart';
 import '../../../shared/widgets/ui/auth_media_viewer.dart';
 import '../../../shared/widgets/ui/file_upload_field.dart';
 
+/// React TenantDetailPage.jsx:60-67 — nhãn quan hệ thành viên ở cùng.
+const Map<String, String> kRelationshipLabels = {
+  'family': 'Gia đình / Người thân',
+  'spouse': 'Vợ / Chồng',
+  'child': 'Con cái',
+  'roommate': 'Bạn cùng phòng',
+  'friend': 'Bạn bè',
+  'other': 'Khác',
+};
+
+/// React TenantDetailPage.jsx:174-191 — trạng thái hiển thị suy từ hợp đồng + history.
+String resolveDisplayTenantStatus(Map<String, dynamic>? tenant) {
+  if (tenant == null) return 'INACTIVE';
+  final status = tenant['status']?.toString() ?? '';
+  if (status == 'MERGED') return 'MERGED';
+  if (status == 'REJECTED') return 'REJECTED';
+
+  final contracts = tenant['contracts'] is List ? tenant['contracts'] as List : const [];
+  final activeContract = contracts.any((c) =>
+      c is Map &&
+      ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].contains(c['status']?.toString()));
+  final explicitActive = tenant['active_contract'] is Map;
+  if (activeContract || explicitActive || status == 'ACTIVE') return 'ACTIVE';
+  if (status == 'PENDING') return 'PENDING';
+  if (tenant['has_past_contract'] == true ||
+      status == 'MOVED_OUT' ||
+      status == 'INACTIVE') {
+    return 'MOVED_OUT';
+  }
+  return 'APPROVED';
+}
+
 /// Tenant / Resident Detail & Identity Verification Screen.
 /// Port of `frontend/src/pages/admin/tenants/TenantDetailPage.jsx`.
 class TenantDetailPage extends ConsumerStatefulWidget {
@@ -423,7 +455,6 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
   }
 
   Widget? _buildActiveModal(bool isMaskedForOwner, bool isPending, bool canManageTenants, Map<String, dynamic> tenant, dynamic latestFrontImg, dynamic latestBackImg) {
-    final status = tenant['status']?.toString() ?? 'INACTIVE';
     final fullName = tenant['full_name']?.toString() ?? 'Cư dân';
 
     if (_applicationReviewOpen) {
@@ -500,7 +531,7 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                           const Text('Trạng thái hồ sơ:', style: TextStyle(color: AppColors.slate500)),
                           const SizedBox(width: 8),
                           Flexible(
-                            child: StatusBadge(status: status, domain: StatusDomain.tenant),
+                            child: StatusBadge(status: resolveDisplayTenantStatus(_tenant), domain: StatusDomain.tenant),
                           ),
                         ],
                       ),
@@ -752,10 +783,16 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     final tenant = _tenant ?? {};
     final fullName = tenant['full_name']?.toString() ?? 'Hồ sơ cư dân';
     final status = tenant['status']?.toString() ?? 'INACTIVE';
-    final isPending = status == 'PENDING';
+    final displayStatus = resolveDisplayTenantStatus(_tenant);
+    final isPending = status == 'PENDING' || displayStatus == 'PENDING';
 
     final contracts = (tenant['contracts'] is List) ? tenant['contracts'] as List : [];
     final occupants = (tenant['occupants'] is List) ? tenant['occupants'] as List : [];
+    final activeContract = contracts.firstWhere(
+      (c) => c is Map &&
+          ['ACTIVE', 'RENEWAL_PENDING', 'TERMINATION_PENDING'].contains(c['status']?.toString()),
+      orElse: () => null,
+    );
     final hasContractHistory = tenant['active_contract'] != null ||
         contracts.isNotEmpty ||
         tenant['has_past_contract'] == true;
@@ -851,6 +888,20 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                         onPressed: _handleSaveProfile,
                       ),
                   ],
+                  if (activeContract is Map)
+                    AppButton(
+                      text: 'Chuyển phòng / Kết thúc HĐ (${activeContract['apartment_code'] ?? ''})',
+                      variant: AppButtonVariant.primary,
+                      icon: const Icon(LucideIcons.arrowRightLeft, size: 16),
+                      onPressed: () => context.go('/admin/contracts/${activeContract['id'] ?? ''}'),
+                    )
+                  else if (contracts.isNotEmpty)
+                    AppButton(
+                      text: 'Xem hợp đồng gần nhất',
+                      variant: AppButtonVariant.outline,
+                      icon: const Icon(LucideIcons.fileText, size: 16),
+                      onPressed: () => context.go('/admin/contracts/${contracts.first is Map ? contracts.first['id'] ?? '' : ''}'),
+                    ),
                   if (isSysAdmin && status != 'MERGED')
                     AppButton(
                       text: 'Xóa hồ sơ',
@@ -863,6 +914,47 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
               ),
             ),
             const SizedBox(height: 16),
+
+            // React TenantDetailPage.jsx:742-774 — nguyện vọng / lý do từ chối / đồng ý DLCN.
+            if (tenant['desired_apartment_code'] != null ||
+                tenant['application_note'] != null ||
+                tenant['rejection_reason'] != null ||
+                tenant['privacy_consent_at'] != null)
+              AppCard(
+                padding: const EdgeInsets.all(16),
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (tenant['desired_apartment_code'] != null)
+                      Text(
+                        'Nguyện vọng đăng ký thuê: Căn ${tenant['desired_apartment_code']}'
+                        '${tenant['desired_building_name'] != null ? ' — ${tenant['desired_building_name']}' : ''}',
+                        style: const TextStyle(fontSize: 12, color: AppColors.slate700),
+                      ),
+                    if (tenant['application_note'] != null)
+                      Text(
+                        'Ghi chú từ cư dân: ${tenant['application_note']}',
+                        style: const TextStyle(fontSize: 12, color: AppColors.slate600),
+                      ),
+                    if (status == 'REJECTED' && tenant['rejection_reason'] != null)
+                      Text(
+                        'Lý do từ chối gần nhất: ${tenant['rejection_reason']}',
+                        style: const TextStyle(fontSize: 12, color: AppColors.rose700, fontWeight: FontWeight.w600),
+                      ),
+                    if (tenant['privacy_consent_at'] != null)
+                      const AppBadge(label: 'Đã đồng ý xử lý DLCN', variant: AppBadgeVariant.emerald)
+                    else
+                      const AppBadge(label: 'Chưa ghi nhận đồng ý DLCN trực tuyến', variant: AppBadgeVariant.slate),
+                  ],
+                ),
+              ),
+            if (tenant['desired_apartment_code'] != null ||
+                tenant['application_note'] != null ||
+                tenant['rejection_reason'] != null ||
+                tenant['privacy_consent_at'] != null)
+              const SizedBox(height: 16),
 
             // Tabs
             AppTabs(
@@ -901,7 +993,7 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                                 color: AppColors.slate900,
                               ),
                             ),
-                            StatusBadge(status: status, domain: StatusDomain.tenant),
+                            StatusBadge(status: displayStatus, domain: StatusDomain.tenant),
                           ],
                         ),
                         const SizedBox(height: 16),
@@ -1403,10 +1495,32 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                       render: (row) => Text(row is Map ? formatMoney(row['rent_amount']) : '0 ₫'),
                     ),
                     DataTableColumn<dynamic>(
+                      key: 'deposit_amount',
+                      label: 'Tiền đặt cọc',
+                      align: TextAlign.right,
+                      render: (row) => Text(row is Map ? formatMoney(row['deposit_amount']) : '0 ₫'),
+                    ),
+                    DataTableColumn<dynamic>(
                       key: 'status',
-                      label: 'Trạng thái',
+                      label: 'Trạng thái HĐ',
                       align: TextAlign.center,
-                      render: (row) => StatusBadge(status: row is Map ? row['status']?.toString() : null),
+                      render: (row) => StatusBadge(
+                        status: row is Map ? row['status']?.toString() : null,
+                        domain: StatusDomain.contract,
+                      ),
+                    ),
+                    DataTableColumn<dynamic>(
+                      key: 'action',
+                      label: 'Thao tác',
+                      align: TextAlign.center,
+                      render: (row) => AppButton(
+                        text: 'Mở hợp đồng',
+                        variant: AppButtonVariant.ghost,
+                        size: AppButtonSize.xs,
+                        onPressed: row is Map && row['id'] != null
+                            ? () => context.go('/admin/contracts/${row['id']}')
+                            : null,
+                      ),
                     ),
                   ],
                   data: contracts,
@@ -1431,13 +1545,40 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                     ),
                     DataTableColumn<dynamic>(
                       key: 'relationship',
-                      label: 'Quan hệ với chủ HĐ',
-                      render: (row) => Text(row is Map ? row['relationship']?.toString() ?? 'Người ở cùng' : '—'),
+                      label: 'Quan hệ với chủ hộ',
+                      render: (row) {
+                        final rel = row is Map ? row['relationship']?.toString() : null;
+                        return AppBadge(
+                          label: (rel != null ? kRelationshipLabels[rel] : null) ?? rel ?? 'Thành viên ở cùng',
+                          variant: AppBadgeVariant.indigo,
+                        );
+                      },
+                    ),
+                    DataTableColumn<dynamic>(
+                      key: 'id_number',
+                      label: 'Số CCCD / Hộ chiếu',
+                      render: (row) => Text(
+                        row is Map ? row['id_number']?.toString() ?? 'Chưa cập nhật' : 'Chưa cập nhật',
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                      ),
                     ),
                     DataTableColumn<dynamic>(
                       key: 'status',
                       label: 'Trạng thái',
                       render: (row) => StatusBadge(status: row is Map ? row['status']?.toString() : null, domain: StatusDomain.tenant),
+                    ),
+                    DataTableColumn<dynamic>(
+                      key: 'action',
+                      label: 'Hồ sơ',
+                      align: TextAlign.center,
+                      render: (row) => row is Map && row['tenant_id'] != null
+                          ? AppButton(
+                              text: 'Xem hồ sơ',
+                              variant: AppButtonVariant.ghost,
+                              size: AppButtonSize.xs,
+                              onPressed: () => context.go('/admin/tenants/${row['tenant_id']}'),
+                            )
+                          : const SizedBox.shrink(),
                     ),
                   ],
                   data: occupants,

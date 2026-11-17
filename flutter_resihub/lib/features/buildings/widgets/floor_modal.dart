@@ -53,6 +53,135 @@ String buildDefaultFloorName(int level, [String namePrefix = 'Tầng']) {
   return (from: nextFrom, to: nextTo);
 }
 
+/// React FloorModal:117-128 — tự quyết định includeZero theo dải tầng khi người
+/// dùng CHƯA tự sửa checkbox (zeroTouched = false). Trả null = giữ nguyên.
+bool? autoIncludeZeroForRange(String? fromStr, String? toStr) {
+  final f = parseStrictInt(fromStr);
+  final t = parseStrictInt(toStr);
+  if (f == null || t == null) return null;
+  if (f < 0 && t > 0) return false;
+  if (f == 0 || t == 0) return true;
+  return null;
+}
+
+/// Một preset chọn nhanh (React FloorModal:379-456).
+class FloorPreset {
+  final String label;
+  final int from;
+  final int to;
+  final bool? includeZero;
+
+  const FloorPreset({
+    required this.label,
+    required this.from,
+    required this.to,
+    this.includeZero,
+  });
+}
+
+/// 4 preset khi chưa có tầng, 3 preset khi đã có tầng (khớp React).
+List<FloorPreset> buildFloorPresets(List<dynamic> existingFloors) {
+  if (existingFloors.isEmpty) {
+    return const [
+      FloorPreset(label: 'Tầng 1 → 5', from: 1, to: 5, includeZero: false),
+      FloorPreset(label: 'Tầng 1 → 10', from: 1, to: 10, includeZero: false),
+      FloorPreset(label: 'Hầm B1 + Tầng 1 → 5', from: -1, to: 5, includeZero: false),
+      FloorPreset(label: 'Trệt (0) + Tầng 1 → 5', from: 0, to: 5, includeZero: true),
+    ];
+  }
+  final sug = computeSuggestedRange(existingFloors);
+  return [
+    FloorPreset(label: '+5 tầng kế (${sug.from} → ${sug.to})', from: sug.from, to: sug.to),
+    FloorPreset(
+      label: '+10 tầng kế (${sug.from} → ${math.min(kMaxLevel, sug.from + 9)})',
+      from: sug.from,
+      to: math.min(kMaxLevel, sug.from + 9),
+    ),
+    const FloorPreset(label: 'Thêm 2 tầng hầm (B1, B2)', from: -2, to: -1, includeZero: false),
+  ];
+}
+
+/// Tính danh sách tầng preview — tách để test thuần (không cần widget).
+({String error, List<FloorBulkRow> rows}) computeFloorBulkRows({
+  required String fromLevel,
+  required String toLevel,
+  required List<dynamic> existingFloors,
+  required bool includeZero,
+  required bool skipExisting,
+  required Set<int> excludedLevels,
+  required Map<int, String> customNames,
+  required String namePrefix,
+}) {
+  final parsedFrom = parseStrictInt(fromLevel);
+  final parsedTo = parseStrictInt(toLevel);
+
+  if (parsedFrom == null || parsedTo == null) {
+    return (
+      error: 'Vui lòng nhập Từ tầng và Đến tầng là số nguyên hợp lệ.',
+      rows: const <FloorBulkRow>[]
+    );
+  }
+  if (parsedFrom < kMinLevel ||
+      parsedTo > kMaxLevel ||
+      parsedTo < kMinLevel ||
+      parsedFrom > kMaxLevel) {
+    return (
+      error: 'Số tầng phải nằm trong khoảng từ $kMinLevel đến $kMaxLevel.',
+      rows: const <FloorBulkRow>[]
+    );
+  }
+  if (parsedFrom > parsedTo) {
+    return (
+      error: 'Giá trị "Từ tầng" không được lớn hơn "Đến tầng".',
+      rows: const <FloorBulkRow>[]
+    );
+  }
+
+  final existingByLevel = <int, dynamic>{};
+  for (final f in existingFloors) {
+    final lvl = parseStrictInt(f is Map ? f['level'] : null);
+    if (lvl != null) existingByLevel[lvl] = f;
+  }
+
+  final rows = <FloorBulkRow>[];
+  for (var lvl = parsedFrom; lvl <= parsedTo; lvl++) {
+    if (lvl == 0 && !includeZero) continue;
+    final existing = existingByLevel[lvl];
+    final autoSkipped = existing != null && skipExisting;
+    final manuallyExcluded = excludedLevels.contains(lvl);
+    final checked = !autoSkipped && !manuallyExcluded;
+    final defaultName = buildDefaultFloorName(lvl, namePrefix);
+    final displayName = customNames[lvl] ?? defaultName;
+
+    rows.add(FloorBulkRow(
+      level: lvl,
+      existing: existing,
+      autoSkipped: autoSkipped,
+      manuallyExcluded: manuallyExcluded,
+      checked: checked,
+      defaultName: defaultName,
+      displayName: displayName,
+      isConflict: existing != null && !skipExisting && checked,
+    ));
+
+    if (rows.length > kMaxBulkCount) {
+      return (
+        error: 'Một lần chỉ hỗ trợ tạo tối đa $kMaxBulkCount tầng. Vui lòng thu hẹp dải tầng.',
+        rows: const <FloorBulkRow>[]
+      );
+    }
+  }
+
+  if (rows.isEmpty) {
+    return (
+      error: 'Dải tầng hiện tại không có tầng nào để tạo.',
+      rows: const <FloorBulkRow>[]
+    );
+  }
+
+  return (error: '', rows: rows);
+}
+
 class FloorBulkRow {
   final int level;
   final dynamic existing;
@@ -111,6 +240,7 @@ class _FloorModalState extends ConsumerState<FloorModal> {
   final _toLevelController = TextEditingController();
   final _namePrefixController = TextEditingController(text: 'Tầng');
   bool _includeZero = false;
+  bool _zeroTouched = false;
   bool _skipExisting = true;
   final Set<int> _excludedLevels = {};
   final Map<int, String> _customNames = {};
@@ -150,87 +280,60 @@ class _FloorModalState extends ConsumerState<FloorModal> {
     _toLevelController.text = suggested.to.toString();
     _namePrefixController.text = 'Tầng';
     _includeZero = suggested.from == 0 || suggested.to == 0;
+    _zeroTouched = false;
     _skipExisting = true;
     _excludedLevels.clear();
     _customNames.clear();
   }
 
-  Map<int, dynamic> _buildExistingByLevel() {
-    final map = <int, dynamic>{};
-    for (final f in widget.existingFloors) {
-      final lvl = parseStrictInt(f is Map ? f['level'] : null);
-      if (lvl != null) {
-        map[lvl] = f;
-      }
-    }
-    return map;
+  ({String error, List<FloorBulkRow> rows}) _computeBulkRows() {
+    return computeFloorBulkRows(
+      fromLevel: _fromLevelController.text,
+      toLevel: _toLevelController.text,
+      existingFloors: widget.existingFloors,
+      includeZero: _includeZero,
+      skipExisting: _skipExisting,
+      excludedLevels: _excludedLevels,
+      customNames: _customNames,
+      namePrefix: _namePrefixController.text,
+    );
   }
 
-  ({String error, List<FloorBulkRow> rows}) _computeBulkRows() {
-    final parsedFrom = parseStrictInt(_fromLevelController.text);
-    final parsedTo = parseStrictInt(_toLevelController.text);
-
-    if (parsedFrom == null || parsedTo == null) {
-      return (
-        error: 'Vui lòng nhập Từ tầng và Đến tầng là số nguyên hợp lệ.',
-        rows: const <FloorBulkRow>[]
+  /// React FloorModal:117-128 — đổi dải tự cập nhật includeZero khi user chưa tự sửa.
+  void _handleRangeChange({String? from, String? to}) {
+    if (from != null) _fromLevelController.text = from;
+    if (to != null) _toLevelController.text = to;
+    if (!_zeroTouched) {
+      final auto = autoIncludeZeroForRange(
+        _fromLevelController.text,
+        _toLevelController.text,
       );
+      if (auto != null) _includeZero = auto;
     }
-    if (parsedFrom < kMinLevel ||
-        parsedTo > kMaxLevel ||
-        parsedTo < kMinLevel ||
-        parsedFrom > kMaxLevel) {
-      return (
-        error: 'Số tầng phải nằm trong khoảng từ $kMinLevel đến $kMaxLevel.',
-        rows: const <FloorBulkRow>[]
-      );
-    }
-    if (parsedFrom > parsedTo) {
-      return (
-        error: 'Giá trị "Từ tầng" không được lớn hơn "Đến tầng".',
-        rows: const <FloorBulkRow>[]
-      );
-    }
+    setState(() {});
+  }
 
-    final existingByLevel = _buildExistingByLevel();
-    final rows = <FloorBulkRow>[];
+  void _handleCustomNameChange(int level, String value) {
+    setState(() => _customNames[level] = value);
+  }
 
-    for (var lvl = parsedFrom; lvl <= parsedTo; lvl++) {
-      if (lvl == 0 && !_includeZero) continue;
-      final existing = existingByLevel[lvl];
-      final autoSkipped = existing != null && _skipExisting;
-      final manuallyExcluded = _excludedLevels.contains(lvl);
-      final checked = !autoSkipped && !manuallyExcluded;
-      final defaultName = buildDefaultFloorName(lvl, _namePrefixController.text);
-      final displayName = _customNames[lvl] ?? defaultName;
+  void _handleResetCustomizations() {
+    setState(() {
+      _excludedLevels.clear();
+      _customNames.clear();
+    });
+  }
 
-      rows.add(FloorBulkRow(
-        level: lvl,
-        existing: existing,
-        autoSkipped: autoSkipped,
-        manuallyExcluded: manuallyExcluded,
-        checked: checked,
-        defaultName: defaultName,
-        displayName: displayName,
-        isConflict: existing != null && !_skipExisting && checked,
-      ));
-
-      if (rows.length > kMaxBulkCount) {
-        return (
-          error: 'Một lần chỉ hỗ trợ tạo tối đa $kMaxBulkCount tầng. Vui lòng thu hẹp dải tầng.',
-          rows: const <FloorBulkRow>[]
-        );
+  void _applyPreset(FloorPreset preset) {
+    setState(() {
+      _fromLevelController.text = preset.from.toString();
+      _toLevelController.text = preset.to.toString();
+      if (preset.includeZero != null) {
+        _includeZero = preset.includeZero!;
+        _zeroTouched = true;
       }
-    }
-
-    if (rows.isEmpty) {
-      return (
-        error: 'Dải tầng hiện tại không có tầng nào để tạo.',
-        rows: const <FloorBulkRow>[]
-      );
-    }
-
-    return (error: '', rows: rows);
+      _excludedLevels.clear();
+    });
   }
 
   Future<void> _handleSingleSubmit() async {
@@ -378,7 +481,7 @@ class _FloorModalState extends ConsumerState<FloorModal> {
                     label: 'Từ tầng',
                     required: true,
                     controller: _fromLevelController,
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (val) => _handleRangeChange(from: val),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -387,7 +490,7 @@ class _FloorModalState extends ConsumerState<FloorModal> {
                     label: 'Đến tầng',
                     required: true,
                     controller: _toLevelController,
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (val) => _handleRangeChange(to: val),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -406,36 +509,23 @@ class _FloorModalState extends ConsumerState<FloorModal> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                ActionChip(
-                  label: const Text('Tầng hầm (B3 - B1)'),
-                  onPressed: () {
-                    _fromLevelController.text = '-3';
-                    _toLevelController.text = '-1';
-                    _includeZero = false;
-                    _excludedLevels.clear();
-                    setState(() {});
-                  },
-                ),
-                ActionChip(
-                  label: const Text('5 tầng tiếp'),
-                  onPressed: () {
-                    final suggested = computeSuggestedRange(widget.existingFloors);
-                    _fromLevelController.text = suggested.from.toString();
-                    _toLevelController.text = suggested.to.toString();
-                    _excludedLevels.clear();
-                    setState(() {});
-                  },
-                ),
+                for (final preset in buildFloorPresets(widget.existingFloors))
+                  ActionChip(
+                    label: Text(preset.label),
+                    onPressed: () => _applyPreset(preset),
+                  ),
               ],
             ),
             const SizedBox(height: 12),
             Row(
               children: [
                 Checkbox(
+                  key: const Key('include-zero-checkbox'),
                   value: _includeZero,
                   onChanged: (val) {
                     setState(() {
                       _includeZero = val ?? false;
+                      _zeroTouched = true;
                     });
                   },
                 ),
@@ -499,8 +589,13 @@ class _FloorModalState extends ConsumerState<FloorModal> {
                               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                           const SizedBox(width: 12),
                           Expanded(
-                            child: Text(row.displayName,
-                                style: const TextStyle(fontSize: 13, color: AppColors.slate700)),
+                            child: AppInput(
+                              key: Key('floor-name-${row.level}'),
+                              initialValue: row.displayName,
+                              placeholder: row.defaultName,
+                              enabled: !row.autoSkipped && row.checked && !_submitting,
+                              onChanged: (value) => _handleCustomNameChange(row.level, value),
+                            ),
                           ),
                           if (row.autoSkipped)
                             const AppBadge(
@@ -538,6 +633,12 @@ class _FloorModalState extends ConsumerState<FloorModal> {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
+                    if (_excludedLevels.isNotEmpty || _customNames.isNotEmpty)
+                      AppButton(
+                        text: 'Khôi phục mặc định',
+                        variant: AppButtonVariant.ghost,
+                        onPressed: _submitting ? null : _handleResetCustomizations,
+                      ),
                     AppButton(
                       text: 'Hủy',
                       variant: AppButtonVariant.outline,

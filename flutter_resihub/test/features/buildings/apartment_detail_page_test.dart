@@ -667,4 +667,17 @@ void main() {
       await tester.pump(const Duration(seconds: 5));
     });
   });
+
+  group('C19 - cancelPolicy merge', () {
+    test('API policy merges into defaults without dropping default keys', () {
+      final merged = mergeCancelPolicy(kDefaultReservationCancelPolicy, {
+        'max_hold_days': 45,
+      });
+      expect(merged['max_hold_days'], 45);
+      expect(merged['default_hold_amount'],
+          kDefaultReservationCancelPolicy['default_hold_amount']);
+      expect(merged['full_refund_before_days'],
+          kDefaultReservationCancelPolicy['full_refund_before_days']);
+    });
+  });
 }

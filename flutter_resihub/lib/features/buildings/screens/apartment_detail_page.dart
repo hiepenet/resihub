@@ -41,6 +41,21 @@ const List<String> _kApartmentTypeOptions = [
   'Duplex',
 ];
 
+/// React ApartmentDetailPage:104-112 — gộp policy từ API vào default thay vì thay thế.
+Map<String, dynamic> mergeCancelPolicy(
+  Map<String, dynamic> base,
+  Map<String, dynamic> override,
+) =>
+    <String, dynamic>{...base, ...override};
+
+/// React ApartmentDetailPage:2154-2158 — đưa type lạ lên đầu danh sách option.
+List<String> apartmentTypeOptionsWithCurrent(String current) {
+  if (current.isEmpty || _kApartmentTypeOptions.contains(current)) {
+    return _kApartmentTypeOptions;
+  }
+  return [current, ..._kApartmentTypeOptions];
+}
+
 /// Chi tiết Căn hộ & Quản lý Giữ chỗ 4 Mắt — `ApartmentDetailPage` (M03–M04).
 /// Port of `frontend/src/pages/admin/apartments/ApartmentDetailPage.jsx`.
 class ApartmentDetailPage extends ConsumerStatefulWidget {
@@ -187,7 +202,10 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
       if (polRes is Map && polRes['data'] is Map) {
         if (mounted) {
           setState(() {
-            _cancelPolicy = Map<String, dynamic>.from(polRes['data'] as Map);
+            _cancelPolicy = mergeCancelPolicy(
+              _cancelPolicy,
+              Map<String, dynamic>.from(polRes['data'] as Map),
+            );
           });
         }
       }
@@ -1791,7 +1809,9 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
           )),
     ];
 
-    final typeOptions = _kApartmentTypeOptions.map((t) => AppSelectOption(value: t, label: t)).toList();
+    final typeOptions = apartmentTypeOptionsWithCurrent(_formType)
+        .map((t) => AppSelectOption(value: t, label: t))
+        .toList();
 
     return AppModal(
       title: 'Cập nhật căn hộ ${_apt!['code'] ?? ''}',
@@ -2215,6 +2235,16 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
     final refAmt = num.tryParse(_reviewTargetRsv?['refunded_amount']?.toString() ?? '')?.toInt() ?? 0;
     final forfAmt = num.tryParse(_reviewTargetRsv?['forfeited_amount']?.toString() ?? '')?.toInt() ?? 0;
 
+    final settlement = _reviewTargetRsv?['cancel_settlement'];
+    final policyOverride = settlement is Map && settlement['policy_override'] == true;
+    final suggestedSplit = settlement is Map ? settlement['policy_suggested_split'] : null;
+    final suggestedRefund = suggestedSplit is Map
+        ? num.tryParse(suggestedSplit['refunded_amount']?.toString() ?? '')?.toInt() ?? 0
+        : 0;
+    final suggestedForfeit = suggestedSplit is Map
+        ? num.tryParse(suggestedSplit['forfeited_amount']?.toString() ?? '')?.toInt() ?? 0
+        : 0;
+
     return AppModal(
       title: _reviewMode == 'reject'
           ? 'Từ chối đề xuất thanh lý hủy giữ chỗ'
@@ -2289,6 +2319,23 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
                 if (_reviewTargetRsv?['cancel_reason'] != null) ...[
                   const Divider(height: 16),
                   Text('Lý do BQL đề xuất: ${_reviewTargetRsv!['cancel_reason']}', style: const TextStyle(fontSize: 12, color: AppColors.slate700)),
+                ],
+                if (policyOverride) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppColors.amber50,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.amber200),
+                    ),
+                    child: Text(
+                      'Cảnh báo lệch chính sách chuẩn: Mức đề xuất khác với gợi ý tự động của hệ thống '
+                      '(Hoàn ${formatMoney(suggestedRefund)} • Phạt ${formatMoney(suggestedForfeit)}). '
+                      'Vui lòng kiểm tra kỹ lý do trước khi phê duyệt.',
+                      style: const TextStyle(fontSize: 12, color: AppColors.amber900),
+                    ),
+                  ),
                 ],
               ],
             ),

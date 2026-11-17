@@ -6,11 +6,14 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/ai_helpers.dart';
 import '../../../core/utils/date_range.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/service_subscription_meta.dart';
 import '../../../core/utils/validation.dart';
+import '../../ai_gateway/services/ai_service.dart';
 import '../../../shared/widgets/common/service_subscription_meta_fields.dart';
+import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
 import '../../../shared/widgets/common/data_table_widget.dart';
@@ -34,9 +37,9 @@ import '../services/contracts_service.dart';
 
 const Map<String, String> kContractStatusLabels = {
   '': 'Tất cả trạng thái',
-  'PENDING_ALL': 'Tất cả chờ duyệt (Giá / Gia hạn / Chấm dứt)',
+  'PENDING_ALL': 'Tất cả chờ phê duyệt (Giá / Gia hạn / Chấm dứt)',
   'DRAFT': 'Bản nháp (DRAFT)',
-  'PENDING_APPROVAL': 'Chờ duyệt giá (PENDING_APPROVAL)',
+  'PENDING_APPROVAL': 'Chờ phê duyệt giá (PENDING_APPROVAL)',
   'ACTIVE': 'Đang hiệu lực (ACTIVE)',
   'RENEWAL_PENDING': 'Chờ duyệt gia hạn (RENEWAL_PENDING)',
   'TERMINATION_PENDING': 'Chờ bàn giao chấm dứt (TERMINATION_PENDING)',
@@ -61,7 +64,7 @@ const Map<String, AppBadgeVariant> kRequestTypeVariants = {
 
 const Map<String, String> kRequestStatusLabels = {
   '': 'Tất cả trạng thái yêu cầu',
-  'SUBMITTED': 'Chờ duyệt (SUBMITTED)',
+  'SUBMITTED': 'Chờ xử lý (SUBMITTED)',
   'APPROVED': 'Đã phê duyệt (APPROVED)',
   'REJECTED': 'Đã từ chối (REJECTED)',
 };
@@ -74,6 +77,99 @@ const List<AppSelectOption<String>> kRelationshipOptions = [
   AppSelectOption(value: 'friend', label: 'Bạn bè'),
   AppSelectOption(value: 'other', label: 'Khác'),
 ];
+
+/// React ContractsPage.jsx:375,643-644 — giá niêm yết parse số trực tiếp
+/// (không formatMoney().replaceAll('.', '') — cách cũ sai khi giá có '.' phân cách hàng nghìn).
+String rawNumericString(dynamic raw) {
+  if (raw == null) return '';
+  final numVal = num.tryParse(raw.toString());
+  if (numVal == null) return '';
+  return numVal.round().toString();
+}
+
+/// React ContractsPage.jsx:136-149 — nhãn trạng thái căn hộ trong option select.
+String getAptSelectStatusLabel(String status) {
+  switch (status) {
+    case 'AVAILABLE':
+      return 'Còn trống';
+    case 'RESERVED':
+      return 'Đã giữ chỗ';
+    case 'OCCUPIED':
+      return 'Đang có khách thuê (Tạo HĐ nối tiếp)';
+    case 'MAINTENANCE':
+      return 'Đang bảo trì (Tạo HĐ tương lai)';
+    default:
+      return status;
+  }
+}
+
+/// React ContractsPage.jsx:1905-1917 — option căn hộ kèm trạng thái/giá/sublabel/badge.
+AppSelectOption<String> buildApartmentSelectOption(Map<String, dynamic> a) {
+  final id = a['id']?.toString() ?? '';
+  final code = a['code']?.toString() ?? '';
+  final status = a['status']?.toString() ?? '';
+  final cCount = num.tryParse(a['active_contracts_count']?.toString() ?? '')?.toInt() ?? 0;
+  final rCount = num.tryParse(a['held_reservations_count']?.toString() ?? '')?.toInt() ?? 0;
+  final badgeParts = <String>[];
+  if (cCount > 0) badgeParts.add('$cCount HĐ');
+  if (rCount > 0) badgeParts.add('$rCount giữ chỗ');
+  final sublabel = [
+    a['building_name']?.toString() ?? '',
+    a['floor_name']?.toString() ?? '',
+  ].where((s) => s.isNotEmpty).join(' · ');
+  return AppSelectOption<String>(
+    value: id,
+    label: '$code — ${getAptSelectStatusLabel(status)} — Niêm yết: ${formatMoney(a['base_rent'])}',
+    sublabel: sublabel.isNotEmpty ? sublabel : null,
+    badge: badgeParts.isNotEmpty ? badgeParts.join(' · ') : null,
+    searchText: code,
+  );
+}
+
+/// React ContractsPage.jsx:909-959 — map output AI quét hợp đồng sang draft tạo HĐ.
+Map<String, dynamic> mapContractAiOutputToDraft(
+  Map<String, dynamic> out,
+  List<dynamic> apartments,
+) {
+  final aptCode = out['apartment_code']?.toString().trim().toLowerCase() ?? '';
+  Map<String, dynamic>? matched;
+  if (aptCode.isNotEmpty) {
+    for (final a in apartments) {
+      if (a is Map && a['code']?.toString().trim().toLowerCase() == aptCode) {
+        matched = Map<String, dynamic>.from(a);
+        break;
+      }
+    }
+  }
+
+  String date10(dynamic v) {
+    final s = v?.toString() ?? '';
+    return s.length >= 10 ? s.substring(0, 10) : s;
+  }
+
+  String positiveAmount(dynamic v, {bool allowZero = false}) {
+    final n = num.tryParse(v?.toString() ?? '');
+    if (n == null) return '';
+    if (allowZero ? n < 0 : n <= 0) return '';
+    return n.round().toString();
+  }
+
+  return {
+    'start_date': out['start_date'] != null ? date10(out['start_date']) : '',
+    'end_date': out['end_date'] != null ? date10(out['end_date']) : '',
+    'rent_amount': positiveAmount(out['rent_amount']),
+    'deposit_amount': positiveAmount(out['deposit_amount'], allowZero: true),
+    'billing_day': out['billing_day'] != null ? out['billing_day'].toString() : '',
+    'payment_due_days':
+        out['payment_due_days'] != null ? out['payment_due_days'].toString() : '',
+    'note': (out['terms_note']?.toString() ?? out['note']?.toString() ?? '').trim(),
+    'apartment_id': matched?['id']?.toString(),
+    'building_id': matched?['building_id']?.toString(),
+    'tenant_phone': out['tenant_phone']?.toString() ?? '',
+    'tenant_id_number': out['tenant_id_number']?.toString() ?? '',
+    'tenant_full_name': out['tenant_full_name']?.toString() ?? '',
+  };
+}
 
 /// Dữ liệu form tạo hợp đồng — lớp thuần để validate/test không cần widget hay provider.
 class ContractCreateDraft {
@@ -331,9 +427,22 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
   // Tenant mode: 'existing' | 'new'
   String _tenantMode = 'existing';
   String _tenantIdentifier = '';
+  final TextEditingController _tenantIdentifierController = TextEditingController();
+  final FocusNode _tenantIdentifierFocusNode = FocusNode();
   bool _tenantLookupLoading = false;
   dynamic _lookedUpTenant;
   String? _tenantLookupMessage;
+  bool _tenantLookupInvalidFormat = false;
+  bool _tenantLookupOutOfScope = false;
+  String _tenantLookupNormalizedPhone = '';
+  String _tenantLookupNormalizedId = '';
+
+  // B8 — AI quét hợp đồng giấy/PDF & CCCD (React ContractsPage.jsx:300-309).
+  List<String> _contractScanFiles = [];
+  bool _contractScanConsent = true;
+  bool _extractingContractAi = false;
+  Map<String, dynamic>? _contractAiTracker;
+  String? _contractAiError;
 
   // New tenant fields
   final Map<String, dynamic> _newTenantForm = {
@@ -353,6 +462,8 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
     'isDuplicate': false,
     'inScope': true,
     'message': '',
+    'canLinkCrossBuilding': false,
+    'duplicates': <dynamic>[],
   };
 
   // Occupants inline
@@ -381,12 +492,23 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
     _activeTab = (widget.initialTab == 'requests') ? 'requests' : 'list';
     _createStartDate = toDateOnlyStr(DateTime.now());
     _createEndDate = addMonthsClampedStr(_createStartDate, 12);
+    // React ContractsPage.jsx:2149-2153 — tra cứu khi rời ô (onBlur).
+    _tenantIdentifierFocusNode.addListener(() {
+      if (!_tenantIdentifierFocusNode.hasFocus &&
+          _tenantIdentifier.trim().isNotEmpty &&
+          !_tenantLookupLoading &&
+          _lookedUpTenant == null) {
+        _handleLookupTenant();
+      }
+    });
     _fetchData();
   }
 
   @override
   void dispose() {
     _dupTimer?.cancel();
+    _tenantIdentifierController.dispose();
+    _tenantIdentifierFocusNode.dispose();
     super.dispose();
   }
 
@@ -456,8 +578,24 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
       _createNote = '';
       _tenantMode = 'existing';
       _tenantIdentifier = '';
+      _tenantIdentifierController.clear();
       _lookedUpTenant = null;
       _tenantLookupMessage = null;
+      _tenantLookupInvalidFormat = false;
+      _tenantLookupOutOfScope = false;
+      _tenantLookupNormalizedPhone = '';
+      _tenantLookupNormalizedId = '';
+      _contractScanFiles = [];
+      _contractScanConsent = true;
+      _contractAiTracker = null;
+      _contractAiError = null;
+      _dupInfo = {
+        'isDuplicate': false,
+        'inScope': true,
+        'message': '',
+        'canLinkCrossBuilding': false,
+        'duplicates': <dynamic>[],
+      };
       _newTenantForm.updateAll((key, value) => '');
       _newTenantForm['nationality'] = 'Việt Nam';
       _inlineOccupants.clear();
@@ -508,9 +646,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
           );
           if (matched is Map) {
             _createBuildingId = matched['building_id']?.toString() ?? _createBuildingId;
-            final base = matched['base_rent'] != null
-                ? formatMoney(matched['base_rent'], showSymbol: false).replaceAll('.', '')
-                : '';
+            final base = rawNumericString(matched['base_rent']);
             _createRentAmount = base;
             _createDepositAmount = base;
           }
@@ -565,9 +701,7 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
       orElse: () => null,
     );
     if (apt is Map) {
-      final base = apt['base_rent'] != null
-          ? formatMoney(apt['base_rent'], showSymbol: false).replaceAll('.', '')
-          : '';
+      final base = rawNumericString(apt['base_rent']);
       setState(() {
         if (_createBuildingId.isEmpty) {
           _createBuildingId = apt['building_id']?.toString() ?? '';
@@ -657,62 +791,234 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
     }
   }
 
-  Future<void> _handleLookupTenant() async {
-    final raw = _tenantIdentifier.trim();
+  /// React ContractsPage.jsx:662-724 — tra cứu theo SĐT/CCCD (gọi được từ onBlur/Enter/nút).
+  Future<dynamic> _handleLookupTenant([String? rawValue]) async {
+    final raw = (rawValue ?? _tenantIdentifier).trim();
     if (raw.isEmpty) {
       setState(() {
         _lookedUpTenant = null;
-        _tenantLookupMessage = 'Vui lòng nhập SĐT hoặc CCCD.';
+        _tenantLookupMessage = null;
+        _tenantLookupInvalidFormat = false;
+        _tenantLookupOutOfScope = false;
       });
-      return;
+      return null;
     }
 
     final normPhone = normalizePhone(raw);
-    final isPhone = isValidPhone(normPhone);
-    final isId = !isPhone && isValidIdNumber(raw);
+    final okPhone = isValidPhone(normPhone);
+    final okId = !okPhone && isValidIdNumber(raw);
 
-    if (!isPhone && !isId) {
+    if (!okPhone && !okId) {
       setState(() {
         _lookedUpTenant = null;
-        _tenantLookupMessage = 'Định dạng không hợp lệ (10 số đối với SĐT, 9–12 số đối với CCCD).';
+        _tenantLookupInvalidFormat = true;
+        _tenantLookupOutOfScope = false;
+        _tenantLookupMessage =
+            'Định dạng không hợp lệ. Vui lòng nhập đúng SĐT 10 chữ số (VD: 0912345678) hoặc Số CCCD/Hộ chiếu (9–12 ký tự).';
       });
-      return;
+      return null;
     }
 
     setState(() {
       _tenantLookupLoading = true;
       _tenantLookupMessage = null;
+      _tenantLookupInvalidFormat = false;
+      _tenantLookupOutOfScope = false;
       _lookedUpTenant = null;
     });
 
     try {
-      final res = await ref.read(tenantsServiceProvider).lookup(isPhone ? normPhone : raw);
+      final res = await ref.read(tenantsServiceProvider).lookup(okPhone ? normPhone : raw.replaceAll(RegExp(r'\s+'), ''));
       if (res is Map && res['found'] == true && res['tenant'] != null) {
         setState(() {
           _lookedUpTenant = res['tenant'];
           _tenantLookupMessage = null;
           _createErrors.remove('primary_tenant');
+          _createErrors.remove('primary_tenant_id');
         });
-      } else {
-        setState(() {
-          _lookedUpTenant = null;
-          _tenantLookupMessage = (res is Map && res['message'] != null)
-              ? res['message'].toString()
-              : 'Không tìm thấy hồ sơ cư dân với SĐT/CCCD này.';
-        });
+        return res['tenant'];
       }
-    } catch (err) {
-      ref.read(toastProvider.notifier).error(
-            extractErrorMessage(err, 'Lỗi tra cứu cư dân.'),
-          );
+
       setState(() {
         _lookedUpTenant = null;
-        _tenantLookupMessage = 'Lỗi tra cứu cư dân.';
+        _tenantLookupOutOfScope = res is Map && res['outOfScopeConflict'] == true;
+        _tenantLookupNormalizedPhone = res is Map
+            ? res['normalizedPhone']?.toString() ?? (okPhone ? normPhone : '')
+            : (okPhone ? normPhone : '');
+        _tenantLookupNormalizedId = res is Map
+            ? res['normalizedIdNumber']?.toString() ?? (okId ? raw.replaceAll(RegExp(r'\s+'), '') : '')
+            : (okId ? raw.replaceAll(RegExp(r'\s+'), '') : '');
+        _tenantLookupMessage = (res is Map && res['message'] != null)
+            ? res['message'].toString()
+            : 'Chưa tìm thấy hồ sơ cư dân khớp với SĐT / CCCD này.';
       });
+      return null;
+    } catch (err) {
+      setState(() {
+        _lookedUpTenant = null;
+        _tenantLookupOutOfScope = false;
+        _tenantLookupMessage = extractErrorMessage(err, 'Không thể tra cứu hồ sơ cư dân.');
+      });
+      return null;
     } finally {
       if (mounted) {
         setState(() => _tenantLookupLoading = false);
       }
+    }
+  }
+
+  /// React ContractsPage.jsx:655-660 — nút "Đổi / Nhập lại".
+  void _handleClearLookedUpTenant() {
+    setState(() {
+      _lookedUpTenant = null;
+      _tenantLookupMessage = null;
+      _tenantLookupInvalidFormat = false;
+      _tenantLookupOutOfScope = false;
+      _tenantIdentifier = '';
+      _tenantIdentifierController.clear();
+      _createErrors.remove('primary_tenant_id');
+    });
+  }
+
+  /// React ContractsPage.jsx:728-737 — tạo cư dân mới với SĐT/CCCD đã normalize.
+  void _handleSwitchToNewWithPrefill() {
+    setState(() {
+      if (_tenantLookupNormalizedPhone.isNotEmpty) {
+        _newTenantForm['phone'] = _tenantLookupNormalizedPhone;
+      }
+      if (_tenantLookupNormalizedId.isNotEmpty) {
+        _newTenantForm['id_number'] = _tenantLookupNormalizedId;
+      }
+      _tenantLookupMessage = null;
+      _createErrors.remove('primary_tenant_id');
+      _tenantMode = 'new';
+    });
+  }
+
+  /// React ContractsPage.jsx:739-752 — chuyển sang tra cứu & liên kết liên tòa.
+  Future<void> _handleSwitchToCrossBuildingLookup() async {
+    final phone = normalizePhone(_newTenantForm['phone']?.toString());
+    final id = (_newTenantForm['id_number']?.toString() ?? '').trim();
+    final ident = isValidPhone(phone) ? phone : id;
+    setState(() {
+      _tenantMode = 'existing';
+      _tenantIdentifier = ident;
+      _tenantIdentifierController.text = ident;
+      _createErrors.remove('primary_tenant_id');
+    });
+    if (ident.isNotEmpty) await _handleLookupTenant(ident);
+  }
+
+  /// React ContractsPage.jsx:894-1001 — AI quét hợp đồng → điền nháp form tạo HĐ.
+  Future<void> _handleExtractContractAi() async {
+    final files = _contractScanFiles.where((s) => s.isNotEmpty).toList();
+    if (files.isEmpty) {
+      ref.read(toastProvider.notifier).warning(
+            'Vui lòng chọn ảnh hoặc tệp PDF hợp đồng trước khi trích xuất AI.',
+          );
+      return;
+    }
+
+    setState(() {
+      _extractingContractAi = true;
+      _contractAiError = null;
+    });
+
+    try {
+      final res = await ref.read(aiServiceProvider).extractDocument({
+        'document_type': 'CONTRACT',
+        'building_id': _createBuildingId.isNotEmpty ? _createBuildingId : null,
+        'files': files,
+        'privacy_acknowledged': _contractScanConsent,
+      });
+      final data = (res is Map && res['data'] != null) ? res['data'] : res;
+      final out = (data is Map && data['output'] is Map)
+          ? Map<String, dynamic>.from(data['output'] as Map)
+          : <String, dynamic>{};
+      final mapped = mapContractAiOutputToDraft(out, _apartments);
+
+      setState(() {
+        if (mapped['apartment_id'] != null) {
+          _createApartmentId = mapped['apartment_id'] as String;
+        }
+        if (mapped['building_id'] != null && mapped['building_id'].toString().isNotEmpty) {
+          _createBuildingId = mapped['building_id'].toString();
+        }
+        if (mapped['start_date'].toString().isNotEmpty) _createStartDate = mapped['start_date'].toString();
+        if (mapped['end_date'].toString().isNotEmpty) _createEndDate = mapped['end_date'].toString();
+        if (mapped['rent_amount'].toString().isNotEmpty) _createRentAmount = mapped['rent_amount'].toString();
+        if (mapped['deposit_amount'].toString().isNotEmpty) _createDepositAmount = mapped['deposit_amount'].toString();
+        if (mapped['billing_day'].toString().isNotEmpty) _createBillingDay = mapped['billing_day'].toString();
+        if (mapped['payment_due_days'].toString().isNotEmpty) {
+          _createPaymentDueDays = mapped['payment_due_days'].toString();
+        }
+        if (mapped['note'].toString().isNotEmpty) _createNote = mapped['note'].toString();
+      });
+
+      final normalizedTenantPhone = normalizePhone(mapped['tenant_phone'].toString());
+      final tenantIdNumber = mapped['tenant_id_number'].toString().trim();
+      final lookupKey = normalizedTenantPhone.isNotEmpty ? normalizedTenantPhone : tenantIdNumber;
+      if (lookupKey.isNotEmpty) {
+        setState(() {
+          _tenantMode = 'existing';
+          _tenantIdentifier = lookupKey;
+          _tenantIdentifierController.text = lookupKey;
+        });
+        final found = await _handleLookupTenant(lookupKey);
+        if (found == null) {
+          setState(() {
+            _tenantMode = 'new';
+            if (mapped['tenant_full_name'].toString().isNotEmpty) {
+              _newTenantForm['full_name'] = mapped['tenant_full_name'].toString();
+            }
+            if (mapped['tenant_phone'].toString().isNotEmpty) {
+              _newTenantForm['phone'] = normalizePhone(mapped['tenant_phone'].toString());
+            }
+            if (mapped['tenant_id_number'].toString().isNotEmpty) {
+              _newTenantForm['id_number'] = mapped['tenant_id_number'].toString().trim();
+            }
+          });
+        }
+      } else if (mapped['tenant_full_name'].toString().isNotEmpty) {
+        setState(() {
+          _tenantMode = 'new';
+          _newTenantForm['full_name'] = mapped['tenant_full_name'].toString();
+        });
+      }
+
+      final baseConf = data is Map ? data['confidence'] : null;
+      final confMap = <String, dynamic>{
+        'start_date': out['field_confidences']?['start_date'] ?? baseConf,
+        'end_date': out['field_confidences']?['end_date'] ?? baseConf,
+        'rent_amount': out['field_confidences']?['rent_amount'] ?? baseConf,
+        'deposit_amount': out['field_confidences']?['deposit_amount'] ?? baseConf,
+        'billing_day': out['field_confidences']?['billing_day'] ?? baseConf,
+        'payment_due_days': out['field_confidences']?['payment_due_days'] ?? baseConf,
+        'note': out['field_confidences']?['terms_note'] ?? baseConf,
+      };
+      setState(() {
+        _contractAiTracker = createAiFieldTracker(
+          data is Map ? data['suggestion_id']?.toString() : null,
+          {
+            'start_date': mapped['start_date'],
+            'end_date': mapped['end_date'],
+            'rent_amount': mapped['rent_amount'],
+            'deposit_amount': mapped['deposit_amount'],
+            'billing_day': mapped['billing_day'],
+            'payment_due_days': mapped['payment_due_days'],
+            'note': mapped['note'],
+          },
+          confMap,
+        );
+      });
+      ref.read(toastProvider.notifier).success(
+            'AI đã trích xuất nháp hợp đồng — vui lòng kiểm tra các ô viền nét đứt trước khi lưu.',
+          );
+    } catch (err) {
+      final msg = mapAiErrorToVietnamese(err);
+      setState(() => _contractAiError = '${msg.title} ${msg.guidance}'.trim());
+    } finally {
+      if (mounted) setState(() => _extractingContractAi = false);
     }
   }
 
@@ -726,7 +1032,13 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
 
     if (!okPhone && !okId) {
       setState(() {
-        _dupInfo = {'isDuplicate': false, 'inScope': true, 'message': ''};
+        _dupInfo = {
+          'isDuplicate': false,
+          'inScope': true,
+          'message': '',
+          'canLinkCrossBuilding': false,
+          'duplicates': <dynamic>[],
+        };
       });
       return;
     }
@@ -744,6 +1056,8 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
               'isDuplicate': res is Map && res['isDuplicate'] == true,
               'inScope': res is Map ? res['inScope'] != false : true,
               'message': (res is Map && res['message'] != null) ? res['message'].toString() : '',
+              'canLinkCrossBuilding': res is Map && res['canLinkCrossBuilding'] == true,
+              'duplicates': res is Map && res['duplicates'] is List ? res['duplicates'] : <dynamic>[],
             };
           });
         }
@@ -1324,6 +1638,99 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // B8 — AI quét hợp đồng giấy/PDF (React ContractsPage.jsx:894-1048).
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEEF2FF),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFC7D2FE)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(LucideIcons.sparkles, size: 16, color: AppColors.secondary600),
+                        SizedBox(width: 8),
+                        Text(
+                          'Quét hợp đồng giấy / CCCD bằng AI (AI-01)',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1E1B4B),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    FileUploadField(
+                      label: 'Chọn ảnh hoặc tệp PDF hợp đồng để trích xuất',
+                      multiple: true,
+                      value: _contractScanFiles,
+                      onChanged: (val) {
+                        if (val is List) {
+                          setState(() => _contractScanFiles = val.cast<String>());
+                        } else if (val is String && val.isNotEmpty) {
+                          setState(() => _contractScanFiles = [val]);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _contractScanConsent,
+                          onChanged: (v) =>
+                              setState(() => _contractScanConsent = v ?? true),
+                        ),
+                        const Expanded(
+                          child: Text(
+                            'Đồng thuận quyền riêng tư trước khi gửi AI',
+                            style: TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.slate700),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_contractAiError != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          _contractAiError!,
+                          style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.rose600),
+                        ),
+                      ),
+                    Wrap(
+                      spacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        AppButton(
+                          text: 'Quét hợp đồng',
+                          icon: const Icon(LucideIcons.sparkles, size: 16),
+                          loading: _extractingContractAi,
+                          variant: AppButtonVariant.primary,
+                          onPressed: _handleExtractContractAi,
+                        ),
+                        if (_contractAiTracker?['suggestionId'] != null)
+                          AppButton(
+                            text: 'Hủy nháp AI',
+                            variant: AppButtonVariant.ghost,
+                            onPressed: () => setState(() => _contractAiTracker = null),
+                          ),
+                      ],
+                    ),
+                    if (_contractAiTracker != null)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text(
+                          'AI đã trích xuất nháp hợp đồng — vui lòng kiểm tra các ô trước khi lưu.',
+                          style: TextStyle(fontFamily: 'Inter', fontSize: 11, color: Color(0xFF3730A3)),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
               // 1. Tòa nhà & Căn hộ
               const Text(
                 '1. Thông tin Bất động sản',
@@ -1341,7 +1748,11 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                       options: _buildings.map((b) {
                         final id = b['id']?.toString() ?? '';
                         final name = b['name']?.toString() ?? '';
-                        return AppSelectOption(value: id, label: name);
+                        final code = b['code']?.toString() ?? '';
+                        return AppSelectOption(
+                          value: id,
+                          label: code.isNotEmpty ? '$name ($code)' : name,
+                        );
                       }).toList(),
                       onChanged: _onBuildingChangedInModal,
                     ),
@@ -1351,14 +1762,17 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     child: AppSelect<String>(
                       label: 'Căn hộ',
                       required: true,
-                      placeholder: _loadingRefData ? 'Đang tải...' : 'Chọn căn hộ trống',
+                      placeholder: _loadingRefData
+                          ? 'Đang tải căn hộ...'
+                          : _apartments.isEmpty
+                              ? 'Không có căn hộ khả dụng'
+                              : '-- Chọn căn hộ --',
+                      searchPlaceholder: 'Tìm mã căn hộ, trạng thái, giá thuê...',
                       value: _createApartmentId.isNotEmpty ? _createApartmentId : null,
-                      options: _apartments.map((a) {
-                        final id = a['id']?.toString() ?? '';
-                        final code = a['code']?.toString() ?? '';
-                        final base = a['base_rent'] != null ? ' - ${formatMoney(a['base_rent'])}' : '';
-                        return AppSelectOption(value: id, label: '$code$base');
-                      }).toList(),
+                      options: _apartments
+                          .whereType<Map>()
+                          .map((a) => buildApartmentSelectOption(Map<String, dynamic>.from(a)))
+                          .toList(),
                       onChanged: _onApartmentSelected,
                     ),
                   ),
@@ -1409,9 +1823,25 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                     Expanded(
                       child: AppInput(
                         label: 'SĐT hoặc CCCD khách thuê',
-                        placeholder: 'Nhập SĐT (10 số) hoặc CCCD...',
-                        initialValue: _tenantIdentifier,
-                        onChanged: (val) => _tenantIdentifier = val,
+                        placeholder: 'Nhập chính xác SĐT 10 số hoặc số CCCD/Hộ chiếu của cư dân...',
+                        controller: _tenantIdentifierController,
+                        focusNode: _tenantIdentifierFocusNode,
+                        onChanged: (val) {
+                          _tenantIdentifier = val;
+                          if (_tenantLookupMessage != null) {
+                            setState(() => _tenantLookupMessage = null);
+                          }
+                        },
+                        onEditingComplete: () {
+                          if (_tenantIdentifier.trim().isNotEmpty && !_tenantLookupLoading) {
+                            _handleLookupTenant();
+                          }
+                        },
+                        onSubmitted: (_) {
+                          if (_tenantIdentifier.trim().isNotEmpty && !_tenantLookupLoading) {
+                            _handleLookupTenant();
+                          }
+                        },
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -1427,11 +1857,42 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                   ],
                 ),
                 if (_tenantLookupMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      _tenantLookupMessage!,
-                      style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.amber700),
+                  Container(
+                    margin: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: _tenantLookupInvalidFormat || _tenantLookupOutOfScope
+                          ? AppColors.rose50
+                          : AppColors.amber50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _tenantLookupInvalidFormat || _tenantLookupOutOfScope
+                            ? AppColors.rose200
+                            : AppColors.amber200,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _tenantLookupMessage!,
+                            style: TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 12,
+                              color: _tenantLookupInvalidFormat || _tenantLookupOutOfScope
+                                  ? AppColors.rose700
+                                  : AppColors.amber700,
+                            ),
+                          ),
+                        ),
+                        if (!_tenantLookupInvalidFormat && !_tenantLookupOutOfScope)
+                          AppButton(
+                            text: '+ Tạo cư dân mới',
+                            variant: AppButtonVariant.primary,
+                            size: AppButtonSize.xs,
+                            onPressed: _handleSwitchToNewWithPrefill,
+                          ),
+                      ],
                     ),
                   ),
                 if (_lookedUpTenant != null)
@@ -1451,16 +1912,30 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                _lookedUpTenant['full_name']?.toString() ?? '',
-                                style: const TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600, color: AppColors.emerald700),
+                              Wrap(
+                                spacing: 6,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Text(
+                                    'Đã xác thực cư dân: ${_lookedUpTenant['masked_name'] ?? _lookedUpTenant['full_name'] ?? ''}',
+                                    style: const TextStyle(fontFamily: 'Inter', fontWeight: FontWeight.w600, color: AppColors.emerald700),
+                                  ),
+                                  if (_lookedUpTenant['cross_building_link'] == true)
+                                    const AppBadge(label: 'Liên kết liên tòa (Bảo mật PII)', variant: AppBadgeVariant.indigo),
+                                ],
                               ),
                               Text(
-                                'SĐT: ${_lookedUpTenant['phone'] ?? '—'} • CCCD: ${maskIdNumber(_lookedUpTenant['id_number'])}',
+                                'SĐT: ${_lookedUpTenant['masked_phone'] ?? _lookedUpTenant['phone'] ?? '—'} • CCCD: ${_lookedUpTenant['masked_id_number'] ?? maskIdNumber(_lookedUpTenant['id_number'])}',
                                 style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.emerald700),
                               ),
                             ],
                           ),
+                        ),
+                        AppButton(
+                          text: 'Đổi / Nhập lại',
+                          variant: AppButtonVariant.outline,
+                          size: AppButtonSize.xs,
+                          onPressed: _handleClearLookedUpTenant,
                         ),
                       ],
                     ),
@@ -1544,11 +2019,31 @@ class _ContractsPageState extends ConsumerState<ContractsPage> {
                   ],
                 ),
                 if (_dupInfo['isDuplicate'] == true)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      _dupInfo['message']?.toString() ?? 'Phát hiện SĐT/CCCD đã có trong hệ thống.',
-                      style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.amber700),
+                  Container(
+                    margin: const EdgeInsets.only(top: 6),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppColors.amber50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.amber200),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _dupInfo['message']?.toString() ??
+                                'Phát hiện SĐT/CCCD đã có trong hệ thống.',
+                            style: const TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.amber700),
+                          ),
+                        ),
+                        if (_dupInfo['inScope'] == false && _dupInfo['canLinkCrossBuilding'] == true)
+                          AppButton(
+                            text: 'Chuyển sang Tra cứu & Liên kết cư dân',
+                            variant: AppButtonVariant.primary,
+                            size: AppButtonSize.xs,
+                            onPressed: _handleSwitchToCrossBuildingLookup,
+                          ),
+                      ],
                     ),
                   ),
                 if (_createErrors['duplicate_identity'] != null)
