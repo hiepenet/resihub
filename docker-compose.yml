@@ -38,7 +38,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
       GEMINI_TIMEOUT_MS: ${GEMINI_TIMEOUT_MS:-45000}
-      CORS_ORIGIN: "http://localhost:3000"
+      CORS_ORIGIN: "http://localhost:3000,http://localhost:3001"
     ports:
       - "5000:5000"
     depends_on:
@@ -63,6 +63,17 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+
+  flutter_web:
+    build:
+      context: ./flutter_resihub
+      dockerfile: Dockerfile
+    container_name: resihub-flutter-web
+    restart: always
+    ports:
+      - "3001:80"
+    depends_on:
+      - api
 
 volumes:
   pgdata:
