@@ -41,6 +41,27 @@ const List<String> kOpenSrStatuses = [
   'REOPENED'
 ];
 
+/// Port of React `toLocalDateTimeInputValue()`: ISO -> local `YYYY-MM-DDTHH:mm`.
+String toLocalDateTimeInputValue(dynamic isoValue) {
+  if (isoValue == null) return '';
+  final raw = isoValue.toString();
+  if (raw.isEmpty) return '';
+  final dt = DateTime.tryParse(raw);
+  if (dt == null) return '';
+  final local = dt.toLocal();
+  String p(int n) => n.toString().padLeft(2, '0');
+  return '${local.year.toString().padLeft(4, '0')}-${p(local.month)}-${p(local.day)}T${p(local.hour)}:${p(local.minute)}';
+}
+
+/// Port of React `new Date(v).toISOString()`: local datetime input -> UTC ISO.
+String? toIsoFromLocalInput(String value) {
+  final raw = value.trim();
+  if (raw.isEmpty) return null;
+  final dt = DateTime.tryParse(raw);
+  if (dt == null) return null;
+  return dt.toUtc().toIso8601String();
+}
+
 /// Port of `AUDIT_ACTION_LABELS` trong ServiceRequestsPage.jsx.
 const Map<String, String> kSrAuditActionLabels = {
   'CREATE_SERVICE_REQUEST': 'Tạo yêu cầu báo hỏng',
@@ -1136,7 +1157,7 @@ class _ServiceRequestDetailDrawerState
         'OTHER';
     _holdReasonController.text = d['hold_reason']?.toString() ?? '';
     _nextAppointmentController.text =
-        d['next_appointment_at']?.toString() ?? '';
+        toLocalDateTimeInputValue(d['next_appointment_at']);
     _resolutionNoteController.text = d['resolution_note']?.toString() ?? '';
     _internalNoteController.text = d['internal_note']?.toString() ?? '';
 
@@ -1305,9 +1326,7 @@ class _ServiceRequestDetailDrawerState
         'resolution_note': _resolutionNoteController.text.trim(),
         'resolution_images': _resolutionImages,
         'hold_reason': _holdReasonController.text.trim(),
-        'next_appointment_at': _nextAppointmentController.text.trim().isNotEmpty
-            ? _nextAppointmentController.text.trim()
-            : null,
+        'next_appointment_at': toIsoFromLocalInput(_nextAppointmentController.text),
         'internal_note': _internalNoteController.text.trim(),
       };
 
@@ -1480,8 +1499,12 @@ class _ServiceRequestDetailDrawerState
         const Divider(height: 1, color: AppColors.slate200),
         const SizedBox(height: 16),
 
-        // Card AI Triage (React đặt trước hộp Zalo)
-        _buildAiTriageCard(d, canEdit, aiTriageMeta, availableAssignees),
+        // Card AI Triage (React đặt trước hộp Zalo): chỉ hiện khi có triage
+        // status/status mở (React ServiceRequestsPage.jsx:1199-1200).
+        if ((d['ai_triage_status']?.toString().isNotEmpty == true &&
+                d['ai_triage_status']?.toString() != 'NONE') ||
+            (canEdit && kOpenSrStatuses.contains(status)))
+          _buildAiTriageCard(d, canEdit, aiTriageMeta, availableAssignees),
         const SizedBox(height: 16),
 
         // Hộp tiện ích Đồng bộ Nhóm Zalo Phòng (FR-069)
@@ -1957,6 +1980,23 @@ class _ServiceRequestDetailDrawerState
           ),
           const SizedBox(height: 10),
 
+          // Tóm tắt AI (React: detail.ai_summary)
+          if (d['ai_summary']?.toString().isNotEmpty == true) ...[
+            Container(
+              padding: const EdgeInsets.all(10),
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.9),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFDE68A)),
+              ),
+              child: Text(
+                'Tóm tắt AI: ${d['ai_summary']}',
+                style: const TextStyle(fontSize: 12, color: AppColors.slate800),
+              ),
+            ),
+          ],
+
           // Chi tiết gợi ý
           if (cat != null || prio != null) ...[
             Wrap(
@@ -2038,8 +2078,36 @@ class _ServiceRequestDetailDrawerState
             ),
           ],
 
+          // Cảnh báo cần phân loại thủ công (AC-011.2, React:1267-1274)
+          if (aiTriageMeta?['needsManualWarning'] == true) ...[
+            Container(
+              padding: const EdgeInsets.all(10),
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF1F2),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFECDD3)),
+              ),
+              child: const Text(
+                'AI chưa đủ độ tin cậy hoặc tạm gián đoạn (AC-011.2) — hệ thống giữ nguyên phiếu '
+                'và gắn cờ Cần phân loại thủ công. Vui lòng chọn hạng mục/mức ưu tiên bên dưới để điều phối.',
+                style: TextStyle(fontSize: 12, color: AppColors.rose800),
+              ),
+            ),
+          ],
+
           // Action buttons cho AI Triage
           if (canEdit) ...[
+            AppSelect<String>(
+              label: 'Hạng mục áp dụng / ghi đè',
+              value: _triageOverrideCategory,
+              options: kServiceRequestCategories.entries
+                  .map((e) => AppSelectOption(value: e.key, label: e.value))
+                  .toList(),
+              onChanged: (val) =>
+                  setState(() => _triageOverrideCategory = val ?? 'OTHER'),
+            ),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -2116,6 +2184,7 @@ class _ServiceRequestDetailDrawerState
                 ),
               if (_status == 'ASSIGNED' ||
                   _status == 'IN_PROGRESS' ||
+                  _status == 'ON_HOLD' ||
                   _status == 'REOPENED')
                 AppButton(
                   text: 'Hoàn tất xử lý',
@@ -2168,6 +2237,20 @@ class _ServiceRequestDetailDrawerState
           ),
           const SizedBox(height: 12),
           AppSelect<String>(
+            label: 'Mức độ ưu tiên',
+            value: _priority,
+            options: const [
+              AppSelectOption(value: 'LOW', label: 'Thấp'),
+              AppSelectOption(value: 'NORMAL', label: 'Bình thường'),
+              AppSelectOption(value: 'HIGH', label: 'Cao'),
+              AppSelectOption(value: 'URGENT', label: 'Khẩn cấp'),
+            ],
+            onChanged: (val) {
+              if (val != null) setState(() => _priority = val);
+            },
+          ),
+          const SizedBox(height: 12),
+          AppSelect<String>(
             label: 'Kỹ thuật viên phụ trách',
             value: _assignedTo.isEmpty ? null : _assignedTo,
             options: [
@@ -2193,7 +2276,7 @@ class _ServiceRequestDetailDrawerState
             const SizedBox(height: 12),
             AppInput(
               label: 'Lịch hẹn xử lý tiếp theo',
-              hint: 'YYYY-MM-DDTHH:mm:ss.sssZ',
+              hint: 'YYYY-MM-DDTHH:mm (giờ lokal, sẽ gửi dạng ISO UTC)',
               controller: _nextAppointmentController,
             ),
             const SizedBox(height: 12),
@@ -2207,6 +2290,19 @@ class _ServiceRequestDetailDrawerState
             controller: _resolutionNoteController,
             multiline: true,
             rows: 2,
+          ),
+          const SizedBox(height: 12),
+
+          FileUploadField(
+            label: 'Ảnh nghiệm thu sau sửa chữa (tối đa 3 ảnh)',
+            multiple: true,
+            maxFiles: 3,
+            allowPdf: false,
+            value: _resolutionImages,
+            onChanged: (val) => setState(() {
+              _resolutionImages =
+                  List<String>.from((val as List?) ?? const <String>[]);
+            }),
           ),
           const SizedBox(height: 12),
 

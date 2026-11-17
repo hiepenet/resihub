@@ -215,6 +215,19 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> pumpDetail(
+    WidgetTester tester,
+    _FakeServiceRequestsService service,
+    String id,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(createTestApp(service: service, initialRequestId: id));
+    await tester.pumpAndSettle();
+  }
+
   testWidgets('parity: 4 KPIs, header strings and labelled view toggle',
       (tester) async {
     final service = _FakeServiceRequestsService(mockRequests());
@@ -398,5 +411,72 @@ void main() {
 
     expect(service.lastListParams?.containsKey('search'), isFalse);
     expect(find.text('Xóa bộ lọc'), findsNothing);
+  });
+
+  test('parity: next_appointment_at converts local input <-> ISO (React)', () {
+    // Display (React toLocalDateTimeInputValue): ISO -> local YYYY-MM-DDTHH:mm
+    // and back via parse+toUtc must round-trip exactly, regardless of host TZ.
+    const iso = '2026-11-17T02:30:00.000Z';
+    final local = toLocalDateTimeInputValue(iso);
+    expect(local, matches(RegExp(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$')));
+    expect(DateTime.parse(local).toUtc().toIso8601String(), iso);
+    expect(toLocalDateTimeInputValue(null), '');
+    expect(toLocalDateTimeInputValue(''), '');
+    expect(toLocalDateTimeInputValue('garbage'), '');
+
+    // Send (React new Date(v).toISOString()): local input -> UTC ISO.
+    // Explicit offset keeps the assertion host-TZ independent.
+    expect(toIsoFromLocalInput('2026-11-17T09:30:00+07:00'),
+        '2026-11-17T02:30:00.000Z');
+    expect(toIsoFromLocalInput('  '), isNull);
+    expect(toIsoFromLocalInput('garbage'), isNull);
+  });
+
+  testWidgets('parity: edit section has resolution upload and priority select',
+      (tester) async {
+    final service = _FakeServiceRequestsService(mockRequests());
+    await pumpDetail(tester, service, 'sr-101');
+
+    expect(find.text('Mức độ ưu tiên'), findsOneWidget);
+    expect(
+      find.text('Ảnh nghiệm thu sau sửa chữa (tối đa 3 ảnh)'),
+      findsOneWidget,
+    );
+    // Create-form upload is not shown on detail; only resolution upload exists.
+    expect(find.byType(FileUploadField), findsOneWidget);
+  });
+
+  testWidgets('parity: AI card hidden when no triage and status closed',
+      (tester) async {
+    final service = _FakeServiceRequestsService(mockRequests());
+    // sr-102: RESOLVED, no ai_triage_status -> React hides the card.
+    await pumpDetail(tester, service, 'sr-102');
+
+    expect(find.text('Phân loại & điều phối từ AI'), findsNothing);
+  });
+
+  testWidgets(
+      'parity: AI card shows ai_summary, manual warning and category override',
+      (tester) async {
+    final requests = mockRequests();
+    requests.first['ai_triage_status'] = 'NEEDS_MANUAL_REVIEW';
+    requests.first['ai_summary'] = 'Tóm tắt sự cố điện do AI.';
+    final service = _FakeServiceRequestsService(requests);
+    await pumpDetail(tester, service, 'sr-101');
+
+    expect(find.text('Phân loại & điều phối từ AI'), findsOneWidget);
+    expect(find.textContaining('Tóm tắt AI:'), findsOneWidget);
+    expect(find.textContaining('Cần phân loại thủ công'), findsWidgets);
+    expect(find.text('Hạng mục áp dụng / ghi đè'), findsOneWidget);
+  });
+
+  testWidgets('parity: resolve button visible when status ON_HOLD',
+      (tester) async {
+    final requests = mockRequests();
+    requests.first['status'] = 'ON_HOLD';
+    final service = _FakeServiceRequestsService(requests);
+    await pumpDetail(tester, service, 'sr-101');
+
+    expect(find.text('Hoàn tất xử lý'), findsOneWidget);
   });
 }
