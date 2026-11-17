@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/billing_helpers.dart';
+import '../../../core/utils/date_range.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/service_subscription_meta.dart';
 import '../../../core/utils/validation.dart';
@@ -282,15 +283,15 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                   ],
                   if (canManage && status == 'CANCELLATION_PENDING') ...[
                     AppButton(
-                      text: 'Từ chối hủy',
+                      text: 'Giữ lại dịch vụ',
                       variant: AppButtonVariant.outline,
                       onPressed: () {
                         Navigator.of(ctx).pop();
-                        _handleRejectSubscription(item);
+                        _handleKeepService(item);
                       },
                     ),
                     AppButton(
-                      text: 'Chấp thuận hủy',
+                      text: 'Xác nhận hủy',
                       variant: AppButtonVariant.danger,
                       onPressed: () {
                         Navigator.of(ctx).pop();
@@ -349,8 +350,32 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
     }
   }
 
+  Future<void> _handleKeepService(Map<String, dynamic> item) async {
+    final id = item['id']?.toString();
+    if (id == null) return;
+
+    try {
+      await ref.read(servicesServiceProvider).updateSubscription(id, {
+        'status': 'ACTIVE',
+        'note': 'Giữ lại dịch vụ tiếp tục sử dụng',
+      });
+      ref.read(toastProvider.notifier).success('Đã giữ lại dịch vụ, tiếp tục duy trì hoạt động.');
+      _fetchSubscriptions(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể giữ lại dịch vụ.'),
+          );
+    }
+  }
+
   void _openCancelModal(Map<String, dynamic> item) {
-    String endDate = todayVietnamYmd();
+    final startStr = toDateOnlyStr(item['start_date']);
+    final existingEnd = toDateOnlyStr(item['end_date']);
+    final initialEndDate = existingEnd.isNotEmpty
+        ? existingEnd
+        : maxDateStr([todayVietnamYmd(), startStr]);
+    String endDate = initialEndDate;
+    String note = item['note']?.toString() ?? '';
     bool zeroUsage = false;
     bool saving = false;
 
@@ -361,6 +386,15 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
       size: AppModalSize.md,
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
+          final endError = getDateOrderError(
+            startStr,
+            endDate,
+            strictAfter: false,
+            startLabel: startStr.isNotEmpty
+                ? 'Ngày bắt đầu đăng ký (${formatDateVi(startStr)})'
+                : 'Ngày bắt đầu đăng ký',
+            endLabel: 'Ngày kết thúc sử dụng',
+          );
           final prorata = previewSubscriptionProrata(
             unitPrice: item['unit_price'],
             quantity: item['quantity'] ?? 1,
@@ -374,40 +408,55 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
             children: [
               AppInput(
                 label: 'Ngày kết thúc sử dụng',
-                initialValue: endDate,
+                initialValue: initialEndDate,
+                error: endError.isNotEmpty ? endError : null,
                 onChanged: (val) => setModalState(() => endDate = val.trim()),
               ),
               const SizedBox(height: 12),
-              SwitchListTile.adaptive(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Miễn phí sử dụng kỳ cuối (Zero usage)', style: TextStyle(fontSize: 13)),
-                value: zeroUsage,
-                onChanged: (val) => setModalState(() => zeroUsage = val),
+              Material(
+                color: Colors.transparent,
+                child: SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Miễn phí sử dụng kỳ cuối (Zero usage)', style: TextStyle(fontSize: 13)),
+                  value: zeroUsage,
+                  onChanged: (val) => setModalState(() => zeroUsage = val),
+                ),
               ),
+              if (endError.isEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.slate50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Dự tính phí Pro-rata kỳ này:', style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                      const SizedBox(height: 4),
+                      Text(
+                        formatMoney(prorata.amount),
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.slate900),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        prorata.description,
+                        style: const TextStyle(fontSize: 12, color: AppColors.slate600),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.slate50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: AppColors.border),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Dự tính phí Pro-rata kỳ này:', style: TextStyle(fontSize: 12, color: AppColors.slate500)),
-                    const SizedBox(height: 4),
-                    Text(
-                      formatMoney(prorata.amount),
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppColors.slate900),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      prorata.description,
-                      style: const TextStyle(fontSize: 12, color: AppColors.slate600),
-                    ),
-                  ],
-                ),
+              AppInput(
+                label: 'Ghi chú xác nhận hủy',
+                initialValue: note,
+                placeholder: 'Ghi chú thu hồi thẻ gửi xe / ngắt kết nối dịch vụ...',
+                multiline: true,
+                rows: 2,
+                onChanged: (val) => setModalState(() => note = val),
               ),
               const SizedBox(height: 20),
               Row(
@@ -423,27 +472,36 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                     text: 'Xác nhận chấm dứt',
                     variant: AppButtonVariant.danger,
                     loading: saving,
-                    onPressed: () async {
-                      setModalState(() => saving = true);
-                      final id = item['id']?.toString();
-                      if (id == null) return;
+                    onPressed: (endError.isNotEmpty || saving)
+                        ? null
+                        : () async {
+                            setModalState(() => saving = true);
+                            final id = item['id']?.toString();
+                            if (id == null) return;
 
-                      try {
-                        await ref.read(servicesServiceProvider).terminateSubscription(id, {
-                          'status': 'TERMINATED',
-                          'end_date': endDate,
-                          'zero_usage': zeroUsage,
-                        });
-                        ref.read(toastProvider.notifier).success('Đã chấm dứt gói dịch vụ thành công.');
-                        if (ctx.mounted) Navigator.of(ctx).pop();
-                        _fetchSubscriptions(force: true);
-                      } catch (err) {
-                        setModalState(() => saving = false);
-                        ref.read(toastProvider.notifier).error(
-                              extractErrorMessage(err, 'Không thể chấm dứt gói dịch vụ.'),
-                            );
-                      }
-                    },
+                            final cleanNote = note.trim();
+                            final payload = <String, dynamic>{
+                              'status': 'TERMINATED',
+                              'end_date': endDate,
+                              'zero_usage': zeroUsage,
+                              'note': cleanNote.isNotEmpty ? cleanNote : null,
+                            };
+                            if (cleanNote.isNotEmpty) {
+                              payload['cancel_reason'] = cleanNote;
+                            }
+
+                            try {
+                              await ref.read(servicesServiceProvider).terminateSubscription(id, payload);
+                              ref.read(toastProvider.notifier).success('Đã chấm dứt gói dịch vụ thành công.');
+                              if (ctx.mounted) Navigator.of(ctx).pop();
+                              _fetchSubscriptions(force: true);
+                            } catch (err) {
+                              setModalState(() => saving = false);
+                              ref.read(toastProvider.notifier).error(
+                                    extractErrorMessage(err, 'Không thể chấm dứt gói dịch vụ.'),
+                                  );
+                            }
+                          },
                   ),
                 ],
               ),
@@ -495,6 +553,9 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
       String startDate = todayVietnamYmd();
       List<String> vehiclePlates = [''];
       String note = '';
+      List<String> plateErrors = [];
+      String quantityError = '';
+      String noteError = '';
       bool saving = false;
 
       AppModal.show<void>(
@@ -579,10 +640,12 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                         label: 'Số lượng đăng ký',
                         required: true,
                         initialValue: quantity.toString(),
+                        error: quantityError.isNotEmpty ? quantityError : null,
                         onChanged: (val) {
                           final parsed = int.tryParse(val.trim()) ?? 1;
                           setModalState(() {
                             quantity = parsed > 0 ? parsed : 1;
+                            quantityError = '';
                             if (isParking) {
                               vehiclePlates = syncVehiclePlatesArray(vehiclePlates, quantity);
                             }
@@ -607,12 +670,20 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                   quantity: quantity,
                   vehiclePlates: vehiclePlates,
                   note: note,
+                  plateErrors: plateErrors,
+                  noteError: noteError,
                   onPlateChange: (idx, val) {
                     if (idx >= 0 && idx < vehiclePlates.length) {
-                      vehiclePlates[idx] = val;
+                      setModalState(() {
+                        vehiclePlates[idx] = val;
+                        plateErrors = const [];
+                      });
                     }
                   },
-                  onNoteChange: (val) => note = val,
+                  onNoteChange: (val) => setModalState(() {
+                        note = val;
+                        noteError = '';
+                      }),
                 ),
                 const SizedBox(height: 16),
                 Container(
@@ -653,18 +724,24 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                           return;
                         }
 
-                        if (isParking) {
-                          final metaVal = validateServiceMetaInput(
-                            isParking: true,
-                            quantity: quantity,
-                            vehiclePlates: vehiclePlates,
-                            note: note,
-                          );
-                          if (!metaVal.valid) {
-                            final err = metaVal.plateErrors.firstWhere((e) => e.isNotEmpty, orElse: () => metaVal.quantityError);
-                            ref.read(toastProvider.notifier).warning(err);
-                            return;
-                          }
+                        final metaVal = validateServiceMetaInput(
+                          isParking: isParking,
+                          quantity: quantity,
+                          vehiclePlates: vehiclePlates,
+                          note: note,
+                        );
+                        final plateErrs = metaVal.plateErrors.where((e) => e.isNotEmpty).toList();
+                        setModalState(() {
+                          plateErrors = plateErrs;
+                          quantityError = metaVal.quantityError;
+                          noteError = metaVal.noteError;
+                        });
+                        if (!metaVal.valid) {
+                          final err = metaVal.quantityError.isNotEmpty
+                              ? metaVal.quantityError
+                              : (plateErrs.isNotEmpty ? plateErrs.first : metaVal.noteError);
+                          ref.read(toastProvider.notifier).warning(err);
+                          return;
                         }
 
                         setModalState(() => saving = true);
@@ -674,8 +751,8 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                             'service_id': selectedServiceId,
                             'quantity': quantity,
                             'start_date': startDate,
-                            'vehicle_plates': isParking ? vehiclePlates.map((p) => p.trim()).where((p) => p.isNotEmpty).toList() : [],
-                            'note': note.trim(),
+                            'vehicle_plates': isParking ? metaVal.cleanPlates : [],
+                            'note': metaVal.cleanNote.isNotEmpty ? metaVal.cleanNote : null,
                           });
                           ref.read(toastProvider.notifier).success('Đã đăng ký dịch vụ thành công.');
                           if (ctx.mounted) Navigator.of(ctx).pop();
@@ -946,6 +1023,18 @@ class _SubscriptionsPageState extends ConsumerState<SubscriptionsPage> {
                                       icon: const Icon(LucideIcons.x, size: 16, color: AppColors.rose600),
                                       tooltip: 'Từ chối',
                                       onPressed: () => _handleRejectSubscription(sub),
+                                    ),
+                                  ],
+                                  if (canManage && status == 'CANCELLATION_PENDING') ...[
+                                    IconButton(
+                                      icon: const Icon(LucideIcons.check, size: 16, color: AppColors.emerald600),
+                                      tooltip: 'Giữ lại dịch vụ',
+                                      onPressed: () => _handleKeepService(sub),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(LucideIcons.ban, size: 16, color: AppColors.amber600),
+                                      tooltip: 'Xác nhận hủy',
+                                      onPressed: () => _openCancelModal(sub),
                                     ),
                                   ],
                                   if (canManage && status == 'ACTIVE')
