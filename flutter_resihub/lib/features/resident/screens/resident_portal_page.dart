@@ -31,6 +31,35 @@ const List<String> kValidResidentTabs = [
   'profile',
 ];
 
+/// Mirrors React `VALID_TABS.includes(rawTab) ? rawTab : 'overview'`.
+String resolveInitialResidentTab(String? raw) =>
+    raw != null && kValidResidentTabs.contains(raw) ? raw : 'overview';
+
+/// Mirrors ResidentPortalPage.jsx:93-109 — only adopt `target_contract_id`
+/// when it belongs to the active contracts list and differs from the current.
+bool shouldSyncTargetContractId(
+  String? target,
+  dynamic activeContracts,
+  String? current,
+) {
+  if (target == null || target.isEmpty) return false;
+  if (activeContracts is! List) return false;
+  final isActive = activeContracts.any((c) =>
+      c is Map &&
+      (c['contract_id']?.toString() == target || c['id']?.toString() == target));
+  return isActive && current != target;
+}
+
+/// Promise.allSettled equivalent: records success or failure per future so one
+/// rejected fetch never discards the other result.
+Future<Map<String, dynamic>> settledResult(Future<dynamic> future) async {
+  try {
+    return {'ok': true, 'value': await future};
+  } catch (e) {
+    return {'ok': false, 'error': e};
+  }
+}
+
 /// Multi-device Resident Portal Page wrapping [ResidentShell].
 /// Supports multi-unit apartment switching, prospect reservation onboarding, and deep-linking query parameters.
 class ResidentPortalPage extends ConsumerStatefulWidget {
@@ -86,9 +115,9 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   @override
   void initState() {
     super.initState();
-    _activeTab = widget.initialTab ?? 'overview';
+    _activeTab = resolveInitialResidentTab(widget.initialTab);
     _visitedTabs.add(_activeTab);
-    _selectedContractId = widget.contractId ?? widget.targetContractId;
+    _selectedContractId = widget.contractId;
     _actionParam = widget.action;
     _modalParam = widget.modal;
     _requestIdParam = widget.requestId;
@@ -123,6 +152,11 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
           if (firstCid != null) {
             _selectedContractId = firstCid;
           }
+        }
+        final target = widget.targetContractId;
+        if (shouldSyncTargetContractId(
+            target, ovData['active_contracts'], _selectedContractId)) {
+          _selectedContractId = target;
         }
         _loading = false;
       }
@@ -163,10 +197,17 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         _activeTab = qTab;
         _visitedTabs.add(_activeTab);
       }
-      final qContractId =
-          queryParams['contract_id'] ?? queryParams['target_contract_id'];
+      final explicitId = queryParams['contract_id'];
+      final targetId = queryParams['target_contract_id'];
+      String? qContractId;
+      if (explicitId != null && explicitId.isNotEmpty) {
+        qContractId = explicitId;
+      } else if (targetId != null &&
+          shouldSyncTargetContractId(
+              targetId, _overview?['active_contracts'], _selectedContractId)) {
+        qContractId = targetId;
+      }
       if (qContractId != null &&
-          qContractId.isNotEmpty &&
           widget.contractId == null &&
           widget.targetContractId == null) {
         if (_selectedContractId != qContractId) {
@@ -222,61 +263,70 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     if (!silent && _overview == null) setState(() => _loading = true);
     setState(() => _error = '');
 
-    try {
-      final residentService = ref.read(residentServiceProvider);
-      final results = await Future.wait([
-        residentService.getOverview(_selectedContractId),
-        residentService.listServiceRequests(_selectedContractId),
-      ]);
+    final residentService = ref.read(residentServiceProvider);
+    // E11: allSettled - process each result independently so a failed fetch
+    // never discards the other one.
+    final results = await Future.wait([
+      settledResult(residentService.getOverview(_selectedContractId)),
+      settledResult(residentService.listServiceRequests(_selectedContractId)),
+    ]);
 
-      final ovRes = results[0];
-      final srRes = results[1];
+    final ovRes = results[0];
+    final srRes = results[1];
 
-      final ovData = ovRes is Map && ovRes['data'] is Map
-          ? Map<String, dynamic>.from(ovRes['data'] as Map)
-          : (ovRes is Map ? Map<String, dynamic>.from(ovRes) : null);
+    if (!mounted) return;
 
-      if (mounted) {
-        setState(() {
-          if (ovData != null) {
-            final activeContract =
-                ovData['active_contract'] ?? ovData['contract'];
-            final contactConfig =
-                ovData['contact_config'] ?? ovData['manager_contact'];
-            _overview = {
-              ...ovData,
-              if (activeContract != null) 'active_contract': activeContract,
-              if (contactConfig != null) 'contact_config': contactConfig,
-            };
+    if (ovRes['ok'] == true) {
+      final raw = ovRes['value'];
+      final ovData = raw is Map && raw['data'] is Map
+          ? Map<String, dynamic>.from(raw['data'] as Map)
+          : (raw is Map ? Map<String, dynamic>.from(raw) : null);
 
-            // Set initial selected contract id if not already selected
-            if (_selectedContractId == null || _selectedContractId!.isEmpty) {
-              final firstCid = activeContract is Map
-                  ? activeContract['contract_id']?.toString()
-                  : null;
-              if (firstCid != null) {
-                _selectedContractId = firstCid;
-              }
+      setState(() {
+        if (ovData != null) {
+          final activeContract =
+              ovData['active_contract'] ?? ovData['contract'];
+          final contactConfig =
+              ovData['contact_config'] ?? ovData['manager_contact'];
+          _overview = {
+            ...ovData,
+            if (activeContract != null) 'active_contract': activeContract,
+            if (contactConfig != null) 'contact_config': contactConfig,
+          };
+
+          if (_selectedContractId == null || _selectedContractId!.isEmpty) {
+            final firstCid = activeContract is Map
+                ? activeContract['contract_id']?.toString()
+                : null;
+            if (firstCid != null) {
+              _selectedContractId = firstCid;
             }
           }
-          _loading = false;
-        });
 
-        final srList = srRes is Map && srRes['data'] is List
-            ? srRes['data'] as List
-            : (srRes is List ? srRes : const []);
-        _computeOpenRequests(srList);
-      }
-    } catch (err) {
-      if (mounted) {
-        final msg =
-            extractErrorMessage(err, 'Không thể tải dữ liệu Cổng cư dân.');
-        setState(() {
-          _error = msg;
-          _loading = false;
-        });
-        ref.read(toastProvider.notifier).error(msg);
-      }
+          final target = widget.targetContractId;
+          if (shouldSyncTargetContractId(
+              target, ovData['active_contracts'], _selectedContractId)) {
+            _selectedContractId = target;
+          }
+        }
+        _loading = false;
+      });
+    } else {
+      final msg = extractErrorMessage(
+          ovRes['error'], 'Không thể tải dữ liệu Cổng cư dân.');
+      setState(() {
+        _error = msg;
+        _loading = false;
+      });
+      ref.read(toastProvider.notifier).error(msg);
+    }
+
+    if (srRes['ok'] == true) {
+      final srList = srRes['value'] is Map &&
+              (srRes['value'] as Map)['data'] is List
+          ? (srRes['value'] as Map)['data'] as List
+          : (srRes['value'] is List ? srRes['value'] as List : const []);
+      _computeOpenRequests(srList);
     }
   }
 

@@ -1074,5 +1074,127 @@ void main() {
         findsOneWidget,
       );
     });
+
+    group('E11 - portal fetch/tab/deep-link parity', () {
+    test('tab param is validated against VALID_TABS', () {
+      expect(resolveInitialResidentTab('invoices'), 'invoices');
+      expect(resolveInitialResidentTab('unknown-tab'), 'overview');
+      expect(resolveInitialResidentTab(null), 'overview');
+    });
+
+    test('target_contract_id only synced when present in active contracts', () {
+      final active = [
+        {'contract_id': 'c-101'},
+        {'contract_id': 'c-202'},
+      ];
+      expect(shouldSyncTargetContractId('c-202', active, 'c-101'), isTrue);
+      expect(shouldSyncTargetContractId('c-999', active, 'c-101'), isFalse);
+      expect(shouldSyncTargetContractId('c-101', active, 'c-101'), isFalse);
+      expect(shouldSyncTargetContractId('c-202', null, 'c-101'), isFalse);
+    });
+
+    testWidgets('one failed fetch does not drop the other result', (tester) async {
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/resident/overview')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'active_contract': {
+                  'contract_id': 'c-1',
+                  'apartment_code': 'A.101',
+                  'building_name': 'Tòa Ruby',
+                },
+                'active_contracts': [],
+                'user': {'full_name': 'Cư Dân Test'},
+              },
+            }),
+            200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            },
+          );
+        }
+        if (options.path.contains('/resident/service-requests')) {
+          return ResponseBody.fromString('{"success":false}', 500,
+              headers: {
+                Headers.contentTypeHeader: [Headers.jsonContentType]
+              });
+        }
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {
+              Headers.contentTypeHeader: [Headers.jsonContentType]
+            });
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: const MaterialApp(home: ResidentPortalPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Overview survived the service-request failure (Promise.allSettled behaviour).
+      expect(find.textContaining('A.101'), findsWidgets);
+    });
+  });
+
+  group('E12 - payment account source priority', () {
+    test('building beats settings beats overview', () {
+      final fromBuilding = resolveResidentPaymentAccountFromSources(
+        buildingAccount: {
+          'bank': 'MB Bank',
+          'bank_code': 'MBB',
+          'bank_bin': '970422',
+          'account_no': '1111',
+          'account_name': 'BUILDING',
+        },
+        settingsAccount: {
+          'bank': 'VCB',
+          'bank_code': 'VCB',
+          'account_no': '2222',
+        },
+        overviewAccount: {
+          'bank': 'BIDV',
+          'bank_code': 'BIDV',
+          'account_no': '3333',
+        },
+      );
+      expect(fromBuilding['account_no'], '1111');
+
+      final fromSettings = resolveResidentPaymentAccountFromSources(
+        settingsAccount: {
+          'bank': 'VCB',
+          'bank_code': 'VCB',
+          'account_no': '2222',
+        },
+        overviewAccount: {
+          'bank': 'BIDV',
+          'bank_code': 'BIDV',
+          'account_no': '3333',
+        },
+      );
+      expect(fromSettings['account_no'], '2222');
+
+      final fromOverview = resolveResidentPaymentAccountFromSources(
+        overviewAccount: {
+          'bank': 'BIDV',
+          'bank_code': 'BIDV',
+          'account_no': '3333',
+        },
+      );
+      expect(fromOverview['account_no'], '3333');
+    });
+  });
   });
 }

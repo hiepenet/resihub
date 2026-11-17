@@ -11,6 +11,7 @@ import '../../../core/utils/date_range.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
 import '../../../core/utils/file_exporter.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/idempotency.dart' as idem;
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
@@ -24,6 +25,48 @@ import '../../../shared/widgets/ui/auth_media_viewer.dart';
 import '../../../shared/widgets/ui/html_print_preview_modal.dart';
 import '../../contracts/services/contracts_service.dart';
 import '../services/resident_service.dart';
+
+/// A resident mutation payload paired with a stable per-action idempotency key
+/// (matches React's `bankIdemKeyRef` / `disputeIdemKeyRef` pattern).
+class ResidentMutationRequest {
+  final Map<String, dynamic> payload;
+  final String idempotencyKey;
+
+  const ResidentMutationRequest({
+    required this.payload,
+    required this.idempotencyKey,
+  });
+}
+
+/// React ContractTab.jsx:400-413 & OverviewTab.jsx:628-641 — bank info is a
+/// nested `{bank_info: {...}}` object, never flat top-level fields.
+ResidentMutationRequest buildResidentBankUpdateRequest({
+  required String bankName,
+  String? bankCode,
+  String? bankBin,
+  required String accountNumber,
+  required String accountHolder,
+}) {
+  return ResidentMutationRequest(
+    payload: {
+      'bank_info': {
+        'bank_name': bankName.trim(),
+        if (bankCode != null && bankCode.isNotEmpty) 'bank_code': bankCode,
+        if (bankBin != null && bankBin.isNotEmpty) 'bank_bin': bankBin,
+        'account_number': accountNumber.trim(),
+        'account_holder': accountHolder.trim(),
+      },
+    },
+    idempotencyKey: idem.createIdempotencyKey(),
+  );
+}
+
+ResidentMutationRequest buildResidentDisputeRequest(String reason) {
+  return ResidentMutationRequest(
+    payload: {'reason': reason.trim()},
+    idempotencyKey: idem.createIdempotencyKey(),
+  );
+}
 
 const Map<String, String> kResidentDeductCategoryLabels = {
   'DAMAGE': 'Hư hỏng tài sản',
@@ -622,9 +665,13 @@ class _ContractTabState extends ConsumerState<ContractTab> {
 
                             setModalState(() => submitting = true);
                             try {
-                              await ref
-                                  .read(residentServiceProvider)
-                                  .disputeDeposit(depositId, {'reason': r});
+                              final disputeReq =
+                                  buildResidentDisputeRequest(r);
+                              await ref.read(residentServiceProvider).disputeDeposit(
+                                    depositId,
+                                    disputeReq.payload,
+                                    idempotencyKey: disputeReq.idempotencyKey,
+                                  );
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }
@@ -652,13 +699,21 @@ class _ContractTabState extends ConsumerState<ContractTab> {
   void _openDepositBankModal(BuildContext context, Map<String, dynamic> dep) {
     final depositId =
         dep['deposit_id']?.toString() ?? dep['id']?.toString() ?? '';
-    String bankName = dep['bank_name']?.toString() ?? '';
-    String? bankCode = dep['bank_code']?.toString();
-    String? bankBin = dep['bank_bin']?.toString();
-    final accNumCtrl =
-        TextEditingController(text: dep['account_number']?.toString() ?? '');
-    final accHolderCtrl =
-        TextEditingController(text: dep['account_holder']?.toString() ?? '');
+    final settlement = dep['settlement'];
+    final existingBank = (settlement is Map ? settlement['bank_info'] : null) ??
+        dep['refund_bank_info'];
+    final bankInfo = existingBank is Map
+        ? Map<String, dynamic>.from(existingBank)
+        : const <String, dynamic>{};
+    String bankName = (bankInfo['bank_name'] ?? bankInfo['bank'] ?? '').toString();
+    String? bankCode = bankInfo['bank_code']?.toString();
+    String? bankBin = bankInfo['bank_bin']?.toString();
+    final accNumCtrl = TextEditingController(
+        text: (bankInfo['account_number'] ?? bankInfo['account_no'] ?? '')
+            .toString());
+    final accHolderCtrl = TextEditingController(
+        text: (bankInfo['account_holder'] ?? bankInfo['account_name'] ?? '')
+            .toString());
 
     bool saving = false;
 
@@ -720,15 +775,21 @@ class _ContractTabState extends ConsumerState<ContractTab> {
 
                             setModalState(() => saving = true);
                             try {
+                              final bankUpdate =
+                                  buildResidentBankUpdateRequest(
+                                bankName: bankName,
+                                bankCode: bankCode,
+                                bankBin: bankBin,
+                                accountNumber: acc,
+                                accountHolder: holder,
+                              );
                               await ref
                                   .read(residentServiceProvider)
-                                  .updateDepositRefundBankInfo(depositId, {
-                                'bank_name': bankName,
-                                if (bankCode != null) 'bank_code': bankCode,
-                                if (bankBin != null) 'bank_bin': bankBin,
-                                'account_number': acc,
-                                'account_holder': holder.toUpperCase(),
-                              });
+                                  .updateDepositRefundBankInfo(
+                                depositId,
+                                bankUpdate.payload,
+                                idempotencyKey: bankUpdate.idempotencyKey,
+                              );
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }

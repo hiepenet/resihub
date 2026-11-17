@@ -404,4 +404,34 @@ void main() {
           find.text('Chi tiết tiền cọc & Bảng kê tất toán'), findsOneWidget);
     });
   });
+
+  group('E13 - nested bank_info payload + idempotency', () {
+    test('bank_info payload is nested and carries an idempotency key', () {
+      final req = buildResidentBankUpdateRequest(
+        bankName: ' Vietcombank ',
+        bankCode: 'VCB',
+        bankBin: '970436',
+        accountNumber: ' 123456789 ',
+        accountHolder: ' NGUYEN VAN A ',
+      );
+
+      expect(req.payload.containsKey('bank_info'), isTrue);
+      expect(req.payload.containsKey('bank_name'), isFalse);
+      expect(req.payload.containsKey('account_number'), isFalse);
+
+      final info = req.payload['bank_info'] as Map;
+      expect(info['bank_name'], 'Vietcombank');
+      expect(info['bank_code'], 'VCB');
+      expect(info['bank_bin'], '970436');
+      expect(info['account_number'], '123456789');
+      expect(info['account_holder'], 'NGUYEN VAN A');
+      expect(req.idempotencyKey, isNotEmpty);
+    });
+
+    test('dispute request carries an idempotency key', () {
+      final req = buildResidentDisputeRequest(' Khấu trừ sai ');
+      expect(req.payload, {'reason': 'Khấu trừ sai'});
+      expect(req.idempotencyKey, isNotEmpty);
+    });
+  });
 }

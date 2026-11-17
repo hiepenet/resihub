@@ -9,6 +9,8 @@ import '../../../core/utils/billing_helpers.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/validation.dart';
 import '../../../core/utils/vietqr_banks.dart';
+import '../../../features/buildings/services/buildings_service.dart';
+import '../../../features/users/services/users_service.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/status_badge.dart';
 import '../../../shared/widgets/ui/app_badge.dart';
@@ -29,6 +31,92 @@ const _paymentMethods = <String, String>{
   'CARD': 'Thẻ',
   'OTHER': 'Khác',
 };
+
+/// Promise.allSettled equivalent used for the payment-account lookups.
+Future<Map<String, dynamic>> _settled(Future<dynamic> future) async {
+  try {
+    return {'ok': true, 'value': await future};
+  } catch (e) {
+    return {'ok': false, 'error': e};
+  }
+}
+
+/// Payment account priority (mirrors InvoicesTab.jsx:203-235):
+/// building -> settings -> overview -> corporate default.
+Map<String, dynamic> resolveResidentPaymentAccountFromSources({
+  dynamic buildingAccount,
+  dynamic settingsAccount,
+  dynamic overviewAccount,
+}) {
+  for (final raw in [buildingAccount, settingsAccount, overviewAccount]) {
+    if (raw is Map && raw.isNotEmpty) return normalizeResidentPaymentAccount(raw);
+  }
+  return normalizeResidentPaymentAccount(null);
+}
+
+dynamic _extractBuildingAccount(dynamic res, String? targetBuildingId) {
+  final data = res is Map ? res['data'] : res;
+  if (data is! List || data.isEmpty) return null;
+  Map? matched;
+  if (targetBuildingId != null && targetBuildingId.isNotEmpty) {
+    for (final b in data) {
+      if (b is Map && b['id']?.toString() == targetBuildingId) {
+        matched = b;
+        break;
+      }
+    }
+  }
+  matched ??= data.first is Map ? data.first as Map : null;
+  if (matched == null) return null;
+  final lease = matched['lease_terms'];
+  return matched['payment_account'] ??
+      (lease is Map ? lease['payment_account'] : null);
+}
+
+dynamic _extractSettingsAccount(dynamic res) {
+  final data = res is Map ? res['data'] : res;
+  if (data is! Map) return null;
+  final billing = data['billing_config'];
+  return data['payment_account'] ??
+      (billing is Map ? billing['payment_account'] : null);
+}
+
+/// Normalizes a raw payment account into the shape used by the transfer UI.
+Map<String, dynamic> normalizeResidentPaymentAccount(dynamic raw) {
+  if (raw is! Map) {
+    return {
+      'bank': 'Vietcombank',
+      'bank_code': 'VCB',
+      'bank_bin': '970436',
+      'account_no': '99988877766',
+      'account_name': 'RESIHUB CORP',
+      'branch': 'Chi nhánh Hội Sở',
+    };
+  }
+  final map = Map<String, dynamic>.from(raw);
+  final bank = (map['bank'] ?? map['bank_name'] ?? map['bankName'] ?? 'Vietcombank').toString();
+  final bankCode = (map['bank_code'] ?? map['bankCode'] ?? '').toString();
+  final bankBin = (map['bank_bin'] ?? map['bankBin'] ?? map['bin'] ?? '').toString();
+  final accountNo = (map['account_no'] ?? map['account_number'] ?? map['accountNo'] ?? '99988877766').toString();
+  final accountName = (map['account_name'] ?? map['account_holder'] ?? map['holder_name'] ?? 'RESIHUB CORP').toString();
+  final branch = (map['branch'] ?? '').toString();
+
+  final matched = matchVietQrBank(kFallbackVietQrBanks, {
+    'bank_name': bank,
+    'bank_code': bankCode,
+    'bank_bin': bankBin,
+  });
+
+  return {
+    'bank': bank,
+    'bank_code': bankCode.isNotEmpty ? bankCode : (matched?['code']?.toString() ?? ''),
+    'bank_bin': bankBin.isNotEmpty ? bankBin : (matched?['bin']?.toString() ?? '970436'),
+    'bank_logo': matched?['logo']?.toString() ?? '',
+    'account_no': accountNo,
+    'account_name': accountName,
+    'branch': branch,
+  };
+}
 
 class InvoicesTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
@@ -87,49 +175,64 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     final raw = widget.overview?['payment_account'] ??
         widget.overview?['active_contract']?['payment_account'] ??
         widget.overview?['contract']?['payment_account'];
-    return _normalizePaymentAccount(raw);
+    return normalizeResidentPaymentAccount(raw);
   }
 
-  Map<String, dynamic> _normalizePaymentAccount(dynamic raw) {
-    if (raw is! Map) {
-      return {
-        'bank': 'Vietcombank',
-        'bank_code': 'VCB',
-        'bank_bin': '970436',
-        'account_no': '99988877766',
-        'account_name': 'RESIHUB CORP',
-        'branch': 'Chi nhánh Hội Sở',
-      };
-    }
-    final map = Map<String, dynamic>.from(raw);
-    final bank = (map['bank'] ?? map['bank_name'] ?? map['bankName'] ?? 'Vietcombank').toString();
-    final bankCode = (map['bank_code'] ?? map['bankCode'] ?? '').toString();
-    final bankBin = (map['bank_bin'] ?? map['bankBin'] ?? map['bin'] ?? '').toString();
-    final accountNo = (map['account_no'] ?? map['account_number'] ?? map['accountNo'] ?? '99988877766').toString();
-    final accountName = (map['account_name'] ?? map['account_holder'] ?? map['holder_name'] ?? 'RESIHUB CORP').toString();
-    final branch = (map['branch'] ?? '').toString();
+  /// Mirrors React: fetch buildings + settings alongside invoices and resolve
+  /// the payment account with priority building -> settings -> overview.
+  Map<String, dynamic> _resolvePaymentAccountWithSources(
+    Map<String, dynamic> bldgRes,
+    Map<String, dynamic> settingsRes,
+    List<dynamic> loadedInvoices,
+  ) {
+    final contract = widget.overview?['active_contract'] ??
+        widget.overview?['contract'];
+    final history = widget.overview?['contract_history'];
+    final targetBuildingId = contract is Map
+        ? contract['building_id']?.toString()
+        : null;
+    final firstInvoiceBuilding = loadedInvoices.isNotEmpty &&
+            loadedInvoices.first is Map
+        ? (loadedInvoices.first as Map)['building_id']?.toString()
+        : null;
+    final historyBuilding = history is List &&
+            history.isNotEmpty &&
+            history.first is Map
+        ? (history.first as Map)['building_id']?.toString()
+        : null;
+    final buildingId = (targetBuildingId?.isNotEmpty == true
+            ? targetBuildingId
+            : firstInvoiceBuilding?.isNotEmpty == true
+                ? firstInvoiceBuilding
+                : historyBuilding) ??
+        '';
 
-    final matched = matchVietQrBank(kFallbackVietQrBanks, {
-      'bank_name': bank,
-      'bank_code': bankCode,
-      'bank_bin': bankBin,
-    });
+    final buildingAccount = bldgRes['ok'] == true
+        ? _extractBuildingAccount(bldgRes['value'], buildingId)
+        : null;
+    final settingsAccount = settingsRes['ok'] == true
+        ? _extractSettingsAccount(settingsRes['value'])
+        : null;
+    final overviewAccount = widget.overview?['payment_account'] ??
+        (contract is Map ? contract['payment_account'] : null);
 
-    return {
-      'bank': bank,
-      'bank_code': bankCode.isNotEmpty ? bankCode : (matched?['code']?.toString() ?? ''),
-      'bank_bin': bankBin.isNotEmpty ? bankBin : (matched?['bin']?.toString() ?? '970436'),
-      'bank_logo': matched?['logo']?.toString() ?? '',
-      'account_no': accountNo,
-      'account_name': accountName,
-      'branch': branch,
-    };
+    return resolveResidentPaymentAccountFromSources(
+      buildingAccount: buildingAccount,
+      settingsAccount: settingsAccount,
+      overviewAccount: overviewAccount,
+    );
   }
 
   Future<void> _fetchInvoices() async {
     setState(() => _loading = true);
     try {
-      final res = await ref.read(residentServiceProvider).listInvoices(_contractId);
+      final results = await Future.wait([
+        _settled(ref.read(residentServiceProvider).listInvoices(_contractId)),
+        _settled(ref.read(buildingsServiceProvider).list()),
+        _settled(ref.read(usersServiceProvider).getSettings()),
+      ]);
+      final invRes = results[0];
+      final res = invRes['ok'] == true ? invRes['value'] : null;
       List<dynamic> list = [];
       List<dynamic> credits = [];
       if (res is Map) {
@@ -155,7 +258,11 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
         }
       }
 
-      _paymentAccount = _resolvePaymentAccount();
+      _paymentAccount = _resolvePaymentAccountWithSources(
+        results[1],
+        results[2],
+        list,
+      );
 
       if (mounted) {
         setState(() {

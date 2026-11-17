@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -24,6 +25,32 @@ import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../../../shared/widgets/ui/money_input.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../services/public_service.dart';
+
+/// Mirrors React `Math.max(1, Number(orgPol.public_max_hold_days || 7))`.
+int clampPublicMaxHoldDays(dynamic raw) {
+  if (raw == null || raw == '' || raw == 0 || raw == false) return 7;
+  final parsed = num.tryParse(raw.toString()) ?? 7;
+  return parsed < 1 ? 1 : parsed.round();
+}
+
+/// Validates the editable "Giữ đến ngày" field against React's
+/// `min={addDaysStr(today, 1)}` / `max={addDaysStr(today, maxDays)}`.
+String? holdUntilRangeError(String value, String todayStr, int maxDays) {
+  final parsed = DateTime.tryParse(value.trim());
+  final today = DateTime.tryParse(todayStr);
+  if (parsed == null || today == null) {
+    return 'Vui lòng chọn ngày giữ hợp lệ (YYYY-MM-DD).';
+  }
+  final base = DateTime(today.year, today.month, today.day);
+  final minDay = base.add(const Duration(days: 1));
+  final capped = maxDays < 1 ? 1 : maxDays;
+  final maxDay = base.add(Duration(days: capped));
+  final valueDay = DateTime(parsed.year, parsed.month, parsed.day);
+  if (valueDay.isBefore(minDay) || valueDay.isAfter(maxDay)) {
+    return 'Ngày giữ phải từ ${toDateOnlyStr(minDay)} đến ${toDateOnlyStr(maxDay)}.';
+  }
+  return null;
+}
 
 List<String> _extractAmenityLabels(dynamic amenities) {
   if (amenities == null) return const [];
@@ -1092,9 +1119,7 @@ class _BookingModalDialogState extends ConsumerState<_BookingModalDialog> {
   }
 
   int get _maxPublicDays =>
-      num.tryParse(_orgPolicy['public_max_hold_days']?.toString() ?? '')
-          ?.toInt() ??
-      7;
+      clampPublicMaxHoldDays(_orgPolicy['public_max_hold_days']);
 
   @override
   void initState() {
@@ -1102,7 +1127,7 @@ class _BookingModalDialogState extends ConsumerState<_BookingModalDialog> {
     _todayStr = toDateOnlyStr(DateTime.now());
     _bookingIdemKey = createIdempotencyKey();
 
-    final maxDays = _maxPublicDays > 0 ? _maxPublicDays : 7;
+    final maxDays = _maxPublicDays;
     final defaultSpan = maxDays < 3 ? maxDays : 3;
 
     final defaultHoldNum = num.tryParse(
@@ -1202,6 +1227,13 @@ class _BookingModalDialogState extends ConsumerState<_BookingModalDialog> {
       ref.read(toastProvider.notifier).warning(
             'Vui lòng nhập mã xác thực OTP 6 chữ số.',
           );
+      return;
+    }
+
+    final holdUntilError =
+        holdUntilRangeError(_holdUntil, _todayStr, _maxPublicDays);
+    if (holdUntilError != null) {
+      ref.read(toastProvider.notifier).warning(holdUntilError);
       return;
     }
 
@@ -1685,6 +1717,10 @@ class _BookingModalDialogState extends ConsumerState<_BookingModalDialog> {
                         placeholder: 'Nhập 6 số OTP',
                         icon: const Icon(LucideIcons.keyRound, size: 16),
                         controller: _otpController,
+                        maxLength: 6,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1709,7 +1745,10 @@ class _BookingModalDialogState extends ConsumerState<_BookingModalDialog> {
                         label: 'Giữ đến ngày (tối đa $_maxPublicDays ngày)',
                         required: true,
                         initialValue: _holdUntil,
-                        readOnly: true,
+                        keyboardType: TextInputType.datetime,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                        ],
                         onChanged: (v) => setState(() => _holdUntil = v),
                       ),
                     ),

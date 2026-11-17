@@ -1,11 +1,16 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter_resihub/core/constants/statuses.dart';
+import 'package:flutter_resihub/core/network/dio_client.dart';
 import 'package:flutter_resihub/core/storage/app_storage.dart';
 import 'package:flutter_resihub/core/utils/notification_navigation.dart';
+import 'package:flutter_resihub/features/auth/models/user_model.dart';
+import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
+import 'package:flutter_resihub/features/buildings/services/buildings_service.dart';
 import 'package:flutter_resihub/features/notifications/services/notifications_service.dart';
 import 'package:flutter_resihub/shared/providers/notification_provider.dart';
 import 'package:flutter_resihub/shared/widgets/common/bank_select.dart';
@@ -36,6 +41,67 @@ class _FakeNotificationsService extends Fake implements NotificationsService {
   @override
   Future<dynamic> markRead(dynamic id) async {
     return {'success': true};
+  }
+}
+
+class _AdminNotificationService extends Fake implements NotificationsService {
+  @override
+  Future<dynamic> list() async {
+    return {
+      'data': [
+        {
+          'id': 'n-admin-1',
+          'type': 'PAYMENT_REPORTED',
+          'title': 'Cần đối soát chứng từ',
+          'content': 'Có chứng từ mới cần đối soát.',
+          'created_at': DateTime.now().toIso8601String(),
+          'read_at': null,
+          'payload': {
+            'payment_id': '11111111-1111-1111-1111-111111111111',
+            'building_id': '22222222-2222-2222-2222-222222222222',
+          },
+        }
+      ],
+      'unread_count': 1,
+    };
+  }
+
+  @override
+  Future<dynamic> markRead(dynamic id) async => {'success': true};
+}
+
+class _FakeBuildingsService extends Fake implements BuildingsService {
+  static const targetId = '22222222-2222-2222-2222-222222222222';
+
+  @override
+  dynamic peekList() => {
+        'data': [
+          {'id': targetId},
+          {'id': 'b-other'},
+        ]
+      };
+
+  @override
+  Future<dynamic> list({bool force = false}) async => {
+        'data': [
+          {'id': targetId}
+        ]
+      };
+}
+
+class _RecordingAuthNotifier extends AuthNotifier {
+  final AuthState initial;
+  final List<String?> buildingSelections = [];
+
+  _RecordingAuthNotifier(this.initial);
+
+  @override
+  AuthState build() => initial;
+
+  @override
+  Future<void> setSelectedBuildingId(String? buildingId) async {
+    buildingSelections.add(buildingId);
+    state = state.copyWith(selectedBuildingId: buildingId?.trim() ?? '');
   }
 }
 
@@ -348,6 +414,54 @@ void main() {
 
       // Verify no overflow errors were thrown
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('E10 - notification click syncs building filter', () {
+    testWidgets('admin notification click sets the target building filter',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = AppStorage(isWeb: true);
+      await storage.init();
+
+      const adminState = AuthState(
+        isAuthenticated: true,
+        selectedBuildingId: 'b-old',
+        user: UserModel(
+          id: 'u-admin',
+          fullName: 'Manager',
+          email: 'manager@resihub.vn',
+          roles: [UserRoleModel(code: 'MANAGER')],
+        ),
+      );
+      final authNotifier = _RecordingAuthNotifier(adminState);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            appStorageProvider.overrideWithValue(storage),
+            dioProvider.overrideWithValue(Dio()),
+            notificationsServiceProvider
+                .overrideWithValue(_AdminNotificationService()),
+            buildingsServiceProvider.overrideWithValue(_FakeBuildingsService()),
+            authProvider.overrideWith(() => authNotifier),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(body: NotificationBell()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(IconButton));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cần đối soát chứng từ'));
+      await tester.pumpAndSettle();
+
+      expect(
+        authNotifier.buildingSelections,
+        contains(_FakeBuildingsService.targetId),
+      );
     });
   });
 }

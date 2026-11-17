@@ -8,6 +8,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/format.dart';
 import '../../../core/utils/notification_navigation.dart';
 import '../../../features/auth/providers/auth_provider.dart';
+import '../../../features/buildings/services/buildings_service.dart';
 import '../../providers/notification_provider.dart';
 import 'notification_detail_modal.dart';
 
@@ -47,7 +48,18 @@ class _NotificationBellState extends ConsumerState<NotificationBell> {
     super.dispose();
   }
 
-  void _handleNotificationClick(Map<String, dynamic> notif) {
+  /// Extracts building ids from a buildings list payload (cache or fresh fetch).
+  static List<String> _buildingIdsFrom(dynamic res) {
+    final data = res is Map ? res['data'] : res;
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((b) => b['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList();
+  }
+
+  Future<void> _handleNotificationClick(Map<String, dynamic> notif) async {
     final notifier = ref.read(notificationProvider.notifier);
     notifier.markAsRead(notif['id'], notif);
 
@@ -60,6 +72,35 @@ class _NotificationBellState extends ConsumerState<NotificationBell> {
       role: userRole,
       isAdminPortal: isAdminPortal,
     );
+
+    // E10: match React useNotificationAction - sync the active building filter
+    // to the notification's target building before navigating (admin only).
+    if (isAdminPortal &&
+        action.buildingId != null &&
+        action.buildingId!.isNotEmpty &&
+        authState.selectedBuildingId.isNotEmpty &&
+        authState.selectedBuildingId != action.buildingId) {
+      final buildingsService = ref.read(buildingsServiceProvider);
+      List<String> accessibleIds = _buildingIdsFrom(buildingsService.peekList());
+      if (accessibleIds.isEmpty) {
+        try {
+          accessibleIds = _buildingIdsFrom(await buildingsService.list());
+        } catch (_) {
+          accessibleIds = const [];
+        }
+      }
+      if (mounted) {
+        syncBuildingFilterBeforeNavigate(
+          action.buildingId,
+          selectedBuildingId: authState.selectedBuildingId,
+          accessibleBuildingIds: accessibleIds,
+          setSelectedBuildingId: (id) =>
+              ref.read(authProvider.notifier).setSelectedBuildingId(id),
+        );
+      }
+    }
+
+    if (!mounted) return;
 
     if (action.kind == NotificationActionKind.navigate && action.url != null) {
       final router = GoRouter.maybeOf(context);

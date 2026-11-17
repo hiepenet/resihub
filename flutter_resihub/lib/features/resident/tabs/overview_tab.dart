@@ -20,6 +20,7 @@ import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
 import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../services/resident_service.dart';
+import 'contract_tab.dart' show buildResidentBankUpdateRequest;
 
 class OverviewTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
@@ -162,13 +163,19 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
       BuildContext context, Map<String, dynamic> rsv) {
     final rsvId =
         rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
-    String bankName = rsv['bank_name']?.toString() ?? '';
-    String? bankCode = rsv['bank_code']?.toString();
-    String? bankBin = rsv['bank_bin']?.toString();
-    final accNumCtrl =
-        TextEditingController(text: rsv['account_number']?.toString() ?? '');
-    final accHolderCtrl =
-        TextEditingController(text: rsv['account_holder']?.toString() ?? '');
+    final existingBank = rsv['refund_bank_info'];
+    final bankInfo = existingBank is Map
+        ? Map<String, dynamic>.from(existingBank)
+        : const <String, dynamic>{};
+    String bankName = (bankInfo['bank_name'] ?? bankInfo['bank'] ?? '').toString();
+    String? bankCode = bankInfo['bank_code']?.toString();
+    String? bankBin = bankInfo['bank_bin']?.toString();
+    final accNumCtrl = TextEditingController(
+        text: (bankInfo['account_number'] ?? bankInfo['account_no'] ?? '')
+            .toString());
+    final accHolderCtrl = TextEditingController(
+        text: (bankInfo['account_holder'] ?? bankInfo['account_name'] ?? '')
+            .toString());
 
     bool saving = false;
 
@@ -231,15 +238,21 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
 
                             setModalState(() => saving = true);
                             try {
+                              final bankUpdate =
+                                  buildResidentBankUpdateRequest(
+                                bankName: bankName,
+                                bankCode: bankCode,
+                                bankBin: bankBin,
+                                accountNumber: acc,
+                                accountHolder: holder,
+                              );
                               await ref
                                   .read(residentServiceProvider)
-                                  .updateReservationRefundBankInfo(rsvId, {
-                                'bank_name': bankName,
-                                if (bankCode != null) 'bank_code': bankCode,
-                                if (bankBin != null) 'bank_bin': bankBin,
-                                'account_number': acc,
-                                'account_holder': holder.toUpperCase(),
-                              });
+                                  .updateReservationRefundBankInfo(
+                                rsvId,
+                                bankUpdate.payload,
+                                idempotencyKey: bankUpdate.idempotencyKey,
+                              );
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }

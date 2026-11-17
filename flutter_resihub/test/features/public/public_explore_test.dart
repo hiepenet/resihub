@@ -530,6 +530,54 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       await tester.pumpAndSettle();
     });
+
+    group('E14/E15 - hold date, clamp and OTP limit', () {
+    test('public_max_hold_days clamps like React Math.max(1, ...)', () {
+      expect(clampPublicMaxHoldDays(7), 7);
+      expect(clampPublicMaxHoldDays(0), 7);
+      expect(clampPublicMaxHoldDays(-3), 1);
+      expect(clampPublicMaxHoldDays('2'), 2);
+      expect(clampPublicMaxHoldDays(null), 7);
+    });
+
+    test('hold-until range validation respects min/max', () {
+      expect(holdUntilRangeError('2026-11-18', '2026-11-17', 7), isNull);
+      expect(holdUntilRangeError('2026-11-17', '2026-11-17', 7), isNotNull);
+      expect(holdUntilRangeError('2026-11-25', '2026-11-17', 7), isNotNull);
+      expect(holdUntilRangeError('not-a-date', '2026-11-17', 7), isNotNull);
+    });
+
+    testWidgets('OTP field limits input to 6 characters and hold-until is editable',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 1100));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(createTestWidget());
+      await tester.pumpAndSettle();
+
+      final bookButtons = find.text('Đặt giữ chỗ Online');
+      await tester.ensureVisible(bookButtons.first);
+      await tester.pumpAndSettle();
+      await tester.tap(bookButtons.first);
+      await tester.pumpAndSettle();
+
+      final otpField = tester.widget<TextField>(
+        find.descendant(
+          of: find.byKey(const Key('booking-otp')),
+          matching: find.byType(TextField),
+        ),
+      );
+      expect(otpField.maxLength, 6);
+
+      final holdField = tester.widget<TextField>(
+        find.descendant(
+          of: find.byKey(const Key('booking-hold-until')),
+          matching: find.byType(TextField),
+        ),
+      );
+      expect(holdField.readOnly, isFalse);
+    });
+  });
   });
 }
 
