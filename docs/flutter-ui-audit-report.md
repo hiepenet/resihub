@@ -3,7 +3,7 @@
 > **Dự án:** ResiHub v2.0 — Nền tảng Quản lý Căn hộ & Nhà cho thuê  
 > **Phạm vi kiểm tra:** Codebase ReactJS (`frontend/`) và Flutter (`flutter_resihub/`)  
 > **Ngày thực hiện:** 16/11/2026  
-> **Trạng thái Test Suite tự động (lần chạy cuối 17/11/2026):** `flutter test` từ `flutter_resihub/` → **620 passed / 4 failed** (tổng 624; exit code 1). 4 failure đều ở `test/features/resident/overview_actions_test.dart`, nguyên nhân là fixture test của Task 4 xung đột với nhánh onboarding mới của Task 5 (chi tiết: `docs/flutter-react-ui-diff-report.md` mục 5.4). Baseline lúc audit là 562; +62 test được thêm trong đợt parity. Không còn là "607/607 PASS" như báo cáo bản Task 18.
+> **Trạng thái Test Suite tự động (lần chạy cuối 17/11/2026):** `flutter test` từ `flutter_resihub/` → **624 passed / 0 failed** (tổng 624; exit code 0). 4 fixture failure trước đó ở `test/features/resident/overview_actions_test.dart` (fixture Task 4 xung đột với nhánh onboarding Task 5) **đã được sửa trong commit `71bfe1b`** (chi tiết: `docs/flutter-react-ui-diff-report.md` mục 5.4). Baseline lúc audit là 562; +62 test được thêm trong đợt parity. Không còn là "607/607 PASS" như báo cáo bản Task 18.
 
 > ## ⚠️ HIỆU CHỈNH (17/11/2026) — các tuyên bố "100% 1-1" bên dưới KHÔNG còn đúng
 >
@@ -61,7 +61,7 @@ Sau khi tiến hành kiểm tra mã nguồn song song, đối chiếu từng mà
 | 20 | **Component dùng chung (Shared UI)** | `components/common/*`<br>`components/ui/*` | `shared/widgets/common/*`<br>`shared/widgets/ui/*` | ✅ | ✅ | ✅ | ✅ | Khớp 1-1 |
 | 21 | **Điều hướng & Khung sườn (Layout)** | `constants/navigation.js`<br>`components/layout/*` | `core/constants/navigation.dart`<br>`shared/widgets/layout/*` | ✅ | ✅ | ✅ | ✅ | Khớp 1-1 |
 | 22 | **Định dạng dữ liệu & Trạng thái** | `utils/format.js`<br>`constants/statuses.js`<br>`constants/roles.js` | `core/utils/format.dart`<br>`core/constants/statuses.dart`<br>`core/constants/roles.dart` | ✅ | ✅ | ✅ | ✅ | Khớp 1-1 |
-| 23 | **Kiểm thử tự động (Verification)** | `frontend/**.test.jsx` | `flutter_resihub/test/**_test.dart` (624 tests) | ⚠️ | ⚠️ | ⚠️ | ⚠️ | 620 pass / 4 fail (đo 17/11/2026; 4 fail ở `overview_actions_test.dart` — xem diff report mục 5.4) |
+| 23 | **Kiểm thử tự động (Verification)** | `frontend/**.test.jsx` | `flutter_resihub/test/**_test.dart` (624 tests) | ⚠️ | ⚠️ | ⚠️ | ⚠️ | 624 pass / 0 fail (đo 17/11/2026; 4 fixture fail trước đó ở `overview_actions_test.dart` đã sửa trong commit `71bfe1b` — xem diff report mục 5.4) |
 
 ---
 
@@ -235,5 +235,5 @@ Sau khi tiến hành kiểm tra mã nguồn song song, đối chiếu từng mà
 
 1. ~~**Giao diện Flutter đã map 1-1 hoàn toàn và toàn diện với ReactJS**~~ — **Không còn đúng.** Audit 17/11 phát hiện 93 điểm khác biệt. Sau 19 task parity: **90 điểm đã sửa, 3 điểm giữ nguyên (Flutter-only: #20, #38, #39), 0 điểm còn mở** — bao gồm cả Overview (#5–#19) và Dịch vụ (#58–#65) từng bị bỏ sót. Tuy nhiên vẫn còn minor cosmetic/edge-case hoãn lại (diff report mục 5.2), nên không tuyên bố 100%. Chi tiết tại `docs/flutter-react-ui-diff-report.md` mục 4–5.
 2. ~~**Khớp dữ liệu hoàn hảo ... 100%**~~ — **Không còn đúng.** Đã sửa các thiếu sót lớn (`images[]`, `billing_day`, `payment_due_days`, input cấu hình, định dạng kỳ GMT+7, ...), nhưng vẫn còn minor mở (payload `image_data` vs `image_base64`, flag duplicate chưa đối soát API) — xem diff report mục 5.2.
-3. **Chất lượng test suite — có vấn đề cần xử lý**: lần chạy `flutter test` cuối ngày 17/11/2026 từ `flutter_resihub/` cho **620 passed / 4 failed** (tổng 624; baseline 562 + 62 test mới). 4 failure ở `overview_actions_test.dart` do fixture Task 4 xung đột với nhánh onboarding Task 5 (diff report mục 5.4) — không còn là "607/607 PASS" như bản Task 18.
+3. **Chất lượng test suite — có vấn đề cần xử lý**: lần chạy `flutter test` cuối ngày 17/11/2026 từ `flutter_resihub/` cho **624 passed / 0 failed** (tổng 624; baseline 562 + 62 test mới). 4 fixture failure trước đó ở `overview_actions_test.dart` do fixture Task 4 xung đột với nhánh onboarding Task 5 **đã được sửa trong commit `71bfe1b`** (diff report mục 5.4) — không còn là "607/607 PASS" như bản Task 18.
 4. **Sẵn sàng triển khai — có điều kiện**: Có thể đóng gói (Android, iOS, Web, Desktop) và UAT, **nhưng chưa đạt parity 100% và chưa xanh test suite**. Cần sửa 4 test (mục 5.4), chụp lại 4 ảnh đối chiếu trong `docs/ui-diff-screenshots/` (hiện vẫn là ảnh pre-parity), đối soát các minor API, và xử lý dần minor mục 5.2 trước khi khẳng định "1-1". Screenshot regeneration do controller thực hiện làm bước verification.

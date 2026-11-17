@@ -32,7 +32,7 @@
 | Lối tắt | 4 card lớn có icon + tiêu đề + mô tả ("Báo đã thanh toán", "Gửi yêu cầu sửa chữa"...) | 5 chip nhỏ ("Báo hỏng / Sự cố", "Thanh toán hóa đơn"...) | **Đã sửa** — Task 4 (`4f42211` + fix `af2339f`) |
 | Phần dưới | Card "Hóa đơn kỳ gần nhất" + "Ban Quản Lý hỗ trợ" | **Không có** | **Đã sửa** — Task 4 (`4f42211` + fix `af2339f`) |
 | Mobile | Có horizontal tab strip + bottom nav | Chỉ bottom nav ("Thêm" gộp 4 tab phụ) | Đã xử lý bởi Task 6 (`7f1152e`) — xem #1–#4 |
-| Console | Không lỗi | 1 lần `RenderFlex overflow` tại `resident_shell.dart:748` trong lúc viewport khởi tạo rất nhỏ; reload sạch ở 1440 và 390 → **không còn lỗi** | Task 6 có test overflow ở 390px; lần chạy `flutter test` cuối: **620 passed, 4 failed** — xem mục 5.4 (caveat: 21 file unstaged của công việc ngoài plan đang hiện diện trong working tree) |
+| Console | Không lỗi | 1 lần `RenderFlex overflow` tại `resident_shell.dart:748` trong lúc viewport khởi tạo rất nhỏ; reload sạch ở 1440 và 390 → **không còn lỗi** | Task 6 có test overflow ở 390px; lần chạy `flutter test` cuối: **624 passed, 0 failed** (4 fixture failure trước đó đã được sửa trong commit `71bfe1b`; xem mục 5.4 — caveat: 21 file unstaged của công việc ngoài plan đang hiện diện trong working tree) |
 
 Tổng: **93 điểm khác biệt được ghi nhận** (65 resident + 28 admin). Dưới đây là bảng chi tiết đã gắn trạng thái sau parity.
 
@@ -225,7 +225,7 @@ Tất cả 19 task implementation đã committed (HEAD `d578ecd`). Tasks 2–5 (
 
 ### 5.4. Kết quả full test suite lần cuối (caveat)
 
-Lần chạy `flutter test` cuối từ `flutter_resihub/`: **620 passed, 4 failed** (tổng 624 test; exit code 1). 4 test fail đều nằm trong `test/features/resident/overview_actions_test.dart`:
+Lần chạy `flutter test` cuối từ `flutter_resihub/`: **624 passed, 0 failed** (tổng 624 test; exit code 0). 4 fixture failure từng nằm ở `test/features/resident/overview_actions_test.dart` (liệt kê dưới đây để tham chiếu) **đã được sửa trong commit `71bfe1b`** (thay đổi test-only); nguyên nhân bên dưới là lịch sử của lần chạy Task 20:
 
 - `quick actions, latest invoice and support cards render React strings`
 - `quick actions and card buttons navigate to the right tabs`
