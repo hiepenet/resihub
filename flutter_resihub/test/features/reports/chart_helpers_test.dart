@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter_resihub/core/network/query_cache.dart';
 import 'package:flutter_resihub/core/storage/app_storage.dart';
+import 'package:flutter_resihub/core/utils/file_exporter.dart';
 import 'package:flutter_resihub/core/utils/format.dart';
 import 'package:flutter_resihub/features/audit/services/audit_service.dart';
 import 'package:flutter_resihub/features/audit/widgets/audit_logs_view.dart';
@@ -776,6 +777,56 @@ void main() {
       expect(find.text(formatMoney(100000000)), findsOneWidget);
       expect(find.text(formatMoney(120000000)), findsOneWidget);
       expect(find.text('+${formatMoney(25000000)}'), findsOneWidget);
+    });
+  });
+
+  group('Reports parity helpers (D17-D18)', () {
+    test('occupancy by building builds 3 stacked datasets', () {
+      final data = buildOccupancyBuildingChartData([
+        {
+          'building_code': 'LM1',
+          'occupancy_rate': 90,
+          'occupied': 18,
+          'available': 1,
+          'reserved': 1,
+          'maintenance': 0,
+        },
+        {
+          'building_code': 'LM2',
+          'occupancy_rate': 80.5,
+          'occupied': 8,
+          'available': 2,
+          'reserved': 0,
+          'maintenance': 1,
+        },
+      ]);
+      expect(data.labels, ['LM1 (90%)', 'LM2 (80.5%)']);
+      expect(data.occupied, [18.0, 8.0]);
+      expect(data.available, [1.0, 2.0]);
+      expect(data.reservedMaintenance, [1.0, 1.0]);
+    });
+
+    test('revenue CSV fallback has Tỷ lệ thu (%) column', () {
+      expect(kRevenueCsvHeaders.map((h) => h.label), contains('Tỷ lệ thu (%)'));
+      final rateHeader = kRevenueCsvHeaders.firstWhere((h) => h.label == 'Tỷ lệ thu (%)');
+      expect(rateHeader.accessor!({'billed': 100000, 'collected': 80000}), 80);
+      expect(rateHeader.accessor!({'billed': 0, 'collected': 0}), 0);
+
+      final bytes = buildUtf8BomCsvBytes(
+        headers: kRevenueCsvHeaders,
+        rows: [
+          {
+            'period': '2026-01',
+            'invoice_count': 10,
+            'billed': 100000,
+            'collected': 80000,
+            'outstanding': 20000,
+          },
+        ],
+      );
+      final text = utf8.decode(bytes);
+      expect(text, contains('Tỷ lệ thu (%)'));
+      expect(text, contains('2026-01,10,100000,80000,80,20000'));
     });
   });
 }

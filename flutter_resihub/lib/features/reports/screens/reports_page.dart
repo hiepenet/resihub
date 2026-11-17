@@ -68,6 +68,62 @@ const List<AppSelectOption<String>> kDepositStatusFilterOptions = [
   AppSelectOption(value: 'RETURNED', label: 'Ngân hàng hoàn trả lệnh (RETURNED)'),
 ];
 
+num _revenueCollectionRate(Map<String, dynamic> row) {
+  final billed = toNonNegativeNumber(row['billed']);
+  final collected = toNonNegativeNumber(row['collected']);
+  if (billed <= 0) return 0;
+  final pct = num.parse((collected / billed * 100).toStringAsFixed(1));
+  return pct == pct.round() ? pct.toInt() : pct;
+}
+
+const List<CsvHeader> kRevenueCsvHeaders = [
+  CsvHeader(label: 'Kỳ (YYYY-MM)', key: 'period'),
+  CsvHeader(label: 'Số lượng hóa đơn', key: 'invoice_count'),
+  CsvHeader(label: 'Tổng phát hành (VNĐ)', key: 'billed'),
+  CsvHeader(label: 'Thực thu (VNĐ)', key: 'collected'),
+  CsvHeader(label: 'Tỷ lệ thu (%)', key: 'rate', accessor: _revenueCollectionRate),
+  CsvHeader(label: 'Còn tồn đọng (VNĐ)', key: 'outstanding'),
+];
+
+/// React ReportsPage.jsx:329-354 — occupancy-by-building 3 stacked datasets.
+class OccupancyBuildingChartData {
+  final List<String> labels;
+  final List<double> occupied;
+  final List<double> available;
+  final List<double> reservedMaintenance;
+
+  const OccupancyBuildingChartData({
+    required this.labels,
+    required this.occupied,
+    required this.available,
+    required this.reservedMaintenance,
+  });
+}
+
+OccupancyBuildingChartData buildOccupancyBuildingChartData(List rows) {
+  final labels = <String>[];
+  final occupied = <double>[];
+  final available = <double>[];
+  final reservedMaintenance = <double>[];
+
+  for (final raw in rows) {
+    if (raw is! Map) continue;
+    labels.add('${raw['building_code'] ?? ''} (${raw['occupancy_rate'] ?? 0}%)');
+    occupied.add(toNonNegativeNumber(raw['occupied']));
+    available.add(toNonNegativeNumber(raw['available']));
+    reservedMaintenance.add(
+      toNonNegativeNumber(raw['reserved']) + toNonNegativeNumber(raw['maintenance']),
+    );
+  }
+
+  return OccupancyBuildingChartData(
+    labels: labels,
+    occupied: occupied,
+    available: available,
+    reservedMaintenance: reservedMaintenance,
+  );
+}
+
 /// Admin Management Reports Page (PRD §15.2 - 6 Specialized Reporting Sections).
 class ReportsPage extends ConsumerStatefulWidget {
   final String? initialTab;
@@ -255,13 +311,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       try {
         final rows = _reportData['revenue_12m'] is List ? _reportData['revenue_12m'] as List : [];
         final csvBytes = buildUtf8BomCsvBytes(
-          headers: [
-            const CsvHeader(label: 'Kỳ (YYYY-MM)', key: 'period'),
-            const CsvHeader(label: 'Số lượng hóa đơn', key: 'invoice_count'),
-            const CsvHeader(label: 'Tổng phát hành (VNĐ)', key: 'billed'),
-            const CsvHeader(label: 'Thực thu (VNĐ)', key: 'collected'),
-            const CsvHeader(label: 'Còn tồn đọng (VNĐ)', key: 'outstanding'),
-          ],
+          headers: kRevenueCsvHeaders,
           rows: rows.map((r) => (r is Map ? r.cast<String, dynamic>() : <String, dynamic>{})).toList(),
         );
         await saveOrShareBytes(csvBytes, fileName: 'bao-cao-doanh-thu-12-thang.csv', mimeType: 'text/csv; charset=utf-8');
@@ -761,7 +811,9 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 height: 300,
                 child: rev12m.isEmpty
                     ? const EmptyState(title: 'Chưa có dữ liệu doanh thu')
-                    : RevenueTrendLineChart(data: revenueTrend),
+                    : _revenueChartMode == 'line'
+                        ? RevenueTrendLineChart(data: revenueTrend)
+                        : _buildRevenueBarChart(revenueTrend),
               ),
             ],
           ),
@@ -848,9 +900,113 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     );
   }
 
+  Widget _buildRevenueBarChart(RevenueTrendData data) {
+    double maxY = 0;
+    for (int i = 0; i < data.labels.length; i++) {
+      if (data.billed[i] > maxY) maxY = data.billed[i];
+      if (data.invoiceSettled[i] > maxY) maxY = data.invoiceSettled[i];
+      if (data.collected[i] > maxY) maxY = data.collected[i];
+    }
+    if (maxY == 0) maxY = 1000000;
+    maxY *= 1.15;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Wrap(
+          spacing: 16,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
+          children: [
+            _chartLegend(const Color(0xFF0EA5E9), 'Phát hành'),
+            _chartLegend(const Color(0xFF8B5CF6), 'Tất toán HĐ'),
+            _chartLegend(const Color(0xFF10B981), 'Thực thu'),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: BarChart(
+            BarChartData(
+              minY: 0,
+              maxY: maxY,
+              gridData: FlGridData(
+                show: true,
+                drawVerticalLine: false,
+                horizontalInterval: maxY / 4,
+                getDrawingHorizontalLine: (v) => const FlLine(color: AppColors.slate100, strokeWidth: 1),
+              ),
+              titlesData: FlTitlesData(
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 64,
+                    getTitlesWidget: (v, meta) => Text(
+                      formatCompactMoney(v),
+                      style: const TextStyle(fontSize: 10, color: AppColors.slate500),
+                    ),
+                  ),
+                ),
+                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 26,
+                    interval: 1,
+                    getTitlesWidget: (v, meta) {
+                      final idx = v.toInt();
+                      if (idx >= 0 && idx < data.labels.length) {
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            data.labels[idx],
+                            style: const TextStyle(fontSize: 10, color: AppColors.slate600),
+                          ),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                ),
+              ),
+              borderData: FlBorderData(show: false),
+              barGroups: [
+                for (int i = 0; i < data.labels.length; i++)
+                  BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(toY: data.billed[i], color: const Color(0xFF0EA5E9), width: 14, borderRadius: BorderRadius.circular(4)),
+                      BarChartRodData(toY: data.invoiceSettled[i], color: const Color(0xFF8B5CF6), width: 14, borderRadius: BorderRadius.circular(4)),
+                      BarChartRodData(toY: data.collected[i], color: const Color(0xFF10B981), width: 14, borderRadius: BorderRadius.circular(4)),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chartLegend(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(fontSize: 11, color: AppColors.slate600)),
+      ],
+    );
+  }
+
   // ─── TAB 2: OCCUPANCY ───────────────────────────────────────────────────────
 
   Widget _buildOccupancyTab(List occByBuilding) {
+    final occupancyChart = buildOccupancyBuildingChartData(occByBuilding);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -870,6 +1026,8 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 ),
               ),
               const SizedBox(height: 12),
+              if (occByBuilding.isNotEmpty) _buildOccupancyStackedChart(occupancyChart),
+              const SizedBox(height: 16),
               if (occByBuilding.isEmpty)
                 const EmptyState(title: 'Chưa có dữ liệu tòa nhà')
               else
@@ -985,6 +1143,103 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                   },
                 ),
             ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOccupancyStackedChart(OccupancyBuildingChartData data) {
+    double totalMax = 0;
+    for (int i = 0; i < data.labels.length; i++) {
+      final total = data.occupied[i] + data.available[i] + data.reservedMaintenance[i];
+      if (total > totalMax) totalMax = total;
+    }
+    if (totalMax == 0) totalMax = 20;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Wrap(
+          spacing: 16,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
+          children: [
+            _chartLegend(const Color(0xFF10B981), 'Đang thuê'),
+            _chartLegend(const Color(0xFF38BDF8), 'Còn trống'),
+            _chartLegend(const Color(0xFFF59E0B), 'Đã cọc / Bảo trì'),
+          ],
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 260,
+          child: BarChart(
+            BarChartData(
+              minY: 0,
+              maxY: totalMax * 1.1,
+              gridData: FlGridData(show: true, drawVerticalLine: false),
+              borderData: FlBorderData(show: false),
+              titlesData: FlTitlesData(
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 32,
+                    getTitlesWidget: (v, meta) => Text(
+                      '${v.toInt()}',
+                      style: const TextStyle(fontSize: 10, color: AppColors.slate500),
+                    ),
+                  ),
+                ),
+                rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 44,
+                    interval: 1,
+                    getTitlesWidget: (v, meta) {
+                      final idx = v.toInt();
+                      if (idx >= 0 && idx < data.labels.length) {
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            data.labels[idx],
+                            style: const TextStyle(fontSize: 10, color: AppColors.slate600),
+                          ),
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    },
+                  ),
+                ),
+              ),
+              barGroups: [
+                for (int i = 0; i < data.labels.length; i++)
+                  BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: data.occupied[i] + data.available[i] + data.reservedMaintenance[i],
+                        width: 22,
+                        borderRadius: BorderRadius.circular(4),
+                        rodStackItems: [
+                          BarChartRodStackItem(0, data.occupied[i], const Color(0xFF10B981)),
+                          BarChartRodStackItem(
+                            data.occupied[i],
+                            data.occupied[i] + data.available[i],
+                            const Color(0xFF38BDF8),
+                          ),
+                          BarChartRodStackItem(
+                            data.occupied[i] + data.available[i],
+                            data.occupied[i] + data.available[i] + data.reservedMaintenance[i],
+                            const Color(0xFFF59E0B),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+              ],
+            ),
           ),
         ),
       ],
@@ -1140,7 +1395,10 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                     child: AppInput(
                       label: 'Từ ngày',
                       initialValue: _ledgerFromDate,
-                      onChanged: (v) => _ledgerFromDate = v,
+                      onChanged: (v) {
+                        _ledgerFromDate = v;
+                        _fetchDepositLedger();
+                      },
                     ),
                   ),
                   SizedBox(
@@ -1148,7 +1406,10 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                     child: AppInput(
                       label: 'Đến ngày',
                       initialValue: _ledgerToDate,
-                      onChanged: (v) => _ledgerToDate = v,
+                      onChanged: (v) {
+                        _ledgerToDate = v;
+                        _fetchDepositLedger();
+                      },
                     ),
                   ),
                   SizedBox(
@@ -1562,7 +1823,10 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                           sideTitles: SideTitles(
                             showTitles: true,
                             reservedSize: 40,
-                            getTitlesWidget: (v, meta) => Text('${v.toInt()}h', style: const TextStyle(fontSize: 10)),
+                            getTitlesWidget: (v, meta) => Text(
+                              '${v == v.round() ? v.toInt() : v}h',
+                              style: const TextStyle(fontSize: 10),
+                            ),
                           ),
                         ),
                         rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
@@ -1579,7 +1843,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                                 return Padding(
                                   padding: const EdgeInsets.only(top: 6),
                                   child: Text(
-                                    label.length > 10 ? '${label.substring(0, 8)}...' : label,
+                                    label,
                                     style: const TextStyle(fontSize: 10),
                                   ),
                                 );
@@ -1648,7 +1912,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 }
                 final hrs = num.tryParse(r['avg_resolve_hours'].toString()) ?? 0;
                 return AppBadge(
-                  label: '${hrs.toStringAsFixed(1)} giờ',
+                  label: '$hrs giờ',
                   variant: hrs <= 24 ? AppBadgeVariant.emerald : AppBadgeVariant.amber,
                 );
               },
