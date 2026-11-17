@@ -208,7 +208,7 @@ Tất cả 19 task implementation đã committed (HEAD `d578ecd`). Tasks 2–5 (
 | 11 | Tên file "Bản in" trong lịch sử khác tên A4 hợp đồng — mirrors React, cosmetic |
 | 11 | Chuyển `AppCard` làm thay đổi nhẹ border/shadow/gap |
 | 12 | Prefix code/SLA trần, thiếu banner no-contract + empty CTA + rating note, nút reopen hết hạn chưa disable, timer reset copy-code — ngoài phạm vi brief |
-| 13 | Tab tap khi quick filter còn active để `_quickFilter` lại → tab như bị "chết" và banner vẫn hiện; React xóa param khi tap tab (DepositsPage.jsx:361-369) |
+| 13 | **RESOLVED** — Tab tap khi quick filter còn active từng để `_quickFilter` lại → tab như bị "chết" và banner vẫn hiện; `_selectMainTab` (`deposits_page.dart`) nay xóa `_quickFilter` và rewrite URL '/admin/deposits', khớp React xóa param khi tap tab (DepositsPage.jsx:361-369) |
 | 13 | `?status=XYZ` bất kỳ (≠DISPUTED) rơi về filter thường — brief chỉ bắt buộc DISPUTED |
 | 14 | Dùng `router.go` thay vì `replace` khi clear filter — back nav có thể apply lại filter |
 | 15 | 2 lint info-level curly-brace ở `service_requests_page.dart:284,297` sau re-wrap `if` |
@@ -221,7 +221,7 @@ Tất cả 19 task implementation đã committed (HEAD `d578ecd`). Tasks 2–5 (
 
 ### 5.3. Screenshot đối chiếu
 
-4 ảnh trong `docs/ui-diff-screenshots/` vẫn là ảnh **trước parity** (audit 17/11/2026). Các task trong plan **không tự tạo lại** (ruling: controller chịu trách nhiệm regeneration làm bước verification). Controller cần chụp lại 4 ảnh tại `1440×900` và `390×844` để phản ánh trạng thái sau fix — đặc biệt `<flutter-overview-*-1440/390.png>` vẫn cho thấy KPI/hero/lối tắt cũ dù Tasks 2–5 đã landing.
+4 ảnh trong `docs/ui-diff-screenshots/` **đã được chụp lại (regenerated)** từ React (localhost:3000) và Flutter web (localhost:8080) tại `1440×900` và `390×844` qua Chrome DevTools. Cả 4 file giờ là ảnh **authoritative cho UI sau fix** (thay thế ảnh trước parity từ audit 17/11/2026), phản ánh đúng Tasks 2–5 đã landing (KPI/hero/lối tắt mới). Lưu ý: 2 PNG trong số đó còn mang thêm external edit unstaged từ công việc concurrent — controller sẽ xử lý 2 file này; không chỉnh sửa trong wave này.
 
 ### 5.4. Kết quả full test suite lần cuối (caveat)
 
