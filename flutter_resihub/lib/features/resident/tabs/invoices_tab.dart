@@ -33,9 +33,12 @@ const _paymentMethods = <String, String>{
 };
 
 /// Promise.allSettled equivalent used for the payment-account lookups.
-Future<Map<String, dynamic>> _settled(Future<dynamic> future) async {
+/// Takes a callback so provider reads happen INSIDE the try — a sync throw
+/// (e.g. an unmocked storage plugin in tests) must not abort the build via
+/// the toast in _fetchInvoices' catch. Enrichment sources are best-effort.
+Future<Map<String, dynamic>> _settled(Future<dynamic> Function() run) async {
   try {
-    return {'ok': true, 'value': await future};
+    return {'ok': true, 'value': await run()};
   } catch (e) {
     return {'ok': false, 'error': e};
   }
@@ -227,9 +230,9 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     setState(() => _loading = true);
     try {
       final results = await Future.wait([
-        _settled(ref.read(residentServiceProvider).listInvoices(_contractId)),
-        _settled(ref.read(buildingsServiceProvider).list()),
-        _settled(ref.read(usersServiceProvider).getSettings()),
+        _settled(() => ref.read(residentServiceProvider).listInvoices(_contractId)),
+        _settled(() => ref.read(buildingsServiceProvider).list()),
+        _settled(() => ref.read(usersServiceProvider).getSettings()),
       ]);
       final invRes = results[0];
       final res = invRes['ok'] == true ? invRes['value'] : null;
