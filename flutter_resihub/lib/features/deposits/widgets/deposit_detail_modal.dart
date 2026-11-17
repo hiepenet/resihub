@@ -21,6 +21,7 @@ import '../../../shared/widgets/ui/html_print_preview_modal.dart';
 import '../../../shared/widgets/ui/money_input.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../auth/providers/permission_provider.dart';
+import '../../invoices/services/invoices_service.dart';
 import '../services/deposits_service.dart';
 
 const List<Map<String, String>> kDeductCategoryOptions = [
@@ -43,6 +44,51 @@ const List<Map<String, String>> kPaymentMethodOptions = [
   {'value': 'BANK_TRANSFER', 'label': 'Chuyển khoản ngân hàng (BANK_TRANSFER)'},
   {'value': 'CASH', 'label': 'Tiền mặt (CASH)'},
 ];
+
+/// STK hoàn cọc: chữ/số, 4–25 ký tự (React DepositsPage.jsx:827).
+final RegExp kRefundAccountNumberPattern = RegExp(r'^[A-Za-z0-9]{4,25}$');
+
+bool isValidRefundAccountNumber(String value) =>
+    kRefundAccountNumberPattern.hasMatch(value.trim());
+
+/// `liveCalc.serviceDebt` = max(0, round(calculated_service_debt)) (React :733-742).
+int resolveLiveServiceDebt(dynamic raw) {
+  final n = raw is num ? raw : (num.tryParse(raw?.toString() ?? '') ?? 0);
+  return n > 0 ? n.round() : 0;
+}
+
+/// Payload trình tất toán, khớp key/kiểu React DepositsPage.jsx:837-858.
+Map<String, dynamic> buildSettlePayload({
+  required dynamic rawServiceDebt,
+  required List<Map<String, dynamic>> items,
+  required String refundMethod,
+  required Map<String, dynamic> bankInfo,
+  required dynamic inspectionEvidence,
+}) {
+  return <String, dynamic>{
+    'outstanding_debt': resolveLiveServiceDebt(rawServiceDebt),
+    'items': items
+        .map((it) => <String, dynamic>{
+              'category': it['category'],
+              'amount': num.tryParse(it['amount']?.toString() ?? '')?.toInt() ?? 0,
+              'description': it['description']?.toString().trim() ?? '',
+              'evidence': it['evidence'] is List ? it['evidence'] : <dynamic>[],
+            })
+        .toList(),
+    'refund_method': refundMethod,
+    'bank_info': refundMethod == 'BANK_TRANSFER'
+        ? <String, dynamic>{
+            'bank_name': bankInfo['bank_name']?.toString().trim() ?? '',
+            'bank_code': bankInfo['bank_code']?.toString() ?? '',
+            'bank_bin': bankInfo['bank_bin']?.toString() ?? '',
+            'bank_logo': bankInfo['bank_logo']?.toString() ?? '',
+            'account_number': bankInfo['account_number']?.toString().trim() ?? '',
+            'account_holder': bankInfo['account_holder']?.toString().trim() ?? '',
+          }
+        : <String, dynamic>{},
+    'inspection_evidence': inspectionEvidence,
+  };
+}
 
 class DepositDetailModal extends ConsumerStatefulWidget {
   final Map<String, dynamic> deposit;
@@ -139,6 +185,7 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
   };
   dynamic _inspectionEvidence;
   bool _submittingSettlement = false;
+  bool _generatingFinalInvoice = false;
 
   // 4-Eyes Actions loading states
   bool _actionLoading = false;
@@ -204,7 +251,7 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
         : (_dep['settlement'] is Map ? Map<String, dynamic>.from(_dep['settlement'] as Map) : null);
 
     final rawDebt = data['calculated_service_debt'] ?? existing?['outstanding_debt'] ?? 0;
-    _outstandingDebt = (rawDebt is num ? rawDebt : num.tryParse(rawDebt.toString()) ?? 0).toInt();
+    _outstandingDebt = resolveLiveServiceDebt(rawDebt);
 
     if (existing != null) {
       final items = existing['items'];
@@ -328,23 +375,24 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
         ref.read(toastProvider.notifier).warning('Vui lòng nhập đầy đủ thông tin tài khoản ngân hàng thụ hưởng.');
         return;
       }
+      if (!isValidRefundAccountNumber(accNo)) {
+        ref.read(toastProvider.notifier).warning(
+              'Số tài khoản ngân hàng chỉ được chứa chữ và số (4 đến 25 ký tự, không khoảng trắng hay dấu gạch).',
+            );
+        return;
+      }
     }
 
     setState(() => _submittingSettlement = true);
     try {
       final service = ref.read(depositsServiceProvider);
-      final payload = {
-        'outstanding_debt': _outstandingDebt,
-        'items': _deductionItems.map((it) => {
-          'category': it['category'],
-          'amount': num.tryParse(it['amount']?.toString() ?? '')?.toInt() ?? 0,
-          'description': it['description']?.toString().trim() ?? '',
-          'evidence': it['evidence'] is List ? it['evidence'] : [],
-        }).toList(),
-        'refund_method': _refundMethod,
-        'bank_info': _refundMethod == 'BANK_TRANSFER' ? _bankInfo : null,
-        'inspection_evidence': _inspectionEvidence,
-      };
+      final payload = buildSettlePayload(
+        rawServiceDebt: _outstandingDebt,
+        items: _deductionItems,
+        refundMethod: _refundMethod,
+        bankInfo: _bankInfo,
+        inspectionEvidence: _inspectionEvidence,
+      );
 
       final res = await service.submitSettlement(_dep['id'].toString(), payload);
       if (!mounted) return;
@@ -362,6 +410,39 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
       }
     } finally {
       if (mounted) setState(() => _submittingSettlement = false);
+    }
+  }
+
+  /// Sinh hóa đơn Pro-rata kỳ cuối (React DepositsPage.jsx:202-221).
+  Future<void> _handleGenerateFinalInvoice() async {
+    final preconditions = _settlementDetail?['preconditions'];
+    final unbilled = preconditions is Map ? preconditions['unbilled_final_period'] : null;
+    final period = unbilled is Map ? unbilled['period']?.toString() : null;
+    final contractId = _dep['contract_id']?.toString();
+    if (contractId == null || contractId.isEmpty || period == null || period.isEmpty) {
+      return;
+    }
+
+    setState(() => _generatingFinalInvoice = true);
+    try {
+      await ref.read(invoicesServiceProvider).generateBatch({
+        'contract_id': contractId,
+        'period': period,
+      });
+      if (!mounted) return;
+      ref.read(toastProvider.notifier).success(
+            'Đã sinh hóa đơn Pro-rata kỳ cuối $period thành công.',
+          );
+      widget.onRefresh?.call();
+      await _loadSettlement();
+    } catch (err) {
+      if (mounted) {
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Không thể sinh hóa đơn kỳ cuối.'),
+            );
+      }
+    } finally {
+      if (mounted) setState(() => _generatingFinalInvoice = false);
     }
   }
 
@@ -1382,34 +1463,46 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
             onPressed: _openAddDeductionDialog,
           ),
           const SizedBox(height: 20),
+          _buildFinalInvoiceBanner(),
           const Text(
             'Thông tin nhận hoàn tiền cọc',
             style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: AppColors.slate900),
           ),
           const SizedBox(height: 12),
-          BankSelect(
-            value: _bankInfo['bank_code']?.toString() ?? '',
-            onBankChange: (nextVal, bank) {
-              setState(() {
-                _bankInfo['bank_code'] = nextVal;
-                _bankInfo['bank_name'] = bank?['shortName'] ?? bank?['name'] ?? nextVal;
-                _bankInfo['bank_bin'] = bank?['bin']?.toString();
-                _bankInfo['bank_logo'] = bank?['logo']?.toString();
-              });
-            },
+          AppSelect<String>(
+            label: 'Phương thức hoàn trả tiền cọc',
+            value: _refundMethod,
+            options: kPaymentMethodOptions
+                .map((o) => AppSelectOption<String>(value: o['value']!, label: o['label']!))
+                .toList(),
+            onChanged: (v) => setState(() => _refundMethod = v ?? 'BANK_TRANSFER'),
           ),
-          const SizedBox(height: 12),
-          AppInput(
-            label: 'Số tài khoản ngân hàng',
-            initialValue: _bankInfo['account_number']?.toString() ?? '',
-            onChanged: (v) => _bankInfo['account_number'] = v,
-          ),
-          const SizedBox(height: 12),
-          AppInput(
-            label: 'Chủ tài khoản thụ hưởng',
-            initialValue: _bankInfo['account_holder']?.toString() ?? '',
-            onChanged: (v) => _bankInfo['account_holder'] = v,
-          ),
+          if (_refundMethod == 'BANK_TRANSFER') ...[
+            const SizedBox(height: 12),
+            BankSelect(
+              value: _bankInfo['bank_code']?.toString() ?? '',
+              onBankChange: (nextVal, bank) {
+                setState(() {
+                  _bankInfo['bank_code'] = nextVal;
+                  _bankInfo['bank_name'] = bank?['shortName'] ?? bank?['name'] ?? nextVal;
+                  _bankInfo['bank_bin'] = bank?['bin']?.toString();
+                  _bankInfo['bank_logo'] = bank?['logo']?.toString();
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            AppInput(
+              label: 'Số tài khoản ngân hàng',
+              initialValue: _bankInfo['account_number']?.toString() ?? '',
+              onChanged: (v) => _bankInfo['account_number'] = v,
+            ),
+            const SizedBox(height: 12),
+            AppInput(
+              label: 'Chủ tài khoản thụ hưởng',
+              initialValue: _bankInfo['account_holder']?.toString() ?? '',
+              onChanged: (v) => _bankInfo['account_holder'] = v,
+            ),
+          ],
           const SizedBox(height: 16),
           const Text('Ảnh / biên bản kiểm tra bàn giao mặt bằng:',
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
@@ -1422,6 +1515,47 @@ class _DepositDetailModalState extends ConsumerState<DepositDetailModal>
           ),
         ],
       ],
+    );
+  }
+
+  /// Cảnh báo kỳ cuối chưa sinh hóa đơn + nút sinh Pro-rata (React :2203-2229).
+  Widget _buildFinalInvoiceBanner() {
+    final preconditions = _settlementDetail?['preconditions'];
+    final unbilled = preconditions is Map ? preconditions['unbilled_final_period'] : null;
+    if (unbilled is! Map || unbilled['has_unbilled_period'] != true) {
+      return const SizedBox.shrink();
+    }
+    final period = unbilled['period']?.toString() ?? '';
+    final activeDays = unbilled['active_days']?.toString() ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.amber50,
+        border: Border.all(color: AppColors.amber300),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          const Icon(LucideIcons.triangleAlert, size: 18, color: AppColors.amber600),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Hợp đồng có kỳ cuối chưa sinh hóa đơn: Kỳ $period ($activeDays ngày). '
+              'Khuyến nghị sinh hóa đơn Pro-rata trước khi tất toán.',
+              style: const TextStyle(fontSize: 12, color: AppColors.amber700),
+            ),
+          ),
+          AppButton(
+            text: 'Sinh hóa đơn Pro-rata kỳ cuối',
+            variant: AppButtonVariant.primary,
+            size: AppButtonSize.sm,
+            loading: _generatingFinalInvoice,
+            onPressed: _handleGenerateFinalInvoice,
+          ),
+        ],
+      ),
     );
   }
 
