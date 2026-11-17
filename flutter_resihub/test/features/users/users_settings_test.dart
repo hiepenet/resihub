@@ -20,6 +20,7 @@ import 'package:flutter_resihub/features/auth/providers/auth_provider.dart';
 import 'package:flutter_resihub/features/buildings/services/buildings_service.dart';
 import 'package:flutter_resihub/features/users/screens/users_page.dart';
 import 'package:flutter_resihub/features/users/services/users_service.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_badge.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions options) _handler;
@@ -276,15 +277,18 @@ void main() {
     late AuditService testAuditService;
     late AiService testAiService;
     late BuildingsService testBuildingsService;
+    int userListFetchCount = 0;
 
     setUp(() {
       mockDio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
       testQueryCache = QueryCache();
+      userListFetchCount = 0;
 
       mockDio.httpClientAdapter = _MockHttpClientAdapter((options) async {
         final path = options.path;
 
         if (path == '/api/v1/admin/users') {
+          userListFetchCount++;
           return ResponseBody.fromString(
             jsonEncode({
               'data': [
@@ -659,6 +663,142 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(exportCalled, isTrue);
+    });
+
+    // -------------------------------------------------------------------------
+    // D21-D22: React/Flutter logic parity tests
+    // -------------------------------------------------------------------------
+
+    testWidgets('config tab renders full billing, SLA and contact field groups', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 1200));
+      await tester.pumpWidget(createTestApp(home: const UsersPage()));
+      await tester.pumpAndSettle();
+
+      final configTab = find.text('Cấu hình hệ thống');
+      await tester.ensureVisible(configTab);
+      await tester.tap(configTab);
+      await tester.pumpAndSettle();
+
+      // Billing (3 fields missing in Flutter)
+      expect(find.text('Thời hạn thanh toán (số ngày sau phát hành)'), findsOneWidget);
+      expect(find.text('Các mốc ngày nhắc nợ tự động (cách nhau dấu phẩy)'), findsOneWidget);
+      expect(find.text('Lãi phạt chậm thanh toán (% / tháng)'), findsOneWidget);
+      // SLA (2 fields missing in Flutter)
+      expect(find.text('SLA xử lý sự cố KHẨN CẤP (giờ)'), findsOneWidget);
+      expect(find.text('SLA xử lý sự cố THÔNG THƯỜNG (giờ)'), findsOneWidget);
+      // Contact (3 fields missing in Flutter)
+      expect(find.text('Hotline An ninh / Trực bảo vệ 24/7'), findsOneWidget);
+      expect(find.text('Số điện thoại khẩn cấp / PCCC'), findsOneWidget);
+      expect(find.text('Email tiếp nhận hỗ trợ cư dân'), findsOneWidget);
+    });
+
+    testWidgets('role badges use ROLE_LABELS instead of raw codes', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 1200));
+      await tester.pumpWidget(createTestApp(home: const UsersPage()));
+      await tester.pumpAndSettle();
+
+      // React renders ROLE_LABELS[code] (e.g. "Quản trị hệ thống"), not the raw code.
+      expect(find.textContaining('Quản trị hệ thống'), findsWidgets);
+      expect(find.textContaining('Quản lý tòa nhà'), findsWidgets);
+    });
+
+    testWidgets('edit modal has account status select and can remove the last role', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 1200));
+      await tester.pumpWidget(createTestApp(home: const UsersPage()));
+      await tester.pumpAndSettle();
+
+      // u-1 has exactly one role; open its edit modal.
+      final editBtn = find.text('Phân quyền').first;
+      await tester.ensureVisible(editBtn);
+      await tester.tap(editBtn);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Trạng thái tài khoản'), findsOneWidget);
+
+      // Removing the only role must be allowed while editing (minRoles = 0).
+      expect(find.byKey(const Key('remove-role-row-0')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('remove-role-row-0')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('remove-role-row-0')), findsNothing);
+    });
+
+    testWidgets('search input debounces user fetch by 200ms', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1440, 1200));
+      await tester.pumpWidget(createTestApp(home: const UsersPage()));
+      await tester.pumpAndSettle();
+
+      final initialCount = userListFetchCount;
+      expect(initialCount, greaterThanOrEqualTo(1));
+
+      final searchField = find.byType(TextField).first;
+      await tester.enterText(searchField, 'A');
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.enterText(searchField, 'AB');
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.enterText(searchField, 'ABC');
+      // Still within the 200ms window — no fetch yet.
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(userListFetchCount, initialCount);
+
+      // After a 200ms debounce a single fetch fires (must have happened by 350ms total).
+      await tester.pump(const Duration(milliseconds: 210));
+      expect(userListFetchCount, initialCount + 1, reason: 'fetch must fire within 200ms debounce');
+      await tester.pumpAndSettle();
+    });
+  });
+
+  group('UsersPage settings payload parity (D21-D22)', () {
+    Map<String, dynamic> baseBilling() => <String, dynamic>{
+          'billing_day': 1,
+          'payment_due_days': 5,
+          'reminder_days_text': '3, 7, 15',
+          'late_fee_percent': 0,
+          'electricity_default_price': 3800,
+          'water_default_price': 22000,
+        };
+
+    test('buildSettingsPayload clamps billing_day to 1..31 and payment_due_days to >=1', () {
+      final payload = buildSettingsPayload(
+        billing: <String, dynamic>{
+          ...baseBilling(),
+          'billing_day': '99',
+          'payment_due_days': '0',
+        },
+        sla: Map<String, dynamic>.from(kUsersDefaultSlaConfig),
+        contact: Map<String, dynamic>.from(kUsersDefaultContactConfig),
+        approval: const <String, dynamic>{},
+        ai: const <String, dynamic>{},
+      );
+      final billing = payload['billing_config'] as Map<String, dynamic>;
+      expect(billing['billing_day'], 31);
+      expect(billing['payment_due_days'], 1);
+    });
+
+    test('buildSettingsPayload falls back monthly_budget_vnd to 0 and keeps fractional late_fee_percent', () {
+      final payload = buildSettingsPayload(
+        billing: <String, dynamic>{...baseBilling(), 'late_fee_percent': '0.5'},
+        sla: Map<String, dynamic>.from(kUsersDefaultSlaConfig),
+        contact: Map<String, dynamic>.from(kUsersDefaultContactConfig),
+        approval: const <String, dynamic>{},
+        ai: const <String, dynamic>{'monthly_budget_vnd': '', 'monthly_token_limit': ''},
+      );
+      expect((payload['billing_config'] as Map)['late_fee_percent'], 0.5);
+      expect((payload['ai_config'] as Map)['monthly_budget_vnd'], 0);
+    });
+
+    test('billingStateFromConfig derives reminder_days_text instead of keeping stale text', () {
+      final state = billingStateFromConfig(<String, dynamic>{
+        'billing_day': 5,
+        'reminder_days': <int>[3, 10],
+      });
+      expect(state['reminder_days_text'], '3, 10');
+      expect(state['billing_day'], 5);
+      expect(billingStateFromConfig(null)['reminder_days_text'], '3, 7, 15');
+    });
+
+    test('role badge constants match React (RESIDENT is purple)', () {
+      expect(kRoleLabels['RESIDENT'], 'Cư dân');
+      expect(kRoleBadgeVariants['RESIDENT'], AppBadgeVariant.purple);
     });
   });
 }

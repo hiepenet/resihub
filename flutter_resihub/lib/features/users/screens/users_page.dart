@@ -38,6 +38,113 @@ const List<AppSelectOption<String>> kAllRoleSelectOptions = [
   AppSelectOption(value: 'RESIDENT', label: 'Cư dân (RESIDENT)'),
 ];
 
+// Mirror of React `constants/roles.js` (ROLE_LABELS / ROLE_BADGE_VARIANTS).
+const Map<String, String> kRoleLabels = {
+  'SYS_ADMIN': 'Quản trị hệ thống',
+  'OWNER': 'Chủ đầu tư',
+  'MANAGER': 'Quản lý tòa nhà',
+  'RESIDENT': 'Cư dân',
+};
+const Map<String, AppBadgeVariant> kRoleBadgeVariants = {
+  'SYS_ADMIN': AppBadgeVariant.indigo,
+  'OWNER': AppBadgeVariant.amber,
+  'MANAGER': AppBadgeVariant.sky,
+  'RESIDENT': AppBadgeVariant.purple,
+};
+
+const Map<String, dynamic> kUsersDefaultSlaConfig = {
+  'response_hours': 2,
+  'urgent_resolve_hours': 4,
+  'normal_resolve_hours': 24,
+  'deposit_refund_days': 5,
+};
+const Map<String, dynamic> kUsersDefaultContactConfig = {
+  'working_hours': '08:00 – 18:00 (Thứ 2 – Thứ 7)',
+  'technical_hotline': '1900 6868',
+  'security_hotline': '1900 9119',
+  'emergency_phone': '0909 113 114',
+  'support_email': 'support@resihub.vn',
+};
+
+num _cfgNum(dynamic value, num fallback, {num? min, num? max}) {
+  var n = num.tryParse(value?.toString() ?? '') ?? fallback;
+  if (min != null && n < min) n = min;
+  if (max != null && n > max) n = max;
+  return n;
+}
+
+int _cfgInt(dynamic value, int fallback, {int? min, int? max}) =>
+    _cfgNum(value, fallback, min: min, max: max).round();
+
+/// Rebuild billing UI state from a server default (or null) — never spread the
+/// previous map, otherwise a `reminder_days` list leaves a stale
+/// `reminder_days_text` behind (React UsersPage.jsx:399-411).
+Map<String, dynamic> billingStateFromConfig(Map? def) {
+  return <String, dynamic>{
+    'billing_day': def?['billing_day'] ?? 1,
+    'payment_due_days': def?['payment_due_days'] ?? 5,
+    'reminder_days_text': def?['reminder_days'] is List
+        ? (def!['reminder_days'] as List).join(', ')
+        : '3, 7, 15',
+    'late_fee_percent': def?['late_fee_percent'] ?? 0,
+    'electricity_default_price': def?['electricity_default_price'] ?? 3800,
+    'water_default_price': def?['water_default_price'] ?? 22000,
+  };
+}
+
+/// Build the settings payload with the same keys/types/defaults/clamps as
+/// React UsersPage.jsx:426-471. Kept pure so it is unit-testable.
+Map<String, dynamic> buildSettingsPayload({
+  required Map<String, dynamic> billing,
+  required Map<String, dynamic> sla,
+  required Map<String, dynamic> contact,
+  required Map<String, dynamic> approval,
+  required Map<String, dynamic> ai,
+}) {
+  final reminderDays = billing['reminder_days_text']
+      .toString()
+      .split(',')
+      .map((x) => num.tryParse(x.trim()))
+      .where((n) => n != null && n > 0)
+      .map((n) => n!.round())
+      .toList();
+
+  return <String, dynamic>{
+    'billing_config': <String, dynamic>{
+      'billing_day': _cfgInt(billing['billing_day'], 1, min: 1, max: 31),
+      'payment_due_days': _cfgInt(billing['payment_due_days'], 5, min: 1),
+      'reminder_days': reminderDays.isNotEmpty ? reminderDays : const [3, 7, 15],
+      'late_fee_percent': _cfgNum(billing['late_fee_percent'], 0, min: 0),
+      'electricity_default_price': _cfgInt(billing['electricity_default_price'], 3800, min: 0),
+      'water_default_price': _cfgInt(billing['water_default_price'], 22000, min: 0),
+    },
+    'sla_config': <String, dynamic>{
+      'response_hours': _cfgInt(sla['response_hours'], 2, min: 1),
+      'urgent_resolve_hours': _cfgInt(sla['urgent_resolve_hours'], 4, min: 1),
+      'normal_resolve_hours': _cfgInt(sla['normal_resolve_hours'], 24, min: 1),
+      'deposit_refund_days': _cfgInt(sla['deposit_refund_days'], 5, min: 1),
+    },
+    'contact_config': <String, dynamic>{
+      'working_hours': contact['working_hours']?.toString().trim() ?? '',
+      'technical_hotline': contact['technical_hotline']?.toString().trim() ?? '',
+      'security_hotline': contact['security_hotline']?.toString().trim() ?? '',
+      'emergency_phone': contact['emergency_phone']?.toString().trim() ?? '',
+      'support_email': contact['support_email']?.toString().trim() ?? '',
+    },
+    'approval_config': <String, dynamic>{
+      'allow_self_approval': approval['allow_self_approval'] == true,
+    },
+    'ai_config': <String, dynamic>{
+      ...ai,
+      'monthly_budget_vnd': _cfgInt(ai['monthly_budget_vnd'], 0, min: 0),
+      'monthly_token_limit': _cfgInt(ai['monthly_token_limit'], 5000000, min: 10000),
+      'ocr_threshold': _cfgNum(ai['ocr_threshold'], 0.85),
+      'extract_threshold': _cfgNum(ai['extract_threshold'], 0.75),
+      'triage_threshold': _cfgNum(ai['triage_threshold'], 0.65),
+    },
+  };
+}
+
 class UsersPage extends ConsumerStatefulWidget {
   const UsersPage({super.key});
 
@@ -61,27 +168,9 @@ class _UsersPageState extends ConsumerState<UsersPage> {
   bool _loadingSettings = false;
   bool _savingSettings = false;
   bool _resettingSetting = false;
-  Map<String, dynamic> _billingConfig = {
-    'billing_day': 1,
-    'payment_due_days': 5,
-    'reminder_days_text': '3, 7, 15',
-    'late_fee_percent': 0,
-    'electricity_default_price': 3800,
-    'water_default_price': 22000,
-  };
-  Map<String, dynamic> _slaConfig = {
-    'response_hours': 2,
-    'urgent_resolve_hours': 4,
-    'normal_resolve_hours': 24,
-    'deposit_refund_days': 5,
-  };
-  Map<String, dynamic> _contactConfig = {
-    'working_hours': '08:00 – 18:00 (Thứ 2 – Thứ 7)',
-    'technical_hotline': '1900 6868',
-    'security_hotline': '1900 9119',
-    'emergency_phone': '0909 113 114',
-    'support_email': 'support@resihub.vn',
-  };
+  Map<String, dynamic> _billingConfig = billingStateFromConfig(null);
+  Map<String, dynamic> _slaConfig = Map<String, dynamic>.from(kUsersDefaultSlaConfig);
+  Map<String, dynamic> _contactConfig = Map<String, dynamic>.from(kUsersDefaultContactConfig);
   Map<String, dynamic> _approvalConfig = {'allow_self_approval': false};
   Map<String, dynamic> _aiConfig = Map<String, dynamic>.from(kDefaultAiConfig);
   bool _aiKeyConfigured = false;
@@ -143,15 +232,7 @@ class _UsersPageState extends ConsumerState<UsersPage> {
       if (mounted) {
         setState(() {
           if (data['billing_config'] is Map) {
-            final bc = data['billing_config'] as Map;
-            _billingConfig = {
-              'billing_day': bc['billing_day'] ?? 1,
-              'payment_due_days': bc['payment_due_days'] ?? 5,
-              'reminder_days_text': bc['reminder_days'] is List ? (bc['reminder_days'] as List).join(', ') : '3, 7, 15',
-              'late_fee_percent': bc['late_fee_percent'] ?? 0,
-              'electricity_default_price': bc['electricity_default_price'] ?? 3800,
-              'water_default_price': bc['water_default_price'] ?? 22000,
-            };
+            _billingConfig = billingStateFromConfig(data['billing_config'] as Map);
           }
           if (data['sla_config'] is Map) {
             _slaConfig = {
@@ -291,6 +372,18 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                     ),
                   ],
                 ),
+                if (isEdit) ...[
+                  const SizedBox(height: 12),
+                  AppSelect<String>(
+                    label: 'Trạng thái tài khoản',
+                    value: currentStatus,
+                    options: const [
+                      AppSelectOption(value: 'ACTIVE', label: 'Đang hoạt động (ACTIVE)'),
+                      AppSelectOption(value: 'SUSPENDED', label: 'Tạm khóa (SUSPENDED)'),
+                    ],
+                    onChanged: (val) => setModalState(() => currentStatus = val ?? 'ACTIVE'),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 const Divider(color: AppColors.border),
                 const SizedBox(height: 12),
@@ -299,9 +392,11 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text(
-                      'Phân quyền vai trò & Phạm vi tòa nhà',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate900),
+                    const Expanded(
+                      child: Text(
+                        'Phân quyền vai trò & Phạm vi tòa nhà',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate900),
+                      ),
                     ),
                     AppButton(
                       text: 'Thêm vai trò',
@@ -367,8 +462,10 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        if (currentRoles.length > 1)
+                        // React: minRoles = 0 when editing, 1 when creating.
+                        if (isEdit || currentRoles.length > 1)
                           IconButton(
+                            key: ValueKey('remove-role-row-$idx'),
                             icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.rose600),
                             onPressed: () {
                               setModalState(() {
@@ -538,48 +635,13 @@ class _UsersPageState extends ConsumerState<UsersPage> {
     setState(() => _savingSettings = true);
     try {
       final usersService = ref.read(usersServiceProvider);
-      final reminderDays = _billingConfig['reminder_days_text']
-          .toString()
-          .split(',')
-          .map((x) => int.tryParse(x.trim()))
-          .where((n) => n != null && n > 0)
-          .cast<int>()
-          .toList();
-
-      final payload = <String, dynamic>{
-        'billing_config': {
-          'billing_day': int.tryParse(_billingConfig['billing_day']?.toString() ?? '') ?? 1,
-          'payment_due_days': int.tryParse(_billingConfig['payment_due_days']?.toString() ?? '') ?? 5,
-          'reminder_days': reminderDays.isNotEmpty ? reminderDays : [3, 7, 15],
-          'late_fee_percent': int.tryParse(_billingConfig['late_fee_percent']?.toString() ?? '') ?? 0,
-          'electricity_default_price': int.tryParse(_billingConfig['electricity_default_price']?.toString() ?? '') ?? 3800,
-          'water_default_price': int.tryParse(_billingConfig['water_default_price']?.toString() ?? '') ?? 22000,
-        },
-        'sla_config': {
-          'response_hours': int.tryParse(_slaConfig['response_hours']?.toString() ?? '') ?? 2,
-          'urgent_resolve_hours': int.tryParse(_slaConfig['urgent_resolve_hours']?.toString() ?? '') ?? 4,
-          'normal_resolve_hours': int.tryParse(_slaConfig['normal_resolve_hours']?.toString() ?? '') ?? 24,
-          'deposit_refund_days': int.tryParse(_slaConfig['deposit_refund_days']?.toString() ?? '') ?? 5,
-        },
-        'contact_config': {
-          'working_hours': _contactConfig['working_hours']?.toString().trim() ?? '',
-          'technical_hotline': _contactConfig['technical_hotline']?.toString().trim() ?? '',
-          'security_hotline': _contactConfig['security_hotline']?.toString().trim() ?? '',
-          'emergency_phone': _contactConfig['emergency_phone']?.toString().trim() ?? '',
-          'support_email': _contactConfig['support_email']?.toString().trim() ?? '',
-        },
-        'approval_config': {
-          'allow_self_approval': _approvalConfig['allow_self_approval'] == true,
-        },
-        'ai_config': {
-          ..._aiConfig,
-          'monthly_budget_vnd': int.tryParse(_aiConfig['monthly_budget_vnd']?.toString() ?? '') ?? 1000000,
-          'monthly_token_limit': int.tryParse(_aiConfig['monthly_token_limit']?.toString() ?? '') ?? 5000000,
-          'ocr_threshold': double.tryParse(_aiConfig['ocr_threshold']?.toString() ?? '') ?? 0.85,
-          'extract_threshold': double.tryParse(_aiConfig['extract_threshold']?.toString() ?? '') ?? 0.75,
-          'triage_threshold': double.tryParse(_aiConfig['triage_threshold']?.toString() ?? '') ?? 0.65,
-        },
-      };
+      final payload = buildSettingsPayload(
+        billing: _billingConfig,
+        sla: _slaConfig,
+        contact: _contactConfig,
+        approval: _approvalConfig,
+        ai: _aiConfig,
+      );
 
       final res = await usersService.updateSettings(payload);
       final msg = res is Map && res['message'] != null ? res['message'].toString() : 'Đã lưu cấu hình hệ thống thành công.';
@@ -622,18 +684,15 @@ class _UsersPageState extends ConsumerState<UsersPage> {
           } else if (key == 'approval_config') {
             _approvalConfig = {'allow_self_approval': def?['allow_self_approval'] == true};
           } else if (key == 'billing_config') {
-            _billingConfig = {
-              ..._billingConfig,
-              if (def != null) ...Map<String, dynamic>.from(def),
-            };
+            _billingConfig = billingStateFromConfig(def);
           } else if (key == 'sla_config') {
             _slaConfig = {
-              ..._slaConfig,
+              ...kUsersDefaultSlaConfig,
               if (def != null) ...Map<String, dynamic>.from(def),
             };
           } else if (key == 'contact_config') {
             _contactConfig = {
-              ..._contactConfig,
+              ...kUsersDefaultContactConfig,
               if (def != null) ...Map<String, dynamic>.from(def),
             };
           }
@@ -736,10 +795,11 @@ class _UsersPageState extends ConsumerState<UsersPage> {
               final code = r['code']?.toString() ?? '';
               final bldg = r['building_code']?.toString() ?? '';
               final suffix = bldg.isNotEmpty ? ' • $bldg' : (code == 'SYS_ADMIN' ? ' • Toàn hệ thống' : '');
+              final label = kRoleLabels[code] ?? r['name']?.toString() ?? code;
 
               return AppBadge(
-                label: '$code$suffix',
-                variant: code == 'SYS_ADMIN' ? AppBadgeVariant.indigo : (code == 'OWNER' ? AppBadgeVariant.amber : AppBadgeVariant.sky),
+                label: '$label$suffix',
+                variant: kRoleBadgeVariants[code] ?? AppBadgeVariant.slate,
               );
             }).toList(),
           );
@@ -900,6 +960,7 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                               _fetchUsersData();
                             },
                             placeholder: 'Tìm theo họ tên, email hoặc SĐT...',
+                            debounceDuration: const Duration(milliseconds: 200),
                           ),
                         ),
                         SizedBox(
@@ -1074,7 +1135,31 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                             label: 'Ngày chốt chỉ số & lập HĐ (1–31)',
                             initialValue: (_billingConfig['billing_day'] ?? 1).toString(),
                             enabled: canManageUsers,
-                            onChanged: (val) => _billingConfig['billing_day'] = int.tryParse(val) ?? 1,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _billingConfig['billing_day'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Thời hạn thanh toán (số ngày sau phát hành)',
+                            initialValue: (_billingConfig['payment_due_days'] ?? 5).toString(),
+                            enabled: canManageUsers,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _billingConfig['payment_due_days'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Các mốc ngày nhắc nợ tự động (cách nhau dấu phẩy)',
+                            initialValue: _billingConfig['reminder_days_text']?.toString() ?? '3, 7, 15',
+                            enabled: canManageUsers,
+                            onChanged: (val) => _billingConfig['reminder_days_text'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Lãi phạt chậm thanh toán (% / tháng)',
+                            initialValue: (_billingConfig['late_fee_percent'] ?? 0).toString(),
+                            enabled: canManageUsers,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            onChanged: (val) => _billingConfig['late_fee_percent'] = val,
                           ),
                           const SizedBox(height: 12),
                           MoneyInput(
@@ -1119,14 +1204,32 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                             label: 'Thời gian tiếp nhận tối đa (giờ)',
                             initialValue: (_slaConfig['response_hours'] ?? 2).toString(),
                             enabled: canManageUsers,
-                            onChanged: (val) => _slaConfig['response_hours'] = int.tryParse(val) ?? 2,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _slaConfig['response_hours'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'SLA xử lý sự cố KHẨN CẤP (giờ)',
+                            initialValue: (_slaConfig['urgent_resolve_hours'] ?? 4).toString(),
+                            enabled: canManageUsers,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _slaConfig['urgent_resolve_hours'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'SLA xử lý sự cố THÔNG THƯỜNG (giờ)',
+                            initialValue: (_slaConfig['normal_resolve_hours'] ?? 24).toString(),
+                            enabled: canManageUsers,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _slaConfig['normal_resolve_hours'] = val,
                           ),
                           const SizedBox(height: 12),
                           AppInput(
                             label: 'Thời hạn hoàn trả cọc sau thanh lý (ngày)',
                             initialValue: (_slaConfig['deposit_refund_days'] ?? 5).toString(),
                             enabled: canManageUsers,
-                            onChanged: (val) => _slaConfig['deposit_refund_days'] = int.tryParse(val) ?? 5,
+                            keyboardType: TextInputType.number,
+                            onChanged: (val) => _slaConfig['deposit_refund_days'] = val,
                           ),
                         ],
                       ),
@@ -1165,6 +1268,28 @@ class _UsersPageState extends ConsumerState<UsersPage> {
                             initialValue: _contactConfig['technical_hotline']?.toString() ?? '',
                             enabled: canManageUsers,
                             onChanged: (val) => _contactConfig['technical_hotline'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Hotline An ninh / Trực bảo vệ 24/7',
+                            initialValue: _contactConfig['security_hotline']?.toString() ?? '',
+                            enabled: canManageUsers,
+                            onChanged: (val) => _contactConfig['security_hotline'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Số điện thoại khẩn cấp / PCCC',
+                            initialValue: _contactConfig['emergency_phone']?.toString() ?? '',
+                            enabled: canManageUsers,
+                            onChanged: (val) => _contactConfig['emergency_phone'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Email tiếp nhận hỗ trợ cư dân',
+                            initialValue: _contactConfig['support_email']?.toString() ?? '',
+                            enabled: canManageUsers,
+                            keyboardType: TextInputType.emailAddress,
+                            onChanged: (val) => _contactConfig['support_email'] = val,
                           ),
                         ],
                       ),
