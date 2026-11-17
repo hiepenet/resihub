@@ -86,6 +86,17 @@ const List<AppSelectOption<String>> _kComposeTypeOptions = [
   AppSelectOption(value: 'SECURITY_ALERT', label: 'Cảnh báo An ninh / PCCC khẩn'),
 ];
 
+/// Port of React `toLocalDateTimeInputValue()`: ISO -> local `YYYY-MM-DDTHH:mm`.
+String toLocalDateTimeInputValue(dynamic isoValue) {
+  final raw = isoValue?.toString() ?? '';
+  if (raw.isEmpty) return '';
+  final dt = DateTime.tryParse(raw);
+  if (dt == null) return '';
+  final local = dt.toLocal();
+  String p(int n) => n.toString().padLeft(2, '0');
+  return '${local.year.toString().padLeft(4, '0')}-${p(local.month)}-${p(local.day)}T${p(local.hour)}:${p(local.minute)}';
+}
+
 /// Admin notifications, resident announcements, and Zalo group integration center.
 /// Port of `frontend/src/pages/admin/notifications/NotificationsPage.jsx`.
 class NotificationsPage extends ConsumerStatefulWidget {
@@ -410,9 +421,7 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
   }
 
   Map<String, dynamic> _buildAnnouncementPayload({String? scheduledIso}) {
-    final zaloContent = _zaloContentController.text.trim().isNotEmpty
-        ? _zaloContentController.text.trim()
-        : null;
+    final zaloContent = _zaloContentController.text.trim();
 
     return {
       'building_id': _formBuildingId,
@@ -566,7 +575,7 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
       _titleController.text = ann['title']?.toString() ?? '';
       _bodyController.text = ann['body']?.toString() ?? '';
       _zaloContentController.text = ann['zalo_content']?.toString() ?? '';
-      _scheduledAtController.text = ann['scheduled_at']?.toString() ?? '';
+      _scheduledAtController.text = toLocalDateTimeInputValue(ann['scheduled_at']);
     });
     if (_formTargetScope == 'FLOOR' && _formBuildingId.isNotEmpty) {
       _loadFloors(_formBuildingId);
@@ -826,6 +835,7 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
   @override
   Widget build(BuildContext context) {
     final matrix = ref.watch(permissionProvider);
+    final selectedBuildingId = ref.watch(authProvider).selectedBuildingId;
     final canSendNotifications = matrix.canSendAnnouncements;
     final canManageZaloGroups = matrix.canManageZaloGroups;
     final canDeleteZaloGroups = matrix.canDeleteZaloGroups;
@@ -860,6 +870,14 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
 
     final filteredInbox = _inbox.where((n) {
       if (_unreadOnly && n['read_at'] != null && n['read_at'].toString().isNotEmpty) {
+        return false;
+      }
+      final payloadBuildingId = n['payload'] is Map
+          ? n['payload']['building_id']?.toString() ?? ''
+          : '';
+      if (selectedBuildingId.isNotEmpty &&
+          payloadBuildingId.isNotEmpty &&
+          payloadBuildingId != selectedBuildingId) {
         return false;
       }
       if (_search.trim().isNotEmpty) {
@@ -930,9 +948,11 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                       ),
                       AppTabItem(
                         id: 'inbox',
-                        label: 'Hộp thư đến',
+                        label: _unreadCount > 0
+                            ? 'Hộp thư đến ($_unreadCount mới)'
+                            : 'Hộp thư đến',
                         icon: const Icon(LucideIcons.inbox, size: 16),
-                        count: _unreadCount > 0 ? _unreadCount : filteredInbox.length,
+                        count: _unreadCount > 0 ? null : filteredInbox.length,
                       ),
                     ],
                   ),
@@ -1179,7 +1199,11 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
               options: _apartments.map((a) {
                 final id = a['id']?.toString() ?? '';
                 final code = a['code']?.toString() ?? '';
-                return AppSelectOption(value: id, label: 'Căn $code');
+                final statusCode = a['status']?.toString() ?? '';
+                final statusLabel = statusCode.isEmpty
+                    ? statusCode
+                    : resolveStatusMeta(StatusDomain.apartment, statusCode).label;
+                return AppSelectOption(value: id, label: 'Căn $code ($statusLabel)');
               }).toList(),
               onChanged: (val) {
                 if (val != null) {

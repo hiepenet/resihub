@@ -508,7 +508,7 @@ void main() {
       // Check Tabs exist
       expect(find.text('Thông báo & Xuất Zalo'), findsWidgets);
       expect(find.text('Danh bạ Nhóm Zalo'), findsWidgets);
-      expect(find.text('Hộp thư đến'), findsWidgets);
+      expect(find.textContaining('Hộp thư đến'), findsWidgets);
 
       // Check Manager can see compose card
       expect(find.text('Soạn bản tin mới'), findsOneWidget);
@@ -690,6 +690,152 @@ void main() {
         matching: find.text('Sao chép & Dán sang nhóm Zalo vận hành'),
       );
       expect(modalInsideScrollColumn, findsNothing);
+    });
+  });
+
+  group('D20 parity - compose & inbox', () {
+    late Dio parityDio;
+    Map<String, dynamic>? draftPayload;
+    List<Map<String, dynamic>> inboxRows = [];
+    int serverUnread = 0;
+
+    setUp(() {
+      draftPayload = null;
+      inboxRows = [];
+      serverUnread = 0;
+      parityDio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      parityDio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        final path = options.path;
+        if (options.method == 'POST' && path == '/api/v1/announcements') {
+          draftPayload = Map<String, dynamic>.from(options.data as Map);
+        }
+        dynamic body;
+        if (path == '/api/v1/buildings') {
+          body = {
+            'success': true,
+            'data': [
+              {'id': 'b-101', 'code': 'VOP-A', 'name': 'Vinhomes Ocean Park A'},
+              {'id': 'b-999', 'code': 'OTHER-B', 'name': 'Tòa khác'},
+            ],
+          };
+        } else if (path == '/api/v1/notifications') {
+          body = {'success': true, 'unread_count': serverUnread, 'data': inboxRows};
+        } else {
+          body = {'success': true, 'data': []};
+        }
+        return ResponseBody.fromString(
+          jsonEncode(body),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+    });
+
+    Future<void> pumpPage(WidgetTester tester, {String tab = 'announcements'}) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final appStorage = AppStorage(prefs: prefs, isWeb: true);
+      await appStorage.init();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(parityDio),
+            appStorageProvider.overrideWithValue(appStorage),
+            notificationsServiceProvider.overrideWithValue(NotificationsService(parityDio)),
+            announcementsServiceProvider.overrideWithValue(AnnouncementsService(parityDio)),
+            buildingsServiceProvider.overrideWithValue(BuildingsService(dio: parityDio)),
+            authProvider.overrideWith(() {
+              return _FakeAuthNotifier(
+                AuthState(
+                  user: UserModel(
+                    id: 'u-mgr-1',
+                    email: 'mgr@resihub.vn',
+                    fullName: 'Quản Lý Tòa Nhà',
+                    roles: [UserRoleModel(code: 'MANAGER', name: 'Manager')],
+                  ),
+                  isAuthenticated: true,
+                  selectedBuildingId: 'b-101',
+                ),
+              );
+            }),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: NotificationsPage(initialTab: tab),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('zalo_content is trimmed and never null in save-draft payload', (tester) async {
+      await pumpPage(tester);
+
+      final fields = find.byType(TextFormField);
+      await tester.enterText(fields.at(0), 'Tiêu đề test');
+      await tester.enterText(fields.at(1), 'Nội dung test');
+      await tester.pumpAndSettle();
+      await tester.enterText(fields.at(2), '   ');
+      await tester.pumpAndSettle();
+
+      final saveButton = find.text('Lưu nháp');
+      await tester.ensureVisible(saveButton);
+      await tester.pumpAndSettle();
+      await tester.tap(saveButton);
+      await tester.pumpAndSettle();
+
+      expect(draftPayload, isNotNull);
+      final payload = draftPayload!;
+      expect(payload['zalo_content'], isA<String>());
+      expect(payload['zalo_content'], '');
+    });
+
+    testWidgets('inbox filters by payload.building_id and tab label shows "N mới"', (tester) async {
+      inboxRows = [
+        {
+          'id': 'n-ok',
+          'type': 'ANNOUNCEMENT',
+          'title': 'Thông báo cùng tòa',
+          'content': 'Nội dung đúng tòa',
+          'read_at': null,
+          'payload': {'building_id': 'b-101'},
+          'created_at': DateTime.now().toIso8601String(),
+        },
+        {
+          'id': 'n-other',
+          'type': 'ANNOUNCEMENT',
+          'title': 'Thông báo tòa khác',
+          'content': 'Nội dung tòa khác',
+          'read_at': null,
+          'payload': {'building_id': 'b-999'},
+          'created_at': DateTime.now().toIso8601String(),
+        },
+      ];
+      serverUnread = 2;
+
+      await pumpPage(tester, tab: 'inbox');
+
+      expect(find.text('Thông báo cùng tòa'), findsOneWidget);
+      expect(find.text('Thông báo tòa khác'), findsNothing);
+      expect(find.text('Hộp thư đến (2 mới)'), findsOneWidget);
+    });
+
+    test('toLocalDateTimeInputValue converts ISO to local datetime input value', () {
+      expect(toLocalDateTimeInputValue(null), '');
+      expect(toLocalDateTimeInputValue(''), '');
+      expect(toLocalDateTimeInputValue('không phải ngày'), '');
+      expect(toLocalDateTimeInputValue('2026-12-01T08:30:45'), '2026-12-01T08:30');
+
+      final dt = DateTime.utc(2027, 1, 2, 3, 4).toLocal();
+      String p(int n) => n.toString().padLeft(2, '0');
+      final expected = '${dt.year}-${p(dt.month)}-${p(dt.day)}T${p(dt.hour)}:${p(dt.minute)}';
+      expect(toLocalDateTimeInputValue('2027-01-02T03:04:00.000Z'), expected);
     });
   });
 }
