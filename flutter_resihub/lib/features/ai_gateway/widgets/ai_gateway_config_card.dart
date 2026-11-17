@@ -113,10 +113,14 @@ class _AiGatewayConfigCardState extends ConsumerState<AiGatewayConfigCard> {
     });
   }
 
+  /// React G6: giá trị có `%`, thiếu giá trị thì "Chưa có mẫu" (không có `%`).
+  String _g6RateText(dynamic value) =>
+      value != null ? '$value%' : 'Chưa có mẫu';
+
   @override
   Widget build(BuildContext context) {
     final effectiveKeyOk = (_usage?['api_key_configured'] as bool?) ?? widget.apiKeyConfigured;
-    final isEnabled = widget.aiConfig['enabled'] != false;
+    final isEnabled = widget.aiConfig['enabled'] == true;
     final rawTasks = widget.aiConfig['tasks'] is Map ? widget.aiConfig['tasks'] as Map : const {};
 
     final budgetPct = math.min(100.0, math.max(0.0, double.tryParse(_usage?['monthly_budget_pct']?.toString() ?? '') ?? 0.0));
@@ -299,7 +303,7 @@ class _AiGatewayConfigCardState extends ConsumerState<AiGatewayConfigCard> {
             runSpacing: 12,
             children: tasks.map((t) {
               final taskKey = t['key']!;
-              final checked = rawTasks[taskKey] != false;
+              final checked = rawTasks[taskKey] == true;
 
               return SizedBox(
                 width: 280,
@@ -567,12 +571,12 @@ class _AiGatewayConfigCardState extends ConsumerState<AiGatewayConfigCard> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          'Chấp nhận trường trích xuất không sửa: ${_usage!['kpi_g6']?['exact_field_acceptance_rate_pct'] ?? 'Chưa có mẫu'}% (Mục tiêu ≥ ${_usage!['kpi_g6']?['target_pct'] ?? 70}%)',
+                          'Chấp nhận trường trích xuất không sửa: ${_g6RateText(_usage!['kpi_g6']?['exact_field_acceptance_rate_pct'])} (Mục tiêu ≥ ${_usage!['kpi_g6']?['target_pct'] ?? 70}%)',
                           style: const TextStyle(fontSize: 11, color: AppColors.slate700),
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Giữ nguyên phân loại báo hỏng: ${_usage!['kpi_g6']?['triage_keep_rate_pct'] ?? 'Chưa có mẫu'}% (Mục tiêu ≥ ${_usage!['kpi_g6']?['triage_target_pct'] ?? 80}%)',
+                          'Giữ nguyên phân loại báo hỏng: ${_g6RateText(_usage!['kpi_g6']?['triage_keep_rate_pct'])} (Mục tiêu ≥ ${_usage!['kpi_g6']?['triage_target_pct'] ?? 80}%)',
                           style: const TextStyle(fontSize: 11, color: AppColors.slate700),
                         ),
                       ],

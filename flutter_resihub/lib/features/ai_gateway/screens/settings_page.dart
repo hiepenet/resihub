@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
@@ -52,6 +53,106 @@ const Map<String, dynamic> kDefaultContactConfig = {
   'support_email': 'support@resihub.vn',
 };
 
+/// JS `Math.min(max, Math.max(min, parsed))` — parse thất bại thì dùng [fallback].
+int clampSettingInt(dynamic raw, int fallback, int min, [int? max]) {
+  final parsed = int.tryParse(raw?.toString() ?? '');
+  if (parsed == null) return fallback;
+  var value = parsed < min ? min : parsed;
+  if (max != null && value > max) value = max;
+  return value;
+}
+
+/// Payload `updateSettings`, khớp key / kiểu / clamp / fallback của React `handleSave`.
+Map<String, dynamic> buildSystemSettingsPayload({
+  required Map<String, dynamic> billing,
+  required Map<String, dynamic> sla,
+  required Map<String, dynamic> contact,
+  required Map<String, dynamic> approval,
+  required Map<String, dynamic> reservation,
+  required Map<String, dynamic> ai,
+}) {
+  final reminderDays = billing['reminder_days_text']
+      .toString()
+      .split(',')
+      .map((x) => int.tryParse(x.trim()))
+      .where((n) => n != null && n > 0)
+      .cast<int>()
+      .toList();
+
+  final due = clampSettingInt(
+    billing['due_date_offset_days'] ?? billing['payment_due_days'],
+    5,
+    1,
+    60,
+  );
+  final capRaw = billing['late_fee_cap'];
+  final capNum = num.tryParse(capRaw?.toString() ?? '');
+  final lateFeeCap = (capRaw != null && capNum != null && capNum > 0)
+      ? capNum.round()
+      : null;
+
+  return {
+    'billing_config': {
+      'billing_day': clampSettingInt(billing['billing_day'], 1, 1, 31),
+      'payment_due_days': due,
+      'due_date_offset_days': due,
+      'late_fee_grace_days':
+          clampSettingInt(billing['late_fee_grace_days'], 5, 0, 60),
+      'late_fee_per_day':
+          clampSettingInt(billing['late_fee_per_day'], 100000, 0),
+      'late_fee_cap': lateFeeCap,
+      'meter_anomaly_threshold_pct':
+          clampSettingInt(billing['meter_anomaly_threshold_pct'], 30, 1, 500),
+      'reminder_days': reminderDays.isNotEmpty ? reminderDays : [3, 7, 15],
+      'late_fee_percent': clampSettingInt(billing['late_fee_percent'], 0, 0),
+      'electricity_default_price':
+          clampSettingInt(billing['electricity_default_price'], 3800, 0),
+      'water_default_price':
+          clampSettingInt(billing['water_default_price'], 22000, 0),
+    },
+    'sla_config': {
+      'response_hours': clampSettingInt(sla['response_hours'], 2, 1),
+      'urgent_resolve_hours': clampSettingInt(sla['urgent_resolve_hours'], 4, 1),
+      'normal_resolve_hours': clampSettingInt(sla['normal_resolve_hours'], 24, 1),
+      'deposit_refund_days': clampSettingInt(sla['deposit_refund_days'], 5, 1),
+      'reopen_window_days': clampSettingInt(sla['reopen_window_days'], 3, 1),
+    },
+    'contact_config': {
+      'working_hours': contact['working_hours']?.toString().trim() ?? '',
+      'technical_hotline': contact['technical_hotline']?.toString().trim() ?? '',
+      'security_hotline': contact['security_hotline']?.toString().trim() ?? '',
+      'emergency_phone': contact['emergency_phone']?.toString().trim() ?? '',
+      'support_email': contact['support_email']?.toString().trim() ?? '',
+    },
+    'approval_config': {
+      'allow_self_approval': approval['allow_self_approval'] == true,
+    },
+    'reservation_cancel_policy': {
+      'max_hold_days': clampSettingInt(reservation['max_hold_days'], 30, 1, 90),
+      'public_max_hold_days':
+          clampSettingInt(reservation['public_max_hold_days'], 7, 1, 30),
+      'full_refund_before_days':
+          clampSettingInt(reservation['full_refund_before_days'], 3, 0, 30),
+      'partial_refund_pct':
+          clampSettingInt(reservation['partial_refund_pct'], 50, 0, 100),
+      'default_hold_amount':
+          clampSettingInt(reservation['default_hold_amount'], 2000000, 0),
+    },
+    'ai_config': {
+      ...ai,
+      'monthly_budget_vnd': clampSettingInt(ai['monthly_budget_vnd'], 0, 0),
+      'monthly_token_limit':
+          clampSettingInt(ai['monthly_token_limit'], 5000000, 10000),
+      'ocr_threshold':
+          double.tryParse(ai['ocr_threshold']?.toString() ?? '') ?? 0.85,
+      'extract_threshold':
+          double.tryParse(ai['extract_threshold']?.toString() ?? '') ?? 0.75,
+      'triage_threshold':
+          double.tryParse(ai['triage_threshold']?.toString() ?? '') ?? 0.65,
+    },
+  };
+}
+
 /// System Settings & Automated Cron Jobs Monitoring Page.
 /// Root widget has `key: const Key('route:/admin/settings')` for route testing.
 class SettingsPage extends ConsumerStatefulWidget {
@@ -82,6 +183,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   String _cronAsOfDate = '';
   String _cronBuildingId = '';
   List<Map<String, dynamic>> _buildings = [];
+
+  // Deep link ?modal=ai|cron → modal cảnh báo hệ thống (tương đương effect trong React).
+  bool _deepLinkHandled = false;
 
   @override
   void initState() {
@@ -142,6 +246,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           _aiKeyConfigured = aiRuntime is Map && aiRuntime['api_key_configured'] == true;
           _loading = false;
         });
+        _maybeOpenDeepLinkModal();
       }
     } catch (err) {
       if (mounted) {
@@ -149,6 +254,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               extractErrorMessage(err, 'Không thể tải cấu hình hệ thống.'),
             );
         setState(() => _loading = false);
+        _maybeOpenDeepLinkModal();
       }
     }
   }
@@ -185,12 +291,64 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           }
           _cronLoading = false;
         });
+        _maybeOpenDeepLinkModal();
       }
     } catch (_) {
       if (mounted) {
         setState(() => _cronLoading = false);
+        _maybeOpenDeepLinkModal();
       }
     }
+  }
+
+  /// Đọc `?modal=ai|cron` ngay trong widget (không sửa router), mở modal khi
+  /// dữ liệu đã tải xong — khớp effect ở `SettingsPage.jsx:132-140`.
+  void _maybeOpenDeepLinkModal() {
+    if (!mounted || _deepLinkHandled) return;
+    final router = GoRouter.maybeOf(context);
+    if (router == null) return;
+    final modal = GoRouterState.of(context).uri.queryParameters['modal'];
+    if (modal != 'ai' && modal != 'cron') return;
+    if (_loading) return;
+    if (modal == 'cron' && _cronLoading) return;
+    if (!ref.read(permissionProvider).isSysAdmin) return;
+
+    setState(() => _deepLinkHandled = true);
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(modal == 'ai'
+            ? 'Cảnh báo Ngân sách & Trạng thái AI Gateway'
+            : 'Chi tiết Cảnh báo Tiến trình Tự động Hằng ngày (Cron)'),
+        content: modal == 'ai'
+            ? Text(
+                'Trạng thái cổng AI: ${_aiConfig['enabled'] == true ? 'Đang bật' : 'Đang tắt'}\n'
+                'Ngân sách trần / tháng: ${formatMoney(_aiConfig['monthly_budget_vnd'] ?? 0)}\n'
+                'API Key: ${_aiKeyConfigured ? 'Đã cấu hình' : 'Chưa cấu hình'}',
+              )
+            : Text(
+                _cronRuns.isEmpty
+                    ? 'Chưa có bản ghi thực thi tiến trình nào.'
+                    : 'Ngày đối soát: ${formatDate(_cronRuns.first['run_date'])} • '
+                        'Lần thử: ${_cronRuns.first['attempt_count'] ?? 1}',
+              ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Đóng'),
+          ),
+          if (modal == 'cron')
+            FilledButton(
+              onPressed: () async {
+                final navigator = Navigator.of(context);
+                await _handleTriggerCron();
+                if (mounted) navigator.pop();
+              },
+              child: const Text('Chạy lại tiến trình ngay'),
+            ),
+        ],
+      ),
+    );
   }
 
   Future<void> _handleTriggerCron() async {
@@ -230,67 +388,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     try {
       final usersService = ref.read(usersServiceProvider);
 
-      final reminderDays = _billingConfig['reminder_days_text']
-          .toString()
-          .split(',')
-          .map((x) => int.tryParse(x.trim()))
-          .where((n) => n != null && n > 0)
-          .cast<int>()
-          .toList();
-
-      final dueOffset = int.tryParse(_billingConfig['due_date_offset_days']?.toString() ?? '') ?? 5;
-      final graceDays = int.tryParse(_billingConfig['late_fee_grace_days']?.toString() ?? '') ?? 5;
-      final lateFeePerDay = int.tryParse(_billingConfig['late_fee_per_day']?.toString() ?? '') ?? 100000;
-      final lateFeeCapRaw = int.tryParse(_billingConfig['late_fee_cap']?.toString() ?? '');
-      final lateFeeCap = (lateFeeCapRaw != null && lateFeeCapRaw > 0) ? lateFeeCapRaw : null;
-
-      final payload = <String, dynamic>{
-        'billing_config': {
-          'billing_day': int.tryParse(_billingConfig['billing_day']?.toString() ?? '') ?? 1,
-          'payment_due_days': dueOffset,
-          'due_date_offset_days': dueOffset,
-          'late_fee_grace_days': graceDays,
-          'late_fee_per_day': lateFeePerDay,
-          'late_fee_cap': lateFeeCap,
-          'meter_anomaly_threshold_pct': int.tryParse(_billingConfig['meter_anomaly_threshold_pct']?.toString() ?? '') ?? 30,
-          'reminder_days': reminderDays.isNotEmpty ? reminderDays : [3, 7, 15],
-          'late_fee_percent': int.tryParse(_billingConfig['late_fee_percent']?.toString() ?? '') ?? 0,
-          'electricity_default_price': int.tryParse(_billingConfig['electricity_default_price']?.toString() ?? '') ?? 3800,
-          'water_default_price': int.tryParse(_billingConfig['water_default_price']?.toString() ?? '') ?? 22000,
-        },
-        'sla_config': {
-          'response_hours': int.tryParse(_slaConfig['response_hours']?.toString() ?? '') ?? 2,
-          'urgent_resolve_hours': int.tryParse(_slaConfig['urgent_resolve_hours']?.toString() ?? '') ?? 4,
-          'normal_resolve_hours': int.tryParse(_slaConfig['normal_resolve_hours']?.toString() ?? '') ?? 24,
-          'deposit_refund_days': int.tryParse(_slaConfig['deposit_refund_days']?.toString() ?? '') ?? 5,
-          'reopen_window_days': int.tryParse(_slaConfig['reopen_window_days']?.toString() ?? '') ?? 3,
-        },
-        'contact_config': {
-          'working_hours': _contactConfig['working_hours']?.toString().trim() ?? '',
-          'technical_hotline': _contactConfig['technical_hotline']?.toString().trim() ?? '',
-          'security_hotline': _contactConfig['security_hotline']?.toString().trim() ?? '',
-          'emergency_phone': _contactConfig['emergency_phone']?.toString().trim() ?? '',
-          'support_email': _contactConfig['support_email']?.toString().trim() ?? '',
-        },
-        'approval_config': {
-          'allow_self_approval': _approvalConfig['allow_self_approval'] == true,
-        },
-        'reservation_cancel_policy': {
-          'max_hold_days': int.tryParse(_reservationCancelPolicy['max_hold_days']?.toString() ?? '') ?? 30,
-          'public_max_hold_days': int.tryParse(_reservationCancelPolicy['public_max_hold_days']?.toString() ?? '') ?? 7,
-          'full_refund_before_days': int.tryParse(_reservationCancelPolicy['full_refund_before_days']?.toString() ?? '') ?? 3,
-          'partial_refund_pct': int.tryParse(_reservationCancelPolicy['partial_refund_pct']?.toString() ?? '') ?? 50,
-          'default_hold_amount': int.tryParse(_reservationCancelPolicy['default_hold_amount']?.toString() ?? '') ?? 2000000,
-        },
-        'ai_config': {
-          ..._aiConfig,
-          'monthly_budget_vnd': int.tryParse(_aiConfig['monthly_budget_vnd']?.toString() ?? '') ?? 1000000,
-          'monthly_token_limit': int.tryParse(_aiConfig['monthly_token_limit']?.toString() ?? '') ?? 5000000,
-          'ocr_threshold': double.tryParse(_aiConfig['ocr_threshold']?.toString() ?? '') ?? 0.85,
-          'extract_threshold': double.tryParse(_aiConfig['extract_threshold']?.toString() ?? '') ?? 0.75,
-          'triage_threshold': double.tryParse(_aiConfig['triage_threshold']?.toString() ?? '') ?? 0.65,
-        },
-      };
+      final payload = buildSystemSettingsPayload(
+        billing: _billingConfig,
+        sla: _slaConfig,
+        contact: _contactConfig,
+        approval: _approvalConfig,
+        reservation: _reservationCancelPolicy,
+        ai: _aiConfig,
+      );
 
       final res = await usersService.updateSettings(payload);
       final msg = res is Map && res['message'] != null ? res['message'].toString() : 'Đã lưu cấu hình hệ thống thành công.';
@@ -338,9 +443,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               if (def != null) ...Map<String, dynamic>.from(def),
             };
           } else if (key == 'billing_config') {
+            final resolvedDue = def?['due_date_offset_days'] ?? def?['payment_due_days'] ?? 5;
+            final capRaw = def?['late_fee_cap'];
+            final capNum = num.tryParse(capRaw?.toString() ?? '');
             _billingConfig = {
               ...kDefaultBillingConfig,
               if (def != null) ...Map<String, dynamic>.from(def),
+              'payment_due_days': resolvedDue,
+              'due_date_offset_days': resolvedDue,
+              'late_fee_cap': (capRaw != null && capNum != null && capNum > 0)
+                  ? capRaw
+                  : '',
+              'reminder_days_text': def != null && def['reminder_days'] is List
+                  ? (def['reminder_days'] as List).join(', ')
+                  : kDefaultBillingConfig['reminder_days_text'],
             };
           } else if (key == 'sla_config') {
             _slaConfig = {
@@ -910,6 +1026,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                               DataColumn(label: Text('Trạng thái', style: TextStyle(fontWeight: FontWeight.w600))),
                               DataColumn(label: Text('Lần thử / Thời lượng', style: TextStyle(fontWeight: FontWeight.w600))),
                               DataColumn(label: Text('Kết quả tổng hợp', style: TextStyle(fontWeight: FontWeight.w600))),
+                              DataColumn(label: Text('Thời điểm chạy', style: TextStyle(fontWeight: FontWeight.w600))),
                             ],
                             rows: _cronRuns.map((run) {
                               final st = (run['status'] ?? '').toString().toUpperCase();
@@ -937,9 +1054,32 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                     ),
                                   ),
                                   DataCell(
-                                    Text(
-                                      'HĐ nháp: ${sum['autoCreatedInvoices'] ?? 0} • Chặn thiếu chỉ số: ${sum['skippedMeterContracts'] ?? 0} • Quá hạn: ${sum['overdueMarked'] ?? 0} • Phạt: ${sum['lateFeeUpdated'] ?? 0}',
-                                      style: const TextStyle(fontSize: 11, color: AppColors.slate700),
+                                    Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'HĐ nháp: ${sum['autoCreatedInvoices'] ?? 0} • Chặn thiếu chỉ số: ${sum['skippedMeterContracts'] ?? 0} • Quá hạn: ${sum['overdueMarked'] ?? 0} • Phạt: ${sum['lateFeeUpdated'] ?? 0}',
+                                          style: const TextStyle(fontSize: 11, color: AppColors.slate700),
+                                        ),
+                                        if ((run['error_message']?.toString() ?? '').isNotEmpty)
+                                          Text(
+                                            run['error_message'].toString(),
+                                            style: const TextStyle(fontSize: 11, color: AppColors.rose600),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  DataCell(
+                                    Row(
+                                      children: [
+                                        const Icon(LucideIcons.clock, size: 13, color: AppColors.slate500),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          formatDateTime(run['started_at']),
+                                          style: const TextStyle(fontSize: 11, color: AppColors.slate600),
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
