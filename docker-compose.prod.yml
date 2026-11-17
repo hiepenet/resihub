@@ -130,6 +130,29 @@ services:
         condition: service_healthy
     logging: *default-logging
 
+  flutter_web:
+    image: resihub-flutter-web:prod
+    build:
+      context: ./flutter_resihub
+      dockerfile: Dockerfile
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "${FLUTTER_PORT:-3001}:80"
+    networks:
+      - default
+      - resihub_internal
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
+
   backup:
     image: postgres:16-alpine
     restart: unless-stopped
