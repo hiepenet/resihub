@@ -125,4 +125,31 @@ void main() {
     );
     expect(find.text('Chi tiết hóa đơn'), findsOneWidget);
   });
+
+  // Final review findings (re-graded Important — money + notification path).
+  test('empty payment account is rejected so lower-priority sources can win',
+      () {
+    expect(
+      normalizeResidentPaymentAccount({'bank': '', 'account_no': ''}),
+      isNull,
+    );
+  });
+
+  test('payment account fallback skips an empty building account', () {
+    final resolved = resolveResidentPaymentAccountFromSources(
+      buildingAccount: {'bank': '', 'account_no': ''},
+      settingsAccount: {
+        'bank': 'Vietcombank',
+        'account_no': '1234567890',
+        'account_name': 'BQL',
+      },
+    );
+    expect(resolved['account_no'], '1234567890');
+  });
+
+  testWidgets('modal=pay without invoice_id opens the payment report modal',
+      (tester) async {
+    await pumpTab(tester, modalParam: 'pay');
+    expect(find.text('Báo đã thanh toán hóa đơn'), findsOneWidget);
+  });
 }

@@ -52,9 +52,10 @@ Map<String, dynamic> resolveResidentPaymentAccountFromSources({
   dynamic overviewAccount,
 }) {
   for (final raw in [buildingAccount, settingsAccount, overviewAccount]) {
-    if (raw is Map && raw.isNotEmpty) return normalizeResidentPaymentAccount(raw);
+    final normalized = normalizeResidentPaymentAccount(raw);
+    if (normalized != null) return normalized;
   }
-  return normalizeResidentPaymentAccount(null);
+  return defaultResidentPaymentAccount();
 }
 
 dynamic _extractBuildingAccount(dynamic res, String? targetBuildingId) {
@@ -84,10 +85,9 @@ dynamic _extractSettingsAccount(dynamic res) {
       (billing is Map ? billing['payment_account'] : null);
 }
 
-/// Normalizes a raw payment account into the shape used by the transfer UI.
-Map<String, dynamic> normalizeResidentPaymentAccount(dynamic raw) {
-  if (raw is! Map) {
-    return {
+/// Default account used only when EVERY source is empty — React's final
+/// corporate fallback, not a value that should shadow settings/overview.
+Map<String, dynamic> defaultResidentPaymentAccount() => {
       'bank': 'Vietcombank',
       'bank_code': 'VCB',
       'bank_bin': '970436',
@@ -95,14 +95,20 @@ Map<String, dynamic> normalizeResidentPaymentAccount(dynamic raw) {
       'account_name': 'RESIHUB CORP',
       'branch': 'Chi nhánh Hội Sở',
     };
-  }
+
+/// Normalizes a raw payment account into the shape used by the transfer UI.
+/// Returns null for an empty/absent account so the priority chain can fall
+/// through to the next source (React normalizePaymentAccount:97).
+Map<String, dynamic>? normalizeResidentPaymentAccount(dynamic raw) {
+  if (raw is! Map) return null;
   final map = Map<String, dynamic>.from(raw);
-  final bank = (map['bank'] ?? map['bank_name'] ?? map['bankName'] ?? 'Vietcombank').toString();
+  final bank = (map['bank'] ?? map['bank_name'] ?? map['bankName'] ?? '').toString();
   final bankCode = (map['bank_code'] ?? map['bankCode'] ?? '').toString();
   final bankBin = (map['bank_bin'] ?? map['bankBin'] ?? map['bin'] ?? '').toString();
-  final accountNo = (map['account_no'] ?? map['account_number'] ?? map['accountNo'] ?? '99988877766').toString();
-  final accountName = (map['account_name'] ?? map['account_holder'] ?? map['holder_name'] ?? 'RESIHUB CORP').toString();
+  final accountNo = (map['account_no'] ?? map['account_number'] ?? map['accountNo'] ?? '').toString();
+  final accountName = (map['account_name'] ?? map['account_holder'] ?? map['holder_name'] ?? '').toString();
   final branch = (map['branch'] ?? '').toString();
+  if (bank.isEmpty && accountNo.isEmpty) return null;
 
   final matched = matchVietQrBank(kFallbackVietQrBanks, {
     'bank_name': bank,
@@ -111,12 +117,12 @@ Map<String, dynamic> normalizeResidentPaymentAccount(dynamic raw) {
   });
 
   return {
-    'bank': bank,
+    'bank': bank.isNotEmpty ? bank : 'Ngân hàng đối tác',
     'bank_code': bankCode.isNotEmpty ? bankCode : (matched?['code']?.toString() ?? ''),
     'bank_bin': bankBin.isNotEmpty ? bankBin : (matched?['bin']?.toString() ?? '970436'),
     'bank_logo': matched?['logo']?.toString() ?? '',
-    'account_no': accountNo,
-    'account_name': accountName,
+    'account_no': accountNo.isNotEmpty ? accountNo : '—',
+    'account_name': accountName.isNotEmpty ? accountName : 'BAN QUAN LY RESIHUB',
     'branch': branch,
   };
 }
@@ -178,7 +184,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     final raw = widget.overview?['payment_account'] ??
         widget.overview?['active_contract']?['payment_account'] ??
         widget.overview?['contract']?['payment_account'];
-    return normalizeResidentPaymentAccount(raw);
+    return normalizeResidentPaymentAccount(raw) ?? defaultResidentPaymentAccount();
   }
 
   /// Mirrors React: fetch buildings + settings alongside invoices and resolve
@@ -324,9 +330,13 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
         break;
       }
     }
+    bool fromUnpaidFallback = false;
     if (matched == null && modal == 'pay' && _unpaidInvoices.isNotEmpty) {
       final first = _unpaidInvoices.first;
-      if (first is Map) matched = Map<String, dynamic>.from(first);
+      if (first is Map) {
+        matched = Map<String, dynamic>.from(first);
+        fromUnpaidFallback = true;
+      }
     }
     if (matched == null) {
       ref.read(toastProvider.notifier).info(
@@ -334,9 +344,11 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
       return;
     }
     setState(() => _filterTab = 'all');
-    if (modal == 'pay' && _unpaidInvoices.any((u) =>
-        (u is Map ? (u['invoice_id'] ?? u['id'])?.toString() : null) ==
-        invoiceId)) {
+    if (modal == 'pay' &&
+        (fromUnpaidFallback ||
+            _unpaidInvoices.any((u) =>
+                (u is Map ? (u['invoice_id'] ?? u['id'])?.toString() : null) ==
+                invoiceId))) {
       _openPaymentReportModal(context, matched);
     } else {
       _openInvoiceDetailModal(context, matched);
