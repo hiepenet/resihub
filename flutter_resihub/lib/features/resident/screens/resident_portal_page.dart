@@ -41,6 +41,10 @@ class ResidentPortalPage extends ConsumerStatefulWidget {
   final String? invoiceId;
   final String? requestId;
   final String? modal;
+  final String? reservationId;
+  final String? depositId;
+  final String? subscriptionId;
+  final String? creditId;
 
   const ResidentPortalPage({
     super.key = const Key('route:/resident'),
@@ -51,6 +55,10 @@ class ResidentPortalPage extends ConsumerStatefulWidget {
     this.invoiceId,
     this.requestId,
     this.modal,
+    this.reservationId,
+    this.depositId,
+    this.subscriptionId,
+    this.creditId,
   });
 
   @override
@@ -62,6 +70,13 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   final Set<String> _visitedTabs = {};
   String? _selectedContractId;
   String? _actionParam;
+  late String? _modalParam;
+  late String? _requestIdParam;
+  late String? _invoiceIdParam;
+  late String? _reservationIdParam;
+  late String? _depositIdParam;
+  late String? _subscriptionIdParam;
+  late String? _creditIdParam;
 
   Map<String, dynamic>? _overview;
   int _openRequestsCount = 0;
@@ -75,6 +90,13 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     _visitedTabs.add(_activeTab);
     _selectedContractId = widget.contractId ?? widget.targetContractId;
     _actionParam = widget.action;
+    _modalParam = widget.modal;
+    _requestIdParam = widget.requestId;
+    _invoiceIdParam = widget.invoiceId;
+    _reservationIdParam = widget.reservationId;
+    _depositIdParam = widget.depositId;
+    _subscriptionIdParam = widget.subscriptionId;
+    _creditIdParam = widget.creditId;
     _applyCachedOverview();
     _fetchOverviewData(false);
   }
@@ -156,6 +178,20 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       if (qAction != null && widget.action == null) {
         _actionParam = qAction;
       }
+      // Deep-link params not wired through the router constructor are read
+      // straight from the current GoRouter URI (same source React reads).
+      void inherit(String key, void Function(String) assign) {
+        final value = queryParams[key];
+        if (value != null && value.isNotEmpty) assign(value);
+      }
+
+      inherit('modal', (v) => _modalParam ??= v);
+      inherit('request_id', (v) => _requestIdParam ??= v);
+      inherit('invoice_id', (v) => _invoiceIdParam ??= v);
+      inherit('reservation_id', (v) => _reservationIdParam ??= v);
+      inherit('deposit_id', (v) => _depositIdParam ??= v);
+      inherit('subscription_id', (v) => _subscriptionIdParam ??= v);
+      inherit('credit_id', (v) => _creditIdParam ??= v);
     } catch (_) {
       // In standalone widget test outside GoRouter, queryParams fallback is safely skipped.
     }
@@ -368,25 +404,35 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
           openRequestsCount: _openRequestsCount,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
+          modalParam: _modalParam,
+          reservationIdParam: _reservationIdParam,
         );
       case 'contract':
         return ContractTab(
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
+          modalParam: _modalParam,
+          depositIdParam: _depositIdParam,
         );
       case 'invoices':
         return InvoicesTab(
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
-          invoiceIdParam: widget.invoiceId,
+          invoiceIdParam: _invoiceIdParam,
+          creditIdParam: _creditIdParam,
+          modalParam: _modalParam,
         );
       case 'services':
         return ServicesTab(
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
+          actionParam: _actionParam,
+          modalParam: _modalParam,
+          subscriptionIdParam: _subscriptionIdParam,
+          onClearActionParam: () => setState(() => _actionParam = null),
         );
       case 'maintenance':
         return MaintenanceTab(
@@ -396,6 +442,8 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
           onRequestsChanged: _computeOpenRequests,
           actionParam: _actionParam,
           onClearActionParam: () => setState(() => _actionParam = null),
+          requestIdParam: _requestIdParam,
+          modalParam: _modalParam,
         );
       case 'notifications':
         return NotificationsTab(

@@ -39,7 +39,11 @@ void main() {
     dio.httpClientAdapter = _StubAdapter();
   });
 
-  Widget buildTestApp(Map<String, dynamic> overview) {
+  Widget buildTestApp(
+    Map<String, dynamic> overview, {
+    String? modalParam,
+    String? reservationIdParam,
+  }) {
     return ProviderScope(
       overrides: [
         dioProvider.overrideWithValue(dio),
@@ -51,6 +55,8 @@ void main() {
             overview: overview,
             onRefreshOverview: () async {},
             onNavigateTab: (tab, [extra]) {},
+            modalParam: modalParam,
+            reservationIdParam: reservationIdParam,
           ),
         ),
       ),
@@ -58,9 +64,17 @@ void main() {
   }
 
   Future<void> pumpOverview(
-      WidgetTester tester, Map<String, dynamic> overview) async {
+    WidgetTester tester,
+    Map<String, dynamic> overview, {
+    String? modalParam,
+    String? reservationIdParam,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
-    await tester.pumpWidget(buildTestApp(overview));
+    await tester.pumpWidget(buildTestApp(
+      overview,
+      modalParam: modalParam,
+      reservationIdParam: reservationIdParam,
+    ));
     await tester.pumpAndSettle();
   }
 
@@ -227,5 +241,93 @@ void main() {
 
     expect(find.text('Đăng ký thuê trực tuyến'), findsOneWidget);
     expect(find.text('Hiện chưa có căn hộ trống công khai'), findsOneWidget);
+  });
+
+  testWidgets('every onboarding entrypoint opens the single consent form',
+      (tester) async {
+    await pumpOverview(tester, {
+      'active_contract': null,
+      'reservations': [],
+      'available_apartments': [],
+    });
+
+    // Entrypoint: "Đăng ký thuê trực tuyến" / "Gửi hồ sơ đăng ký thuê".
+    await tester.tap(find.text('Đăng ký thuê trực tuyến').first);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('resident-inline-onboarding-form')),
+        findsOneWidget);
+    expect(find.text('Ngày sinh'), findsOneWidget);
+    expect(
+      find.text(
+        'Ảnh chụp CCCD 2 mặt (Khuyến khích tải đủ mặt trước & mặt sau để duyệt nhanh)',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Ghi chú / Nhu cầu nhận phòng'), findsOneWidget);
+    expect(
+      find.byWidgetPredicate((w) =>
+          w is RichText &&
+          w.text.toPlainText().contains('Đồng ý chính sách bảo vệ dữ liệu cá nhân')),
+      findsOneWidget,
+    );
+
+    // Divergent fields of the old _openApplicationModal are gone.
+    expect(find.text('Nghề nghiệp'), findsNothing);
+    expect(find.text('Người liên hệ khẩn cấp'), findsNothing);
+    expect(find.text('Địa chỉ thường trú'), findsNothing);
+    expect(find.text('SĐT người liên hệ khẩn cấp'), findsNothing);
+  });
+
+  testWidgets('deep-link modal=apply opens the unified consent form',
+      (tester) async {
+    await pumpOverview(
+      tester,
+      {
+        'active_contract': null,
+        'user': {'full_name': 'Khách Mới'},
+        'reservations': [],
+        'available_apartments': [
+          {'id': 'apt-9', 'code': 'A.101', 'building_name': 'Tòa Ruby'},
+        ],
+      },
+      modalParam: 'apply',
+    );
+
+    expect(find.byKey(const Key('resident-inline-onboarding-form')),
+        findsOneWidget);
+    expect(
+      find.byWidgetPredicate((w) =>
+          w is RichText &&
+          w.text.toPlainText().contains('Đồng ý chính sách bảo vệ dữ liệu cá nhân')),
+      findsOneWidget,
+    );
+    expect(find.text('Nghề nghiệp'), findsNothing);
+  });
+
+  testWidgets('deep-link reservation_id opens the reservation detail modal',
+      (tester) async {
+    await pumpOverview(
+      tester,
+      {
+        'active_contract': null,
+        'user': {'full_name': 'Khách Đặt Cọc'},
+        'reservations': [
+          {
+            'reservation_id': 'rsv-1',
+            'apartment_id': 'apt-1',
+            'apartment_code': 'P.302',
+            'building_name': 'Tòa Sapphire',
+            'reservation_status': 'CONVERTED',
+            'hold_amount': 2000000,
+          },
+        ],
+      },
+      reservationIdParam: 'rsv-1',
+    );
+
+    expect(find.byKey(const Key('resident-reservation-detail-modal')),
+        findsOneWidget);
+    expect(find.text('Chi tiết Phiếu Giữ chỗ — Căn P.302'), findsOneWidget);
   });
 }

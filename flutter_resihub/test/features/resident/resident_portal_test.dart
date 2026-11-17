@@ -1019,5 +1019,60 @@ void main() {
       // Prorata preview box is displayed
       expect(find.textContaining('Phí tạm tính tháng này'), findsOneWidget);
     });
+
+    testWidgets('portal passes modal deep-link down to OverviewTab',
+        (tester) async {
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/resident/overview')) {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'reservations': [],
+                'available_apartments': [],
+                'active_contract': null,
+                'active_contracts': [],
+                'user': {'full_name': 'Khách Mới'},
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': []}), 200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]});
+      });
+
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dioProvider.overrideWithValue(dio),
+            appStorageProvider.overrideWithValue(storage),
+            residentServiceProvider
+                .overrideWithValue(ResidentService(dio: dio)),
+          ],
+          child: const MaterialApp(
+            home: ResidentPortalPage(initialTab: 'overview', modal: 'apply'),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // The unified consent form (E8) must be open from the page-level param.
+      expect(find.byKey(const Key('resident-inline-onboarding-form')),
+          findsOneWidget);
+      expect(
+        find.byWidgetPredicate((w) =>
+            w is RichText &&
+            w.text
+                .toPlainText()
+                .contains('Đồng ý chính sách bảo vệ dữ liệu cá nhân')),
+        findsOneWidget,
+      );
+    });
   });
 }

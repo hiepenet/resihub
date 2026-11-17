@@ -26,6 +26,8 @@ class OverviewTab extends ConsumerStatefulWidget {
   final int openRequestsCount;
   final Future<void> Function() onRefreshOverview;
   final void Function(String tab, [Map<String, dynamic>? extra]) onNavigateTab;
+  final String? modalParam;
+  final String? reservationIdParam;
 
   const OverviewTab({
     super.key,
@@ -33,6 +35,8 @@ class OverviewTab extends ConsumerStatefulWidget {
     this.openRequestsCount = 0,
     required this.onRefreshOverview,
     required this.onNavigateTab,
+    this.modalParam,
+    this.reservationIdParam,
   });
 
   @override
@@ -40,139 +44,118 @@ class OverviewTab extends ConsumerStatefulWidget {
 }
 
 class _OverviewTabState extends ConsumerState<OverviewTab> {
+  @override
+  void initState() {
+    super.initState();
+    final modal = widget.modalParam;
+    final rsvId = widget.reservationIdParam;
+    if (modal == null && (rsvId == null || rsvId.isEmpty)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (modal == 'apply') {
+        _openApplicationModal(context);
+        return;
+      }
+      if (modal == 'reservation' || (rsvId != null && rsvId.isNotEmpty)) {
+        _openDeepLinkedReservation(rsvId);
+      }
+    });
+  }
+
+  /// Mọi入口 (nút Đăng ký, detail giữ chỗ, deep-link) dùng chung 1 form — E8.
+  Widget _buildApplicationForm({
+    String? initialApartmentId,
+    VoidCallback? onSubmitted,
+  }) {
+    final ov = widget.overview ?? const {};
+    final user = ov['user'] is Map ? ov['user'] as Map : const {};
+    final reservations = (ov['reservations'] is List
+            ? ov['reservations'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    final availableApartments = (ov['available_apartments'] is List
+            ? ov['available_apartments'] as List
+            : const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    return _InlineOnboardingForm(
+      user: user,
+      reservation: reservations.isNotEmpty ? reservations.first : null,
+      availableApartments: availableApartments,
+      idImages: ov['id_images'] is List ? ov['id_images'] as List : const [],
+      onRefresh: widget.onRefreshOverview,
+      initialApartmentId: initialApartmentId,
+      onSubmitted: onSubmitted,
+    );
+  }
+
   void _openApplicationModal(BuildContext context, {String? apartmentId}) {
-    final overview = widget.overview ?? const {};
-    final user = overview['user'] is Map ? overview['user'] as Map : const {};
-
-    final fullNameCtrl =
-        TextEditingController(text: user['full_name']?.toString() ?? '');
-    final phoneCtrl =
-        TextEditingController(text: user['phone']?.toString() ?? '');
-    final idNumberCtrl =
-        TextEditingController(text: user['id_number']?.toString() ?? '');
-    final addressCtrl =
-        TextEditingController(text: user['address']?.toString() ?? '');
-    final jobCtrl = TextEditingController();
-    final emergencyNameCtrl = TextEditingController();
-    final emergencyPhoneCtrl = TextEditingController();
-
-    bool submitting = false;
-
     AppModal.show(
       context: context,
-      title: 'Nộp hồ sơ thuê căn hộ',
+      title: 'Đăng ký thông tin nhận nhà',
       subtitle:
-          'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
-      child: StatefulBuilder(
-        builder: (ctx, setModalState) {
-          return SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                AppInput(
-                  label: 'Họ và tên *',
-                  controller: fullNameCtrl,
-                  hint: 'Nguyễn Văn A',
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Số điện thoại *',
-                  controller: phoneCtrl,
-                  keyboardType: TextInputType.phone,
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Số CCCD/Hộ chiếu *',
-                  controller: idNumberCtrl,
-                  keyboardType: TextInputType.number,
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Địa chỉ thường trú',
-                  controller: addressCtrl,
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Nghề nghiệp',
-                  controller: jobCtrl,
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Người liên hệ khẩn cấp',
-                  controller: emergencyNameCtrl,
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'SĐT người liên hệ khẩn cấp',
-                  controller: emergencyPhoneCtrl,
-                  keyboardType: TextInputType.phone,
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    AppButton(
-                      text: 'Hủy',
-                      variant: AppButtonVariant.outline,
-                      onPressed:
-                          submitting ? null : () => Navigator.of(ctx).pop(),
-                    ),
-                    const SizedBox(width: 8),
-                    AppButton(
-                      text: submitting ? 'Đang gửi...' : 'Gửi hồ sơ',
-                      loading: submitting,
-                      onPressed: submitting
-                          ? null
-                          : () async {
-                              final name = fullNameCtrl.text.trim();
-                              final phone = phoneCtrl.text.trim();
-                              if (name.isEmpty || phone.isEmpty) {
-                                ref.read(toastProvider.notifier).error(
-                                    'Vui lòng điền họ tên và số điện thoại.');
-                                return;
-                              }
-
-                              setModalState(() => submitting = true);
-                              try {
-                                await ref
-                                    .read(residentServiceProvider)
-                                    .submitRentalApplication({
-                                  if (apartmentId != null &&
-                                      apartmentId.isNotEmpty)
-                                    'desired_apartment_id': apartmentId,
-                                  'full_name': name,
-                                  'phone': phone,
-                                  'id_number': idNumberCtrl.text.trim(),
-                                  'address': addressCtrl.text.trim(),
-                                  'job_title': jobCtrl.text.trim(),
-                                  'emergency_contact_name':
-                                      emergencyNameCtrl.text.trim(),
-                                  'emergency_contact_phone':
-                                      emergencyPhoneCtrl.text.trim(),
-                                });
-                                if (ctx.mounted) {
-                                  Navigator.of(ctx).pop();
-                                }
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .success('Đã gửi hồ sơ thuê thành công.');
-                                await widget.onRefreshOverview();
-                              } catch (err) {
-                                setModalState(() => submitting = false);
-                                ref.read(toastProvider.notifier).error(
-                                    extractErrorMessage(
-                                        err, 'Không thể gửi hồ sơ thuê.'));
-                              }
-                            },
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          );
-        },
+          'Khai báo thông tin định danh và tải lên ảnh CCCD 2 mặt để Ban Quản Lý phê duyệt hồ sơ',
+      child: SingleChildScrollView(
+        child: _buildApplicationForm(
+          initialApartmentId: apartmentId,
+          onSubmitted: () {
+            if (context.mounted) Navigator.of(context).pop();
+          },
+        ),
       ),
     );
+  }
+
+  /// Deep-link ?modal=reservation / ?reservation_id=... — parity OverviewTab.jsx:669-698.
+  void _openDeepLinkedReservation(String? rsvId) {
+    final ov = widget.overview ?? const {};
+    final onboardingApplication =
+        ov['onboarding_application'] ?? ov['pending_application'];
+    final allRsv = <Map<String, dynamic>>[
+      ...(ov['reservations'] is List
+          ? (ov['reservations'] as List).whereType<Map<String, dynamic>>()
+          : const <Map<String, dynamic>>[]),
+      ...(ov['reservation_history'] is List
+          ? (ov['reservation_history'] as List).whereType<Map<String, dynamic>>()
+          : const <Map<String, dynamic>>[]),
+    ];
+    Map<String, dynamic>? matched;
+    if (rsvId != null && rsvId.isNotEmpty) {
+      for (final r in allRsv) {
+        final id = (r['reservation_id'] ?? r['id'])?.toString();
+        if (id == rsvId) {
+          matched = r;
+          break;
+        }
+      }
+      if (matched == null) {
+        ref.read(toastProvider.notifier).info(
+            'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        return;
+      }
+    }
+
+    if (matched == null) {
+      if (onboardingApplication is Map) {
+        _openReservationDetailModal(
+          context,
+          {'application': Map<String, dynamic>.from(onboardingApplication)},
+          isApplicationOnly: true,
+        );
+      }
+      return;
+    }
+
+    final status = _reservationStatus(matched);
+    if (status == 'HELD' && onboardingApplication == null) {
+      _openApplicationModal(context,
+          apartmentId: matched['apartment_id']?.toString());
+    } else if (canResidentUpdateReservationBankInfo(matched)) {
+      _openReservationBankModal(context, matched);
+    } else {
+      _openReservationDetailModal(context, matched);
+    }
   }
 
   void _openReservationBankModal(
@@ -2548,6 +2531,8 @@ class _InlineOnboardingForm extends ConsumerStatefulWidget {
   final List<Map<String, dynamic>> availableApartments;
   final List idImages;
   final Future<void> Function() onRefresh;
+  final String? initialApartmentId;
+  final VoidCallback? onSubmitted;
 
   const _InlineOnboardingForm({
     required this.user,
@@ -2555,6 +2540,8 @@ class _InlineOnboardingForm extends ConsumerStatefulWidget {
     required this.availableApartments,
     required this.idImages,
     required this.onRefresh,
+    this.initialApartmentId,
+    this.onSubmitted,
   });
 
   @override
@@ -2587,10 +2574,12 @@ class _InlineOnboardingFormState extends ConsumerState<_InlineOnboardingForm> {
     _idCtrl = TextEditingController(text: user['id_number']?.toString() ?? '');
     _dobCtrl = TextEditingController(text: toInputDate(user['dob']));
     _noteCtrl = TextEditingController();
-    _apartmentId = reservation?['apartment_id']?.toString() ??
-        (widget.availableApartments.isNotEmpty
-            ? widget.availableApartments.first['id']?.toString()
-            : null);
+    _apartmentId = widget.initialApartmentId?.isNotEmpty == true
+        ? widget.initialApartmentId
+        : (reservation?['apartment_id']?.toString() ??
+            (widget.availableApartments.isNotEmpty
+                ? widget.availableApartments.first['id']?.toString()
+                : null));
     _consent = user['privacy_consent_at'] != null;
   }
 
@@ -2693,6 +2682,7 @@ class _InlineOnboardingFormState extends ConsumerState<_InlineOnboardingForm> {
       ref
           .read(toastProvider.notifier)
           .success('Đã gửi hồ sơ đăng ký nhận nhà thành công!');
+      widget.onSubmitted?.call();
       await widget.onRefresh();
     } catch (err) {
       ref

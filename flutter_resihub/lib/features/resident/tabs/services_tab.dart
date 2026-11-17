@@ -123,12 +123,20 @@ class ServicesTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
   final Future<void> Function() onRefreshOverview;
   final void Function(String tab, [Map<String, dynamic>? extra]) onNavigateTab;
+  final String? actionParam;
+  final String? modalParam;
+  final String? subscriptionIdParam;
+  final VoidCallback? onClearActionParam;
 
   const ServicesTab({
     super.key,
     required this.overview,
     required this.onRefreshOverview,
     required this.onNavigateTab,
+    this.actionParam,
+    this.modalParam,
+    this.subscriptionIdParam,
+    this.onClearActionParam,
   });
 
   @override
@@ -137,6 +145,7 @@ class ServicesTab extends ConsumerStatefulWidget {
 
 class _ServicesTabState extends ConsumerState<ServicesTab> {
   bool _loading = false;
+  bool _deepLinkApplied = false;
   bool _showCancelledHistory = false;
   List<dynamic> _subscriptions = [];
   List<dynamic> _catalog = [];
@@ -221,6 +230,7 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
             _loading = false;
           });
         }
+        _applyDeepLink();
       }
     } catch (err) {
       if (mounted) {
@@ -228,6 +238,61 @@ class _ServicesTabState extends ConsumerState<ServicesTab> {
         ref.read(toastProvider.notifier).error(extractErrorMessage(
             err, 'Không thể tải thông tin dịch vụ tiện ích.'));
       }
+    }
+  }
+
+  /// Deep-links ?action=subscribe + ?subscription_id= — parity ServicesTab.jsx:202-230.
+  void _applyDeepLink() {
+    final action = widget.actionParam;
+    final subId = widget.subscriptionIdParam;
+    final modal = widget.modalParam;
+    if (_deepLinkApplied ||
+        (action == null &&
+            (subId == null || subId.isEmpty) &&
+            (modal == null || modal.isEmpty))) {
+      return;
+    }
+    _deepLinkApplied = true;
+    if (!mounted) return;
+    final ctx = context;
+
+    if (action == 'subscribe') {
+      widget.onClearActionParam?.call();
+      if (_hasActiveContract && _catalog.isNotEmpty) {
+        final first = _catalog.first;
+        _openSubscribeModal(
+          ctx,
+          first is Map
+              ? Map<String, dynamic>.from(first)
+              : <String, dynamic>{},
+        );
+      }
+      return;
+    }
+
+    if ((subId != null && subId.isNotEmpty) ||
+        (modal != null && modal.isNotEmpty)) {
+      Map<String, dynamic>? matched;
+      for (final s in _subscriptions) {
+        if (s is Map &&
+            (subId == null ||
+                subId.isEmpty ||
+                (s['id'] ?? s['subscription_id'] ?? s['sub_id'])?.toString() ==
+                    subId)) {
+          matched = Map<String, dynamic>.from(s);
+          break;
+        }
+      }
+      if (matched == null) {
+        ref.read(toastProvider.notifier).info(
+            'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        return;
+      }
+      final status = _str(matched['status']).toUpperCase();
+      if (_kTerminalStatuses.contains(status)) {
+        setState(() => _showCancelledHistory = true);
+      }
+      _openDetailModal(ctx, matched);
     }
   }
 

@@ -74,6 +74,8 @@ class MaintenanceTab extends ConsumerStatefulWidget {
   final void Function(List<dynamic> rows)? onRequestsChanged;
   final String? actionParam;
   final VoidCallback? onClearActionParam;
+  final String? requestIdParam;
+  final String? modalParam;
 
   const MaintenanceTab({
     super.key,
@@ -83,6 +85,8 @@ class MaintenanceTab extends ConsumerStatefulWidget {
     this.onRequestsChanged,
     this.actionParam,
     this.onClearActionParam,
+    this.requestIdParam,
+    this.modalParam,
   });
 
   @override
@@ -91,6 +95,7 @@ class MaintenanceTab extends ConsumerStatefulWidget {
 
 class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
   bool _loading = false;
+  bool _deepLinkApplied = false;
   List<dynamic> _requests = [];
   String _filterTab = 'all';
   String? _copiedCode;
@@ -163,6 +168,7 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
           _loading = false;
         });
         widget.onRequestsChanged?.call(list);
+        _applyDeepLink();
       }
     } catch (err) {
       if (mounted) {
@@ -170,6 +176,39 @@ class _MaintenanceTabState extends ConsumerState<MaintenanceTab> {
         ref.read(toastProvider.notifier).error(extractErrorMessage(
             err, 'Không thể tải danh sách sự cố & yêu cầu.'));
       }
+    }
+  }
+
+  /// Deep-link ?request_id= (&modal=detail) — parity MaintenanceTab.jsx:200-222.
+  void _applyDeepLink() {
+    final requestId = widget.requestIdParam;
+    final modal = widget.modalParam;
+    if (_deepLinkApplied ||
+        (requestId == null || requestId.isEmpty) ||
+        (modal != null && modal != 'detail')) {
+      return;
+    }
+    _deepLinkApplied = true;
+    if (!mounted) return;
+    final ctx = context;
+    Map<String, dynamic>? matched;
+    for (final r in _requests) {
+      if (r is Map && _idOf(r) == requestId) {
+        matched = _asMap(r);
+        break;
+      }
+    }
+    if (matched == null) {
+      ref.read(toastProvider.notifier).info(
+          'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
+    setState(() => _filterTab = 'all');
+    final rating = num.tryParse(matched['rating']?.toString() ?? '') ?? 0;
+    if (_statusOf(matched) == 'RESOLVED' && rating == 0) {
+      _openRatingModal(ctx, matched);
+    } else {
+      _openDetailModal(ctx, matched);
     }
   }
 

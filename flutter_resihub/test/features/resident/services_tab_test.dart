@@ -100,7 +100,13 @@ void main() {
     return dio;
   }
 
-  Future<void> pumpTab(WidgetTester tester, Dio dio) async {
+  Future<void> pumpTab(
+    WidgetTester tester,
+    Dio dio, {
+    String? actionParam,
+    String? modalParam,
+    String? subscriptionIdParam,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
@@ -115,6 +121,10 @@ void main() {
               overview: overview,
               onRefreshOverview: () async {},
               onNavigateTab: (tab, [extra]) {},
+              actionParam: actionParam,
+              modalParam: modalParam,
+              subscriptionIdParam: subscriptionIdParam,
+              onClearActionParam: () {},
             ),
           ),
         ),
@@ -216,6 +226,28 @@ void main() {
       expect(payload['end_date'], '2026-11-20');
       expect(payload['note'], 'Không còn nhu cầu');
       expect(payload.containsKey('cancellation_reason'), isFalse);
+    });
+  });
+
+  group('E9 deep-link — ServicesTab modals', () {
+    testWidgets('action=subscribe opens the subscribe modal', (tester) async {
+      await pumpTab(
+        tester,
+        buildDio(subscriptions: [subscription], services: catalog),
+        actionParam: 'subscribe',
+      );
+      expect(find.text('Đăng ký sử dụng dịch vụ tiện ích'), findsOneWidget);
+    });
+
+    testWidgets('subscription_id opens the subscription detail modal',
+        (tester) async {
+      await pumpTab(
+        tester,
+        buildDio(subscriptions: [subscription], services: catalog),
+        modalParam: 'detail',
+        subscriptionIdParam: 'sub-1',
+      );
+      expect(find.text('Gói dịch vụ: Gói gửi xe ô tô'), findsOneWidget);
     });
   });
 }

@@ -35,6 +35,8 @@ class InvoicesTab extends ConsumerStatefulWidget {
   final Future<void> Function() onRefreshOverview;
   final void Function(String tab, [Map<String, dynamic>? extra]) onNavigateTab;
   final String? invoiceIdParam;
+  final String? creditIdParam;
+  final String? modalParam;
 
   const InvoicesTab({
     super.key,
@@ -42,6 +44,8 @@ class InvoicesTab extends ConsumerStatefulWidget {
     required this.onRefreshOverview,
     required this.onNavigateTab,
     this.invoiceIdParam,
+    this.creditIdParam,
+    this.modalParam,
   });
 
   @override
@@ -50,6 +54,7 @@ class InvoicesTab extends ConsumerStatefulWidget {
 
 class _InvoicesTabState extends ConsumerState<InvoicesTab> {
   bool _loading = false;
+  bool _deepLinkApplied = false;
   List<dynamic> _invoices = [];
   List<dynamic> _creditBalances = [];
   late Map<String, dynamic> _paymentAccount;
@@ -158,6 +163,7 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
           _creditBalances = credits;
           _loading = false;
         });
+        _applyDeepLink();
       }
     } catch (err) {
       if (mounted) {
@@ -167,6 +173,88 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
             .error(extractErrorMessage(err, 'Không thể tải danh sách hóa đơn.'));
       }
     }
+  }
+
+  /// Deep-link ?invoice_id= | ?credit_id= | ?modal=pay — parity InvoicesTab.jsx:291-367.
+  void _applyDeepLink() {
+    final modal = widget.modalParam;
+    final invoiceId = widget.invoiceIdParam;
+    final creditId = widget.creditIdParam;
+    if (_deepLinkApplied ||
+        (modal == null &&
+            (invoiceId == null || invoiceId.isEmpty) &&
+            (creditId == null || creditId.isEmpty))) {
+      return;
+    }
+    _deepLinkApplied = true;
+    if (!mounted) return;
+    final context = this.context;
+
+    if (modal == 'credit' || (creditId != null && creditId.isNotEmpty)) {
+      Map<String, dynamic>? matched;
+      for (final c in _creditBalances) {
+        if (c is Map && (c['id'] ?? c['credit_id'])?.toString() == creditId) {
+          matched = Map<String, dynamic>.from(c);
+          break;
+        }
+      }
+      if (matched == null) {
+        ref.read(toastProvider.notifier).info(
+            'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        return;
+      }
+      _openCreditDetailModal(context, matched);
+      return;
+    }
+
+    Map<String, dynamic>? matched;
+    for (final inv in _invoices) {
+      if (inv is Map && (inv['invoice_id'] ?? inv['id'])?.toString() == invoiceId) {
+        matched = Map<String, dynamic>.from(inv);
+        break;
+      }
+    }
+    if (matched == null && modal == 'pay' && _unpaidInvoices.isNotEmpty) {
+      final first = _unpaidInvoices.first;
+      if (first is Map) matched = Map<String, dynamic>.from(first);
+    }
+    if (matched == null) {
+      ref.read(toastProvider.notifier).info(
+          'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+      return;
+    }
+    setState(() => _filterTab = 'all');
+    if (modal == 'pay' && _unpaidInvoices.any((u) =>
+        (u is Map ? (u['invoice_id'] ?? u['id'])?.toString() : null) ==
+        invoiceId)) {
+      _openPaymentReportModal(context, matched);
+    } else {
+      _openInvoiceDetailModal(context, matched);
+    }
+  }
+
+  void _openInvoiceDetailModal(BuildContext context, Map<String, dynamic> inv) {
+    final code = inv['invoice_code']?.toString() ??
+        inv['invoice_id']?.toString() ??
+        inv['id']?.toString() ??
+        '';
+    final summary = resolveResidentInvoiceTotalsSummary(inv);
+    AppModal.show(
+      context: context,
+      title: 'Chi tiết hóa đơn',
+      subtitle: 'Mã hóa đơn: $code',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Tổng tiền: ${formatMoney(summary.totalAmount)}'),
+          const SizedBox(height: 8),
+          Text('Đã thanh toán: ${formatMoney(summary.paidAmount)}'),
+          const SizedBox(height: 8),
+          Text('Còn nợ: ${formatMoney(summary.remainingAmount)}'),
+        ],
+      ),
+    );
   }
 
   List<dynamic> get _unpaidInvoices {
@@ -510,31 +598,36 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Trạng thái khoản tín dụng',
-                        style: TextStyle(fontSize: 12, color: AppColors.slate500)),
-                    const SizedBox(height: 4),
-                    StatusBadge(status: status, domain: StatusDomain.creditBalance),
-                  ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Trạng thái khoản tín dụng',
+                          style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                      const SizedBox(height: 4),
+                      StatusBadge(status: status, domain: StatusDomain.creditBalance),
+                    ],
+                  ),
                 ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Khả dụng / Giá trị gốc',
-                        style: TextStyle(fontSize: 12, color: AppColors.slate500)),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${formatMoney(avail)} / ${formatMoney(amount)}',
-                      style: const TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.primary700,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      const Text('Khả dụng / Giá trị gốc',
+                          style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${formatMoney(avail)} / ${formatMoney(amount)}',
+                        style: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primary700,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),

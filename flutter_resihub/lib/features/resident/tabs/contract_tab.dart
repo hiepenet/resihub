@@ -230,12 +230,16 @@ class ContractTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
   final Future<void> Function() onRefreshOverview;
   final void Function(String tab, [Map<String, dynamic>? extra]) onNavigateTab;
+  final String? modalParam;
+  final String? depositIdParam;
 
   const ContractTab({
     super.key,
     required this.overview,
     required this.onRefreshOverview,
     required this.onNavigateTab,
+    this.modalParam,
+    this.depositIdParam,
   });
 
   @override
@@ -244,6 +248,7 @@ class ContractTab extends ConsumerStatefulWidget {
 
 class _ContractTabState extends ConsumerState<ContractTab> {
   bool _loading = false;
+  bool _deepLinkApplied = false;
   List<dynamic> _deposits = [];
   List<dynamic> _contractRequests = [];
   List<dynamic> _occupants = [];
@@ -305,6 +310,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
           _occupants = occData;
           _loading = false;
         });
+        _applyDeepLink();
       }
     } catch (err) {
       if (mounted) {
@@ -313,6 +319,122 @@ class _ContractTabState extends ConsumerState<ContractTab> {
             extractErrorMessage(err, 'Không thể tải dữ liệu hợp đồng & cọc.'));
       }
     }
+  }
+
+  /// Deep-link settlement | bank | renew | contract_view | deposit_view —
+  /// parity ContractTab.jsx:573-653.
+  void _applyDeepLink() {
+    final modal = widget.modalParam;
+    final depositId = widget.depositIdParam;
+    if (_deepLinkApplied || (modal == null && (depositId == null || depositId.isEmpty))) {
+      return;
+    }
+    _deepLinkApplied = true;
+    if (!mounted) return;
+    final context = this.context;
+
+    final contract = widget.overview?['active_contract'] is Map
+        ? widget.overview!['active_contract'] as Map<String, dynamic>
+        : (widget.overview?['contract'] is Map
+            ? widget.overview!['contract'] as Map<String, dynamic>
+            : null);
+    final settlementDeposits = resolveResidentSettlementDeposits(
+      overview: widget.overview,
+      contract: contract,
+      contractHistory: asResidentMapList(widget.overview?['contract_history']),
+      deposits: _deposits,
+    );
+    Map<String, dynamic>? target;
+    if (depositId != null && depositId.isNotEmpty) {
+      for (final dep in settlementDeposits) {
+        final id = (dep['deposit_id'] ?? dep['id'])?.toString();
+        if (id == depositId) {
+          target = dep;
+          break;
+        }
+      }
+      if (target == null) {
+        ref.read(toastProvider.notifier).info(
+            'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        return;
+      }
+    }
+
+    switch (modal) {
+      case 'settlement':
+        if (target != null &&
+            getResidentDisputeWindowState(target).canDispute) {
+          _openDisputeModal(context, target);
+        } else if (target != null) {
+          _openDepositDetailModal(context, target,
+              title: 'Chi tiết Bảng kê tất toán cọc');
+        } else {
+          _openDepositDetailModal(context, _primaryDeposit(),
+              title: 'Chi tiết Bảng kê tất toán cọc');
+        }
+        return;
+      case 'bank':
+        if (target != null) {
+          _openDepositBankModal(context, target);
+        } else {
+          ref.read(toastProvider.notifier).info(
+              'Bản ghi liên quan không còn tồn tại hoặc đã thay đổi trạng thái.');
+        }
+        return;
+      case 'renew':
+        final isActive = contract != null &&
+            (contract['contract_status'] ?? contract['status']) == 'ACTIVE';
+        if (isActive) {
+          _openCreateContractRequestModal(context, 'RENEWAL');
+        } else {
+          _handleViewA4Contract();
+        }
+        return;
+      case 'contract_view':
+        _handleViewA4Contract();
+        return;
+      case 'deposit_view':
+        _openDepositDetailModal(context, target ?? _primaryDeposit());
+        return;
+    }
+    if (depositId != null && depositId.isNotEmpty) {
+      _openDepositDetailModal(context, target ?? _primaryDeposit());
+    }
+  }
+
+  Map<String, dynamic> _primaryDeposit() {
+    if (_deposits.isNotEmpty && _deposits.first is Map) {
+      return Map<String, dynamic>.from(_deposits.first as Map);
+    }
+    return const <String, dynamic>{};
+  }
+
+  void _openDepositDetailModal(
+    BuildContext context,
+    Map<String, dynamic> dep, {
+    String title = 'Chi tiết tiền cọc & Bảng kê tất toán',
+  }) {
+    final depositId =
+        dep['deposit_id']?.toString() ?? dep['id']?.toString() ?? '';
+    final settlement = dep['settlement'] is Map
+        ? Map<String, dynamic>.from(dep['settlement'] as Map)
+        : const <String, dynamic>{};
+    AppModal.show(
+      context: context,
+      title: title,
+      subtitle: 'Mã cọc: ${dep['deposit_code'] ?? depositId}',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Tiền cọc: ${formatMoney(dep['deposit_amount'] ?? dep['amount_held'] ?? 0)}'),
+          const SizedBox(height: 8),
+          Text('Hoàn trả: ${formatMoney(settlement['refund_amount'] ?? 0)}'),
+          const SizedBox(height: 8),
+          Text('Khấu trừ: ${formatMoney(settlement['deduction_amount'] ?? 0)}'),
+        ],
+      ),
+    );
   }
 
   Future<void> _handleViewA4Contract([String? targetContractId]) async {

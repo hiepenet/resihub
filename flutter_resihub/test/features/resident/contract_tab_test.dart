@@ -118,6 +118,8 @@ void main() {
     WidgetTester tester, {
     Map<String, dynamic>? overview,
     List<String>? navigatedTabs,
+    String? modalParam,
+    String? depositIdParam,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -141,6 +143,8 @@ void main() {
               overview: overview,
               onRefreshOverview: () async {},
               onNavigateTab: (tab, [extra]) => navigatedTabs?.add(tab),
+              modalParam: modalParam,
+              depositIdParam: depositIdParam,
             ),
           ),
         ),
@@ -148,6 +152,19 @@ void main() {
     );
     await tester.pumpAndSettle();
   }
+
+  Map<String, dynamic> activeContractOverview() => {
+        'active_contract': {
+          'contract_id': 'c-1',
+          'contract_code': 'HD-2026-001',
+          'apartment_code': 'A.101',
+          'building_name': 'Tòa Ruby',
+          'contract_status': 'ACTIVE',
+          'status': 'ACTIVE',
+          'start_date': '2026-01-01',
+          'end_date': '2026-12-31',
+        },
+      };
 
   testWidgets(
       'Contract tab parity surfaces timeline, terms, CTAs, amendments and history',
@@ -330,6 +347,61 @@ void main() {
       expect(find.text('Loại đề nghị'), findsOneWidget);
       expect(
           find.textContaining('Ngày kết thúc mới mong muốn'), findsOneWidget);
+    });
+  });
+
+  group('E9 deep-link — ContractTab modals', () {
+    testWidgets('modal=renew opens the renewal request modal', (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: activeContractOverview(),
+        modalParam: 'renew',
+      );
+      expect(find.text('Gửi yêu cầu Xin gia hạn Hợp đồng'), findsOneWidget);
+    });
+
+    testWidgets('modal=contract_view opens the A4 contract preview',
+        (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: activeContractOverview(),
+        modalParam: 'contract_view',
+      );
+      expect(find.text('Bản in Hợp đồng thuê căn hộ chuẩn A4'), findsOneWidget);
+    });
+
+    testWidgets('modal=bank with deposit_id opens the refund bank modal',
+        (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: activeContractOverview(),
+        modalParam: 'bank',
+        depositIdParam: 'dep-1',
+      );
+      expect(find.text('Tài khoản nhận hoàn tiền cọc'), findsOneWidget);
+    });
+
+    testWidgets('modal=settlement opens the dispute modal when in window',
+        (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: activeContractOverview(),
+        modalParam: 'settlement',
+        depositIdParam: 'dep-1',
+      );
+      expect(find.text('Khiếu nại quyết toán tiền cọc'), findsOneWidget);
+    });
+
+    testWidgets('modal=deposit_view opens the deposit detail modal',
+        (tester) async {
+      await pumpContractTab(
+        tester,
+        overview: activeContractOverview(),
+        modalParam: 'deposit_view',
+        depositIdParam: 'dep-1',
+      );
+      expect(
+          find.text('Chi tiết tiền cọc & Bảng kê tất toán'), findsOneWidget);
     });
   });
 }

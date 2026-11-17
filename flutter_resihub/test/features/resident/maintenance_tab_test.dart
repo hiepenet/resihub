@@ -78,7 +78,7 @@ List<Map<String, dynamic>> _requests() {
   ];
 }
 
-Widget _buildTab(_FakeResidentService service) {
+Widget _buildTab(_FakeResidentService service, {String? requestIdParam}) {
   return ProviderScope(
     overrides: [residentServiceProvider.overrideWithValue(service)],
     child: MaterialApp(
@@ -87,6 +87,7 @@ Widget _buildTab(_FakeResidentService service) {
           overview: _overview(),
           onRefreshOverview: () async {},
           onNavigateTab: (_, [__]) {},
+          requestIdParam: requestIdParam,
         ),
       ),
     ),
@@ -173,6 +174,27 @@ void main() {
       expect(find.text('Xem yêu cầu đã gửi'), findsOneWidget);
       expect(find.text('Vẫn tiếp tục gửi mới'), findsOneWidget);
       expect(find.textContaining('SR-2026-001'), findsWidgets);
+    });
+
+    testWidgets('request_id deep-link opens the request detail modal',
+        (tester) async {
+      final service = _FakeResidentService()..requests = _requests();
+      await tester.pumpWidget(_buildTab(service, requestIdParam: 'sr-1'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Phiếu sửa chữa #SR-2026-001'),
+          findsOneWidget);
+      expect(find.text('Vòi nước rò rỉ'), findsWidgets);
+    });
+
+    testWidgets('request_id for unrated RESOLVED request opens rating modal',
+        (tester) async {
+      final service = _FakeResidentService()..requests = _requests();
+      await tester.pumpWidget(_buildTab(service, requestIdParam: 'sr-2'));
+      await tester.pumpAndSettle();
+
+      expect(
+          find.text('Nghiệm thu & Đánh giá chất lượng xử lý'), findsOneWidget);
     });
   });
 }
