@@ -1453,7 +1453,9 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                   'Các bản tin nháp, hẹn giờ hoặc đã phát hành cùng lịch sử sao chép Zalo sẽ hiển thị tại đây.',
             )
           else
-            _AdaptiveSeparatedList(
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
               itemCount: filteredList.length,
               separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
               itemBuilder: (context, idx) {
@@ -1726,7 +1728,9 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                   : null,
             )
           else
-            _AdaptiveSeparatedList(
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
               itemCount: filteredList.length,
               separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
               itemBuilder: (context, idx) {
@@ -1885,7 +1889,9 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
               description: 'Bạn đã đọc hết các thông báo hoặc chưa có thông báo hệ thống mới.',
             )
           else
-            _AdaptiveSeparatedList(
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
               itemCount: filteredList.length,
               separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
               itemBuilder: (context, idx) {
@@ -2400,41 +2406,6 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
       loading: _deletingGroup,
       onConfirm: _handleConfirmDeleteGroup,
       onClose: () => setState(() => _deleteGroupTarget = null),
-    );
-  }
-}
-
-/// Keeps short lists compact (shrink-wrapped, no nested scroll) but gives long
-/// lists a bounded viewport so only visible rows are built on open.
-///
-/// ponytail: nested scroll for long lists only; if a single unified scroll
-/// feel matters, promote the page to CustomScrollView + SliverList.
-class _AdaptiveSeparatedList extends StatelessWidget {
-  static const int _lazyThreshold = 30;
-  static const double _lazyHeight = 560;
-
-  final int itemCount;
-  final IndexedWidgetBuilder itemBuilder;
-  final IndexedWidgetBuilder separatorBuilder;
-
-  const _AdaptiveSeparatedList({
-    required this.itemCount,
-    required this.itemBuilder,
-    required this.separatorBuilder,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isLong = itemCount > _lazyThreshold;
-    return SizedBox(
-      height: isLong ? _lazyHeight : null,
-      child: ListView.separated(
-        shrinkWrap: !isLong,
-        physics: isLong ? null : const NeverScrollableScrollPhysics(),
-        itemCount: itemCount,
-        separatorBuilder: separatorBuilder,
-        itemBuilder: itemBuilder,
-      ),
     );
   }
 }

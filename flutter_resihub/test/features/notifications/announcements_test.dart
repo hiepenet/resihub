@@ -19,7 +19,6 @@ import 'package:flutter_resihub/features/notifications/screens/notifications_pag
 import 'package:flutter_resihub/features/notifications/services/announcements_service.dart';
 import 'package:flutter_resihub/features/notifications/services/notifications_service.dart';
 import 'package:flutter_resihub/shared/providers/notification_provider.dart';
-import 'package:flutter_resihub/shared/widgets/common/status_badge.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions options) _handler;
@@ -691,93 +690,6 @@ void main() {
         matching: find.text('Sao chép & Dán sang nhóm Zalo vận hành'),
       );
       expect(modalInsideScrollColumn, findsNothing);
-    });
-
-    testWidgets('lazy-builds long announcement lists (only visible items in tree)', (tester) async {
-      tester.view.physicalSize = const Size(1280, 900);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.resetPhysicalSize);
-
-      final announcements = List.generate(100, (i) => {
-        'id': 'ann-perf-$i',
-        'building_id': 'b-101',
-        'building_code': 'VOP-A',
-        'building_name': 'Vinhomes Ocean Park A',
-        'target_scope': 'BUILDING',
-        'type': 'ANNOUNCEMENT',
-        'title': 'Thông báo hàng loạt $i',
-        'body': 'Nội dung thông báo $i',
-        'status': 'SENT',
-        'read_count': 0,
-        'recipient_count': 10,
-        'manual_sent_at': null,
-        'zalo_content': 'Nội dung zalo $i',
-        'target_zalo_groups': <String>[],
-      });
-
-      final perfDio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
-      perfDio.httpClientAdapter = _MockHttpClientAdapter((options) async {
-        final path = options.path;
-        if (path == '/api/v1/announcements') {
-          return ResponseBody.fromString(
-            jsonEncode({'success': true, 'data': announcements}),
-            200,
-            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
-          );
-        }
-        return ResponseBody.fromString(
-          jsonEncode({'success': true, 'data': []}),
-          200,
-          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
-        );
-      });
-
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final appStorage = AppStorage(prefs: prefs, isWeb: true);
-      await appStorage.init();
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            dioProvider.overrideWithValue(perfDio),
-            appStorageProvider.overrideWithValue(appStorage),
-            notificationsServiceProvider.overrideWithValue(NotificationsService(perfDio)),
-            announcementsServiceProvider.overrideWithValue(AnnouncementsService(perfDio)),
-            buildingsServiceProvider.overrideWithValue(BuildingsService(dio: perfDio)),
-            authProvider.overrideWith(() {
-              return _FakeAuthNotifier(
-                AuthState(
-                  user: UserModel(
-                    id: 'u-mgr-1',
-                    email: 'mgr@resihub.vn',
-                    fullName: 'Quản Lý Vận Hành',
-                    roles: [UserRoleModel(code: 'MANAGER', name: 'Manager')],
-                  ),
-                  isAuthenticated: true,
-                  selectedBuildingId: 'b-101',
-                ),
-              );
-            }),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: NotificationsPage(),
-            ),
-          ),
-        ),
-      );
-
-      await tester.pumpAndSettle();
-
-      // Each announcement item renders exactly one StatusBadge. An eager
-      // (shrinkWrap) list mounts all 100; a lazy list mounts only the visible
-      // subset.
-      final mountedItemBadges = find.byType(StatusBadge).evaluate().length;
-      expect(find.text('Đang tải danh sách thông báo...'), findsNothing);
-      expect(find.text('Thông báo hàng loạt 0'), findsOneWidget);
-      expect(mountedItemBadges, lessThan(60),
-          reason: 'only visible announcement items should be built, found $mountedItemBadges');
     });
   });
 }
