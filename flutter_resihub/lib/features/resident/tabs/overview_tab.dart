@@ -519,59 +519,195 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const SizedBox(height: 16),
             ],
 
-            // 4 KPIs Grid
+            // 4 KPI Cards Row (parity: OverviewTab.jsx:1260-1412)
             LayoutBuilder(
               builder: (context, constraints) {
-                final crossAxisCount = constraints.maxWidth >= 768 ? 4 : 2;
-                return GridView.count(
-                  crossAxisCount: crossAxisCount,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
-                  childAspectRatio: constraints.maxWidth >= 768 ? 1.4 : 1.3,
+                final columns = constraints.maxWidth >= 1200
+                    ? 4
+                    : (constraints.maxWidth >= 640 ? 2 : 1);
+                final cardWidth = columns == 4
+                    ? (constraints.maxWidth - 36) / 4
+                    : (columns == 2
+                        ? (constraints.maxWidth - 12) / 2
+                        : constraints.maxWidth);
+
+                final kpiContract = contract ?? const <String, dynamic>{};
+                final dueNow = currentAmountDue > 0;
+                final dueColor =
+                    dueNow ? AppColors.rose600 : AppColors.emerald600;
+                final dueBg = dueNow ? AppColors.rose50 : AppColors.emerald50;
+
+                final rawActiveContracts = ov['active_contracts'];
+                final hasMultiContracts =
+                    rawActiveContracts is List && rawActiveContracts.length > 1;
+                final totalAmountDueAll = _kpiNumber(
+                    ov['total_amount_due_all'] ?? currentAmountDue,
+                    currentAmountDue);
+                final openTotal = unreadCount + widget.openRequestsCount;
+
+                final captionStyle = TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  color: AppColors.slate500,
+                );
+                final linkStyle = TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.primary600,
+                );
+                Widget kpiFooter(List<Widget> children) => Container(
+                      key: const Key('resident-kpi-footer'),
+                      child: Wrap(
+                        alignment: WrapAlignment.spaceBetween,
+                        spacing: 8,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: children,
+                      ),
+                    );
+
+                final cards = <Widget>[
+                  _buildKpiCard(
+                    cardIndex: 1,
+                    title: 'CẦN THANH TOÁN HIỆN TẠI',
+                    value: formatMoney(currentAmountDue),
+                    valueColor: dueColor,
+                    icon: LucideIcons.receipt,
+                    color: dueColor,
+                    bgColor: dueBg,
+                    subline: hasMultiContracts &&
+                            totalAmountDueAll != currentAmountDue
+                        ? RichText(
+                            text: TextSpan(
+                              style: const TextStyle(
+                                fontFamily: 'Inter',
+                                fontSize: 11,
+                                color: AppColors.slate600,
+                              ),
+                              children: [
+                                const TextSpan(text: 'Tổng tất cả căn hộ: '),
+                                TextSpan(
+                                  text: formatMoney(totalAmountDueAll),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.rose600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : null,
+                    footer: kpiFooter([
+                      Text(
+                        dueNow &&
+                                latestInvoice != null &&
+                                ![
+                                  'DRAFT',
+                                  'VOID'
+                                ].contains(latestInvoice['status']?.toString())
+                            ? ((latestInvoice['period']
+                                        ?.toString()
+                                        .isNotEmpty ??
+                                    false)
+                                ? 'Kỳ ${latestInvoice['period']} • Hạn ${formatDate(latestInvoice['due_date'])}'
+                                : 'Phí phạt tất toán')
+                            : 'Không có dư nợ quá hạn',
+                        style: captionStyle,
+                      ),
+                      GestureDetector(
+                        onTap: () => widget.onNavigateTab('invoices'),
+                        child: Text('Hóa đơn', style: linkStyle),
+                      ),
+                    ]),
+                    onTap: () => widget.onNavigateTab('invoices'),
+                  ),
+                  _buildKpiCard(
+                    cardIndex: 2,
+                    title: 'TIỀN THUÊ HÀNG THÁNG',
+                    value: formatMoney(kpiContract['rent_amount'] ??
+                        kpiContract['monthly_rent'] ??
+                        0),
+                    icon: LucideIcons.wallet,
+                    color: AppColors.primary600,
+                    bgColor: AppColors.sky50,
+                    footer: kpiFooter([
+                      Text(
+                        'Chốt kỳ ngày ${_kpiNumber(kpiContract['billing_day'], 1)} hàng tháng',
+                        style: captionStyle,
+                      ),
+                      Text(
+                        'Hạn +${_kpiNumber(kpiContract['payment_due_days'], 5)} ngày',
+                        style: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: AppColors.slate700,
+                        ),
+                      ),
+                    ]),
+                    onTap: () => widget.onNavigateTab('contract'),
+                  ),
+                  _buildKpiCard(
+                    cardIndex: 3,
+                    title: 'TIỀN CỌC ĐANG GIỮ',
+                    value: formatMoney(kpiContract['deposit_held_amount'] ??
+                        kpiContract['deposit_amount'] ??
+                        0),
+                    icon: LucideIcons.shieldCheck,
+                    color: AppColors.secondary600,
+                    bgColor: AppColors.secondary50,
+                    footer: kpiFooter([
+                      Text(
+                        kpiContract['deposit_status']?.toString() == 'HELD'
+                            ? 'Đang bảo lưu theo HĐ'
+                            : 'Sổ cọc hợp đồng',
+                        style: captionStyle,
+                      ),
+                      GestureDetector(
+                        onTap: () => widget.onNavigateTab('contract'),
+                        child: Text(
+                          'Sổ cọc',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.secondary600,
+                          ),
+                        ),
+                      ),
+                    ]),
+                    onTap: () => widget.onNavigateTab('contract'),
+                  ),
+                  _buildKpiCard(
+                    cardIndex: 4,
+                    title: 'THÔNG BÁO & YÊU CẦU MỞ',
+                    value: '$openTotal',
+                    icon: LucideIcons.bellRing,
+                    color: AppColors.purple500,
+                    bgColor: AppColors.purple50,
+                    footer: kpiFooter([
+                      GestureDetector(
+                        onTap: () => widget.onNavigateTab('notifications'),
+                        child:
+                            Text('$unreadCount chưa đọc', style: captionStyle),
+                      ),
+                      GestureDetector(
+                        onTap: () => widget.onNavigateTab('maintenance'),
+                        child: Text('${widget.openRequestsCount} báo hỏng mở',
+                            style: captionStyle),
+                      ),
+                    ]),
+                    onTap: () => widget.onNavigateTab('notifications'),
+                  ),
+                ];
+
+                return Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
                   children: [
-                    // KPI 1: Tiền cần thanh toán
-                    _buildKpiCard(
-                      title: 'Cần thanh toán',
-                      value: formatMoney(currentAmountDue),
-                      icon: LucideIcons.receipt,
-                      color: currentAmountDue > 0 ? AppColors.rose600 : AppColors.primary600,
-                      bgColor: currentAmountDue > 0 ? AppColors.rose50 : AppColors.primary50,
-                      onTap: () => widget.onNavigateTab('invoices'),
-                    ),
-
-                    // KPI 2: Hóa đơn gần nhất
-                    _buildKpiCard(
-                      title: 'Hóa đơn gần nhất',
-                      value: latestInvoice != null
-                          ? (latestInvoice['invoice_code']?.toString() ?? 'Chi tiết')
-                          : 'Không có',
-                      icon: LucideIcons.fileText,
-                      color: AppColors.secondary600,
-                      bgColor: AppColors.secondary50,
-                      onTap: () => widget.onNavigateTab('invoices'),
-                    ),
-
-                    // KPI 3: Yêu cầu cần xử lý
-                    _buildKpiCard(
-                      title: 'Yêu cầu sự cố',
-                      value: '${widget.openRequestsCount} đang mở',
-                      icon: LucideIcons.wrench,
-                      color: widget.openRequestsCount > 0 ? Colors.amber.shade700 : AppColors.slate600,
-                      bgColor: widget.openRequestsCount > 0 ? Colors.amber.shade50 : AppColors.slate100,
-                      onTap: () => widget.onNavigateTab('maintenance'),
-                    ),
-
-                    // KPI 4: Thông báo
-                    _buildKpiCard(
-                      title: 'Thông báo',
-                      value: '$unreadCount chưa đọc',
-                      icon: LucideIcons.bellRing,
-                      color: unreadCount > 0 ? AppColors.primary600 : AppColors.slate600,
-                      bgColor: unreadCount > 0 ? AppColors.primary50 : AppColors.slate100,
-                      onTap: () => widget.onNavigateTab('notifications'),
-                    ),
+                    for (final card in cards)
+                      SizedBox(width: cardWidth, child: card)
                   ],
                 );
               },
@@ -619,19 +755,31 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
+  /// JS `x || fallback` cho số: null / 0 / '' → fallback.
+  num _kpiNumber(dynamic value, num fallback) {
+    if (value is num) return value == 0 ? fallback : value;
+    final parsed = num.tryParse(value?.toString() ?? '');
+    return (parsed == null || parsed == 0) ? fallback : parsed;
+  }
+
   Widget _buildKpiCard({
     required String title,
     required String value,
     required IconData icon,
     required Color color,
     required Color bgColor,
+    required Widget footer,
     required VoidCallback onTap,
+    required int cardIndex,
+    Color? valueColor,
+    Widget? subline,
   }) {
     return InkWell(
+      key: Key('resident-kpi-card-$cardIndex'),
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
       child: Container(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
@@ -639,16 +787,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Expanded(
                   child: Text(
                     title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontFamily: 'Inter',
                       fontSize: 12,
@@ -657,28 +804,36 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     ),
                   ),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 10),
                 Container(
-                  padding: const EdgeInsets.all(6),
+                  width: 36,
+                  height: 36,
                   decoration: BoxDecoration(
                     color: bgColor,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(icon, size: 14, color: color),
+                  child: Icon(icon, size: 18, color: color),
                 ),
               ],
             ),
+            const SizedBox(height: 8),
             Text(
               value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontFamily: 'Inter',
-                fontSize: 16,
+                fontSize: 20,
                 fontWeight: FontWeight.w700,
-                color: color,
+                color: valueColor ?? AppColors.slate900,
               ),
             ),
+            if (subline != null) ...[
+              const SizedBox(height: 4),
+              subline,
+            ],
+            const SizedBox(height: 12),
+            const Divider(color: AppColors.slate100, height: 1),
+            const SizedBox(height: 12),
+            footer,
           ],
         ),
       ),
