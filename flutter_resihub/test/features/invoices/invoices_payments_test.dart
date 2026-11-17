@@ -44,12 +44,13 @@ Widget _buildTestApp({
   required String roleCode,
   required AppStorage storage,
   List<Override> overrides = const [],
+  String? buildingId,
 }) {
   final user = UserModel(
     id: 'user-$roleCode',
     fullName: 'User $roleCode',
     email: '$roleCode@resihub.test',
-    roles: [UserRoleModel(code: roleCode)],
+    roles: [UserRoleModel(code: roleCode, buildingId: buildingId)],
   );
 
   final container = ProviderContainer(
@@ -590,6 +591,108 @@ void main() {
       // OWNER should NOT see "Sinh hóa đơn hàng loạt kỳ này" or "Phát hành"
       expect(find.text('Sinh hóa đơn hàng loạt kỳ này'), findsNothing);
       expect(find.text('Phát hành'), findsNothing);
+    });
+  });
+
+  group('InvoicesPage parity B22-B24', () {
+    ResponseBody jsonRes(Map<String, dynamic> body) => ResponseBody.fromString(
+          jsonEncode(body),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+
+    Future<void> pumpPage(
+      WidgetTester tester, {
+      String roleCode = 'MANAGER',
+      String? buildingId,
+      List<Map<String, dynamic>> buildings = const [
+        {'id': 'b-1', 'code': 'SUN', 'name': 'Sun Tower'},
+      ],
+    }) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path.contains('/adjustments')) {
+          return jsonRes({'success': true, 'data': []});
+        }
+        if (options.path == '/api/v1/buildings') {
+          return jsonRes({'success': true, 'data': buildings});
+        }
+        return jsonRes({
+          'success': true,
+          'data': [
+            {
+              'id': 'inv-201',
+              'invoice_code': 'INV-202611-201',
+              'status': 'DRAFT',
+              'period': '2026-11',
+              'total_amount': 1000000,
+              'paid_amount': 0,
+              'remaining_amount': 1000000,
+              'apartment_code': 'A101',
+              'building_code': 'SUN',
+            }
+          ],
+          'summary': {
+            'total_billed': 1000000,
+            'total_paid': 0,
+            'total_unpaid': 1000000,
+          },
+        });
+      });
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          child: const InvoicesPage(),
+          roleCode: roleCode,
+          storage: storage,
+          buildingId: buildingId,
+          overrides: [
+            invoicesServiceProvider.overrideWithValue(InvoicesService(dio: dio)),
+            buildingsServiceProvider.overrideWithValue(BuildingsService(dio: dio)),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('B22: status filter includes CANCELLED (Đã hủy)', (tester) async {
+      await pumpPage(tester);
+
+      await tester.tap(find.text('Tất cả trạng thái'));
+      await tester.pumpAndSettle();
+
+      final searchField = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == 'Tìm kiếm...',
+      );
+      expect(searchField, findsOneWidget);
+      await tester.enterText(searchField, 'Đã hủy');
+      await tester.pumpAndSettle();
+
+      // VOID + CANCELLED đều có nhãn "Đã hủy" (khớp React INVOICE_STATUS).
+      expect(find.widgetWithText(ListTile, 'Đã hủy'), findsNWidgets(2));
+    });
+
+    testWidgets('B23: period field rejects invalid YYYY-MM month', (tester) async {
+      await pumpPage(tester);
+
+      await tester.enterText(find.byType(TextFormField).first, '2026-13');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Kỳ không hợp lệ (định dạng YYYY-MM)'), findsOneWidget);
+    });
+
+    testWidgets('B24: building scope hidden when a building is selected', (tester) async {
+      await pumpPage(tester, buildingId: 'b-selected');
+
+      await tester.tap(find.text('Sinh hóa đơn hàng loạt kỳ này'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Sinh hóa đơn hàng loạt theo kỳ'), findsOneWidget);
+      expect(find.text('Phạm vi tòa nhà'), findsNothing);
     });
   });
 

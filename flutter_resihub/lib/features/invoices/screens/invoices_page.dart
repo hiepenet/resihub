@@ -28,15 +28,28 @@ import '../../auth/providers/permission_provider.dart';
 import '../../buildings/services/buildings_service.dart';
 import '../services/invoices_service.dart';
 
-const Map<String, String> kInvoiceStatusOptions = {
-  'DRAFT': 'Bản nháp',
-  'ISSUED': 'Đã phát hành',
-  'PARTIALLY_PAID': 'Thanh toán một phần',
-  'PAID': 'Đã thanh toán',
-  'OVERDUE': 'Quá hạn',
-  'ADJUSTED': 'Đã điều chỉnh',
-  'VOID': 'Đã hủy',
-};
+/// 8 mã trạng thái hóa đơn, khớp React `INVOICE_STATUS` (statuses.js).
+/// Nhãn được lấy từ nguồn sự thật `statuses.dart` qua [invoiceStatusLabel].
+const List<String> kInvoiceStatusCodes = [
+  'DRAFT',
+  'ISSUED',
+  'PARTIALLY_PAID',
+  'PAID',
+  'OVERDUE',
+  'ADJUSTED',
+  'VOID',
+  'CANCELLED',
+];
+
+/// Nhãn trạng thái từ `statuses.dart` thay vì map cứng trùng lặp.
+String invoiceStatusLabel(String? code) {
+  if (code == null || code.isEmpty) return '';
+  return resolveStatusMeta(StatusDomain.invoice, code).label;
+}
+
+/// Kỳ hóa đơn đúng `YYYY-MM` với tháng 01–12 (khớp `<input type="month">`).
+bool isValidInvoicePeriod(String value) =>
+    RegExp(r'^\d{4}-(0[1-9]|1[0-2])$').hasMatch(value);
 
 /// Quản lý Hóa đơn Kỳ (M09).
 /// Port of `frontend/src/pages/admin/invoices/InvoicesPage.jsx`.
@@ -58,6 +71,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
 
   // Filters
   String _period = getCurrentPeriod();
+  String? _periodError;
   String _statusFilter = '';
   String _search = '';
   Timer? _debounceTimer;
@@ -71,6 +85,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
   bool _batchOpen = false;
   List<Map<String, dynamic>> _buildings = [];
   String _batchPeriod = getCurrentPeriod();
+  String? _batchPeriodError;
   String _batchBuildingId = '';
   bool _autoIssue = false;
   bool _generating = false;
@@ -249,6 +264,10 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
       ref.read(toastProvider.notifier).warning('Vui lòng chọn kỳ thanh toán cần sinh hóa đơn.');
       return;
     }
+    if (!isValidInvoicePeriod(_batchPeriod)) {
+      ref.read(toastProvider.notifier).warning('Kỳ hóa đơn không hợp lệ (YYYY-MM).');
+      return;
+    }
 
     setState(() => _generating = true);
     final buildingId = ref.read(authProvider).selectedBuildingId;
@@ -337,7 +356,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
       const CsvHeader(label: 'Tổng cộng (VNĐ)', key: 'total_amount'),
       const CsvHeader(label: 'Đã thu (VNĐ)', key: 'paid_amount'),
       const CsvHeader(label: 'Còn lại (VNĐ)', key: 'remaining_amount'),
-      CsvHeader(label: 'Trạng thái', key: 'status', accessor: (r) => kInvoiceStatusOptions[r['status']] ?? r['status'] ?? ''),
+      CsvHeader(label: 'Trạng thái', key: 'status', accessor: (r) => invoiceStatusLabel(r['status']?.toString())),
     ];
 
     try {
@@ -377,6 +396,7 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
   Widget build(BuildContext context) {
     final permissions = ref.watch(permissionProvider);
     final canManageInvoices = permissions.canManageInvoices;
+    final selectedBuildingId = ref.watch(authProvider).selectedBuildingId;
     final totalBilled = num.tryParse(_summary['total_billed']?.toString() ?? '0') ?? 0;
     final totalPaid = num.tryParse(_summary['total_paid']?.toString() ?? '0') ?? 0;
     final totalUnpaid = num.tryParse(_summary['total_unpaid']?.toString() ?? '0') ?? 0;
@@ -514,9 +534,14 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                     label: 'Kỳ hóa đơn (YYYY-MM)',
                     placeholder: 'YYYY-MM',
                     initialValue: _period,
+                    error: _periodError,
                     onChanged: (val) {
-                      setState(() => _period = val);
-                      _fetchInvoices();
+                      final valid = val.isEmpty || isValidInvoicePeriod(val);
+                      setState(() {
+                        _periodError = valid ? null : 'Kỳ không hợp lệ (định dạng YYYY-MM)';
+                        if (valid) _period = val;
+                      });
+                      if (valid) _fetchInvoices();
                     },
                   ),
                 ),
@@ -542,7 +567,9 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                     value: _statusFilter.isEmpty ? null : _statusFilter,
                     options: [
                       const AppSelectOption(value: '', label: 'Tất cả trạng thái'),
-                      ...kInvoiceStatusOptions.entries.map((e) => AppSelectOption(value: e.key, label: e.value)),
+                      ...kInvoiceStatusCodes.map(
+                        (code) => AppSelectOption(value: code, label: invoiceStatusLabel(code)),
+                      ),
                     ],
                     onChanged: (val) {
                       setState(() => _statusFilter = val ?? '');
@@ -813,21 +840,27 @@ class _InvoicesPageState extends ConsumerState<InvoicesPage> {
                     label: 'Kỳ hóa đơn (YYYY-MM) *',
                     placeholder: 'YYYY-MM',
                     initialValue: _batchPeriod,
-                    onChanged: (val) => setState(() => _batchPeriod = val),
+                    error: _batchPeriodError,
+                    onChanged: (val) => setState(() {
+                      _batchPeriod = val;
+                      _batchPeriodError = val.isEmpty || isValidInvoicePeriod(val)
+                          ? null
+                          : 'Kỳ không hợp lệ (định dạng YYYY-MM)';
+                    }),
                   ),
                   const SizedBox(height: 12),
-                  if (_buildings.isNotEmpty)
+                  // Khớp React: chỉ hiện khi chưa có tòa được chọn (không cần option '' riêng).
+                  if (selectedBuildingId.isEmpty)
                     AppSelect<String>(
                       label: 'Phạm vi tòa nhà',
                       placeholder: 'Tất cả tòa nhà trong phạm vi quản lý',
                       value: _batchBuildingId.isEmpty ? null : _batchBuildingId,
-                      options: [
-                        const AppSelectOption(value: '', label: 'Tất cả tòa nhà trong phạm vi quản lý'),
-                        ..._buildings.map((b) => AppSelectOption(
-                              value: b['id']?.toString() ?? '',
-                              label: '${b['code'] ?? ''} — ${b['name'] ?? ''}',
-                            )),
-                      ],
+                      options: _buildings
+                          .map((b) => AppSelectOption(
+                                value: b['id']?.toString() ?? '',
+                                label: '${b['code'] ?? ''} — ${b['name'] ?? ''}',
+                              ))
+                          .toList(),
                       onChanged: (val) => setState(() => _batchBuildingId = val ?? ''),
                     ),
                   const SizedBox(height: 12),
