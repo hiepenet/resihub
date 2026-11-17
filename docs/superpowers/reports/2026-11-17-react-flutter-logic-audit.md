@@ -4,6 +4,8 @@
 > Phạm vi: `frontend/src/**` ↔ `flutter_resihub/lib/**`, đọc tĩnh 6 luồng song song. Không chạy app, không sửa code.
 > Đây là nguồn đầu vào của `docs/superpowers/specs/2026-11-17-react-flutter-logic-parity-design.md`.
 > Báo cáo UI vòng 1: `docs/flutter-react-ui-diff-report.md` (93 điểm, 90 sửa / 3 giữ).
+> Tiến triển thực thi (17/11/2026): **Wave 1 + Wave 2 đã xong** (Task 0–18). Flutter `flutter analyze` no issues, `flutter test` **721 passed** (baseline 626); React lint warnings-only + build OK. Wave 3 (đồng hồ, batch ảnh, audit, thông báo, settings, buildings, floor modal) và Wave 4 (utils edge case, resident misc, cleanup) **chưa làm** theo yêu cầu dừng sau Wave 2. Xem ledger `.superpowers/sdd/2026-11-17-react-flutter-logic-parity/progress.md`.
+
 > Baseline thực thi (17/11/2026): Flutter 3.50.0 `flutter analyze` no issues, `flutter test` **626 passed**; React `npm run lint` warnings-only (exit 0), `npm run build` OK. `npm ci` đã chạy để có `node_modules` (không thêm dependency).
 
 ## Kết luận
