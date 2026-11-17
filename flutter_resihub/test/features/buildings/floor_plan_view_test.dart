@@ -12,6 +12,7 @@ import 'package:flutter_resihub/features/buildings/widgets/floor_modal.dart';
 import 'package:flutter_resihub/features/buildings/widgets/floor_plan_view.dart';
 import 'package:flutter_resihub/features/notifications/services/notifications_service.dart';
 import 'package:flutter_resihub/shared/widgets/ui/app_input.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_select.dart';
 
 class FakeNotificationsService extends Fake implements NotificationsService {
   @override
@@ -194,6 +195,7 @@ class MockFloorPlanBuildingsService extends Fake implements BuildingsService {
   };
 
   Map<String, dynamic>? lastCreatedReservation;
+  Map<String, dynamic>? lastCreatedApartment;
   Map<String, dynamic>? lastCreatedFloor;
   Map<String, dynamic>? lastCreatedFloorsBulk;
   Map<String, dynamic>? lastPreviewedApartmentsBulk;
@@ -293,6 +295,12 @@ class MockFloorPlanBuildingsService extends Fake implements BuildingsService {
   Future<dynamic> createReservation(Map<String, dynamic> payload, {dynamic options}) async {
     lastCreatedReservation = payload;
     return {'id': 'rsv-new', ...payload};
+  }
+
+  @override
+  Future<dynamic> createApartment(Map<String, dynamic> payload) async {
+    lastCreatedApartment = payload;
+    return {'id': 'apt-new', ...payload};
   }
 
   @override
@@ -627,6 +635,128 @@ void main() {
       expect(find.text('Diện tích'), findsOneWidget);
       expect(find.text('Phòng ngủ'), findsOneWidget);
       expect(find.text('Mở trang chi tiết căn hộ'), findsOneWidget);
+    });
+
+    testWidgets('Drawer pending list filters PENDING_CONFIRM, not PENDING_PAYMENT', (tester) async {
+      tester.view.physicalSize = const Size(1400, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      mockService.apartmentDetails = {
+        ...mockService.apartmentDetails,
+        'reservations': [
+          ...(mockService.apartmentDetails['reservations'] as List),
+          {
+            'id': 'rsv-drawer-confirm',
+            'status': 'PENDING_CONFIRM',
+            'prospect_name': 'Confirm Owner',
+            'phone': '0900000002',
+            'hold_amount': 3000000,
+            'hold_from': '2026-11-20',
+            'hold_until': '2026-11-22',
+          },
+          {
+            'id': 'rsv-drawer-pay',
+            'status': 'PENDING_PAYMENT',
+            'prospect_name': 'Payment Owner',
+            'phone': '0900000003',
+            'hold_amount': 1000000,
+            'hold_from': '2026-11-23',
+            'hold_until': '2026-11-24',
+          },
+        ],
+      };
+
+      await tester.pumpWidget(_buildWrapper(
+        child: const FloorPlanView(buildingId: 'b-1'),
+        service: mockService,
+        roleCode: 'MANAGER',
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('A101'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Confirm Owner'), findsOneWidget);
+      expect(find.textContaining('Payment Owner'), findsNothing);
+    });
+
+    testWidgets('Reservation modal offers 6 payment method options', (tester) async {
+      tester.view.physicalSize = const Size(1400, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(_buildWrapper(
+        child: const FloorPlanView(buildingId: 'b-1'),
+        service: mockService,
+        roleCode: 'MANAGER',
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('A101'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Đặt cọc giữ chỗ'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is AppSelect && w.label == 'Phương thức thu tiền',
+          ),
+          matching: find.byType(InkWell),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Chuyển khoản'), findsWidgets);
+      expect(find.text('QR Code'), findsOneWidget);
+      expect(find.text('Ví điện tử'), findsOneWidget);
+      expect(find.text('Tiền mặt'), findsOneWidget);
+      expect(find.text('Thẻ'), findsOneWidget);
+      expect(find.text('Khác'), findsOneWidget);
+    });
+
+    testWidgets('Add apartment modal has zone select and sends zone_id', (tester) async {
+      tester.view.physicalSize = const Size(1400, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(_buildWrapper(
+        child: const FloorPlanView(buildingId: 'b-1'),
+        service: mockService,
+        roleCode: 'MANAGER',
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Thêm căn hộ'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Khu / Phân khu'), findsOneWidget);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byWidgetPredicate(
+            (w) => w is AppSelect && w.label == 'Khu / Phân khu',
+          ),
+          matching: find.byType(InkWell),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cánh Tây'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.descendant(
+          of: find.widgetWithText(AppInput, 'Mã căn hộ'),
+          matching: find.byType(TextField),
+        ),
+        'A1101',
+      );
+      await tester.tap(find.text('Tạo căn hộ'));
+      await tester.pumpAndSettle();
+
+      expect(mockService.lastCreatedApartment, isNotNull);
+      expect(mockService.lastCreatedApartment!['zone_id'], 'z-2');
     });
   });
 

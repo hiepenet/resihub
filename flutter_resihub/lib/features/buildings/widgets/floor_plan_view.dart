@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,6 +10,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/date_range.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/idempotency.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
@@ -21,6 +23,7 @@ import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
 import '../../../shared/widgets/ui/app_select.dart';
 import '../../../shared/widgets/ui/app_skeleton.dart';
+import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../../auth/providers/permission_provider.dart';
 import '../services/buildings_service.dart';
 import 'bulk_apartment_modal.dart';
@@ -189,7 +192,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
   bool _aptModalOpen = false;
   final _aptCodeController = TextEditingController();
   String _aptFloorId = '';
-  final String _aptZoneId = '';
+  String _aptZoneId = '';
   String _aptType = '1PN';
   int _aptBedrooms = 1;
   double _aptAreaM2 = 45;
@@ -206,10 +209,13 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
   final _resHoldFromController = TextEditingController();
   final _resHoldUntilController = TextEditingController();
   final _resNoteController = TextEditingController();
+  List<String> _resEvidence = [];
+  String _resIdemKey = '';
 
   // Reject Modal
   Map<String, dynamic>? _rejectReservation;
   final _rejectReasonController = TextEditingController();
+  String _rejectIdemKey = '';
   bool _rejectModalOpen = false;
 
   bool _submitting = false;
@@ -369,18 +375,47 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     }
   }
 
+  void _openRejectModal(Map<String, dynamic> rsv) {
+    setState(() {
+      _rejectIdemKey = createIdempotencyKey();
+      _rejectReservation = rsv;
+      _rejectReasonController.clear();
+      _rejectModalOpen = true;
+    });
+  }
+
+  Future<void> _refreshSelectedApartmentDetail() async {
+    final aptId = _selectedApt?['id']?.toString();
+    if (aptId == null || aptId.isEmpty) return;
+    try {
+      final res = await ref.read(buildingsServiceProvider).getApartment(aptId);
+      if (mounted && res is Map && res['data'] is Map) {
+        setState(() {
+          _aptDetail = Map<String, dynamic>.from(res['data'] as Map);
+        });
+      }
+    } catch (_) {
+      // Giữ nguyên chi tiết cũ nếu làm mới thất bại.
+    }
+  }
+
   Future<void> _handleConfirmPayment(Map<String, dynamic> rsv) async {
     final id = rsv['id']?.toString();
     if (id == null) return;
     setState(() => _submitting = true);
     try {
       final service = ref.read(buildingsServiceProvider);
-      final res = await service.confirmReservationPayment(id, {});
+      final res = await service.confirmReservationPayment(
+        id,
+        {},
+        Options(headers: {'Idempotency-Key': createIdempotencyKey()}),
+      );
       ref.read(toastProvider.notifier).success(
             (res is Map && res['message'] != null)
                 ? res['message'].toString()
                 : 'Đã xác nhận tiền về và khóa giữ chỗ căn hộ.',
           );
+      await _refreshSelectedApartmentDetail();
       _fetchFloorPlan(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(extractErrorMessage(err));
@@ -401,7 +436,15 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     setState(() => _submitting = true);
     try {
       final service = ref.read(buildingsServiceProvider);
-      final res = await service.rejectReservationPayment(id, {'reason': reason});
+      final res = await service.rejectReservationPayment(
+        id,
+        {'reason': reason},
+        options: Options(
+          headers: {
+            'Idempotency-Key': _rejectIdemKey.isEmpty ? createIdempotencyKey() : _rejectIdemKey,
+          },
+        ),
+      );
       ref.read(toastProvider.notifier).success(
             (res is Map && res['message'] != null)
                 ? res['message'].toString()
@@ -410,7 +453,9 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       setState(() {
         _rejectModalOpen = false;
         _rejectReservation = null;
+        _rejectIdemKey = '';
       });
+      await _refreshSelectedApartmentDetail();
       _fetchFloorPlan(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(extractErrorMessage(err));
@@ -485,6 +530,128 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       reservations: reservationsList,
       todayStr: todayStr,
     );
+  }
+
+  /// Port của useEffect trong FloorPlanPage.jsx:355-376 — tự gợi ý ngày trống
+  /// khi mở modal hoặc khi khoảng đã chọn bị xung đột lịch thuê/giữ chỗ.
+  // ponytail: chỉ chạy lúc mở modal; conflict lúc đang gõ do validation xử lý,
+  // không tự ghi đè input người dùng. Nâng cấp nếu cần mirror useEffect sát hơn.
+  void _syncReservationDates() {
+    final apt = _selectedApt;
+    if (apt == null) return;
+    final todayStr = toDateOnlyStr(DateTime.now());
+    final maxHoldDays = int.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '30') ?? 30;
+    final intervals = _computeBusyIntervals();
+    final base = apt['status'] == 'MAINTENANCE' ? addDaysStr(todayStr, 1) : todayStr;
+    final earliest = findFirstAvailableStartDate(base, intervals, minSpanDays: 2);
+    final from = _resHoldFromController.text.trim();
+    final until = _resHoldUntilController.text.trim();
+    final conflicts = findOverlappingBusyIntervals(from, until, intervals);
+    final stillValid = from.isNotEmpty &&
+        earliest.isNotEmpty &&
+        from.compareTo(earliest) >= 0 &&
+        conflicts.isEmpty;
+    if (stillValid) return;
+    final startStr = earliest.isNotEmpty ? earliest : todayStr;
+    _resHoldFromController.text = startStr;
+    _resHoldUntilController.text =
+        computeSuggestedHoldUntil(startStr, intervals, maxHoldDays: maxHoldDays);
+  }
+
+  DateTime _parseDate(String value, DateTime fallback) => DateTime.tryParse(value) ?? fallback;
+
+  String _resHoldFromError() {
+    final from = _resHoldFromController.text.trim();
+    if (from.isEmpty) return '';
+    final todayStr = toDateOnlyStr(DateTime.now());
+    if (from.compareTo(todayStr) < 0) {
+      return 'Ngày bắt đầu giữ chỗ không được nằm trong quá khứ.';
+    }
+    if (_selectedApt?['status'] == 'MAINTENANCE' && from.compareTo(todayStr) <= 0) {
+      return 'Căn hộ đang bảo trì, vui lòng chọn ngày giữ chỗ sau hôm nay.';
+    }
+    final hits = findOverlappingBusyIntervals(from, from, _computeBusyIntervals());
+    if (hits.isNotEmpty) {
+      return formatBusyOverlapError(hits, actionLabel: 'Ngày bắt đầu giữ chỗ');
+    }
+    return '';
+  }
+
+  String _resHoldUntilError() {
+    final from = _resHoldFromController.text.trim();
+    final until = _resHoldUntilController.text.trim();
+    final orderErr = getDateOrderError(
+      from,
+      until,
+      strictAfter: true,
+      startLabel: 'Ngày bắt đầu giữ chỗ',
+      endLabel: 'Ngày kết thúc giữ chỗ',
+    );
+    if (orderErr.isNotEmpty) return orderErr;
+    final maxHoldDays = int.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '30') ?? 30;
+    final span = diffDaysStr(from, until);
+    if (span != null && span > maxHoldDays) {
+      return 'Thời hạn giữ chỗ tối đa không quá $maxHoldDays ngày theo quy định (FR-067).';
+    }
+    if (_resHoldFromError().isEmpty && from.isNotEmpty && until.isNotEmpty) {
+      final hits = findOverlappingBusyIntervals(from, until, _computeBusyIntervals());
+      if (hits.isNotEmpty) {
+        return formatBusyOverlapError(hits, actionLabel: 'Khoảng giữ chỗ');
+      }
+    }
+    return '';
+  }
+
+  Future<void> _pickReservationDate({required bool isFrom}) async {
+    final now = DateTime.now();
+    final todayStr = toDateOnlyStr(now);
+    final maxHoldDays = int.tryParse(_cancelPolicy['max_hold_days']?.toString() ?? '30') ?? 30;
+    final intervals = _computeBusyIntervals();
+    final base = _selectedApt?['status'] == 'MAINTENANCE' ? addDaysStr(todayStr, 1) : todayStr;
+    final earliest = findFirstAvailableStartDate(base, intervals, minSpanDays: 2);
+
+    late DateTime firstDate;
+    late DateTime lastDate;
+    late DateTime initialDate;
+    if (isFrom) {
+      firstDate = _parseDate(earliest.isNotEmpty ? earliest : todayStr, now);
+      lastDate = _parseDate(addDaysStr(todayStr, maxHoldDays), now.add(Duration(days: maxHoldDays)));
+      if (lastDate.isBefore(firstDate)) {
+        lastDate = firstDate.add(Duration(days: maxHoldDays));
+      }
+      initialDate = _parseDate(_resHoldFromController.text.trim(), firstDate);
+    } else {
+      final fromStr = _resHoldFromController.text.trim();
+      final minStr = addDaysStr(fromStr.isNotEmpty ? fromStr : todayStr, 1);
+      final maxStr = addDaysStr(fromStr.isNotEmpty ? fromStr : todayStr, maxHoldDays);
+      firstDate = _parseDate(minStr, now.add(const Duration(days: 1)));
+      lastDate = _parseDate(maxStr, now.add(Duration(days: maxHoldDays)));
+      if (lastDate.isBefore(firstDate)) lastDate = firstDate;
+      initialDate = _parseDate(_resHoldUntilController.text.trim(), firstDate);
+    }
+    if (initialDate.isBefore(firstDate)) initialDate = firstDate;
+    if (initialDate.isAfter(lastDate)) initialDate = lastDate;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+    if (picked == null || !mounted) return;
+    final pickedStr = toDateOnlyStr(picked);
+    setState(() {
+      if (isFrom) {
+        _resHoldFromController.text = pickedStr;
+        final until = _resHoldUntilController.text.trim();
+        if (until.isEmpty || getDateOrderError(pickedStr, until, strictAfter: true).isNotEmpty) {
+          _resHoldUntilController.text =
+              computeSuggestedHoldUntil(pickedStr, intervals, maxHoldDays: maxHoldDays);
+        }
+      } else {
+        _resHoldUntilController.text = pickedStr;
+      }
+    });
   }
 
   Future<void> _handleCreateReservation() async {
@@ -571,16 +738,24 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     setState(() => _submitting = true);
     try {
       final service = ref.read(buildingsServiceProvider);
-      await service.createReservation({
-        'apartment_id': apt['id'],
-        'prospect_name': name,
-        'phone': phone,
-        'hold_amount': holdAmt,
-        'method': _resMethod,
-        'hold_from': holdFrom,
-        'hold_until': holdUntil,
-        'note': _resNoteController.text.trim(),
-      });
+      await service.createReservation(
+        {
+          'apartment_id': apt['id'],
+          'prospect_name': name,
+          'phone': phone,
+          'hold_amount': holdAmt,
+          'method': _resMethod,
+          'hold_from': holdFrom,
+          'hold_until': holdUntil,
+          'evidence': _resEvidence,
+          'note': _resNoteController.text.trim(),
+        },
+        options: Options(
+          headers: {
+            'Idempotency-Key': _resIdemKey.isEmpty ? createIdempotencyKey() : _resIdemKey,
+          },
+        ),
+      );
       ref.read(toastProvider.notifier).success('Đã ghi nhận đặt cọc giữ chỗ thành công.');
       setState(() {
         _resModalOpen = false;
@@ -689,6 +864,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                       icon: const Icon(LucideIcons.plus, size: 14),
                       onPressed: () => setState(() {
                         _aptFloorId = _floorMap.isNotEmpty ? _floorMap[0]['id'].toString() : '';
+                        _aptZoneId = '';
                         _aptCodeController.clear();
                         _aptModalOpen = true;
                       }),
@@ -777,7 +953,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                                 spacing: 6,
                                 runSpacing: 6,
                                 children: [
-                                  if (isManager) ...[
+                                  if (canManagerConfirmReservationPayment(r, isManager: isManager)) ...[
                                     AppButton(
                                       text: 'Xác nhận tiền về',
                                       variant: AppButtonVariant.success,
@@ -791,13 +967,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                                       variant: AppButtonVariant.danger,
                                       size: AppButtonSize.xs,
                                       icon: const Icon(LucideIcons.xCircle, size: 14),
-                                      onPressed: () {
-                                        setState(() {
-                                          _rejectReservation = r;
-                                          _rejectReasonController.clear();
-                                          _rejectModalOpen = true;
-                                        });
-                                      },
+                                      onPressed: () => _openRejectModal(r),
                                     ),
                                   ],
                                   AppButton(
@@ -905,6 +1075,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                         icon: const Icon(LucideIcons.plus, size: 14),
                         onPressed: () => setState(() {
                           _aptFloorId = _floorMap.isNotEmpty ? _floorMap[0]['id'].toString() : '';
+                          _aptZoneId = '';
                           _aptCodeController.clear();
                           _aptModalOpen = true;
                         }),
@@ -1207,10 +1378,9 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                         child: AppSelect<String>(
                           label: 'Phương thức thu tiền',
                           value: _resMethod,
-                          options: const [
-                            AppSelectOption(value: 'BANK_TRANSFER', label: 'Chuyển khoản'),
-                            AppSelectOption(value: 'CASH', label: 'Tiền mặt'),
-                          ],
+                          options: kPaymentMethodOptions
+                              .map((m) => AppSelectOption(value: m.value, label: m.label))
+                              .toList(),
                           onChanged: (v) => setState(() => _resMethod = v ?? 'BANK_TRANSFER'),
                         ),
                       ),
@@ -1239,6 +1409,12 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                           required: true,
                           controller: _resHoldFromController,
                           placeholder: 'YYYY-MM-DD',
+                          error: _resHoldFromError(),
+                          rightElement: IconButton(
+                            icon: const Icon(Icons.calendar_today, size: 18),
+                            tooltip: 'Chọn ngày',
+                            onPressed: () => _pickReservationDate(isFrom: true),
+                          ),
                           onChanged: (_) => setState(() {}),
                         ),
                       ),
@@ -1249,10 +1425,28 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                           required: true,
                           controller: _resHoldUntilController,
                           placeholder: 'YYYY-MM-DD',
+                          error: _resHoldUntilError(),
+                          rightElement: IconButton(
+                            icon: const Icon(Icons.calendar_today, size: 18),
+                            tooltip: 'Chọn ngày',
+                            onPressed: () => _pickReservationDate(isFrom: false),
+                          ),
                           onChanged: (_) => setState(() {}),
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 12),
+                  FileUploadField(
+                    label: 'Ảnh biên lai / phiếu thu giữ chỗ (tùy chọn, tối đa 5 ảnh)',
+                    multiple: true,
+                    maxFiles: 5,
+                    value: _resEvidence,
+                    onChanged: (v) => setState(() {
+                      _resEvidence = v is List
+                          ? v.map((e) => e.toString()).toList()
+                          : (v == null ? <String>[] : [v.toString()]);
+                    }),
                   ),
                   const SizedBox(height: 12),
                   AppInput(
@@ -1357,6 +1551,25 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                       ),
                     ],
                   ),
+                  if (_zones.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    AppSelect<String>(
+                      label: 'Khu / Phân khu',
+                      value: _aptZoneId.isEmpty ? null : _aptZoneId,
+                      placeholder: '-- Không chọn --',
+                      options: _zones
+                          .map(
+                            (z) => AppSelectOption(
+                              value: z['id'].toString(),
+                              label: (z['name']?.toString().trim().isNotEmpty ?? false)
+                                  ? z['name'].toString()
+                                  : 'Khu ${z['code']}',
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) => setState(() => _aptZoneId = v ?? ''),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -1518,7 +1731,7 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       }
     }
 
-    final aptPendingList = reservationsList.where((r) => r is Map && r['status'] == 'PENDING_PAYMENT').toList();
+    final aptPendingList = reservationsList.where((r) => r is Map && r['status'] == 'PENDING_CONFIRM').toList();
     final aptHeldList = reservationsList.where((r) => r is Map && r['status'] == 'HELD').toList();
 
     final zoneCode = drawerApt['zone_code']?.toString() ?? '—';
@@ -1719,6 +1932,28 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                           '${formatDate(r['hold_from'] ?? r['created_at'])} → ${formatDate(r['hold_until'])}',
                           style: const TextStyle(fontSize: 11, color: AppColors.slate600),
                         ),
+                        if (canManagerConfirmReservationPayment(r, isManager: isManager)) ...[
+                          const SizedBox(height: 6),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              AppButton(
+                                text: 'Xác nhận tiền về (Giữ phòng)',
+                                variant: AppButtonVariant.success,
+                                size: AppButtonSize.xs,
+                                loading: _submitting,
+                                onPressed: () => _handleConfirmPayment(Map<String, dynamic>.from(r as Map)),
+                              ),
+                              AppButton(
+                                text: 'Từ chối',
+                                variant: AppButtonVariant.danger,
+                                size: AppButtonSize.xs,
+                                onPressed: () => _openRejectModal(Map<String, dynamic>.from(r as Map)),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   )),
@@ -1819,19 +2054,14 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
                   size: AppButtonSize.sm,
                   icon: const Icon(LucideIcons.bookmarkPlus, size: 14),
                   onPressed: () {
-                    final startStr = (earliestResStart != null && earliestResStart.isNotEmpty) ? earliestResStart : todayStr;
-                    final untilStr = computeSuggestedHoldUntil(
-                      startStr,
-                      resBusyIntervals,
-                      maxHoldDays: maxInternalHoldDays,
-                    );
                     _resProspectNameController.clear();
                     _resPhoneController.clear();
                     _resHoldAmountController.text =
                         (_cancelPolicy['default_hold_amount'] ?? 2000000).toString();
-                    _resHoldFromController.text = startStr;
-                    _resHoldUntilController.text = untilStr;
                     _resNoteController.clear();
+                    _resEvidence = [];
+                    _resIdemKey = createIdempotencyKey();
+                    _syncReservationDates();
                     setState(() => _resModalOpen = true);
                   },
                 ),
