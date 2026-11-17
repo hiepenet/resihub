@@ -51,6 +51,7 @@ class ServiceSubscriptionMetaFields extends StatelessWidget {
                 required: true,
                 placeholder: 'VD: 59A1-123.45, Xe đạp #1 hoặc Chờ bấm biển',
                 initialValue: slots[i],
+                maxLength: 30,
                 error: i < plateErrors.length ? plateErrors[i] : null,
                 icon: const Icon(LucideIcons.car, size: 16),
                 onChanged: (val) => onPlateChange?.call(i, val),
@@ -64,6 +65,7 @@ class ServiceSubscriptionMetaFields extends StatelessWidget {
               ? 'VD: Loại xe tay ga, ô đỗ hầm B1, mã thẻ từ...'
               : 'VD: Khung giờ phục vụ, gói cước hoặc thỏa thuận riêng...',
           initialValue: note,
+          maxLength: 500,
           multiline: noteMultiline,
           rows: noteRows,
           error: noteError.isNotEmpty ? noteError : null,

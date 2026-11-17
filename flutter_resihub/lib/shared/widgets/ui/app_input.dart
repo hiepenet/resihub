@@ -23,6 +23,7 @@ class AppInput extends StatelessWidget {
   final TextInputType? keyboardType;
   final List<TextInputFormatter>? inputFormatters;
   final FocusNode? focusNode;
+  final int? maxLength;
 
   const AppInput({
     super.key,
@@ -46,6 +47,7 @@ class AppInput extends StatelessWidget {
     this.keyboardType,
     this.inputFormatters,
     this.focusNode,
+    this.maxLength,
   });
 
   @override
@@ -96,6 +98,7 @@ class AppInput extends StatelessWidget {
           maxLines: multiline ? rows : 1,
           minLines: multiline ? rows : 1,
           inputFormatters: inputFormatters,
+          maxLength: maxLength,
           style: const TextStyle(
             fontFamily: 'Inter',
             fontSize: 14,
