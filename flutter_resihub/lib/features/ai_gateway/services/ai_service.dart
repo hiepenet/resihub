@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/utils/idempotency.dart';
 
@@ -20,7 +21,7 @@ class AiService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/ai/extract',
+          '${ApiEndpoints.ai}/extract',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -36,7 +37,7 @@ class AiService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/ai/meter-ocr',
+          '${ApiEndpoints.ai}/meter-ocr',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -52,7 +53,7 @@ class AiService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/ai/classify',
+          '${ApiEndpoints.ai}/classify',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -69,7 +70,7 @@ class AiService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/ai/suggestions/$id/review',
+          '${ApiEndpoints.ai}/suggestions/$id/review',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -84,7 +85,7 @@ class AiService {
   }) {
     return dio
         .get<dynamic>(
-          '/api/v1/ai/usage',
+          '${ApiEndpoints.ai}/usage',
           queryParameters: params is Map<String, dynamic>
               ? params
               : params is Map

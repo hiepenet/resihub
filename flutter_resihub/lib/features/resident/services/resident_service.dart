@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
@@ -31,7 +32,7 @@ class ResidentService {
         key,
         () => dio
             .get<dynamic>(
-              '/api/v1/resident/overview',
+              '${ApiEndpoints.resident}/overview',
               queryParameters: _withContractParam(contractId),
               options: options,
             )
@@ -41,7 +42,7 @@ class ResidentService {
     }
     return dio
         .get<dynamic>(
-          '/api/v1/resident/overview',
+          '${ApiEndpoints.resident}/overview',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -52,7 +53,7 @@ class ResidentService {
   Future<dynamic> submitRentalApplication(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/rental-application',
+          '${ApiEndpoints.resident}/rental-application',
           data: payload,
           options: options,
         )
@@ -63,7 +64,7 @@ class ResidentService {
   Future<dynamic> uploadIdImage(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/id-images',
+          '${ApiEndpoints.resident}/id-images',
           data: payload,
           options: options,
         )
@@ -81,7 +82,7 @@ class ResidentService {
         key,
         () => dio
             .get<dynamic>(
-              '/api/v1/resident/service-requests',
+              '${ApiEndpoints.resident}/service-requests',
               queryParameters: _withContractParam(contractId),
               options: options,
             )
@@ -91,7 +92,7 @@ class ResidentService {
     }
     return dio
         .get<dynamic>(
-          '/api/v1/resident/service-requests',
+          '${ApiEndpoints.resident}/service-requests',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -106,7 +107,7 @@ class ResidentService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/service-requests',
+          '${ApiEndpoints.resident}/service-requests',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -131,7 +132,7 @@ class ResidentService {
     }
     return dio
         .post<dynamic>(
-          '/api/v1/resident/service-requests/$id/cancel',
+          '${ApiEndpoints.resident}/service-requests/$id/cancel',
           data: payload ?? const {},
           options: withIdempotencyOptions(opts, idempotencyKey: idemKey),
         )
@@ -156,7 +157,7 @@ class ResidentService {
     }
     return dio
         .post<dynamic>(
-          '/api/v1/resident/service-requests/$id/reopen',
+          '${ApiEndpoints.resident}/service-requests/$id/reopen',
           data: payload,
           options: withIdempotencyOptions(opts, idempotencyKey: idemKey),
         )
@@ -181,7 +182,7 @@ class ResidentService {
     }
     return dio
         .post<dynamic>(
-          '/api/v1/resident/service-requests/$id/rating',
+          '${ApiEndpoints.resident}/service-requests/$id/rating',
           data: payload,
           options: withIdempotencyOptions(opts, idempotencyKey: idemKey),
         )
@@ -196,7 +197,7 @@ class ResidentService {
         key,
         () => dio
             .get<dynamic>(
-              '/api/v1/resident/invoices',
+              '${ApiEndpoints.resident}/invoices',
               queryParameters: _withContractParam(contractId),
               options: options,
             )
@@ -206,7 +207,7 @@ class ResidentService {
     }
     return dio
         .get<dynamic>(
-          '/api/v1/resident/invoices',
+          '${ApiEndpoints.resident}/invoices',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -217,7 +218,7 @@ class ResidentService {
   Future<dynamic> reportPayment(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/payments/report',
+          '${ApiEndpoints.resident}/payments/report',
           data: payload,
           options: options,
         )
@@ -232,7 +233,7 @@ class ResidentService {
         key,
         () => dio
             .get<dynamic>(
-              '/api/v1/resident/services',
+              '${ApiEndpoints.resident}/services',
               queryParameters: _withContractParam(contractId),
               options: options,
             )
@@ -242,7 +243,7 @@ class ResidentService {
     }
     return dio
         .get<dynamic>(
-          '/api/v1/resident/services',
+          '${ApiEndpoints.resident}/services',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -253,7 +254,7 @@ class ResidentService {
   Future<dynamic> subscribeService(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/services',
+          '${ApiEndpoints.resident}/services',
           data: payload,
           options: options,
         )
@@ -264,7 +265,7 @@ class ResidentService {
   Future<dynamic> cancelService(String id, [dynamic payload = const {}, Options? options]) {
     return dio
         .patch<dynamic>(
-          '/api/v1/resident/services/$id/cancel',
+          '${ApiEndpoints.resident}/services/$id/cancel',
           data: payload ?? const {},
           options: options,
         )
@@ -275,7 +276,7 @@ class ResidentService {
   Future<dynamic> withdrawCancelService(String id, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/resident/services/$id/withdraw-cancel',
+          '${ApiEndpoints.resident}/services/$id/withdraw-cancel',
           options: options,
         )
         .then((r) => r.data);
@@ -285,7 +286,7 @@ class ResidentService {
   Future<dynamic> updateProfile(dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/resident/profile',
+          '${ApiEndpoints.resident}/profile',
           data: payload,
           options: options,
         )
@@ -296,7 +297,7 @@ class ResidentService {
   Future<dynamic> listContractRequests([String? contractId, Options? options]) {
     return dio
         .get<dynamic>(
-          '/api/v1/resident/contract-requests',
+          '${ApiEndpoints.resident}/contract-requests',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -307,7 +308,7 @@ class ResidentService {
   Future<dynamic> createContractRequest(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/resident/contract-requests',
+          '${ApiEndpoints.resident}/contract-requests',
           data: payload,
           options: options,
         )
@@ -318,7 +319,7 @@ class ResidentService {
   Future<dynamic> listDepositTransactions([String? contractId, Options? options]) {
     return dio
         .get<dynamic>(
-          '/api/v1/resident/deposit-transactions',
+          '${ApiEndpoints.resident}/deposit-transactions',
           queryParameters: _withContractParam(contractId),
           options: options,
         )
@@ -334,7 +335,7 @@ class ResidentService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$depositId/dispute',
+          '${ApiEndpoints.deposits}/$depositId/dispute',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -350,7 +351,7 @@ class ResidentService {
   }) {
     return dio
         .patch<dynamic>(
-          '/api/v1/deposits/$depositId/bank-info',
+          '${ApiEndpoints.deposits}/$depositId/bank-info',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -366,7 +367,7 @@ class ResidentService {
   }) {
     return dio
         .patch<dynamic>(
-          '/api/v1/reservations/$reservationId/bank-info',
+          '${ApiEndpoints.reservations}/$reservationId/bank-info',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -380,7 +381,7 @@ class ResidentService {
     );
     return dio
         .get<String>(
-          '/api/v1/deposits/$depositId/settlement/pdf',
+          '${ApiEndpoints.deposits}/$depositId/settlement/pdf',
           options: opts,
         )
         .then((r) => r.data ?? '');

@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -47,7 +48,7 @@ class InvoicesService {
     return _cachedFetch(
       buildCacheKey('invoices', query),
       () => dio
-          .get<dynamic>('/api/v1/invoices', queryParameters: params)
+          .get<dynamic>(ApiEndpoints.invoices, queryParameters: params)
           .then((r) => r.data),
       ttl: kInvoicesTtl,
       force: force,
@@ -64,7 +65,7 @@ class InvoicesService {
     final force = _extractForce(options);
     return _cachedFetch(
       buildCacheKey('invoices', {'op': 'detail', 'id': id}),
-      () => dio.get<dynamic>('/api/v1/invoices/$id').then((r) => r.data),
+      () => dio.get<dynamic>('${ApiEndpoints.invoices}/$id').then((r) => r.data),
       ttl: kInvoicesTtl,
       force: force,
     );
@@ -72,41 +73,41 @@ class InvoicesService {
 
   // 3. generateBatch
   Future<dynamic> generateBatch(Map<String, dynamic> payload) {
-    return dio.post<dynamic>('/api/v1/invoices/generate-batch', data: payload).then((r) => r.data);
+    return dio.post<dynamic>('${ApiEndpoints.invoices}/generate-batch', data: payload).then((r) => r.data);
   }
 
   // 4. updateStatus
   Future<dynamic> updateStatus(String id, Map<String, dynamic> payload) {
-    return dio.patch<dynamic>('/api/v1/invoices/$id/status', data: payload).then((r) => r.data);
+    return dio.patch<dynamic>('${ApiEndpoints.invoices}/$id/status', data: payload).then((r) => r.data);
   }
 
   // 5. addLine (DRAFT Line editor)
   Future<dynamic> addLine(String invoiceId, Map<String, dynamic> payload) {
-    return dio.post<dynamic>('/api/v1/invoices/$invoiceId/lines', data: payload).then((r) => r.data);
+    return dio.post<dynamic>('${ApiEndpoints.invoices}/$invoiceId/lines', data: payload).then((r) => r.data);
   }
 
   // 6. updateLine
   Future<dynamic> updateLine(String invoiceId, String lineId, Map<String, dynamic> payload) {
     return dio
-        .patch<dynamic>('/api/v1/invoices/$invoiceId/lines/$lineId', data: payload)
+        .patch<dynamic>('${ApiEndpoints.invoices}/$invoiceId/lines/$lineId', data: payload)
         .then((r) => r.data);
   }
 
   // 7. deleteLine
   Future<dynamic> deleteLine(String invoiceId, String lineId) {
-    return dio.delete<dynamic>('/api/v1/invoices/$invoiceId/lines/$lineId').then((r) => r.data);
+    return dio.delete<dynamic>('${ApiEndpoints.invoices}/$invoiceId/lines/$lineId').then((r) => r.data);
   }
 
   // 8. issue (Contextual issue)
   Future<dynamic> issue(String invoiceId, [Map<String, dynamic>? payload]) {
     return dio
-        .post<dynamic>('/api/v1/invoices/$invoiceId/issue', data: payload ?? const {})
+        .post<dynamic>('${ApiEndpoints.invoices}/$invoiceId/issue', data: payload ?? const {})
         .then((r) => r.data);
   }
 
   // 9. requestAdjustment (4-eyes adjustment & 2-step VOID)
   Future<dynamic> requestAdjustment(String invoiceId, Map<String, dynamic> payload) {
-    return dio.post<dynamic>('/api/v1/invoices/$invoiceId/adjust', data: payload).then((r) => r.data);
+    return dio.post<dynamic>('${ApiEndpoints.invoices}/$invoiceId/adjust', data: payload).then((r) => r.data);
   }
 
   // 10. peekAdjustments & getAdjustments
@@ -121,7 +122,7 @@ class InvoicesService {
     return _cachedFetch(
       buildCacheKey('invoices', query),
       () => dio
-          .get<dynamic>('/api/v1/invoices/adjustments', queryParameters: params)
+          .get<dynamic>('${ApiEndpoints.invoices}/adjustments', queryParameters: params)
           .then((r) => r.data),
       ttl: kInvoicesTtl,
       force: force,
@@ -131,7 +132,7 @@ class InvoicesService {
   // 11. approveAdjustment
   Future<dynamic> approveAdjustment(String invoiceId, String adjId) {
     return dio
-        .post<dynamic>('/api/v1/invoices/$invoiceId/adjustments/$adjId/approve')
+        .post<dynamic>('${ApiEndpoints.invoices}/$invoiceId/adjustments/$adjId/approve')
         .then((r) => r.data);
   }
 
@@ -142,13 +143,13 @@ class InvoicesService {
     Map<String, dynamic>? payload,
   ]) {
     return dio
-        .post<dynamic>('/api/v1/invoices/$invoiceId/adjustments/$adjId/reject', data: payload ?? const {})
+        .post<dynamic>('${ApiEndpoints.invoices}/$invoiceId/adjustments/$adjId/reject', data: payload ?? const {})
         .then((r) => r.data);
   }
 
   // 13. getAuditLogs
   Future<dynamic> getAuditLogs(String invoiceId) {
-    return dio.get<dynamic>('/api/v1/invoices/$invoiceId/audit-logs').then((r) => r.data);
+    return dio.get<dynamic>('${ApiEndpoints.invoices}/$invoiceId/audit-logs').then((r) => r.data);
   }
 }
 

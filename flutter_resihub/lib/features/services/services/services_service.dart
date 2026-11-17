@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -56,7 +57,7 @@ class ServicesService {
       buildCacheKey('services', _buildParts('catalog', params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/service-catalog',
+            ApiEndpoints.serviceCatalog,
             queryParameters: queryParams,
             options: options,
           )
@@ -70,7 +71,7 @@ class ServicesService {
   Future<dynamic> createCatalog(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/service-catalog',
+          ApiEndpoints.serviceCatalog,
           data: payload,
           options: options,
         )
@@ -81,7 +82,7 @@ class ServicesService {
   Future<dynamic> updateCatalog(String id, dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/service-catalog/$id',
+          '${ApiEndpoints.serviceCatalog}/$id',
           data: payload,
           options: options,
         )
@@ -104,7 +105,7 @@ class ServicesService {
       buildCacheKey('services', _buildParts('subscriptions', params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/service-subscriptions',
+            ApiEndpoints.serviceSubscriptions,
             queryParameters: queryParams,
             options: options,
           )
@@ -118,7 +119,7 @@ class ServicesService {
   Future<dynamic> createSubscription(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/service-subscriptions',
+          ApiEndpoints.serviceSubscriptions,
           data: payload,
           options: options,
         )
@@ -129,7 +130,7 @@ class ServicesService {
   Future<dynamic> updateSubscription(String id, dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/service-subscriptions/$id',
+          '${ApiEndpoints.serviceSubscriptions}/$id',
           data: payload,
           options: options,
         )
@@ -140,7 +141,7 @@ class ServicesService {
   Future<dynamic> terminateSubscription(String id, dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/service-subscriptions/$id',
+          '${ApiEndpoints.serviceSubscriptions}/$id',
           data: payload,
           options: options,
         )

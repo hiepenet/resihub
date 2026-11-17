@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -76,7 +77,7 @@ class ContractsService {
       buildCacheKey('contracts', _buildListParts(params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts',
+            ApiEndpoints.contracts,
             queryParameters: queryParams,
             options: options,
           )
@@ -97,7 +98,7 @@ class ContractsService {
       buildCacheKey('contracts', {'op': 'detail', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts/$id',
+            '${ApiEndpoints.contracts}/$id',
             options: options,
           )
           .then((r) => r.data),
@@ -121,7 +122,7 @@ class ContractsService {
       buildCacheKey('contracts', _buildRequestsParts(params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts/requests',
+            '${ApiEndpoints.contracts}/requests',
             queryParameters: queryParams,
             options: options,
           )
@@ -135,7 +136,7 @@ class ContractsService {
   Future<dynamic> create(dynamic payload, {Options? options, String? idempotencyKey}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts',
+          ApiEndpoints.contracts,
           data: payload,
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -146,7 +147,7 @@ class ContractsService {
   Future<dynamic> update(String id, dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/contracts/$id',
+          '${ApiEndpoints.contracts}/$id',
           data: payload,
           options: options,
         )
@@ -162,7 +163,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/activate',
+          '${ApiEndpoints.contracts}/$id/activate',
           data: payload ?? const {},
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -178,7 +179,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/approve',
+          '${ApiEndpoints.contracts}/$id/approve',
           data: payload ?? const {},
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -189,7 +190,7 @@ class ContractsService {
   Future<dynamic> reject(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/reject',
+          '${ApiEndpoints.contracts}/$id/reject',
           data: payload,
           options: options,
         )
@@ -201,7 +202,7 @@ class ContractsService {
     final payload = reason is String ? {'reason': reason} : reason;
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/reject',
+          '${ApiEndpoints.contracts}/$id/reject',
           data: payload,
           options: options,
         )
@@ -212,7 +213,7 @@ class ContractsService {
   Future<dynamic> cancel(String id, [dynamic payload = const {}, Options? options]) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/cancel',
+          '${ApiEndpoints.contracts}/$id/cancel',
           data: payload ?? const {},
           options: options,
         )
@@ -223,7 +224,7 @@ class ContractsService {
   Future<dynamic> uploadScan(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/scan',
+          '${ApiEndpoints.contracts}/$id/scan',
           data: payload,
           options: options,
         )
@@ -239,7 +240,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/terminate',
+          '${ApiEndpoints.contracts}/$id/terminate',
           data: payload,
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -250,7 +251,7 @@ class ContractsService {
   Future<dynamic> approveTermination(String id, [dynamic payload = const {}, Options? options]) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/terminate/approve',
+          '${ApiEndpoints.contracts}/$id/terminate/approve',
           data: payload ?? const {},
           options: options,
         )
@@ -261,7 +262,7 @@ class ContractsService {
   Future<dynamic> rejectTermination(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/terminate/reject',
+          '${ApiEndpoints.contracts}/$id/terminate/reject',
           data: payload,
           options: options,
         )
@@ -277,7 +278,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/renew',
+          '${ApiEndpoints.contracts}/$id/renew',
           data: payload,
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -293,7 +294,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/transfer-room',
+          '${ApiEndpoints.contracts}/$id/transfer-room',
           data: payload,
           options: _withIdempotency(options, idempotencyKey),
         )
@@ -311,7 +312,7 @@ class ContractsService {
       buildCacheKey('contracts', {'op': 'occupants', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts/$id/occupants',
+            '${ApiEndpoints.contracts}/$id/occupants',
             options: options,
           )
           .then((r) => r.data),
@@ -324,7 +325,7 @@ class ContractsService {
   Future<dynamic> addOccupant(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/occupants',
+          '${ApiEndpoints.contracts}/$id/occupants',
           data: payload,
           options: options,
         )
@@ -335,7 +336,7 @@ class ContractsService {
   Future<dynamic> removeOccupant(String id, String tenantId, {Options? options}) {
     return dio
         .delete<dynamic>(
-          '/api/v1/contracts/$id/occupants/$tenantId',
+          '${ApiEndpoints.contracts}/$id/occupants/$tenantId',
           options: options,
         )
         .then((r) => r.data);
@@ -352,7 +353,7 @@ class ContractsService {
       buildCacheKey('contracts', {'op': 'servicePrices', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts/$id/service-prices',
+            '${ApiEndpoints.contracts}/$id/service-prices',
             options: options,
           )
           .then((r) => r.data),
@@ -365,7 +366,7 @@ class ContractsService {
   Future<dynamic> addServicePrice(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/service-prices',
+          '${ApiEndpoints.contracts}/$id/service-prices',
           data: payload,
           options: options,
         )
@@ -376,7 +377,7 @@ class ContractsService {
   Future<dynamic> removeServicePrice(String id, String priceId, {Options? options}) {
     return dio
         .delete<dynamic>(
-          '/api/v1/contracts/$id/service-prices/$priceId',
+          '${ApiEndpoints.contracts}/$id/service-prices/$priceId',
           options: options,
         )
         .then((r) => r.data);
@@ -393,7 +394,7 @@ class ContractsService {
       buildCacheKey('contracts', {'op': 'amendments', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/contracts/$id/amendments',
+            '${ApiEndpoints.contracts}/$id/amendments',
             options: options,
           )
           .then((r) => r.data),
@@ -406,7 +407,7 @@ class ContractsService {
   Future<dynamic> createAmendment(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/amendments',
+          '${ApiEndpoints.contracts}/$id/amendments',
           data: payload,
           options: options,
         )
@@ -417,7 +418,7 @@ class ContractsService {
   Future<dynamic> approveAmendment(String id, String versionId, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/amendments/$versionId/approve',
+          '${ApiEndpoints.contracts}/$id/amendments/$versionId/approve',
           options: options,
         )
         .then((r) => r.data);
@@ -432,7 +433,7 @@ class ContractsService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/$id/amendments/$versionId/reject',
+          '${ApiEndpoints.contracts}/$id/amendments/$versionId/reject',
           data: payload,
           options: options,
         )
@@ -443,7 +444,7 @@ class ContractsService {
   Future<dynamic> approveRequest(String id, [dynamic payload = const {}, Options? options]) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/requests/$id/approve',
+          '${ApiEndpoints.contracts}/requests/$id/approve',
           data: payload ?? const {},
           options: options,
         )
@@ -454,7 +455,7 @@ class ContractsService {
   Future<dynamic> rejectRequest(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/contracts/requests/$id/reject',
+          '${ApiEndpoints.contracts}/requests/$id/reject',
           data: payload,
           options: options,
         )
@@ -468,7 +469,7 @@ class ContractsService {
     );
     return dio
         .get<String>(
-          '/api/v1/contracts/$id/template',
+          '${ApiEndpoints.contracts}/$id/template',
           options: opts,
         )
         .then((r) => r.data ?? '');

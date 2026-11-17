@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -52,7 +53,7 @@ class ReportsService {
       buildCacheKey('reports', keyParams),
       () => dio
           .get<dynamic>(
-            '/api/v1/reports/dashboard',
+            '${ApiEndpoints.reports}/dashboard',
             queryParameters: params,
           )
           .then((r) => r.data),
@@ -75,7 +76,7 @@ class ReportsService {
       buildCacheKey('reports', keyParams),
       () => dio
           .get<dynamic>(
-            '/api/v1/reports/summary',
+            '${ApiEndpoints.reports}/summary',
             queryParameters: params,
           )
           .then((r) => r.data),
@@ -93,7 +94,7 @@ class ReportsService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/reports/summary',
+          '${ApiEndpoints.reports}/summary',
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )
@@ -109,7 +110,7 @@ class ReportsService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/reports/summary',
+          '${ApiEndpoints.reports}/summary',
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )
@@ -130,7 +131,7 @@ class ReportsService {
       buildCacheKey('reports', keyParams),
       () => dio
           .get<dynamic>(
-            '/api/v1/reports/deposit-ledger',
+            '${ApiEndpoints.reports}/deposit-ledger',
             queryParameters: params,
           )
           .then((r) => r.data),
@@ -148,7 +149,7 @@ class ReportsService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/reports/deposit-ledger',
+          '${ApiEndpoints.reports}/deposit-ledger',
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )
@@ -164,7 +165,7 @@ class ReportsService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/reports/deposit-ledger',
+          '${ApiEndpoints.reports}/deposit-ledger',
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )

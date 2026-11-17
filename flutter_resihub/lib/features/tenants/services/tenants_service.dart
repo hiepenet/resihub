@@ -1,10 +1,11 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
-const Duration kTenantsTtl = Duration(seconds: 60);
+const Duration kTenantsTtl = Duration(seconds: 25);
 
 Map<String, dynamic> _buildListParts(dynamic params) {
   final map = <String, dynamic>{'op': 'list'};
@@ -54,7 +55,7 @@ class TenantsService {
       buildCacheKey('tenants', _buildListParts(params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/tenants',
+            ApiEndpoints.tenants,
             queryParameters: queryParams,
             options: options,
           )
@@ -75,7 +76,7 @@ class TenantsService {
       buildCacheKey('tenants', {'op': 'detail', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/tenants/$id',
+            '${ApiEndpoints.tenants}/$id',
             options: options,
           )
           .then((r) => r.data),
@@ -95,7 +96,7 @@ class TenantsService {
       buildCacheKey('tenants', {'op': 'idImages', 'id': id}),
       () => dio
           .get<dynamic>(
-            '/api/v1/tenants/$id/id-images',
+            '${ApiEndpoints.tenants}/$id/id-images',
             options: options,
           )
           .then((r) => r.data),
@@ -108,7 +109,7 @@ class TenantsService {
   Future<dynamic> lookup(String identifier, {Options? options}) {
     return dio
         .get<dynamic>(
-          '/api/v1/tenants/lookup',
+          '${ApiEndpoints.tenants}/lookup',
           queryParameters: {'identifier': identifier},
           options: options,
         )
@@ -125,7 +126,7 @@ class TenantsService {
 
     return dio
         .get<dynamic>(
-          '/api/v1/tenants/check-dup',
+          '${ApiEndpoints.tenants}/check-dup',
           queryParameters: queryParams,
           options: options,
         )
@@ -136,7 +137,7 @@ class TenantsService {
   Future<dynamic> create(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/tenants',
+          ApiEndpoints.tenants,
           data: payload,
           options: options,
         )
@@ -147,7 +148,7 @@ class TenantsService {
   Future<dynamic> update(String id, dynamic payload, {Options? options}) {
     return dio
         .patch<dynamic>(
-          '/api/v1/tenants/$id',
+          '${ApiEndpoints.tenants}/$id',
           data: payload,
           options: options,
         )
@@ -158,7 +159,7 @@ class TenantsService {
   Future<dynamic> remove(String id, {Options? options}) {
     return dio
         .delete<dynamic>(
-          '/api/v1/tenants/$id',
+          '${ApiEndpoints.tenants}/$id',
           options: options,
         )
         .then((r) => r.data);
@@ -168,7 +169,7 @@ class TenantsService {
   Future<dynamic> merge(dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/tenants/merge',
+          '${ApiEndpoints.tenants}/merge',
           data: payload,
           options: options,
         )
@@ -179,7 +180,7 @@ class TenantsService {
   Future<dynamic> uploadIdImage(String id, dynamic payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/tenants/$id/id-images',
+          '${ApiEndpoints.tenants}/$id/id-images',
           data: payload,
           options: options,
         )
@@ -190,7 +191,7 @@ class TenantsService {
   Future<dynamic> deleteIdImage(String id, String attachmentId, {Options? options}) {
     return dio
         .delete<dynamic>(
-          '/api/v1/tenants/$id/id-images/$attachmentId',
+          '${ApiEndpoints.tenants}/$id/id-images/$attachmentId',
           options: options,
         )
         .then((r) => r.data);

@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -47,7 +48,7 @@ class PaymentsService {
     return _cachedFetch(
       buildCacheKey('payments', query),
       () => dio
-          .get<dynamic>('/api/v1/payments', queryParameters: params)
+          .get<dynamic>(ApiEndpoints.payments, queryParameters: params)
           .then((r) => r.data),
       ttl: kPaymentsTtl,
       force: force,
@@ -56,20 +57,20 @@ class PaymentsService {
 
   // 2. create
   Future<dynamic> create(Map<String, dynamic> payload) {
-    return dio.post<dynamic>('/api/v1/payments', data: payload).then((r) => r.data);
+    return dio.post<dynamic>(ApiEndpoints.payments, data: payload).then((r) => r.data);
   }
 
   // 3. confirm
   Future<dynamic> confirm(String id, [Map<String, dynamic>? payload]) {
     return dio
-        .patch<dynamic>('/api/v1/payments/$id/confirm', data: payload ?? const {})
+        .patch<dynamic>('${ApiEndpoints.payments}/$id/confirm', data: payload ?? const {})
         .then((r) => r.data);
   }
 
   // 4. reject
   Future<dynamic> reject(String id, [Map<String, dynamic>? payload]) {
     return dio
-        .patch<dynamic>('/api/v1/payments/$id/reject', data: payload ?? const {})
+        .patch<dynamic>('${ApiEndpoints.payments}/$id/reject', data: payload ?? const {})
         .then((r) => r.data);
   }
 
@@ -85,7 +86,7 @@ class PaymentsService {
     return _cachedFetch(
       buildCacheKey('payments', query),
       () => dio
-          .get<dynamic>('/api/v1/receivables', queryParameters: params)
+          .get<dynamic>(ApiEndpoints.receivables, queryParameters: params)
           .then((r) => r.data),
       ttl: kPaymentsTtl,
       force: force,
@@ -104,7 +105,7 @@ class PaymentsService {
     return _cachedFetch(
       buildCacheKey('payments', query),
       () => dio
-          .get<dynamic>('/api/v1/payments/credits', queryParameters: params)
+          .get<dynamic>('${ApiEndpoints.payments}/credits', queryParameters: params)
           .then((r) => r.data),
       ttl: kPaymentsTtl,
       force: force,
@@ -114,21 +115,21 @@ class PaymentsService {
   // 7. requestCreditRefund
   Future<dynamic> requestCreditRefund(String creditId, Map<String, dynamic> payload) {
     return dio
-        .post<dynamic>('/api/v1/payments/credits/$creditId/refund', data: payload)
+        .post<dynamic>('${ApiEndpoints.payments}/credits/$creditId/refund', data: payload)
         .then((r) => r.data);
   }
 
   // 8. approveCreditRefund
   Future<dynamic> approveCreditRefund(String creditId) {
     return dio
-        .post<dynamic>('/api/v1/payments/credits/$creditId/refund/approve')
+        .post<dynamic>('${ApiEndpoints.payments}/credits/$creditId/refund/approve')
         .then((r) => r.data);
   }
 
   // 9. rejectCreditRefund
   Future<dynamic> rejectCreditRefund(String creditId, [Map<String, dynamic>? payload]) {
     return dio
-        .post<dynamic>('/api/v1/payments/credits/$creditId/refund/reject', data: payload ?? const {})
+        .post<dynamic>('${ApiEndpoints.payments}/credits/$creditId/refund/reject', data: payload ?? const {})
         .then((r) => r.data);
   }
 }

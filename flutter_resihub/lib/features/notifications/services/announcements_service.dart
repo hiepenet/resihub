@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/utils/idempotency.dart';
 
@@ -13,13 +14,13 @@ class AnnouncementsService {
 
   /// 1. GET /api/v1/announcements/templates
   Future<dynamic> listTemplates() {
-    return dio.get<dynamic>('/api/v1/announcements/templates').then((r) => r.data);
+    return dio.get<dynamic>('${ApiEndpoints.announcements}/templates').then((r) => r.data);
   }
 
   /// 2. GET /api/v1/announcements
   Future<dynamic> listAnnouncements([Map<String, dynamic>? params]) {
     return dio
-        .get<dynamic>('/api/v1/announcements', queryParameters: params)
+        .get<dynamic>(ApiEndpoints.announcements, queryParameters: params)
         .then((r) => r.data);
   }
 
@@ -27,7 +28,7 @@ class AnnouncementsService {
   Future<dynamic> createAnnouncement(Map<String, dynamic> payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/announcements',
+          ApiEndpoints.announcements,
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -42,7 +43,7 @@ class AnnouncementsService {
   }) {
     return dio
         .put<dynamic>(
-          '/api/v1/announcements/$id',
+          '${ApiEndpoints.announcements}/$id',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -58,7 +59,7 @@ class AnnouncementsService {
     final body = payload ?? const {'confirm_send': true};
     return dio
         .post<dynamic>(
-          '/api/v1/announcements/$id/send',
+          '${ApiEndpoints.announcements}/$id/send',
           data: body,
           options: withIdempotencyOptions(options),
         )
@@ -74,7 +75,7 @@ class AnnouncementsService {
     final body = payload ?? const {};
     return dio
         .post<dynamic>(
-          '/api/v1/announcements/$id/mark-zalo-sent',
+          '${ApiEndpoints.announcements}/$id/mark-zalo-sent',
           data: body,
           options: withIdempotencyOptions(options),
         )
@@ -84,7 +85,7 @@ class AnnouncementsService {
   /// 7. GET /api/v1/zalo-groups
   Future<dynamic> listZaloGroups([Map<String, dynamic>? params]) {
     return dio
-        .get<dynamic>('/api/v1/zalo-groups', queryParameters: params)
+        .get<dynamic>(ApiEndpoints.zaloGroups, queryParameters: params)
         .then((r) => r.data);
   }
 
@@ -92,7 +93,7 @@ class AnnouncementsService {
   Future<dynamic> createZaloGroup(Map<String, dynamic> payload, {Options? options}) {
     return dio
         .post<dynamic>(
-          '/api/v1/zalo-groups',
+          ApiEndpoints.zaloGroups,
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -107,7 +108,7 @@ class AnnouncementsService {
   }) {
     return dio
         .put<dynamic>(
-          '/api/v1/zalo-groups/$id',
+          '${ApiEndpoints.zaloGroups}/$id',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -117,7 +118,7 @@ class AnnouncementsService {
   /// 10. DELETE /api/v1/zalo-groups/:id
   Future<dynamic> deleteZaloGroup(dynamic id, {Options? options}) {
     return dio
-        .delete<dynamic>('/api/v1/zalo-groups/$id', options: options)
+        .delete<dynamic>('${ApiEndpoints.zaloGroups}/$id', options: options)
         .then((r) => r.data);
   }
 }

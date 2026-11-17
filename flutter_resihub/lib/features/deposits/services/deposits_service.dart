@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
@@ -40,7 +41,7 @@ class DepositsService {
     final query = <String, dynamic>{'op': 'list', if (params != null) ...params};
     return _cachedFetch(
       buildCacheKey('deposits', query),
-      () => dio.get<dynamic>('/api/v1/deposits', queryParameters: params).then((r) => r.data),
+      () => dio.get<dynamic>(ApiEndpoints.deposits, queryParameters: params).then((r) => r.data),
       ttl: kDepositsTtl,
       force: force,
     );
@@ -48,12 +49,12 @@ class DepositsService {
 
   // 2. listTransactions
   Future<dynamic> listTransactions(String id) {
-    return dio.get<dynamic>('/api/v1/deposits/$id/transactions').then((r) => r.data);
+    return dio.get<dynamic>('${ApiEndpoints.deposits}/$id/transactions').then((r) => r.data);
   }
 
   // 3. getAuditLogs
   Future<dynamic> getAuditLogs(String id) {
-    return dio.get<dynamic>('/api/v1/deposits/$id/audit-logs').then((r) => r.data);
+    return dio.get<dynamic>('${ApiEndpoints.deposits}/$id/audit-logs').then((r) => r.data);
   }
 
   // 4. createTransaction
@@ -64,7 +65,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/transactions',
+          '${ApiEndpoints.deposits}/$id/transactions',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -73,7 +74,7 @@ class DepositsService {
 
   // 5. getSettlement & getSettlementDetail alias
   Future<dynamic> getSettlement(String id) {
-    return dio.get<dynamic>('/api/v1/deposits/$id/settlement').then((r) => r.data);
+    return dio.get<dynamic>('${ApiEndpoints.deposits}/$id/settlement').then((r) => r.data);
   }
 
   Future<dynamic> getSettlementDetail(String id) => getSettlement(id);
@@ -86,7 +87,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/settlement',
+          '${ApiEndpoints.deposits}/$id/settlement',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -101,7 +102,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/settlement/approve',
+          '${ApiEndpoints.deposits}/$id/settlement/approve',
           data: payload ?? <String, dynamic>{},
           options: withIdempotencyOptions(options),
         )
@@ -116,7 +117,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/settlement/reject',
+          '${ApiEndpoints.deposits}/$id/settlement/reject',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -131,7 +132,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/dispute',
+          '${ApiEndpoints.deposits}/$id/dispute',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -146,7 +147,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/resolve-dispute',
+          '${ApiEndpoints.deposits}/$id/resolve-dispute',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -161,7 +162,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/payout',
+          '${ApiEndpoints.deposits}/$id/payout',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -176,7 +177,7 @@ class DepositsService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/deposits/$id/payout-returned',
+          '${ApiEndpoints.deposits}/$id/payout-returned',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -191,7 +192,7 @@ class DepositsService {
   ]) {
     return dio
         .patch<dynamic>(
-          '/api/v1/deposits/$id/bank-info',
+          '${ApiEndpoints.deposits}/$id/bank-info',
           data: payload,
           options: withIdempotencyOptions(options),
         )
@@ -202,7 +203,7 @@ class DepositsService {
   Future<String> getSettlementPdfHtml(String id) {
     return dio
         .get<String>(
-          '/api/v1/deposits/$id/settlement/pdf',
+          '${ApiEndpoints.deposits}/$id/settlement/pdf',
           options: Options(responseType: ResponseType.plain),
         )
         .then((r) => r.data ?? '');

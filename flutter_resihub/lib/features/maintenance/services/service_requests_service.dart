@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
@@ -52,7 +53,7 @@ class ServiceRequestsService {
     final force = options?['force'] == true;
     return _cachedFetch(
       buildCacheKey('serviceRequests', {'op': 'list', ...?params}),
-      () => dio.get<dynamic>('/api/v1/service-requests', queryParameters: params).then((r) => r.data),
+      () => dio.get<dynamic>(ApiEndpoints.serviceRequests, queryParameters: params).then((r) => r.data),
       ttl: kServiceRequestsTtl,
       force: force,
     );
@@ -64,7 +65,7 @@ class ServiceRequestsService {
     final force = options?['force'] == true;
     return _cachedFetch(
       buildCacheKey('serviceRequests', {'op': 'detail', 'id': id}),
-      () => dio.get<dynamic>('/api/v1/service-requests/$id').then((r) => r.data),
+      () => dio.get<dynamic>('${ApiEndpoints.serviceRequests}/$id').then((r) => r.data),
       ttl: kServiceRequestsTtl,
       force: force,
     );
@@ -76,7 +77,7 @@ class ServiceRequestsService {
     final idempotencyKey = options?['idempotencyKey']?.toString();
     return dio
         .post<dynamic>(
-          '/api/v1/service-requests',
+          ApiEndpoints.serviceRequests,
           data: payload,
           options: withIdempotencyOptions(null, idempotencyKey: idempotencyKey),
         )
@@ -89,7 +90,7 @@ class ServiceRequestsService {
     final idempotencyKey = options?['idempotencyKey']?.toString();
     return dio
         .patch<dynamic>(
-          '/api/v1/service-requests/$id/status',
+          '${ApiEndpoints.serviceRequests}/$id/status',
           data: payload,
           options: withIdempotencyOptions(null, idempotencyKey: idempotencyKey),
         )
@@ -102,7 +103,7 @@ class ServiceRequestsService {
     final idempotencyKey = options?['idempotencyKey']?.toString();
     return dio
         .post<dynamic>(
-          '/api/v1/service-requests/$id/apply-triage',
+          '${ApiEndpoints.serviceRequests}/$id/apply-triage',
           data: payload,
           options: withIdempotencyOptions(null, idempotencyKey: idempotencyKey),
         )
@@ -115,7 +116,7 @@ class ServiceRequestsService {
     final idempotencyKey = options?['idempotencyKey']?.toString();
     return dio
         .post<dynamic>(
-          '/api/v1/service-requests/$id/rating',
+          '${ApiEndpoints.serviceRequests}/$id/rating',
           data: payload,
           options: withIdempotencyOptions(null, idempotencyKey: idempotencyKey),
         )

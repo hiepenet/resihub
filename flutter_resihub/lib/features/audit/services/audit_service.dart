@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 
@@ -45,7 +46,7 @@ class AuditService {
       buildCacheKey('auditLogs', keyParams),
       () => dio
           .get<dynamic>(
-            '/api/v1/audit-logs',
+            ApiEndpoints.auditLogs,
             queryParameters: params,
           )
           .then((r) => r.data),
@@ -63,7 +64,7 @@ class AuditService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/audit-logs',
+          ApiEndpoints.auditLogs,
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )
@@ -85,7 +86,7 @@ class AuditService {
     };
     return dio
         .get<dynamic>(
-          '/api/v1/audit-logs',
+          ApiEndpoints.auditLogs,
           queryParameters: query,
           options: Options(responseType: ResponseType.bytes),
         )

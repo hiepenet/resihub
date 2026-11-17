@@ -1,11 +1,12 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
 
-const Duration kMetersTtl = Duration(seconds: 60);
+const Duration kMetersTtl = Duration(seconds: 20);
 
 Map<String, dynamic> _buildParts(String op, dynamic params) {
   final map = <String, dynamic>{'op': op};
@@ -56,7 +57,7 @@ class MetersService {
       buildCacheKey('meters', _buildParts('list', params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/meters',
+            ApiEndpoints.meters,
             queryParameters: queryParams,
             options: options,
           )
@@ -74,7 +75,7 @@ class MetersService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/meters',
+          ApiEndpoints.meters,
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -97,7 +98,7 @@ class MetersService {
       buildCacheKey('meters', _buildParts('readings', params)),
       () => dio
           .get<dynamic>(
-            '/api/v1/meters/readings',
+            '${ApiEndpoints.meters}/readings',
             queryParameters: queryParams,
             options: options,
           )
@@ -111,7 +112,7 @@ class MetersService {
   Future<dynamic> listMeterReadings(String id, {Options? options}) {
     return dio
         .get<dynamic>(
-          '/api/v1/meters/$id/readings',
+          '${ApiEndpoints.meters}/$id/readings',
           options: options,
         )
         .then((r) => r.data);
@@ -126,7 +127,7 @@ class MetersService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/meters/$id/readings',
+          '${ApiEndpoints.meters}/$id/readings',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -141,7 +142,7 @@ class MetersService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/meters/readings/batch',
+          '${ApiEndpoints.meters}/readings/batch',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -157,7 +158,7 @@ class MetersService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/meters/readings/$readingId/confirm',
+          '${ApiEndpoints.meters}/readings/$readingId/confirm',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
@@ -172,7 +173,7 @@ class MetersService {
   ]) {
     return dio
         .post<dynamic>(
-          '/api/v1/meters/readings/confirm-batch',
+          '${ApiEndpoints.meters}/readings/confirm-batch',
           data: payload,
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )

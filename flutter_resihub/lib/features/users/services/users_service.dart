@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/constants/api_endpoints.dart';
 import '../../../core/network/dio_client.dart';
 import '../../../core/network/query_cache.dart';
 import '../../../core/utils/idempotency.dart';
@@ -49,7 +50,7 @@ class UsersService {
       buildCacheKey('users', keyParams),
       () => dio
           .get<dynamic>(
-            '/api/v1/admin/users',
+            ApiEndpoints.adminUsers,
             queryParameters: params,
           )
           .then((r) => r.data),
@@ -68,7 +69,7 @@ class UsersService {
   Future<dynamic> listRoles({bool force = false}) {
     return _cachedFetch(
       buildCacheKey('users', 'roles'),
-      () => dio.get<dynamic>('/api/v1/admin/users/roles').then((r) => r.data),
+      () => dio.get<dynamic>('${ApiEndpoints.adminUsers}/roles').then((r) => r.data),
       ttl: kSettingsTtl,
       force: force,
     );
@@ -77,19 +78,19 @@ class UsersService {
   /// 3. Create a new user with role assignments.
   /// POST /api/v1/admin/users
   Future<dynamic> create(Map<String, dynamic> payload) {
-    return dio.post<dynamic>('/api/v1/admin/users', data: payload).then((r) => r.data);
+    return dio.post<dynamic>(ApiEndpoints.adminUsers, data: payload).then((r) => r.data);
   }
 
   /// 4. Update an existing user and their role assignments.
   /// PATCH /api/v1/admin/users/:id
   Future<dynamic> update(String id, Map<String, dynamic> payload) {
-    return dio.patch<dynamic>('/api/v1/admin/users/$id', data: payload).then((r) => r.data);
+    return dio.patch<dynamic>('${ApiEndpoints.adminUsers}/$id', data: payload).then((r) => r.data);
   }
 
   /// 5. Delete an unreferenced user.
   /// DELETE /api/v1/admin/users/:id
   Future<dynamic> remove(String id) {
-    return dio.delete<dynamic>('/api/v1/admin/users/$id').then((r) => r.data);
+    return dio.delete<dynamic>('${ApiEndpoints.adminUsers}/$id').then((r) => r.data);
   }
 
   // ---------------------------------------------------------------------------
@@ -106,7 +107,7 @@ class UsersService {
   Future<dynamic> getSettings({bool force = false}) {
     return _cachedFetch(
       buildCacheKey('settings', 'global'),
-      () => dio.get<dynamic>('/api/v1/settings').then((r) => r.data),
+      () => dio.get<dynamic>(ApiEndpoints.settings).then((r) => r.data),
       ttl: kSettingsTtl,
       force: force,
     );
@@ -120,14 +121,14 @@ class UsersService {
       'settings': settings,
       ...settings,
     };
-    return dio.put<dynamic>('/api/v1/settings', data: payload).then((r) => r.data);
+    return dio.put<dynamic>(ApiEndpoints.settings, data: payload).then((r) => r.data);
   }
 
   /// 8. Reset a specific configuration group back to its default value.
   /// DELETE /api/v1/settings/:key
   Future<dynamic> resetSetting(String key) {
     final encodedKey = Uri.encodeComponent(key);
-    return dio.delete<dynamic>('/api/v1/settings/$encodedKey').then((r) => r.data);
+    return dio.delete<dynamic>('${ApiEndpoints.settings}/$encodedKey').then((r) => r.data);
   }
 
   // ---------------------------------------------------------------------------
@@ -139,7 +140,7 @@ class UsersService {
   Future<dynamic> listCronRuns([Map<String, dynamic>? params]) {
     return dio
         .get<dynamic>(
-          '/api/v1/settings/cron-runs',
+          '${ApiEndpoints.settings}/cron-runs',
           queryParameters: params,
         )
         .then((r) => r.data);
@@ -154,7 +155,7 @@ class UsersService {
   }) {
     return dio
         .post<dynamic>(
-          '/api/v1/settings/cron-runs/trigger',
+          '${ApiEndpoints.settings}/cron-runs/trigger',
           data: payload ?? <String, dynamic>{},
           options: withIdempotencyOptions(options, idempotencyKey: idempotencyKey),
         )
