@@ -554,6 +554,25 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
+  /// `(thu giữ phạt …)` chỉ hiển thị khi forfeited_amount > 0 (React:1008-1010).
+  String _forfeitedSuffix(Map r) {
+    final raw = r['forfeited_amount'] ?? 0;
+    final num value = raw is num ? raw : num.tryParse(raw.toString()) ?? 0;
+    return value > 0 ? ' (thu giữ phạt ${formatMoney(raw)})' : '';
+  }
+
+  /// Nội dung tài khoản nhận hoàn (React:1013-1025).
+  String _refundBankText(Map r) {
+    final bank = r['refund_bank_info'] is Map
+        ? r['refund_bank_info'] as Map
+        : const <String, dynamic>{};
+    final account = bank['account_number']?.toString() ?? '';
+    if (account.isEmpty) {
+      return 'Bạn chưa cung cấp tài khoản ngân hàng nhận hoàn. Vui lòng bấm "Cập nhật STK nhận hoàn" để Ban Quản Lý chuyển khoản nhanh chóng.';
+    }
+    return '${bank['bank_name'] ?? ''} • $account (${bank['account_holder'] ?? ''})';
+  }
+
   Widget _miniInfo(String label, String value, {Color? valueColor}) {
     return Container(
       padding: const EdgeInsets.all(10),
@@ -591,12 +610,17 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
   /// Danh sách thẻ giữ chỗ (dùng cho cả 2 nhánh có / không hợp đồng).
   Widget _buildReservationBanners(
     BuildContext context,
-    List<Map<String, dynamic>> reservations,
-  ) {
+    List<Map<String, dynamic>> reservations, {
+    required bool showActionButton,
+  }) {
     return Column(
       children: [
         for (final r in reservations)
-          _buildReservationCard(context, r, showActionButton: true),
+          _buildReservationCard(
+            context,
+            r,
+            showActionButton: showActionButton,
+          ),
       ],
     );
   }
@@ -619,6 +643,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final amenities = parseResidentAmenities(r['amenities']);
     final holdAmount = r['hold_amount'] ?? r['amount'] ?? 0;
     final note = r['reservation_note']?.toString() ?? '';
+    final refundBankText = _refundBankText(r);
     final statusLabel = switch (status) {
       'PENDING_CONFIRM' => 'Phiếu đăng ký giữ chỗ đang chờ đối soát',
       'CANCEL_PENDING_APPROVAL' =>
@@ -721,15 +746,28 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             const SizedBox(height: 12),
             _miniInfo(
               'Đề xuất thanh lý',
-              'Hoàn khách ${formatMoney(r['refunded_amount'] ?? 0)} • Thu giữ phạt ${formatMoney(r['forfeited_amount'] ?? 0)}',
+              'Ban Quản Lý đã lập đề xuất thanh lý hủy giữ chỗ (Hoàn khách ${formatMoney(r['refunded_amount'] ?? 0)} • Thu giữ phạt ${formatMoney(r['forfeited_amount'] ?? 0)}) và đang trình Chủ nhà phê duyệt.',
             ),
           ],
           if (isPayout) ...[
             const SizedBox(height: 12),
-            _miniInfo(
-              'Chi hoàn tiền',
-              'Chủ nhà đã phê duyệt hoàn trả ${formatMoney(r['refunded_amount'] ?? 0)}. Ban Quản Lý đang thực hiện thủ tục chi hoàn tiền cho bạn.',
-              valueColor: AppColors.emerald700,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _miniInfo(
+                  'Chi hoàn tiền',
+                  'Chủ nhà đã phê duyệt hoàn trả ${formatMoney(r['refunded_amount'] ?? 0)}${_forfeitedSuffix(r)}. Ban Quản Lý đang thực hiện thủ tục chi hoàn tiền cho bạn.',
+                  valueColor: AppColors.emerald700,
+                ),
+                const SizedBox(height: 8),
+                _miniInfo(
+                  'Tài khoản nhận hoàn',
+                  refundBankText,
+                  valueColor: refundBankText.startsWith('Bạn chưa cung cấp')
+                      ? AppColors.amber700
+                      : AppColors.slate900,
+                ),
+              ],
             ),
           ],
           const SizedBox(height: 12),
@@ -810,7 +848,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                 ),
               if (showActionButton && status == 'HELD')
                 AppButton(
-                  text: 'Nộp hồ sơ thuê',
+                  text: 'Đăng ký thông tin nhận nhà',
                   size: AppButtonSize.sm,
                   icon: const Icon(LucideIcons.fileText, size: 14),
                   onPressed: () => _openApplicationModal(
@@ -959,7 +997,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         ),
         if (reservations.isNotEmpty) ...[
           const SizedBox(height: 16),
-          _buildReservationBanners(context, reservations),
+          _buildReservationBanners(context, reservations,
+              showActionButton: false),
         ],
         if (onboardingApplication != null) ...[
           const SizedBox(height: 16),
@@ -1560,15 +1599,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         : (ov['reservation'] is Map ? [ov['reservation']] : const []);
     final reservations =
         rawReservations.whereType<Map<String, dynamic>>().toList();
+    final onboardingApplication = ov['onboarding_application'] is Map
+        ? ov['onboarding_application'] as Map
+        : (ov['pending_application'] is Map
+            ? ov['pending_application'] as Map
+            : null);
 
     // Chưa có hợp đồng → nhánh riêng (React OverviewTab.jsx:1579-1830):
     // ẩn hero / KPI / quick actions, thay bằng onboarding + giữ chỗ.
     if (contract == null) {
-      final onboardingApplication = ov['onboarding_application'] is Map
-          ? ov['onboarding_application'] as Map
-          : (ov['pending_application'] is Map
-              ? ov['pending_application'] as Map
-              : null);
       return RefreshIndicator(
         onRefresh: widget.onRefreshOverview,
         child: SingleChildScrollView(
@@ -1602,7 +1641,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
           children: [
             // Prospect Reservation Banner(s) — parity: OverviewTab.jsx:903-1079
             if (reservations.isNotEmpty) ...[
-              _buildReservationBanners(context, reservations),
+              _buildReservationBanners(context, reservations,
+                  showActionButton: onboardingApplication == null),
             ],
 
             // Active Resident Apartment Hero Banner (parity: OverviewTab.jsx:1089-1205)
@@ -1686,8 +1726,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         color: Colors.white,
                       ),
                     ),
-                    if (buildingName.isNotEmpty ||
-                        buildingAddress.isNotEmpty) ...[
+                    if (buildingName.isNotEmpty || buildingAddress.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1732,8 +1771,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(8),
-                                border:
-                                    Border.all(color: const Color(0x33FFFFFF)),
+                                border: Border.all(
+                                    color: const Color(0x33FFFFFF)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -1789,10 +1828,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                           _heroSpec(
                             LucideIcons.bedDouble,
                             'Loại phòng',
-                            (contract['apartment_type']
-                                        ?.toString()
-                                        .trim()
-                                        .isNotEmpty ??
+                            (contract['apartment_type']?.toString().trim().isNotEmpty ??
                                     false)
                                 ? contract['apartment_type'].toString().trim()
                                 : (contract['bedrooms'] != null
@@ -2333,8 +2369,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
               AppBadge(
-                variant:
-                    isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                variant: isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
                 label: period.isNotEmpty ? 'Kỳ $period' : 'Phí phạt tất toán',
               ),
               StatusBadge(status: status, domain: StatusDomain.invoice),
@@ -2349,9 +2384,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Hạn thanh toán:',
                 style: TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 12,
-                    color: AppColors.slate500),
+                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
               ),
               Text(
                 formatDate(invoice['due_date']),
@@ -2370,9 +2403,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Đã trả:',
                 style: TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 12,
-                    color: AppColors.slate500),
+                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
               ),
               Text(
                 formatMoney(paid),
@@ -2442,8 +2473,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final hotline = contact['technical_hotline']?.toString().trim() ?? '';
     final hours = contact['working_hours']?.toString().trim() ?? '';
 
-    const labelStyle =
-        TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
+    const labelStyle = TextStyle(
+        fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
 
     return AppCard(
       key: const Key('resident-manager-support-card'),
@@ -2476,8 +2507,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                if (phone.isNotEmpty)
-                  Text('SĐT Quản lý: $phone', style: labelStyle),
+                if (phone.isNotEmpty) Text('SĐT Quản lý: $phone', style: labelStyle),
                 if (email.isNotEmpty) Text('Email: $email', style: labelStyle),
                 Text(
                   'Hotline KT: ${hotline.isEmpty ? '1900 6868' : hotline}',

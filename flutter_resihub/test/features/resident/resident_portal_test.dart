@@ -382,7 +382,7 @@ void main() {
       expect(find.textContaining('P.302'), findsWidgets);
       expect(find.textContaining('Tòa Sapphire'), findsWidgets);
       // Check apply button
-      expect(find.textContaining('Nộp hồ sơ thuê'), findsWidgets);
+      expect(find.textContaining('Đăng ký thông tin nhận nhà'), findsWidgets);
     });
 
     testWidgets(
