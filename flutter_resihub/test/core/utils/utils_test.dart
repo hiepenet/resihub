@@ -89,6 +89,17 @@ void main() {
       expect(getCurrentPeriod(DateTime(2026, 1, 5)), equals('2026-01'));
     });
 
+    test('getCurrentPeriod uses Asia/Ho_Chi_Minh (UTC+7), not device local time', () {
+      // UTC 2026-11-30 20:00 -> +7 = 2026-12-01 -> period flips to 2026-12.
+      expect(getCurrentPeriod(DateTime.utc(2026, 11, 30, 20, 0)), equals('2026-12'));
+      // UTC 2026-10-31 20:00 -> +7 = 2026-11-01 -> period flips to 2026-11.
+      expect(getCurrentPeriod(DateTime.utc(2026, 10, 31, 20, 0)), equals('2026-11'));
+      // UTC 2026-11-16 18:00 -> +7 = 2026-11-17 01:00 -> still 2026-11.
+      expect(getCurrentPeriod(DateTime.utc(2026, 11, 16, 18, 0)), equals('2026-11'));
+      // Local 2026-11-17 01:00 -> still 2026-11 after UTC+7 normalization.
+      expect(getCurrentPeriod(DateTime(2026, 11, 17, 1, 0)), equals('2026-11'));
+    });
+
     test('maskPhone masks middle digits', () {
       expect(maskPhone(null), equals('—'));
       expect(maskPhone(''), equals('—'));

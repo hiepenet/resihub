@@ -397,17 +397,17 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
       case 'MISSING_METER':
         return const AppBadge(label: 'Chọn công tơ', variant: AppBadgeVariant.amber, dot: true);
       case 'LOCKED_BILLED':
-        return const AppBadge(label: 'Đã khóa HĐ', variant: AppBadgeVariant.slate, icon: Icon(LucideIcons.lock, size: 10));
+        return const AppBadge(label: 'Đã lập HĐ', variant: AppBadgeVariant.slate, icon: Icon(LucideIcons.lock, size: 10));
       case 'DUPLICATE_METER_TARGET':
         return const AppBadge(label: 'Trùng công tơ', variant: AppBadgeVariant.red, dot: true);
       case 'MISSING_READING':
-        return const AppBadge(label: 'Chưa có số', variant: AppBadgeVariant.amber, dot: true);
+        return const AppBadge(label: 'Chưa có số mới', variant: AppBadgeVariant.amber, dot: true);
       case 'INVALID_READING':
         return const AppBadge(label: 'Nhỏ hơn số cũ', variant: AppBadgeVariant.red, dot: true);
       case 'READY_ABNORMAL':
         return AppBadge(label: 'Biến động >${widget.anomalyThresholdPct}%', variant: AppBadgeVariant.amber, dot: true);
       case 'READY':
-        return const AppBadge(label: 'Sẵn sàng', variant: AppBadgeVariant.emerald, dot: true);
+        return const AppBadge(label: 'Sẵn sàng lưu', variant: AppBadgeVariant.emerald, dot: true);
       default:
         return const SizedBox.shrink();
     }

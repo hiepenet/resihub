@@ -99,9 +99,10 @@ String formatRelativeTime(dynamic dateVal, {DateTime? now}) {
 /// Chuẩn hóa ngày cho input date (`YYYY-MM-DD`).
 String toInputDate(dynamic dateVal) => toDateOnlyStr(dateVal);
 
-/// Lấy chu kỳ hiện tại dạng `YYYY-MM`.
+/// Lấy chu kỳ hiện tại dạng `YYYY-MM` theo giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7).
 String getCurrentPeriod([DateTime? now]) {
-  final dt = now ?? DateTime.now();
+  // Vietnam has no DST, so UTC+7 is exact. Mirrors React's Asia/Ho_Chi_Minh format.
+  final dt = (now ?? DateTime.now()).toUtc().add(const Duration(hours: 7));
   final year = dt.year.toString().padLeft(4, '0');
   final month = dt.month.toString().padLeft(2, '0');
   return '$year-$month';

@@ -62,7 +62,7 @@ const Map<String, ({String label, AppBadgeVariant variant})> kAgingLabels = {
   'current_not_due': (label: 'Chưa đến hạn', variant: AppBadgeVariant.slate),
   '0_15': (label: '0–15 ngày', variant: AppBadgeVariant.emerald),
   '16_30': (label: '16–30 ngày', variant: AppBadgeVariant.amber),
-  '31_60': (label: '31–60 ngày', variant: AppBadgeVariant.indigo),
+  '31_60': (label: '31–60 ngày', variant: AppBadgeVariant.amber),
   'over_60': (label: '>60 ngày', variant: AppBadgeVariant.red),
 };
 
@@ -627,7 +627,7 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
       const CsvHeader(label: 'Mã hóa đơn', key: 'invoice_code'),
       CsvHeader(label: 'Hạn thanh toán', key: 'due_date', accessor: (r) => formatDate(r['due_date'])),
       const CsvHeader(label: 'Số ngày quá hạn', key: 'days_overdue'),
-      CsvHeader(label: 'Nhóm tuổi nợ', key: 'days_overdue', accessor: (r) => kAgingLabels[resolvePrdAgingBucket(r['days_overdue'])]?.label ?? 'Chưa đến hạn'),
+      CsvHeader(label: 'Nhóm tuổi nợ (AC-016.1)', key: 'days_overdue', accessor: (r) => kAgingLabels[resolvePrdAgingBucket(r['days_overdue'])]?.label ?? 'Chưa đến hạn'),
       const CsvHeader(label: 'Phải thu (VNĐ)', key: 'amount'),
       const CsvHeader(label: 'Đã thu (VNĐ)', key: 'paid_amount'),
       const CsvHeader(label: 'Dư nợ còn lại (VNĐ)', key: 'balance'),
@@ -1296,6 +1296,15 @@ class _PaymentsPageState extends ConsumerState<PaymentsPage> {
                   render: (row) {
                     final bucketKey = resolvePrdAgingBucket(row['days_overdue']);
                     final meta = kAgingLabels[bucketKey] ?? kAgingLabels['current_not_due']!;
+                    if (bucketKey == '31_60') {
+                      // Orange 31–60 day bucket, matching the React dashboard/chart palette.
+                      return const AppBadge(
+                        label: '31–60 ngày',
+                        customBgColor: Color(0xFFFFF7ED),
+                        customTextColor: Color(0xFFC2410C),
+                        customBorderColor: Color(0xFFFED7AA),
+                      );
+                    }
                     return AppBadge(label: meta.label, variant: meta.variant);
                   },
                 ),

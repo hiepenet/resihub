@@ -382,8 +382,8 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                       AppCardHeader(
                         title: 'Biểu đồ doanh thu ($_months kỳ gần nhất)',
                         subtitle: _revenueMode == 'trend'
-                            ? 'Xu hướng doanh thu phát hành (ISSUED), tất toán & thực thu theo kỳ'
-                            : 'Cơ cấu doanh thu phát hành theo nguồn: Thuê phòng, Điện, Nước, Dịch vụ & Khác',
+                            ? 'Xu hướng doanh thu phát hành (ISSUED), tất toán & thực thu theo kỳ (PRD 15.1 & 15.3)'
+                            : 'Cơ cấu doanh thu phát hành theo nguồn: Tiền thuê phòng, Điện, Nước, Dịch vụ & Khác (RP-01)',
                         action: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -425,7 +425,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                                 icon: LucideIcons.barChart3,
                                 title: 'Chưa phát sinh doanh thu trong giai đoạn này',
                                 description:
-                                    'Biểu đồ sẽ hiển thị ngay khi có hóa đơn phát hành hoặc thanh toán.',
+                                    'Biểu đồ sẽ hiển thị ngay khi có hóa đơn phát hành hoặc giao dịch thanh toán được xác nhận.',
                                 action: AppButton(
                                   text: 'Quản lý hóa đơn',
                                   variant: AppButtonVariant.outline,
