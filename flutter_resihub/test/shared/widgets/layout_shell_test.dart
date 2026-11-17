@@ -62,8 +62,18 @@ class _FakeAuthService extends Fake implements AuthService {
 
 class _FakeBuildingsService extends Fake implements BuildingsService {
   List<Map<String, dynamic>> mockList = [
-    {'id': 'bld-1', 'code': 'B01', 'name': 'Tòa Diamond', 'address': '123 Cầu Giấy'},
-    {'id': 'bld-2', 'code': 'B02', 'name': 'Tòa Sapphire', 'address': '456 Mỹ Đình'},
+    {
+      'id': 'bld-1',
+      'code': 'B01',
+      'name': 'Tòa Diamond',
+      'address': '123 Cầu Giấy'
+    },
+    {
+      'id': 'bld-2',
+      'code': 'B02',
+      'name': 'Tòa Sapphire',
+      'address': '456 Mỹ Đình'
+    },
   ];
 
   @override
@@ -93,7 +103,8 @@ Widget _wrapWithScope({
   return ProviderScope(
     overrides: [
       appStorageProvider.overrideWithValue(storage),
-      notificationsServiceProvider.overrideWithValue(_FakeNotificationsService()),
+      notificationsServiceProvider
+          .overrideWithValue(_FakeNotificationsService()),
       authServiceProvider.overrideWithValue(_FakeAuthService()),
       if (buildingsService != null)
         buildingsServiceProvider.overrideWithValue(buildingsService),
@@ -119,7 +130,8 @@ void main() {
   });
 
   group('1. SidebarWidget Role-Based Menu Filtering & Navigation', () {
-    testWidgets('SYS_ADMIN sees all 14 nav items across 4 groups', (tester) async {
+    testWidgets('SYS_ADMIN sees all 14 nav items across 4 groups',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-sysadmin-token');
@@ -157,7 +169,8 @@ void main() {
       expect(find.text('Quản trị hệ thống'), findsOneWidget);
     });
 
-    testWidgets('OWNER sees 13 nav items (audit-logs included, users excluded)', (tester) async {
+    testWidgets('OWNER sees 13 nav items (audit-logs included, users excluded)',
+        (tester) async {
       final user = _createUserWithRole('OWNER');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-owner-token');
@@ -182,7 +195,8 @@ void main() {
       expect(find.text('Chủ đầu tư'), findsOneWidget);
     });
 
-    testWidgets('MANAGER sees 12 nav items (audit-logs and users excluded)', (tester) async {
+    testWidgets('MANAGER sees 12 nav items (audit-logs and users excluded)',
+        (tester) async {
       final user = _createUserWithRole('MANAGER');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-manager-token');
@@ -208,7 +222,8 @@ void main() {
       expect(find.text('Quản lý tòa nhà'), findsOneWidget);
     });
 
-    testWidgets('Sidebar highlights active route and fires onNavigate callback', (tester) async {
+    testWidgets('Sidebar highlights active route and fires onNavigate callback',
+        (tester) async {
       final user = _createUserWithRole('MANAGER');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -238,7 +253,9 @@ void main() {
       expect(navigatedRoute, '/admin/invoices');
     });
 
-    testWidgets('Sidebar toggle collapse button immediately changes rendered width and persists in AppStorage', (tester) async {
+    testWidgets(
+        'Sidebar toggle collapse button immediately changes rendered width and persists in AppStorage',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -280,7 +297,9 @@ void main() {
   });
 
   group('2. TopBar Reactive Building Selector & User Actions', () {
-    testWidgets('TopBar renders building selector with placeholder when multiple buildings exist', (tester) async {
+    testWidgets(
+        'TopBar renders building selector with placeholder when multiple buildings exist',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -307,7 +326,9 @@ void main() {
       expect(find.byType(NotificationBell), findsOneWidget);
     });
 
-    testWidgets('TopBar allows selecting building and switching back to all buildings', (tester) async {
+    testWidgets(
+        'TopBar allows selecting building and switching back to all buildings',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -363,7 +384,9 @@ void main() {
       expect(capturedRef.read(authProvider).selectedBuildingId, '');
     });
 
-    testWidgets('TopBar auto-syncs selectedBuildingId when list changes to single building', (tester) async {
+    testWidgets(
+        'TopBar auto-syncs selectedBuildingId when list changes to single building',
+        (tester) async {
       final user = _createUserWithRole('MANAGER', buildingId: 'bld-1');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -395,7 +418,9 @@ void main() {
       expect(capturedRef.read(authProvider).selectedBuildingId, 'bld-1');
     });
 
-    testWidgets('TopBar auto-resets selectedBuildingId when current selection is not in list', (tester) async {
+    testWidgets(
+        'TopBar auto-resets selectedBuildingId when current selection is not in list',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -429,7 +454,9 @@ void main() {
       expect(capturedRef.read(authProvider).selectedBuildingId, '');
     });
 
-    testWidgets('TopBar profile button opens ProfileModal and logout button clears session', (tester) async {
+    testWidgets(
+        'TopBar profile button opens ProfileModal and logout button clears session',
+        (tester) async {
       final user = _createUserWithRole('SYS_ADMIN');
       await storage.setUser(user.toJson());
       await storage.setTokens(accessToken: 'mock-token');
@@ -478,7 +505,8 @@ void main() {
   });
 
   group('3. AdminShell Desktop vs Mobile Layout', () {
-    testWidgets('AdminShell renders persistent Sidebar on desktop (1280px)', (tester) async {
+    testWidgets('AdminShell renders persistent Sidebar on desktop (1280px)',
+        (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -508,7 +536,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('AdminShell uses Drawer on mobile (375px) and opens via hamburger button', (tester) async {
+    testWidgets(
+        'AdminShell uses Drawer on mobile (375px) and opens via hamburger button',
+        (tester) async {
       tester.view.physicalSize = const Size(375, 667);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -547,7 +577,8 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('AdminShell wraps child in SelectionArea for web text copying', (tester) async {
+    testWidgets('AdminShell wraps child in SelectionArea for web text copying',
+        (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -574,13 +605,27 @@ void main() {
     });
   });
 
-  group('4. ResidentShell 3-Tier Responsive Breakpoints & Multi-Contract Switcher', () {
+  group(
+      '4. ResidentShell 3-Tier Responsive Breakpoints & Multi-Contract Switcher',
+      () {
     final mockContracts = [
-      {'contract_id': 'c-101', 'apartment_code': 'A101', 'building_name': 'Tòa Diamond', 'is_future_contract': false},
-      {'contract_id': 'c-202', 'apartment_code': 'B202', 'building_name': 'Tòa Sapphire', 'is_future_contract': true},
+      {
+        'contract_id': 'c-101',
+        'apartment_code': 'A101',
+        'building_name': 'Tòa Diamond',
+        'is_future_contract': false
+      },
+      {
+        'contract_id': 'c-202',
+        'apartment_code': 'B202',
+        'building_name': 'Tòa Sapphire',
+        'is_future_contract': true
+      },
     ];
 
-    testWidgets('Desktop (1280px) renders left 8-tab sidebar and multi-contract switcher', (tester) async {
+    testWidgets(
+        'Desktop (1280px) renders left 8-tab sidebar and multi-contract switcher',
+        (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -619,7 +664,8 @@ void main() {
       expect(find.text('Hồ sơ cá nhân'), findsOneWidget);
 
       // Multi-contract switcher is visible (contracts.length > 1)
-      expect(find.byKey(const Key('resident-contract-switcher')), findsOneWidget);
+      expect(
+          find.byKey(const Key('resident-contract-switcher')), findsOneWidget);
       await tester.tap(find.byKey(const Key('resident-contract-switcher')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Căn B202 — Tòa Sapphire').last);
@@ -636,7 +682,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('Tablet (800px) renders horizontal scrollable tab bar and no bottom nav', (tester) async {
+    testWidgets(
+        'Tablet (800px) renders horizontal scrollable tab bar and no bottom nav',
+        (tester) async {
       tester.view.physicalSize = const Size(800, 1024);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -663,7 +711,8 @@ void main() {
       await tester.pumpAndSettle();
 
       // Horizontal tab strip is visible
-      expect(find.byKey(const Key('resident-horizontal-tabs')), findsOneWidget);
+      expect(
+          find.byKey(const Key('resident-mobile-tab-strip')), findsOneWidget);
       // Apartment badge rendered since contracts.length <= 1
       expect(find.text('Căn A101 — Tòa Diamond'), findsOneWidget);
       // Contract switcher not rendered since contracts.length <= 1
@@ -673,7 +722,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('Mobile (375px) renders 5-slot BottomNav and "Thêm" opens 4-tab bottom sheet', (tester) async {
+    testWidgets(
+        'Mobile (375px) renders 5-slot BottomNav and "Thêm" opens 4-tab bottom sheet',
+        (tester) async {
       tester.view.physicalSize = const Size(375, 667);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -706,11 +757,11 @@ void main() {
       // BottomNav is visible on mobile
       expect(find.byKey(const Key('resident-bottom-nav')), findsOneWidget);
 
-      // 4 primary tabs: Tổng quan, Hóa đơn, Báo hỏng, Dịch vụ + Thêm
+      // 4 primary tabs in both the strip and bottom nav: Tổng quan, Hóa đơn, Báo hỏng, Dịch vụ + Thêm
       expect(find.text('Tổng quan'), findsWidgets);
-      expect(find.text('Hóa đơn'), findsOneWidget);
-      expect(find.text('Báo hỏng'), findsOneWidget);
-      expect(find.text('Dịch vụ'), findsOneWidget);
+      expect(find.text('Hóa đơn'), findsWidgets);
+      expect(find.text('Báo hỏng'), findsWidgets);
+      expect(find.text('Dịch vụ'), findsWidgets);
       expect(find.text('Thêm'), findsOneWidget);
 
       // Tap on 'Thêm' button to open bottom sheet
@@ -732,12 +783,15 @@ void main() {
       expect(find.text('Current Tab: contract'), findsOneWidget);
 
       // Now that active tab is 'contract' (secondary tab), the 5th bottom nav slot highlights and shows 'Hợp đồng'
-      expect(find.text('Hợp đồng'), findsOneWidget);
+      // (also present in the horizontal strip)
+      expect(find.text('Hợp đồng'), findsWidgets);
 
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('ResidentShell wraps child in SelectionArea for web text copying', (tester) async {
+    testWidgets(
+        'ResidentShell wraps child in SelectionArea for web text copying',
+        (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -763,6 +817,70 @@ void main() {
 
       expect(find.byType(SelectionArea), findsOneWidget);
       expect(find.text('INV-2026-001'), findsOneWidget);
+    });
+
+    testWidgets('mobile width shows tab strip and bottom nav', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final user = _createUserWithRole('RESIDENT');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      await tester.pumpWidget(
+        _wrapWithScope(
+          storage: storage,
+          user: user,
+          child: ResidentShell(
+            activeTab: 'overview',
+            onTabSelected: (_) {},
+            contracts: const [],
+            child: const Text('Mobile Content'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+          find.byKey(const Key('resident-mobile-tab-strip')), findsOneWidget);
+      expect(find.byKey(const Key('resident-bottom-nav')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('tablet width shows strip only, desktop shows sidebar',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final user = _createUserWithRole('RESIDENT');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      await tester.pumpWidget(
+        _wrapWithScope(
+          storage: storage,
+          user: user,
+          child: ResidentShell(
+            activeTab: 'overview',
+            onTabSelected: (_) {},
+            contracts: const [],
+            child: const Text('Responsive Content'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+          find.byKey(const Key('resident-mobile-tab-strip')), findsOneWidget);
+      expect(find.byKey(const Key('resident-bottom-nav')), findsNothing);
+
+      tester.view.physicalSize = const Size(1440, 900);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('resident-mobile-tab-strip')), findsNothing);
+      expect(tester.takeException(), isNull);
     });
   });
 }

@@ -83,10 +83,13 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       final state = GoRouterState.of(context);
       final queryParams = state.uri.queryParameters;
       final qTab = queryParams['tab'];
-      if (qTab != null && kValidResidentTabs.contains(qTab) && widget.initialTab == null) {
+      if (qTab != null &&
+          kValidResidentTabs.contains(qTab) &&
+          widget.initialTab == null) {
         _activeTab = qTab;
       }
-      final qContractId = queryParams['contract_id'] ?? queryParams['target_contract_id'];
+      final qContractId =
+          queryParams['contract_id'] ?? queryParams['target_contract_id'];
       if (qContractId != null &&
           qContractId.isNotEmpty &&
           widget.contractId == null &&
@@ -106,7 +109,13 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   }
 
   void _computeOpenRequests(List<dynamic> rows) {
-    const openStatuses = {'NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'};
+    const openStatuses = {
+      'NEW',
+      'ASSIGNED',
+      'IN_PROGRESS',
+      'ON_HOLD',
+      'REOPENED'
+    };
     final count = rows.where((r) {
       if (r is Map) {
         final st = r['status']?.toString().toUpperCase();
@@ -141,8 +150,10 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       if (mounted) {
         setState(() {
           if (ovData != null) {
-            final activeContract = ovData['active_contract'] ?? ovData['contract'];
-            final contactConfig = ovData['contact_config'] ?? ovData['manager_contact'];
+            final activeContract =
+                ovData['active_contract'] ?? ovData['contract'];
+            final contactConfig =
+                ovData['contact_config'] ?? ovData['manager_contact'];
             _overview = {
               ...ovData,
               if (activeContract != null) 'active_contract': activeContract,
@@ -151,7 +162,9 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
 
             // Set initial selected contract id if not already selected
             if (_selectedContractId == null || _selectedContractId!.isEmpty) {
-              final firstCid = activeContract is Map ? activeContract['contract_id']?.toString() : null;
+              final firstCid = activeContract is Map
+                  ? activeContract['contract_id']?.toString()
+                  : null;
               if (firstCid != null) {
                 _selectedContractId = firstCid;
               }
@@ -167,7 +180,8 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       }
     } catch (err) {
       if (mounted) {
-        final msg = extractErrorMessage(err, 'Không thể tải dữ liệu Cổng cư dân.');
+        final msg =
+            extractErrorMessage(err, 'Không thể tải dữ liệu Cổng cư dân.');
         setState(() {
           _error = msg;
           _loading = false;
@@ -199,16 +213,21 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     final c = _overview?['active_contract'] ?? _overview?['contract'];
     final rList = _overview?['reservations'] is List
         ? _overview!['reservations'] as List
-        : (_overview?['reservation'] != null ? [_overview!['reservation']] : const []);
-    final r = rList.isNotEmpty && rList.first is Map ? rList.first as Map : null;
+        : (_overview?['reservation'] != null
+            ? [_overview!['reservation']]
+            : const []);
+    final r =
+        rList.isNotEmpty && rList.first is Map ? rList.first as Map : null;
     final extraRsv = rList.length > 1 ? ' (+${rList.length - 1})' : '';
-    final app = _overview?['onboarding_application'] ?? _overview?['pending_application'];
+    final app = _overview?['onboarding_application'] ??
+        _overview?['pending_application'];
 
     final cApt = c is Map ? c['apartment_code']?.toString() : null;
     final cBld = c is Map ? c['building_name']?.toString() : null;
     final rApt = r?['apartment_code']?.toString();
     final rBld = r?['building_name']?.toString();
-    final appApt = app is Map ? app['desired_apartment_code']?.toString() : null;
+    final appApt =
+        app is Map ? app['desired_apartment_code']?.toString() : null;
     final appBld = app is Map ? app['desired_building_name']?.toString() : null;
 
     if (cApt != null && rApt != null) {
@@ -242,7 +261,8 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(LucideIcons.alertCircle, size: 48, color: AppColors.rose500),
+                const Icon(LucideIcons.alertCircle,
+                    size: 48, color: AppColors.rose500),
                 const SizedBox(height: 12),
                 const Text(
                   'Không thể kết nối dữ liệu Cổng cư dân',
@@ -257,7 +277,8 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
                 Text(
                   _error,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 13, color: AppColors.slate500),
+                  style:
+                      const TextStyle(fontSize: 13, color: AppColors.slate500),
                 ),
                 const SizedBox(height: 16),
                 AppButton(
@@ -340,8 +361,13 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   Widget build(BuildContext context) {
     final rawContracts = _overview?['active_contracts'] is List
         ? _overview!['active_contracts'] as List
-        : (_overview?['contracts'] is List ? _overview!['contracts'] as List : const []);
-    final contracts = rawContracts.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        : (_overview?['contracts'] is List
+            ? _overview!['contracts'] as List
+            : const []);
+    final contracts = rawContracts
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
 
     return ResidentShell(
       activeTab: _activeTab,
@@ -350,9 +376,6 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       selectedContractId: _selectedContractId,
       onContractChanged: _handleSelectContract,
       apartmentBadge: _computeApartmentBadge(),
-      badgeCounts: {
-        'maintenance': _openRequestsCount,
-      },
       child: _buildTabContent(),
     );
   }

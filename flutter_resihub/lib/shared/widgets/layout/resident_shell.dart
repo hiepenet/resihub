@@ -13,8 +13,8 @@ import '../ui/app_select.dart';
 
 /// 3-Tier Responsive Resident Shell matching `ResidentLayout.jsx`.
 /// - Desktop (>= 1024px): Left 8-tab sidebar + apartment switcher
-/// - Tablet (768..1023px): Top sticky horizontal tab strip of all 8 tabs
-/// - Mobile (< 768px): 5-slot Bottom Navigation Bar (4 primary tabs + 'Thêm' modal sheet)
+/// - Tablet (768..1023px): Sticky horizontal tab strip of all 8 tabs
+/// - Mobile (< 768px): Same strip plus 5-slot Bottom Navigation Bar (4 primary tabs + 'Thêm')
 class ResidentShell extends ConsumerStatefulWidget {
   final Widget child;
   final String activeTab;
@@ -125,7 +125,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(LucideIcons.x, size: 18, color: AppColors.slate400),
+                      icon: const Icon(LucideIcons.x,
+                          size: 18, color: AppColors.slate400),
                       onPressed: () => Navigator.of(sheetContext).pop(),
                     ),
                   ],
@@ -147,12 +148,15 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       },
                       borderRadius: BorderRadius.circular(12),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 12),
                         decoration: BoxDecoration(
                           color: isActive ? AppColors.primary50 : Colors.white,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: isActive ? AppColors.primary200 : AppColors.slate200,
+                            color: isActive
+                                ? AppColors.primary200
+                                : AppColors.slate200,
                           ),
                         ),
                         child: Row(
@@ -161,13 +165,17 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                               width: 36,
                               height: 36,
                               decoration: BoxDecoration(
-                                color: isActive ? AppColors.primary500 : AppColors.slate100,
+                                color: isActive
+                                    ? AppColors.primary500
+                                    : AppColors.slate100,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Icon(
                                 t.icon,
                                 size: 18,
-                                color: isActive ? Colors.white : AppColors.slate600,
+                                color: isActive
+                                    ? Colors.white
+                                    : AppColors.slate600,
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -177,14 +185,19 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                 style: TextStyle(
                                   fontFamily: 'Inter',
                                   fontSize: 14,
-                                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
-                                  color: isActive ? AppColors.primary700 : AppColors.slate800,
+                                  fontWeight: isActive
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
+                                  color: isActive
+                                      ? AppColors.primary700
+                                      : AppColors.slate800,
                                 ),
                               ),
                             ),
                             if (unread > 0) ...[
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 2),
                                 decoration: BoxDecoration(
                                   color: AppColors.rose500,
                                   borderRadius: BorderRadius.circular(10),
@@ -221,7 +234,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                   },
                   borderRadius: BorderRadius.circular(12),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
                     decoration: BoxDecoration(
                       color: AppColors.rose50,
                       borderRadius: BorderRadius.circular(12),
@@ -275,8 +289,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final isDesktop = width >= 1024;
-    final isTablet = width >= 768 && width < 1024;
     final isMobile = width < 768;
+    final isCompactUp = width >= 640;
 
     final authState = ref.watch(authProvider);
     final user = authState.user;
@@ -289,7 +303,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
     );
 
     final router = GoRouter.maybeOf(context);
-    final canGoBack = (router != null && router.canPop()) || widget.activeTab != 'overview';
+    final canGoBack =
+        (router != null && router.canPop()) || widget.activeTab != 'overview';
 
     final contractOptions = widget.contracts.map((c) {
       final apt = c['apartment_code']?.toString() ?? '';
@@ -326,7 +341,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       children: [
                         IconButton(
                           icon: const Icon(LucideIcons.arrowLeft, size: 20),
-                          color: canGoBack ? AppColors.slate700 : AppColors.slate300,
+                          color: canGoBack
+                              ? AppColors.slate700
+                              : AppColors.slate300,
                           onPressed: canGoBack ? _handleBack : null,
                           tooltip: 'Quay lại trang trước',
                         ),
@@ -337,13 +354,17 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(10),
                             gradient: const LinearGradient(
-                              colors: [AppColors.primary500, AppColors.secondary600],
+                              colors: [
+                                AppColors.primary500,
+                                AppColors.secondary600
+                              ],
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
                             ),
                           ),
                           child: const Center(
-                            child: Icon(LucideIcons.home, size: 18, color: Colors.white),
+                            child: Icon(LucideIcons.home,
+                                size: 18, color: Colors.white),
                           ),
                         ),
                         const SizedBox(width: 8),
@@ -369,11 +390,13 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                     ),
                                     const SizedBox(width: 6),
                                     Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 6, vertical: 1),
                                       decoration: BoxDecoration(
                                         color: AppColors.primary50,
                                         borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(color: AppColors.primary100),
+                                        border: Border.all(
+                                            color: AppColors.primary100),
                                       ),
                                       child: const Text(
                                         'Cổng cư dân',
@@ -388,22 +411,29 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                   ],
                                 ),
                               ),
-                              if (!isMobile && widget.contracts.length > 1) ...[
+                              if (isCompactUp &&
+                                  widget.contracts.length > 1) ...[
                                 const SizedBox(height: 4),
                                 ConstrainedBox(
-                                  constraints: const BoxConstraints(maxWidth: 320),
+                                  constraints:
+                                      const BoxConstraints(maxWidth: 320),
                                   child: KeyedSubtree(
-                                    key: const Key('resident-contract-switcher'),
+                                    key:
+                                        const Key('resident-contract-switcher'),
                                     child: AppSelect<String>(
                                       value: widget.selectedContractId ??
                                           (widget.contracts.isNotEmpty
-                                              ? widget.contracts.first['contract_id']?.toString()
+                                              ? widget.contracts
+                                                  .first['contract_id']
+                                                  ?.toString()
                                               : null),
                                       options: contractOptions,
                                       searchable: widget.contracts.length > 3,
-                                      searchPlaceholder: 'Tìm mã căn hộ, tòa nhà...',
+                                      searchPlaceholder:
+                                          'Tìm mã căn hộ, tòa nhà...',
                                       icon: const Icon(LucideIcons.building2,
-                                          size: 16, color: AppColors.primary600),
+                                          size: 16,
+                                          color: AppColors.primary600),
                                       onChanged: (val) {
                                         if (val != null) {
                                           widget.onContractChanged?.call(val);
@@ -450,13 +480,14 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       NotificationBell(
                         onViewAll: () => widget.onTabSelected('notifications'),
                       ),
-                      if (!isMobile) ...[
+                      if (isCompactUp) ...[
                         const SizedBox(width: 8),
                         InkWell(
                           onTap: () => widget.onTabSelected('profile'),
                           borderRadius: BorderRadius.circular(10),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
                             child: Row(
                               children: [
                                 Container(
@@ -484,7 +515,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                 ),
                                 const SizedBox(width: 6),
                                 ConstrainedBox(
-                                  constraints: const BoxConstraints(maxWidth: 140),
+                                  constraints:
+                                      const BoxConstraints(maxWidth: 140),
                                   child: Text(
                                     user?.fullName ?? 'Cư dân',
                                     maxLines: 1,
@@ -504,7 +536,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       ],
                       const SizedBox(width: 4),
                       IconButton(
-                        icon: const Icon(LucideIcons.logOut, size: 18, color: AppColors.slate500),
+                        icon: const Icon(LucideIcons.logOut,
+                            size: 18, color: AppColors.slate500),
                         onPressed: _handleLogout,
                         tooltip: 'Đăng xuất',
                       ),
@@ -514,10 +547,11 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
               ),
             ),
 
-            // Mobile Contract Switcher (< 768px, matching ResidentLayout.jsx:182)
-            if (isMobile && widget.contracts.length > 1)
+            // Mobile full-width contract switcher (< 640px, matching ResidentLayout.jsx:182)
+            if (!isCompactUp && widget.contracts.length > 1)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                 decoration: const BoxDecoration(
                   color: Colors.white,
                   border: Border(
@@ -534,7 +568,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                     options: contractOptions,
                     searchable: widget.contracts.length > 3,
                     searchPlaceholder: 'Tìm mã căn hộ, tòa nhà...',
-                    icon: const Icon(LucideIcons.building2, size: 16, color: AppColors.primary600),
+                    icon: const Icon(LucideIcons.building2,
+                        size: 16, color: AppColors.primary600),
                     onChanged: (val) {
                       if (val != null) {
                         widget.onContractChanged?.call(val);
@@ -544,10 +579,10 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                 ),
               ),
 
-            // Tablet Sticky Horizontal Tab Bar (768..1023px)
-            if (isTablet)
+            // Sticky horizontal tab strip (< 1024px, matching ResidentLayout.jsx:198)
+            if (!isDesktop)
               Container(
-                key: const Key('resident-horizontal-tabs'),
+                key: const Key('resident-mobile-tab-strip'),
                 decoration: const BoxDecoration(
                   color: Color(0xFFF8FAFC),
                   border: Border(
@@ -557,7 +592,8 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                 ),
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                   child: Row(
                     children: kResidentPortalTabs.map((t) {
                       final isActive = widget.activeTab == t.id;
@@ -570,12 +606,17 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                           onTap: () => widget.onTabSelected(t.id),
                           borderRadius: BorderRadius.circular(10),
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 7),
                             decoration: BoxDecoration(
-                              color: isActive ? AppColors.primary500 : Colors.white,
+                              color: isActive
+                                  ? AppColors.primary500
+                                  : Colors.white,
                               borderRadius: BorderRadius.circular(10),
                               border: Border.all(
-                                color: isActive ? AppColors.primary500 : AppColors.slate200,
+                                color: isActive
+                                    ? AppColors.primary500
+                                    : AppColors.slate200,
                               ),
                             ),
                             child: Row(
@@ -584,7 +625,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                 Icon(
                                   t.icon,
                                   size: 14,
-                                  color: isActive ? Colors.white : AppColors.slate600,
+                                  color: isActive
+                                      ? Colors.white
+                                      : AppColors.slate600,
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
@@ -592,16 +635,23 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                   style: TextStyle(
                                     fontFamily: 'Inter',
                                     fontSize: 12,
-                                    fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
-                                    color: isActive ? Colors.white : AppColors.slate700,
+                                    fontWeight: isActive
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    color: isActive
+                                        ? Colors.white
+                                        : AppColors.slate700,
                                   ),
                                 ),
                                 if (unread > 0) ...[
                                   const SizedBox(width: 6),
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 5, vertical: 1),
                                     decoration: BoxDecoration(
-                                      color: isActive ? Colors.white : AppColors.rose500,
+                                      color: isActive
+                                          ? Colors.white
+                                          : AppColors.rose500,
                                       borderRadius: BorderRadius.circular(10),
                                     ),
                                     child: Text(
@@ -609,7 +659,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                       style: TextStyle(
                                         fontSize: 10,
                                         fontWeight: FontWeight.bold,
-                                        color: isActive ? AppColors.primary600 : Colors.white,
+                                        color: isActive
+                                            ? AppColors.primary600
+                                            : Colors.white,
                                       ),
                                     ),
                                   ),
@@ -636,70 +688,85 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                       decoration: const BoxDecoration(
                         color: Colors.white,
                         border: Border(
-                          right: BorderSide(color: AppColors.slate200, width: 1),
+                          right:
+                              BorderSide(color: AppColors.slate200, width: 1),
                         ),
                       ),
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.all(12),
                         child: Column(
                           children: kResidentPortalTabs.map((t) {
-                          final isActive = widget.activeTab == t.id;
-                          final unread = t.id == 'notifications'
-                              ? (widget.badgeCounts[t.id] ?? unreadCount)
-                              : (widget.badgeCounts[t.id] ?? 0);
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            child: InkWell(
-                              onTap: () => widget.onTabSelected(t.id),
-                              borderRadius: BorderRadius.circular(10),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: isActive ? AppColors.primary500 : Colors.transparent,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Icon(
-                                      t.icon,
-                                      size: 16,
-                                      color: isActive ? Colors.white : AppColors.slate600,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Text(
-                                        t.label,
-                                        style: TextStyle(
-                                          fontFamily: 'Inter',
-                                          fontSize: 13,
-                                          fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
-                                          color: isActive ? Colors.white : AppColors.slate700,
-                                        ),
+                            final isActive = widget.activeTab == t.id;
+                            final unread = t.id == 'notifications'
+                                ? (widget.badgeCounts[t.id] ?? unreadCount)
+                                : (widget.badgeCounts[t.id] ?? 0);
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 4),
+                              child: InkWell(
+                                onTap: () => widget.onTabSelected(t.id),
+                                borderRadius: BorderRadius.circular(10),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: isActive
+                                        ? AppColors.primary500
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        t.icon,
+                                        size: 16,
+                                        color: isActive
+                                            ? Colors.white
+                                            : AppColors.slate600,
                                       ),
-                                    ),
-                                    if (unread > 0)
-                                      Container(
-                                        padding:
-                                            const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                        decoration: BoxDecoration(
-                                          color: isActive ? Colors.white : AppColors.rose500,
-                                          borderRadius: BorderRadius.circular(10),
-                                        ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
                                         child: Text(
-                                          unread > 99 ? '99+' : '$unread',
+                                          t.label,
                                           style: TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.bold,
-                                            color: isActive ? AppColors.primary600 : Colors.white,
+                                            fontFamily: 'Inter',
+                                            fontSize: 13,
+                                            fontWeight: isActive
+                                                ? FontWeight.w600
+                                                : FontWeight.w500,
+                                            color: isActive
+                                                ? Colors.white
+                                                : AppColors.slate700,
                                           ),
                                         ),
                                       ),
-                                  ],
+                                      if (unread > 0)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: isActive
+                                                ? Colors.white
+                                                : AppColors.rose500,
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                          ),
+                                          child: Text(
+                                            unread > 99 ? '99+' : '$unread',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: isActive
+                                                  ? AppColors.primary600
+                                                  : Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
                                 ),
                               ),
-                            ),
-                          );
-                        }).toList(),
+                            );
+                          }).toList(),
                         ),
                       ),
                     ),
@@ -751,7 +818,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                 Icon(
                                   t.icon,
                                   size: 20,
-                                  color: isActive ? AppColors.primary600 : AppColors.slate500,
+                                  color: isActive
+                                      ? AppColors.primary600
+                                      : AppColors.slate500,
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
@@ -759,8 +828,12 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                   style: TextStyle(
                                     fontFamily: 'Inter',
                                     fontSize: 11,
-                                    fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
-                                    color: isActive ? AppColors.primary600 : AppColors.slate500,
+                                    fontWeight: isActive
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    color: isActive
+                                        ? AppColors.primary600
+                                        : AppColors.slate500,
                                   ),
                                 ),
                               ],
@@ -791,11 +864,12 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                       top: -4,
                                       right: -6,
                                       child: Container(
-                                        padding:
-                                            const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 4, vertical: 1),
                                         decoration: BoxDecoration(
                                           color: AppColors.rose500,
-                                          borderRadius: BorderRadius.circular(8),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
                                         ),
                                         child: Text(
                                           mobileNav.moreBadgeCount > 99
@@ -819,8 +893,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
                                 style: TextStyle(
                                   fontFamily: 'Inter',
                                   fontSize: 11,
-                                  fontWeight:
-                                      mobileNav.isMoreActive ? FontWeight.w600 : FontWeight.w500,
+                                  fontWeight: mobileNav.isMoreActive
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
                                   color: mobileNav.isMoreActive
                                       ? AppColors.primary600
                                       : AppColors.slate500,
