@@ -15,6 +15,7 @@ import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/bank_select.dart';
 import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
+import '../../../shared/widgets/ui/app_card.dart';
 import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
 import '../../../shared/widgets/ui/app_select.dart';
@@ -311,7 +312,7 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                           size: AppButtonSize.sm,
                           variant: AppButtonVariant.outline,
                           icon: const Icon(LucideIcons.download, size: 14),
-                          onPressed: () => _downloadA4Html(html, cid),
+                          onPressed: () => _downloadA4Html(html),
                         ),
                       ),
                     ),
@@ -336,11 +337,16 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     }
   }
 
-  Future<void> _downloadA4Html(String html, String contractId) async {
+  Future<void> _downloadA4Html(String html) async {
     try {
+      final active =
+          widget.overview?['active_contract'] ?? widget.overview?['contract'];
+      final code = active is Map && active['apartment_code'] != null
+          ? active['apartment_code']!.toString()
+          : 'HopDong';
       await saveOrShareBytes(
         Uint8List.fromList(utf8.encode(html)),
-        fileName: 'HopDong_${contractId}_A4.html',
+        fileName: 'HopDong_${code}_A4.html',
         mimeType: 'text/html;charset=utf-8',
         shareSubject: 'Hợp đồng thuê A4',
       );
@@ -697,43 +703,6 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     );
   }
 
-  Widget _sectionCard({
-    required String title,
-    String? subtitle,
-    required List<Widget> children,
-  }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.slate200),
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              fontFamily: 'Inter',
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: AppColors.slate900,
-            ),
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 4),
-            Text(subtitle,
-                style:
-                    const TextStyle(fontSize: 12, color: AppColors.slate500)),
-          ],
-          const SizedBox(height: 12),
-          ...children,
-        ],
-      ),
-    );
-  }
-
   Widget _emptyHint(String text) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Text(text,
@@ -1004,7 +973,8 @@ class _ContractTabState extends ConsumerState<ContractTab> {
     final refundRaw = st['refund_amount'];
     final expectedRefund = refundRaw != null
         ? _signedNum(refundRaw)
-        : (_nonNegativeNum(sd['amount_held']) - serviceDebt - itemsTotal);
+        : _nonNegativeNum(
+            _nonNegativeNum(sd['amount_held']) - serviceDebt - itemsTotal);
     final rawThread =
         st['dispute_thread'] is List ? st['dispute_thread'] : st['thread'];
     final thread = asResidentMapList(rawThread);
@@ -1401,225 +1371,239 @@ class _ContractTabState extends ConsumerState<ContractTab> {
       'rejection_reason',
     };
 
-    return _sectionCard(
-      title: 'Phụ lục điều chỉnh hợp đồng',
-      subtitle: 'Các phụ lục thay đổi điều khoản đã được phê duyệt',
-      children: amendments.isEmpty
-          ? [
-              _emptyHint('Chưa có phụ lục điều chỉnh'),
-              _emptyHint(
-                  'Hợp đồng hiện giữ nguyên các điều khoản gốc từ khi ký kết.'),
-            ]
-          : amendments.map((am) {
-              final diff = am['diff'] is Map
-                  ? Map<String, dynamic>.from(am['diff'] as Map)
-                  : <String, dynamic>{};
-              final status = diff['status']?.toString();
-              final isInitial = status == 'INITIAL_SNAPSHOT';
-              final statusLabel = isInitial
-                  ? 'Hiệu lực gốc'
-                  : (status == 'APPROVED'
-                      ? 'Đã phê duyệt'
-                      : (status == 'REJECTED' ? 'Từ chối' : 'Chờ duyệt'));
-              return Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.slate50,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.slate200),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        AppBadge(
-                          label: isInitial
-                              ? 'Phiên bản gốc #${am['version_no'] ?? '—'}'
-                              : 'Phụ lục lần #${am['version_no'] ?? '—'}',
-                          variant: AppBadgeVariant.indigo,
-                        ),
-                        if (status != null)
+    return AppCard(
+      header: const AppCardHeader(
+        title: 'Phụ lục điều chỉnh hợp đồng',
+        subtitle: 'Các phụ lục thay đổi điều khoản đã được phê duyệt',
+      ),
+      padding: const EdgeInsets.all(16),
+      borderRadius: BorderRadius.circular(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: amendments.isEmpty
+            ? [
+                _emptyHint('Chưa có phụ lục điều chỉnh'),
+                _emptyHint(
+                    'Hợp đồng hiện giữ nguyên các điều khoản gốc từ khi ký kết.'),
+              ]
+            : amendments.map((am) {
+                final diff = am['diff'] is Map
+                    ? Map<String, dynamic>.from(am['diff'] as Map)
+                    : <String, dynamic>{};
+                final status = diff['status']?.toString();
+                final isInitial = status == 'INITIAL_SNAPSHOT';
+                final statusLabel = isInitial
+                    ? 'Hiệu lực gốc'
+                    : (status == 'APPROVED'
+                        ? 'Đã phê duyệt'
+                        : (status == 'REJECTED' ? 'Từ chối' : 'Chờ duyệt'));
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.slate50,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.slate200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
                           AppBadge(
-                            label: statusLabel,
-                            variant: isInitial || status == 'APPROVED'
-                                ? AppBadgeVariant.emerald
-                                : (status == 'REJECTED'
-                                    ? AppBadgeVariant.red
-                                    : AppBadgeVariant.amber),
+                            label: isInitial
+                                ? 'Phiên bản gốc #${am['version_no'] ?? '—'}'
+                                : 'Phụ lục lần #${am['version_no'] ?? '—'}',
+                            variant: AppBadgeVariant.indigo,
                           ),
-                        Text(
-                          'Hiệu lực: ${formatDate(am['effective_from'])}',
-                          style: const TextStyle(
-                              fontSize: 11, color: AppColors.slate500),
-                        ),
-                      ],
-                    ),
-                    if (am['reason'] != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(
-                          am['reason']!.toString(),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: AppColors.slate700,
+                          if (status != null)
+                            AppBadge(
+                              label: statusLabel,
+                              variant: isInitial || status == 'APPROVED'
+                                  ? AppBadgeVariant.emerald
+                                  : (status == 'REJECTED'
+                                      ? AppBadgeVariant.red
+                                      : AppBadgeVariant.amber),
+                            ),
+                          Text(
+                            'Hiệu lực: ${formatDate(am['effective_from'])}',
+                            style: const TextStyle(
+                                fontSize: 11, color: AppColors.slate500),
+                          ),
+                        ],
+                      ),
+                      if (am['reason'] != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            am['reason']!.toString(),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: AppColors.slate700,
+                            ),
                           ),
                         ),
-                      ),
-                    if (diff['rejection_reason'] != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(
-                          'Lý do từ chối: ${diff['rejection_reason']}',
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.rose700),
+                      if (diff['rejection_reason'] != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            'Lý do từ chối: ${diff['rejection_reason']}',
+                            style: const TextStyle(
+                                fontSize: 12, color: AppColors.rose700),
+                          ),
                         ),
-                      ),
-                    ...diff.entries
-                        .where((e) => !metaKeys.contains(e.key))
-                        .map((e) {
-                      final v = e.value;
-                      final isObj = v is Map;
-                      final from = isObj ? (v['old'] ?? v['from']) : null;
-                      final to = isObj ? (v['new'] ?? v['to']) : v;
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: _settlementRow(
-                          '${fieldLabels[e.key] ?? e.key}:',
-                          '${from != null ? '${_formatDiffValue(e.key, from)} → ' : ''}${_formatDiffValue(e.key, to)}',
-                        ),
-                      );
-                    }),
-                  ],
-                ),
-              );
-            }).toList(),
+                      ...diff.entries
+                          .where((e) => !metaKeys.contains(e.key))
+                          .map((e) {
+                        final v = e.value;
+                        final isObj = v is Map;
+                        final from = isObj ? (v['old'] ?? v['from']) : null;
+                        final to = isObj ? (v['new'] ?? v['to']) : v;
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: _settlementRow(
+                            '${fieldLabels[e.key] ?? e.key}:',
+                            '${from != null ? '${_formatDiffValue(e.key, from)} → ' : ''}${_formatDiffValue(e.key, to)}',
+                          ),
+                        );
+                      }),
+                    ],
+                  ),
+                );
+              }).toList(),
+      ),
     );
   }
 
   Widget _buildHistoryCard(
       List<Map<String, dynamic>> history, String? currentId) {
-    return _sectionCard(
-      title: 'Chuỗi lịch sử hợp đồng',
-      subtitle: 'Toàn bộ các kỳ hợp đồng gốc và gia hạn nối tiếp',
-      children: history.isEmpty
-          ? [
-              _emptyHint('Chưa có lịch sử hợp đồng'),
-              _emptyHint('Các hợp đồng đã ký sẽ hiển thị tại đây.'),
-            ]
-          : history.map((ch) {
-              final id =
-                  ch['id']?.toString() ?? ch['contract_id']?.toString() ?? '';
-              final shortId = id.length >= 8
-                  ? id.substring(0, 8).toUpperCase()
-                  : id.toUpperCase();
-              final parentId = ch['parent_contract_id']?.toString() ?? '';
-              final parentShort = parentId.length >= 8
-                  ? parentId.substring(0, 8).toUpperCase()
-                  : parentId.toUpperCase();
-              final isCurrent = id.isNotEmpty && id == currentId;
-              return Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isCurrent ? AppColors.primary50 : Colors.white,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(
-                    color:
-                        isCurrent ? AppColors.primary300 : AppColors.slate200,
+    return AppCard(
+      header: const AppCardHeader(
+        title: 'Chuỗi lịch sử hợp đồng',
+        subtitle: 'Toàn bộ các kỳ hợp đồng gốc và gia hạn nối tiếp',
+      ),
+      padding: const EdgeInsets.all(16),
+      borderRadius: BorderRadius.circular(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: history.isEmpty
+            ? [
+                _emptyHint('Chưa có lịch sử hợp đồng'),
+                _emptyHint('Các hợp đồng đã ký sẽ hiển thị tại đây.'),
+              ]
+            : history.map((ch) {
+                final id =
+                    ch['id']?.toString() ?? ch['contract_id']?.toString() ?? '';
+                final shortId = id.length >= 8
+                    ? id.substring(0, 8).toUpperCase()
+                    : id.toUpperCase();
+                final parentId = ch['parent_contract_id']?.toString() ?? '';
+                final parentShort = parentId.length >= 8
+                    ? parentId.substring(0, 8).toUpperCase()
+                    : parentId.toUpperCase();
+                final isCurrent = id.isNotEmpty && id == currentId;
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isCurrent ? AppColors.primary50 : Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color:
+                          isCurrent ? AppColors.primary300 : AppColors.slate200,
+                    ),
                   ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              Text(
-                                'HĐ #$shortId — Căn ${ch['apartment_code'] ?? '—'}',
-                                style: const TextStyle(
-                                  fontFamily: 'Inter',
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.slate900,
-                                ),
-                              ),
-                              _statusBadge(
-                                (ch['status'] ?? ch['contract_status'])
-                                    ?.toString(),
-                                StatusDomain.contract,
-                              ),
-                            ],
-                          ),
-                        ),
-                        AppButton(
-                          text: 'Bản in',
-                          size: AppButtonSize.xs,
-                          variant: AppButtonVariant.ghost,
-                          icon: const Icon(LucideIcons.printer, size: 13),
-                          onPressed: () => _handleViewA4Contract(id),
-                        ),
-                      ],
-                    ),
-                    if (ch['building_name'] != null)
-                      Text(
-                        ch['building_name']!.toString(),
-                        style: const TextStyle(
-                            fontSize: 11, color: AppColors.slate500),
-                      ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '${formatDate(ch['start_date'])} → ${formatDate(ch['end_date'])}'
-                      '${ch['terminated_at'] != null ? ' (Thanh lý: ${formatDate(ch['terminated_at'])})' : ''}',
-                      style: const TextStyle(
-                          fontSize: 11, color: AppColors.slate600),
-                    ),
-                    Text(
-                      '${formatMoney(ch['rent_amount'])}/tháng',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.slate800,
-                      ),
-                    ),
-                    if (ch['deposit_amount'] != null ||
-                        ch['deposit_status'] != null)
-                      Wrap(
-                        spacing: 6,
-                        crossAxisAlignment: WrapCrossAlignment.center,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'Tiền cọc: ${formatMoney(ch['deposit_amount'] ?? 0)}',
-                            style: const TextStyle(
-                                fontSize: 11, color: AppColors.slate600),
+                          Expanded(
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                Text(
+                                  'HĐ #$shortId — Căn ${ch['apartment_code'] ?? '—'}',
+                                  style: const TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.slate900,
+                                  ),
+                                ),
+                                _statusBadge(
+                                  (ch['status'] ?? ch['contract_status'])
+                                      ?.toString(),
+                                  StatusDomain.contract,
+                                ),
+                              ],
+                            ),
                           ),
-                          if (ch['deposit_status'] != null)
-                            _statusBadge(ch['deposit_status']?.toString(),
-                                StatusDomain.deposit),
+                          AppButton(
+                            text: 'Bản in',
+                            size: AppButtonSize.xs,
+                            variant: AppButtonVariant.ghost,
+                            icon: const Icon(LucideIcons.printer, size: 13),
+                            onPressed: () => _handleViewA4Contract(id),
+                          ),
                         ],
                       ),
-                    if (ch['parent_contract_id'] != null)
+                      if (ch['building_name'] != null)
+                        Text(
+                          ch['building_name']!.toString(),
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.slate500),
+                        ),
+                      const SizedBox(height: 6),
                       Text(
-                        '↳ Gia hạn / Chuyển tiếp từ HĐ #$parentShort',
+                        '${formatDate(ch['start_date'])} → ${formatDate(ch['end_date'])}'
+                        '${ch['terminated_at'] != null ? ' (Thanh lý: ${formatDate(ch['terminated_at'])})' : ''}',
                         style: const TextStyle(
-                            fontSize: 11, color: AppColors.secondary700),
+                            fontSize: 11, color: AppColors.slate600),
                       ),
-                  ],
-                ),
-              );
-            }).toList(),
+                      Text(
+                        '${formatMoney(ch['rent_amount'])}/tháng',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.slate800,
+                        ),
+                      ),
+                      if (ch['deposit_amount'] != null ||
+                          ch['deposit_status'] != null)
+                        Wrap(
+                          spacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              'Tiền cọc: ${formatMoney(ch['deposit_amount'] ?? 0)}',
+                              style: const TextStyle(
+                                  fontSize: 11, color: AppColors.slate600),
+                            ),
+                            if (ch['deposit_status'] != null)
+                              _statusBadge(ch['deposit_status']?.toString(),
+                                  StatusDomain.deposit),
+                          ],
+                        ),
+                      if (ch['parent_contract_id'] != null)
+                        Text(
+                          '↳ Gia hạn / Chuyển tiếp từ HĐ #$parentShort',
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.secondary700),
+                        ),
+                    ],
+                  ),
+                );
+              }).toList(),
+      ),
     );
   }
 
@@ -1780,11 +1764,11 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                       _buildInfoItem('Tiền cọc quy định',
                           formatMoney(contract['deposit_amount'])),
                       _buildInfoItem(
-                        'Ngày chốt kỳ',
+                        'Ngày chốt hóa đơn',
                         'Ngày ${contract['billing_day'] ?? 1} $billingCycle',
                       ),
                       _buildInfoItem(
-                        'Số ngày gia hạn thanh toán',
+                        'Hạn thanh toán',
                         '${contract['payment_due_days'] ?? 5} ngày sau phát hành',
                       ),
                     ],
@@ -1805,29 +1789,31 @@ class _ContractTabState extends ConsumerState<ContractTab> {
                             fontSize: 12, color: AppColors.slate600),
                       ),
                     ),
-                  const SizedBox(height: 16),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
-                    alignment: WrapAlignment.end,
-                    children: [
-                      AppButton(
-                        text: 'Xin gia hạn HĐ',
-                        size: AppButtonSize.sm,
-                        icon: const Icon(LucideIcons.refreshCw, size: 14),
-                        onPressed: () =>
-                            _openCreateContractRequestModal(context, 'RENEWAL'),
-                      ),
-                      AppButton(
-                        text: 'Xin chấm dứt trước hạn',
-                        size: AppButtonSize.sm,
-                        variant: AppButtonVariant.outline,
-                        icon: const Icon(LucideIcons.logOut, size: 14),
-                        onPressed: () => _openCreateContractRequestModal(
-                            context, 'TERMINATION'),
-                      ),
-                    ],
-                  ),
+                  if (isContractActive) ...[
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.end,
+                      children: [
+                        AppButton(
+                          text: 'Xin gia hạn HĐ',
+                          size: AppButtonSize.sm,
+                          icon: const Icon(LucideIcons.refreshCw, size: 14),
+                          onPressed: () => _openCreateContractRequestModal(
+                              context, 'RENEWAL'),
+                        ),
+                        AppButton(
+                          text: 'Xin chấm dứt trước hạn',
+                          size: AppButtonSize.sm,
+                          variant: AppButtonVariant.outline,
+                          icon: const Icon(LucideIcons.logOut, size: 14),
+                          onPressed: () => _openCreateContractRequestModal(
+                              context, 'TERMINATION'),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1849,11 +1835,19 @@ class _ContractTabState extends ConsumerState<ContractTab> {
 
             // Bảng kê tất toán tiền cọc (settlement detail, deductions, evidence, dispute thread)
             if (settlementDeposits.isNotEmpty) ...[
-              _sectionCard(
-                title: 'Bảng kê tất toán tiền cọc',
-                subtitle:
-                    'Chi tiết đối trừ công nợ dịch vụ, khấu trừ bàn giao và số tiền hoàn trả dự kiến / thực tế',
-                children: settlementDeposits.map(_buildSettlementCard).toList(),
+              AppCard(
+                header: const AppCardHeader(
+                  title: 'Bảng kê tất toán tiền cọc',
+                  subtitle:
+                      'Chi tiết đối trừ công nợ dịch vụ, khấu trừ bàn giao và số tiền hoàn trả dự kiến / thực tế',
+                ),
+                padding: const EdgeInsets.all(16),
+                borderRadius: BorderRadius.circular(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children:
+                      settlementDeposits.map(_buildSettlementCard).toList(),
+                ),
               ),
               const SizedBox(height: 16),
             ],

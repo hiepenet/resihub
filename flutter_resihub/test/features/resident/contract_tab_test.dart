@@ -196,10 +196,10 @@ void main() {
       },
     );
 
-    // Brief Step 1 — exact asserted strings.
+    // React ContractTab.jsx verbatim copy (controller ruling on label conflict).
     expect(find.text('Tiến trình hợp đồng'), findsOneWidget);
-    expect(find.text('Ngày chốt kỳ'), findsOneWidget);
-    expect(find.text('Số ngày gia hạn thanh toán'), findsOneWidget);
+    expect(find.text('Ngày chốt hóa đơn'), findsOneWidget);
+    expect(find.text('Hạn thanh toán'), findsOneWidget);
     expect(find.textContaining('Xin gia hạn'), findsWidgets);
     expect(find.textContaining('Xin chấm dứt'), findsWidgets);
     expect(find.text('Phụ lục điều chỉnh hợp đồng'), findsOneWidget);
