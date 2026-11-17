@@ -649,6 +649,28 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             onChanged: (val) => _billingConfig['late_fee_cap'] = val.replaceAll(RegExp(r'\D'), ''),
                           ),
                           const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: AppInput(
+                                  label: 'Ngưỡng cảnh báo chỉ số (%)',
+                                  initialValue: (_billingConfig['meter_anomaly_threshold_pct'] ?? 30).toString(),
+                                  enabled: canEdit,
+                                  onChanged: (val) => _billingConfig['meter_anomaly_threshold_pct'] = int.tryParse(val) ?? 30,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: AppInput(
+                                  label: 'Mốc ngày nhắc nợ (dấu phẩy)',
+                                  initialValue: _billingConfig['reminder_days_text']?.toString() ?? '',
+                                  enabled: canEdit,
+                                  onChanged: (val) => _billingConfig['reminder_days_text'] = val,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
                           MoneyInput(
                             label: 'Giá điện mặc định (₫/kWh)',
                             disabled: !canEdit,
@@ -715,6 +737,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             enabled: canEdit,
                             onChanged: (val) => _slaConfig['deposit_refund_days'] = int.tryParse(val) ?? 5,
                           ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Số ngày cho phép cư dân mở lại yêu cầu sau khi hoàn tất (ngày)',
+                            initialValue: (_slaConfig['reopen_window_days'] ?? 3).toString(),
+                            enabled: canEdit,
+                            onChanged: (val) => _slaConfig['reopen_window_days'] = int.tryParse(val) ?? 3,
+                          ),
                         ],
                       ),
                     ),
@@ -760,6 +789,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             initialValue: _contactConfig['security_hotline']?.toString() ?? '',
                             enabled: canEdit,
                             onChanged: (val) => _contactConfig['security_hotline'] = val,
+                          ),
+                          const SizedBox(height: 12),
+                          AppInput(
+                            label: 'Số điện thoại khẩn cấp / PCCC',
+                            initialValue: _contactConfig['emergency_phone']?.toString() ?? '',
+                            enabled: canEdit,
+                            onChanged: (val) => _contactConfig['emergency_phone'] = val,
                           ),
                           const SizedBox(height: 12),
                           AppInput(
