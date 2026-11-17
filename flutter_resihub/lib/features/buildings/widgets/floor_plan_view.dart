@@ -631,8 +631,8 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       minSpanDays: 2,
     );
 
-    final hasOverlayModal = _selectedApt != null ||
-        _resModalOpen ||
+    final hasDrawer = _selectedApt != null && !_resModalOpen;
+    final hasCenterModal = _resModalOpen ||
         _floorModalOpen ||
         _bulkModalOpen ||
         _aptModalOpen ||
@@ -1104,7 +1104,53 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
       ),
     ),
 
-    if (hasOverlayModal)
+    // Right-side Drawer overlay for Apartment Detail
+    if (hasDrawer) ...[
+      Positioned.fill(
+        child: GestureDetector(
+          onTap: () => setState(() => _selectedApt = null),
+          child: Container(
+            color: AppColors.slate900.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
+      Positioned(
+        top: 0,
+        bottom: 0,
+        right: 0,
+        width: MediaQuery.sizeOf(context).width < 500
+            ? MediaQuery.sizeOf(context).width
+            : 450,
+        child: AppModal(
+          variant: AppModalVariant.drawer,
+          onClose: () => setState(() => _selectedApt = null),
+          title: 'Căn hộ ${_selectedApt!['code']}',
+          subtitle: '${_building?['code'] ?? ''} — ${_building?['name'] ?? ''}',
+          footer: AppButton(
+            variant: AppButtonVariant.outline,
+            icon: const Icon(LucideIcons.externalLink, size: 14),
+            text: 'Mở trang chi tiết căn hộ',
+            onPressed: () {
+              final aptId = (_aptDetail ?? _selectedApt)?['id']?.toString() ?? _selectedApt!['id']?.toString();
+              if (aptId != null) context.push('/admin/apartments/$aptId');
+            },
+          ),
+          child: _buildApartmentDrawerBody(
+            drawerApt: _aptDetail ?? _selectedApt!,
+            contractsList: contractsList,
+            reservationsList: reservationsList,
+            isManager: isManager,
+            canEditRealEstate: canEditRealEstate,
+            earliestResStart: earliestResStart,
+            resBusyIntervals: resBusyIntervals,
+            maxInternalHoldDays: maxInternalHoldDays,
+            todayStr: todayStr,
+          ),
+        ),
+      ),
+    ],
+
+    if (hasCenterModal)
       Positioned.fill(
         child: Container(
           color: AppColors.slate900.withValues(alpha: 0.45),
@@ -1116,198 +1162,8 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Modal for Apartment Detail
-                  if (_selectedApt != null && !_resModalOpen)
-            AppModal(
-              onClose: () => setState(() => _selectedApt = null),
-              title: 'Căn hộ ${_selectedApt!['code']}',
-              subtitle: '${_building?['code'] ?? ''} — ${_building?['name'] ?? ''}',
-              size: AppModalSize.md,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: AppColors.slate50,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.slate200),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Trạng thái hiện tại',
-                                style: TextStyle(fontSize: 11, color: AppColors.slate500)),
-                            const SizedBox(height: 4),
-                            StatusBadge(
-                              status: (_aptDetail ?? _selectedApt)?['status']?.toString(),
-                              domain: StatusDomain.apartment,
-                            ),
-                          ],
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            const Text('Giá thuê niêm yết',
-                                style: TextStyle(fontSize: 11, color: AppColors.slate500)),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${formatMoney((_aptDetail ?? _selectedApt)?['base_rent'])}/tháng',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.primary700,
-                                  fontSize: 14),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (_detailLoading)
-                    const Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else ...[
-                    // Contracts & Reservations summary
-                    if (contractsList.isNotEmpty) ...[
-                      const Text('Hợp đồng gần nhất',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                      const SizedBox(height: 6),
-                      ...contractsList.take(2).map((c) => Container(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: AppColors.slate50,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: AppColors.slate200),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text('${c['tenant_name'] ?? 'Cư dân'} (${c['tenant_phone'] ?? ''})',
-                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                                StatusBadge(status: c['status']?.toString(), domain: StatusDomain.contract),
-                              ],
-                            ),
-                          )),
-                      const SizedBox(height: 10),
-                    ],
-                    if (reservationsList.isNotEmpty) ...[
-                      const Text('Đang giữ chỗ',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.amber900)),
-                      const SizedBox(height: 6),
-                      ...reservationsList.map((r) => Container(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFFBEB),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: AppColors.amber200),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text('${r['prospect_name']} (${r['phone']})',
-                                    style: const TextStyle(fontSize: 12)),
-                                Text(formatMoney(r['hold_amount']),
-                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                              ],
-                            ),
-                          )),
-                      const SizedBox(height: 10),
-                    ],
-                  ],
-
-                  // Quick action buttons
-                  const Divider(),
-                  const Text('Thao tác nhanh',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.slate700)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      if (isManager &&
-                          ['AVAILABLE', 'RESERVED', 'OCCUPIED']
-                              .contains(_selectedApt?['status'])) ...[
-                        AppButton(
-                          text: 'Đặt cọc giữ chỗ',
-                          variant: AppButtonVariant.warning,
-                          size: AppButtonSize.sm,
-                          icon: const Icon(LucideIcons.bookmarkPlus, size: 14),
-                          onPressed: () {
-                            final startStr = earliestResStart.isNotEmpty ? earliestResStart : todayStr;
-                            final untilStr = computeSuggestedHoldUntil(
-                              startStr,
-                              resBusyIntervals,
-                              maxHoldDays: maxInternalHoldDays,
-                            );
-                            _resProspectNameController.clear();
-                            _resPhoneController.clear();
-                            _resHoldAmountController.text =
-                                (_cancelPolicy['default_hold_amount'] ?? 2000000).toString();
-                            _resHoldFromController.text = startStr;
-                            _resHoldUntilController.text = untilStr;
-                            _resNoteController.clear();
-                            setState(() => _resModalOpen = true);
-                          },
-                        ),
-                        AppButton(
-                          text: 'Tạo hợp đồng thuê',
-                          size: AppButtonSize.sm,
-                          icon: const Icon(LucideIcons.plus, size: 14),
-                          onPressed: () {
-                            context.push('/admin/contracts?apartment_id=${_selectedApt!['id']}');
-                          },
-                        ),
-                      ],
-                      if (canEditRealEstate && _selectedApt?['status'] == 'MAINTENANCE')
-                        AppButton(
-                          text: 'Nghiệm thu & Bàn giao',
-                          variant: AppButtonVariant.success,
-                          size: AppButtonSize.sm,
-                          icon: const Icon(LucideIcons.checkCircle2, size: 14),
-                          onPressed: () {
-                            context.push('/admin/apartments/${_selectedApt!['id']}');
-                          },
-                        ),
-                      if (canEditRealEstate &&
-                          ['AVAILABLE', 'OCCUPIED'].contains(_selectedApt?['status']))
-                        AppButton(
-                          text: 'Chuyển sang Bảo trì',
-                          variant: AppButtonVariant.outline,
-                          size: AppButtonSize.sm,
-                          icon: const Icon(LucideIcons.wrench, size: 14),
-                          loading: _submitting,
-                          onPressed: () async {
-                            final aptId = _selectedApt!['id'].toString();
-                            setState(() => _submitting = true);
-                            try {
-                              final service = ref.read(buildingsServiceProvider);
-                              await service.updateApartment(aptId, {'status': 'MAINTENANCE'});
-                              ref.read(toastProvider.notifier).success('Đã chuyển trạng thái sang Đang bảo trì.');
-                              setState(() => _selectedApt = null);
-                              _fetchFloorPlan(force: true);
-                            } catch (err) {
-                              ref.read(toastProvider.notifier).error(extractErrorMessage(err));
-                            } finally {
-                              if (mounted) setState(() => _submitting = false);
-                            }
-                          },
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-          // Reservation Modal
-          if (_resModalOpen)
+                  // Reservation Modal
+                  if (_resModalOpen)
             AppModal(
               onClose: () => setState(() => _resModalOpen = false),
               title: 'Đặt cọc giữ chỗ — Căn ${_selectedApt?['code'] ?? ''}',
@@ -1607,4 +1463,425 @@ class _FloorPlanViewState extends ConsumerState<FloorPlanView> {
     ],
   );
 }
+
+  Widget _buildDrawerStatBox({required String label, required String value}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.slate200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 11, color: AppColors.slate500)),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate800),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildApartmentDrawerBody({
+    required Map<String, dynamic> drawerApt,
+    required List<dynamic> contractsList,
+    required List<dynamic> reservationsList,
+    required bool isManager,
+    required bool canEditRealEstate,
+    required String? earliestResStart,
+    required List<BusyInterval> resBusyIntervals,
+    required int maxInternalHoldDays,
+    required String todayStr,
+  }) {
+    // Amenities extraction
+    final List<String> amenityKeys = [];
+    final rawAmenities = drawerApt['amenities'];
+    if (rawAmenities is Map) {
+      rawAmenities.forEach((k, v) {
+        if (v == true || v == 1 || (v is String && v.isNotEmpty && v != 'false')) {
+          amenityKeys.add(k.toString());
+        }
+      });
+    } else if (rawAmenities is List) {
+      for (final a in rawAmenities) {
+        if (a != null && a.toString().isNotEmpty) {
+          amenityKeys.add(a.toString());
+        }
+      }
+    }
+
+    final aptPendingList = reservationsList.where((r) => r is Map && r['status'] == 'PENDING_PAYMENT').toList();
+    final aptHeldList = reservationsList.where((r) => r is Map && r['status'] == 'HELD').toList();
+
+    final zoneCode = drawerApt['zone_code']?.toString() ?? '—';
+    final zoneName = drawerApt['zone_name']?.toString();
+    final zoneDisplay = zoneName != null && zoneName.isNotEmpty ? '$zoneCode ($zoneName)' : zoneCode;
+
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 1. Status & Base Rent Card
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.slate50,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.slate200),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Trạng thái hiện tại',
+                          style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                      const SizedBox(height: 4),
+                      StatusBadge(
+                        status: drawerApt['status']?.toString(),
+                        domain: StatusDomain.apartment,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    const Text('Giá thuê niêm yết',
+                        style: TextStyle(fontSize: 11, color: AppColors.slate500)),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${formatMoney(drawerApt['base_rent'])}/tháng',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.primary700,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // 2. 4 Stat Boxes (2 rows x 2 columns)
+          Row(
+            children: [
+              Expanded(
+                child: _buildDrawerStatBox(
+                  label: 'Phân khu',
+                  value: zoneDisplay,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildDrawerStatBox(
+                  label: 'Loại căn',
+                  value: (drawerApt['type']?.toString().isNotEmpty ?? false)
+                      ? drawerApt['type'].toString()
+                      : '1PN',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _buildDrawerStatBox(
+                  label: 'Diện tích',
+                  value: '${drawerApt['area_m2'] ?? 0} m²',
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildDrawerStatBox(
+                  label: 'Phòng ngủ',
+                  value: '${drawerApt['bedrooms'] ?? 1} PN',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+
+          // 3. Amenities
+          if (amenityKeys.isNotEmpty) ...[
+            const Text(
+              'Nội thất & tiện nghi',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate700),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: amenityKeys.map((k) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.sky50,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.sky200),
+                  ),
+                  child: Text(
+                    k,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: AppColors.sky700,
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // 4. Note
+          if (drawerApt['note'] != null && drawerApt['note'].toString().trim().isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.slate50,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.slate200),
+              ),
+              child: RichText(
+                text: TextSpan(
+                  children: [
+                    const TextSpan(
+                      text: 'Ghi chú căn hộ: ',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.slate700),
+                    ),
+                    TextSpan(
+                      text: drawerApt['note'].toString(),
+                      style: const TextStyle(fontSize: 12, color: AppColors.slate600),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // 5. Active details & reservations
+          if (_detailLoading)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else ...[
+            if (aptPendingList.isNotEmpty) ...[
+              Text(
+                'Chờ xác nhận chuyển khoản (${aptPendingList.length} yêu cầu)',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.amber700),
+              ),
+              const SizedBox(height: 6),
+              ...aptPendingList.map((r) => Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFFBEB),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.amber200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${r['prospect_name']} (${r['phone']})',
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(formatMoney(r['hold_amount']),
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.amber900)),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${formatDate(r['hold_from'] ?? r['created_at'])} → ${formatDate(r['hold_until'])}',
+                          style: const TextStyle(fontSize: 11, color: AppColors.slate600),
+                        ),
+                      ],
+                    ),
+                  )),
+              const SizedBox(height: 10),
+            ],
+
+            if (contractsList.isNotEmpty) ...[
+              const Text('Hợp đồng gần nhất',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+              const SizedBox(height: 6),
+              ...contractsList.take(3).map((c) => InkWell(
+                    onTap: () {
+                      final cId = c['id']?.toString();
+                      if (cId != null && cId.isNotEmpty) {
+                        context.push('/admin/contracts/$cId');
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppColors.slate50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.slate200),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('${c['tenant_name'] ?? 'Cư dân'} (${c['tenant_phone'] ?? ''})',
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${formatDate(c['start_date'])} → ${formatDate(c['end_date'])} · ${formatMoney(c['rent_amount'])}/tháng',
+                                  style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                                ),
+                              ],
+                            ),
+                          ),
+                          StatusBadge(status: c['status']?.toString(), domain: StatusDomain.contract),
+                        ],
+                      ),
+                    ),
+                  )),
+              const SizedBox(height: 10),
+            ],
+
+            if (aptHeldList.isNotEmpty) ...[
+              const Text('Đang giữ chỗ',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.amber900)),
+              const SizedBox(height: 6),
+              ...aptHeldList.map((r) => Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFFBEB),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.amber200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${r['prospect_name']} (${r['phone']})',
+                            style: const TextStyle(fontSize: 12),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(formatMoney(r['hold_amount']),
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  )),
+              const SizedBox(height: 10),
+            ],
+          ],
+
+          // 6. Quick action buttons
+          const Divider(),
+          const Text('Thao tác nhanh',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.slate700)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (isManager &&
+                  ['AVAILABLE', 'RESERVED', 'OCCUPIED'].contains(drawerApt['status'])) ...[
+                AppButton(
+                  text: 'Đặt cọc giữ chỗ',
+                  variant: AppButtonVariant.warning,
+                  size: AppButtonSize.sm,
+                  icon: const Icon(LucideIcons.bookmarkPlus, size: 14),
+                  onPressed: () {
+                    final startStr = (earliestResStart != null && earliestResStart.isNotEmpty) ? earliestResStart : todayStr;
+                    final untilStr = computeSuggestedHoldUntil(
+                      startStr,
+                      resBusyIntervals,
+                      maxHoldDays: maxInternalHoldDays,
+                    );
+                    _resProspectNameController.clear();
+                    _resPhoneController.clear();
+                    _resHoldAmountController.text =
+                        (_cancelPolicy['default_hold_amount'] ?? 2000000).toString();
+                    _resHoldFromController.text = startStr;
+                    _resHoldUntilController.text = untilStr;
+                    _resNoteController.clear();
+                    setState(() => _resModalOpen = true);
+                  },
+                ),
+                AppButton(
+                  text: 'Tạo hợp đồng thuê',
+                  size: AppButtonSize.sm,
+                  icon: const Icon(LucideIcons.plus, size: 14),
+                  onPressed: () {
+                    context.push('/admin/contracts?apartment_id=${drawerApt['id']}');
+                  },
+                ),
+              ],
+              if (canEditRealEstate && drawerApt['status'] == 'MAINTENANCE')
+                AppButton(
+                  text: 'Nghiệm thu & Bàn giao',
+                  variant: AppButtonVariant.success,
+                  size: AppButtonSize.sm,
+                  icon: const Icon(LucideIcons.checkCircle2, size: 14),
+                  onPressed: () {
+                    context.push('/admin/apartments/${drawerApt['id']}');
+                  },
+                ),
+              if (canEditRealEstate &&
+                  ['AVAILABLE', 'OCCUPIED'].contains(drawerApt['status']))
+                AppButton(
+                  text: 'Chuyển sang Bảo trì',
+                  variant: AppButtonVariant.outline,
+                  size: AppButtonSize.sm,
+                  icon: const Icon(LucideIcons.wrench, size: 14),
+                  loading: _submitting,
+                  onPressed: () async {
+                    final aptId = drawerApt['id'].toString();
+                    setState(() => _submitting = true);
+                    try {
+                      final service = ref.read(buildingsServiceProvider);
+                      await service.updateApartment(aptId, {'status': 'MAINTENANCE'});
+                      ref.read(toastProvider.notifier).success('Đã chuyển trạng thái sang Đang bảo trì.');
+                      setState(() => _selectedApt = null);
+                      _fetchFloorPlan(force: true);
+                    } catch (err) {
+                      ref.read(toastProvider.notifier).error(extractErrorMessage(err));
+                    } finally {
+                      if (mounted) setState(() => _submitting = false);
+                    }
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }

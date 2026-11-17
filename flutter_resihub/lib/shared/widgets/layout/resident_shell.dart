@@ -706,7 +706,9 @@ class _ResidentShellState extends ConsumerState<ResidentShell> {
 
                   // Main View
                   Expanded(
-                    child: widget.child,
+                    child: SelectionArea(
+                      child: widget.child,
+                    ),
                   ),
                 ],
               ),

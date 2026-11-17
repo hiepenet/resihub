@@ -25,6 +25,7 @@ import 'package:flutter_resihub/shared/widgets/ui/auth_pdf_viewer.dart';
 import 'package:flutter_resihub/shared/widgets/ui/file_upload_field.dart';
 import 'package:flutter_resihub/shared/widgets/ui/html_print_preview_modal.dart';
 import 'package:flutter_resihub/shared/widgets/ui/money_input.dart';
+import 'package:flutter_resihub/shared/widgets/common/data_table_widget.dart';
 
 // Minimal 1x1 transparent PNG for mock image tests
 final Uint8List kTransparent1x1Png = base64Decode(
@@ -623,6 +624,31 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Modal Body Content'), findsNothing);
+    });
+  });
+
+  group('9. DataTableWidget & SelectionArea', () {
+    testWidgets('DataTableWidget wraps table in SelectionArea for web copying', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DataTableWidget<Map<String, dynamic>>(
+              columns: const [
+                DataTableColumn(key: 'code', label: 'Mã hợp đồng'),
+                DataTableColumn(key: 'amount', label: 'Số tiền'),
+              ],
+              data: const [
+                {'code': 'HD-2026-999', 'amount': '15.000.000 ₫'},
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.text('HD-2026-999'), findsOneWidget);
+      expect(find.text('15.000.000 ₫'), findsOneWidget);
     });
   });
 }

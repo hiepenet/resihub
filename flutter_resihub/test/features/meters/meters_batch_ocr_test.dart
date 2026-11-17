@@ -707,6 +707,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.textContaining('Tải ảnh chụp (Tối đa'), findsOneWidget);
       expect(find.textContaining('Chưa có ảnh nào được chọn'), findsOneWidget);
+      expect(find.textContaining('Mẹo đặt tên ảnh để tự động nhận diện phòng'), findsOneWidget);
+      expect(find.textContaining('A1001_dien.jpg'), findsOneWidget);
     });
 
     testWidgets('MeterReadingsPage create meter modal loads apartments and submits exact payload keys', (tester) async {

@@ -481,6 +481,9 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
           ],
         ),
 
+        const SizedBox(height: 12),
+        _buildTipBox(),
+
         if (_isQueueRunning) ...[
           const SizedBox(height: 12),
           LinearProgressIndicator(
@@ -731,6 +734,118 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildTipBox() {
+    Widget buildCodeSnippet(String text) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: const Color(0xFFC7D2FE)),
+        ),
+        child: Text(
+          text,
+          style: const TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF3730A3),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEEF2FF), // Indigo-50
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFC7D2FE)), // Indigo-200
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(LucideIcons.info, size: 16, color: Color(0xFF4F46E5)), // Indigo-600
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Mẹo đặt tên ảnh để tự động nhận diện phòng & công tơ nhanh nhất:',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF312E81), // Indigo-900
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          const Text(
+                            '• Có tên phòng + loại đồng hồ:',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3730A3)),
+                          ),
+                          buildCodeSnippet('A1001_dien.jpg'),
+                          buildCodeSnippet('A1001_nuoc.png'),
+                          buildCodeSnippet('A1001-E.jpg'),
+                          buildCodeSnippet('A1001-W.jpg'),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          const Text(
+                            '• Chỉ ghi tên phòng:',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3730A3)),
+                          ),
+                          buildCodeSnippet('A1001 (1).jpg'),
+                          buildCodeSnippet('A1001 (2).jpg'),
+                          const Text(
+                            '— AI sẽ tự nhìn đơn vị kWh / m³ trên mặt đồng hồ để phân biệt Điện hay Nước!',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3730A3)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          const Text(
+                            '• Ảnh từ điện thoại chưa kịp đổi tên (',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3730A3)),
+                          ),
+                          buildCodeSnippet('IMG_4021.jpg'),
+                          const Text(
+                            ') vẫn đọc chỉ số AI bình thường và chọn lại công tơ ngay tại cột Công tơ đích.',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF3730A3)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

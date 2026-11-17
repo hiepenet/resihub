@@ -169,12 +169,13 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
     final endIndex = math.min(startIndex + widget.pageSize, sortedData.length);
     final pagedData = sortedData.sublist(startIndex, endIndex);
 
-    return Container(
-      decoration: borderDecor,
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+    return SelectionArea(
+      child: Container(
+        decoration: borderDecor,
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
           // Table layout
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -322,6 +323,7 @@ class _DataTableWidgetState<T> extends State<DataTableWidget<T>> {
           ],
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 }

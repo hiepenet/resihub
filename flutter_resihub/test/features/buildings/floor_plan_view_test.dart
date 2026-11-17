@@ -604,6 +604,30 @@ void main() {
       expect(find.text('Tạo hợp đồng thuê'), findsNothing);
       expect(find.text('Chuyển sang Bảo trì'), findsNothing);
     });
+
+    testWidgets('Apartment Drawer renders right-side drawer with 4 stat boxes, amenities and footer CTA', (tester) async {
+      tester.view.physicalSize = const Size(1400, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(_buildWrapper(
+        child: const FloorPlanView(buildingId: 'b-1'),
+        service: mockService,
+        roleCode: 'MANAGER',
+      ));
+      await tester.pumpAndSettle();
+
+      // Open drawer on A101
+      await tester.tap(find.text('A101'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Căn hộ A101'), findsOneWidget);
+      expect(find.text('Phân khu'), findsOneWidget);
+      expect(find.text('Loại căn'), findsOneWidget);
+      expect(find.text('Diện tích'), findsOneWidget);
+      expect(find.text('Phòng ngủ'), findsOneWidget);
+      expect(find.text('Mở trang chi tiết căn hộ'), findsOneWidget);
+    });
   });
 
   group('FloorModal and BulkApartmentModal Tests', () {

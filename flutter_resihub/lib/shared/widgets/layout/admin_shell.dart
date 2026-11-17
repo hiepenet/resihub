@@ -106,7 +106,9 @@ class _AdminShellState extends ConsumerState<AdminShell> {
                   onNavigate: _handleNavigate,
                 ),
                 Expanded(
-                  child: widget.child,
+                  child: SelectionArea(
+                    child: widget.child,
+                  ),
                 ),
               ],
             ),

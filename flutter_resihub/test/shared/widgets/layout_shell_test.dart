@@ -546,6 +546,32 @@ void main() {
       expect(find.byType(SidebarWidget), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('AdminShell wraps child in SelectionArea for web text copying', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final user = _createUserWithRole('SYS_ADMIN');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      await tester.pumpWidget(
+        _wrapWithScope(
+          storage: storage,
+          user: user,
+          buildings: const [],
+          child: const AdminShell(
+            currentLocation: '/admin/contracts',
+            child: Text('HD-2026-001'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.text('HD-2026-001'), findsOneWidget);
+    });
   });
 
   group('4. ResidentShell 3-Tier Responsive Breakpoints & Multi-Contract Switcher', () {
@@ -709,6 +735,34 @@ void main() {
       expect(find.text('Hợp đồng'), findsOneWidget);
 
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('ResidentShell wraps child in SelectionArea for web text copying', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final user = _createUserWithRole('RESIDENT');
+      await storage.setUser(user.toJson());
+      await storage.setTokens(accessToken: 'mock-token');
+
+      await tester.pumpWidget(
+        _wrapWithScope(
+          storage: storage,
+          user: user,
+          buildings: const [],
+          child: ResidentShell(
+            activeTab: 'invoices',
+            onTabSelected: (_) {},
+            contracts: const [],
+            child: const Text('INV-2026-001'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.text('INV-2026-001'), findsOneWidget);
     });
   });
 }
