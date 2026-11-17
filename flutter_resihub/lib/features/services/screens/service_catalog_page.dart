@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -38,6 +39,26 @@ const Map<String, String> kBillingTypes = {
   'METERED': 'Theo chỉ số đồng hồ',
   'QUANTITY': 'Theo số lượng đăng ký',
 };
+
+const String _kOrgDefaultSaveError =
+    'Không thể sửa dịch vụ mặc định tổ chức khi đang được áp dụng tại tòa nhà khác ngoài phạm vi quản lý. Vui lòng tạo cấu hình riêng cho tòa nhà của bạn.';
+const String _kOrgDefaultToggleError =
+    'Không thể thay đổi trạng thái dịch vụ mặc định tổ chức khi đang được áp dụng tại tòa nhà khác ngoài phạm vi quản lý. Vui lòng tạo cấu hình riêng cho tòa nhà của bạn.';
+
+String _catalogErrorMessage(dynamic err, {required bool isToggle}) {
+  final data = err is DioException ? err.response?.data : null;
+  if (data is Map && data['code'] == 'ORG_DEFAULT_SHARED_ACROSS_BUILDINGS') {
+    final message = data['message']?.toString().trim();
+    if (message != null && message.isNotEmpty) return message;
+    return isToggle ? _kOrgDefaultToggleError : _kOrgDefaultSaveError;
+  }
+  return extractErrorMessage(
+    err,
+    isToggle
+        ? 'Không thể thay đổi trạng thái dịch vụ.'
+        : 'Không thể lưu thông tin dịch vụ.',
+  );
+}
 
 /// Service Catalog Administration Page (M07).
 /// Port of `frontend/src/pages/admin/services/ServiceCatalogPage.jsx`.
@@ -143,6 +164,16 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
     }).toList();
   }
 
+  String _buildingScopeLabel(String id) {
+    if (id.isEmpty) return 'Mặc định tổ chức (Áp dụng chung)';
+    final b = _buildings.firstWhere(
+      (x) => x['id']?.toString() == id,
+      orElse: () => <String, dynamic>{},
+    );
+    if (b.isEmpty) return 'Riêng theo tòa nhà';
+    return 'Riêng tòa ${b['code']} — ${b['name']}';
+  }
+
   void _openCatalogFormModal([Map<String, dynamic>? itemToEdit]) {
     final isEditing = itemToEdit != null;
     final selectedBuildingId = ref.read(authProvider).selectedBuildingId;
@@ -212,21 +243,7 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                         return AppSelectOption(value: e.key, label: e.value.label);
                       }).toList(),
                       onChanged: (val) {
-                        if (val != null) {
-                          setModalState(() {
-                            category = val;
-                            if (val == 'ELECTRICITY') {
-                              billingType = 'METERED';
-                              unitCtrl.text = 'kWh';
-                            } else if (val == 'WATER') {
-                              billingType = 'METERED';
-                              unitCtrl.text = 'm³';
-                            } else if (val == 'PARKING') {
-                              billingType = 'QUANTITY';
-                              unitCtrl.text = 'xe/tháng';
-                            }
-                          });
-                        }
+                        if (val != null) setModalState(() => category = val);
                       },
                     ),
                   ),
@@ -269,20 +286,30 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                 ],
               ),
               const SizedBox(height: 12),
-              AppSelect<String>(
-                label: 'Áp dụng cho tòa nhà',
-                value: buildingId,
-                options: [
-                  const AppSelectOption(value: '', label: 'Toàn hệ thống (Tất cả tòa nhà)'),
-                  ..._buildings.map((b) => AppSelectOption(
-                        value: b['id']?.toString() ?? '',
-                        label: '${b['name']} (${b['code']})',
-                      )),
-                ],
-                onChanged: (val) {
-                  if (val != null) setModalState(() => buildingId = val);
-                },
-              ),
+              if (isEditing)
+                AppInput(
+                  label: 'Phạm vi áp dụng',
+                  initialValue: _buildingScopeLabel(buildingId),
+                  enabled: false,
+                )
+              else
+                AppSelect<String>(
+                  label: 'Phạm vi áp dụng',
+                  value: buildingId,
+                  options: [
+                    const AppSelectOption(
+                      value: '',
+                      label: 'Mặc định tổ chức (Áp dụng chung)',
+                    ),
+                    ..._buildings.map((b) => AppSelectOption(
+                          value: b['id']?.toString() ?? '',
+                          label: 'Riêng tòa ${b['code']} — ${b['name']}',
+                        )),
+                  ],
+                  onChanged: (val) {
+                    if (val != null) setModalState(() => buildingId = val);
+                  },
+                ),
               const SizedBox(height: 12),
               AppInput(
                 label: 'Mô tả / Ghi chú dịch vụ',
@@ -292,19 +319,23 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                 rows: 2,
               ),
               const SizedBox(height: 16),
-              SwitchListTile.adaptive(
-                contentPadding: EdgeInsets.zero,
-                title: const Text(
-                  'Kích hoạt áp dụng dịch vụ',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              if (isEditing)
+                Material(
+                  color: Colors.transparent,
+                  child: SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Kích hoạt áp dụng dịch vụ',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                    ),
+                    subtitle: const Text(
+                      'Khi tắt, dịch vụ sẽ không hiển thị khi lập hợp đồng hoặc đăng ký mới',
+                      style: TextStyle(fontSize: 12, color: AppColors.slate500),
+                    ),
+                    value: isActive,
+                    onChanged: (val) => setModalState(() => isActive = val),
+                  ),
                 ),
-                subtitle: const Text(
-                  'Khi tắt, dịch vụ sẽ không hiển thị khi lập hợp đồng hoặc đăng ký mới',
-                  style: TextStyle(fontSize: 12, color: AppColors.slate500),
-                ),
-                value: isActive,
-                onChanged: (val) => setModalState(() => isActive = val),
-              ),
               const SizedBox(height: 20),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
@@ -330,21 +361,35 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                       });
 
                       if (code.isEmpty || name.isEmpty) return;
+                      if (unitPrice < 0) {
+                        ref
+                            .read(toastProvider.notifier)
+                            .warning('Đơn giá dịch vụ không hợp lệ.');
+                        return;
+                      }
+
+                      final description = descCtrl.text.trim();
+                      final basePayload = <String, dynamic>{
+                        'name': name,
+                        'category': category,
+                        'billing_type': billingType,
+                        'unit': unit.isEmpty ? 'tháng' : unit,
+                        'unit_price': unitPrice,
+                        'description': description.isEmpty ? null : description,
+                      };
+                      final payload = isEditing
+                          ? <String, dynamic>{
+                              ...basePayload,
+                              'is_active': isActive,
+                            }
+                          : <String, dynamic>{
+                              'code': code.toUpperCase(),
+                              ...basePayload,
+                              'building_id': buildingId.isEmpty ? null : buildingId,
+                            };
 
                       setModalState(() => saving = true);
                       try {
-                        final payload = {
-                          'code': code,
-                          'name': name,
-                          'category': category,
-                          'billing_type': billingType,
-                          'unit': unit.isEmpty ? 'tháng' : unit,
-                          'unit_price': unitPrice,
-                          'building_id': buildingId.isEmpty ? null : buildingId,
-                          'description': descCtrl.text.trim(),
-                          'is_active': isActive,
-                        };
-
                         final svc = ref.read(servicesServiceProvider);
                         if (isEditing) {
                           await svc.updateCatalog(itemToEdit['id'].toString(), payload);
@@ -359,7 +404,7 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                       } catch (err) {
                         setModalState(() => saving = false);
                         ref.read(toastProvider.notifier).error(
-                              extractErrorMessage(err, 'Không thể lưu thông tin dịch vụ.'),
+                              _catalogErrorMessage(err, isToggle: false),
                             );
                       }
                     },
@@ -389,7 +434,7 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
       _fetchData(force: true);
     } catch (err) {
       ref.read(toastProvider.notifier).error(
-            extractErrorMessage(err, 'Không thể thay đổi trạng thái dịch vụ.'),
+            _catalogErrorMessage(err, isToggle: true),
           );
     }
   }
@@ -476,8 +521,8 @@ class _ServiceCatalogPageState extends ConsumerState<ServiceCatalogPage> {
                             value: _statusFilter,
                             options: const [
                               AppSelectOption(value: 'ALL', label: 'Tất cả trạng thái'),
-                              AppSelectOption(value: 'ACTIVE', label: 'Đang áp dụng'),
-                              AppSelectOption(value: 'INACTIVE', label: 'Ngừng áp dụng'),
+                              AppSelectOption(value: 'ACTIVE', label: 'Đang cung cấp'),
+                              AppSelectOption(value: 'INACTIVE', label: 'Ngưng cung cấp'),
                             ],
                             onChanged: (val) => setState(() => _statusFilter = val ?? 'ALL'),
                           ),
