@@ -15,9 +15,20 @@ import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
 import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
+import '../../../shared/widgets/ui/app_select.dart';
 import '../../../shared/widgets/ui/auth_media_viewer.dart';
 import '../../../shared/widgets/ui/file_upload_field.dart';
+import '../../../shared/widgets/ui/money_input.dart';
 import '../services/resident_service.dart';
+
+const _paymentMethods = <String, String>{
+  'BANK_TRANSFER': 'Chuyển khoản',
+  'QR_CODE': 'QR Code',
+  'E_WALLET': 'Ví điện tử',
+  'CASH': 'Tiền mặt',
+  'CARD': 'Thẻ',
+  'OTHER': 'Khác',
+};
 
 class InvoicesTab extends ConsumerStatefulWidget {
   final Map<String, dynamic>? overview;
@@ -246,101 +257,219 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     ref.read(toastProvider.notifier).info('Đã sao chép $label vào bộ nhớ tạm.');
   }
 
-  void _openPaymentReportModal(BuildContext context, Map<String, dynamic> inv) {
-    final invoiceId = inv['invoice_id']?.toString() ?? inv['id']?.toString() ?? '';
-    final code = inv['invoice_code']?.toString() ?? '';
-    final summary = resolveResidentInvoiceTotalsSummary(inv);
+  void _openPaymentReportModal(BuildContext context, [Map<String, dynamic>? targetInv]) {
+    String invoiceIdOf(dynamic inv) => inv is Map
+        ? (inv['invoice_id'] ?? inv['id'])?.toString() ?? ''
+        : '';
 
-    final amountCtrl = TextEditingController(text: summary.remainingAmount.toString());
+    final candidates = List<dynamic>.from(_unpaidInvoices);
+    if (targetInv != null) {
+      final tid = invoiceIdOf(targetInv);
+      if (tid.isNotEmpty && !candidates.any((u) => invoiceIdOf(u) == tid)) {
+        candidates.insert(0, targetInv);
+      }
+    }
+
+    String amountFor(String invId) {
+      for (final u in candidates) {
+        if (invoiceIdOf(u) == invId) {
+          return resolveResidentInvoiceTotalsSummary(u).remainingAmount.toString();
+        }
+      }
+      return '';
+    }
+
+    String selectedInvoiceId = targetInv != null
+        ? invoiceIdOf(targetInv)
+        : (candidates.isNotEmpty ? invoiceIdOf(candidates.first) : '');
+    if (selectedInvoiceId.isEmpty && candidates.isNotEmpty) {
+      selectedInvoiceId = invoiceIdOf(candidates.first);
+    }
+
+    String amount = amountFor(selectedInvoiceId);
+    String method = 'BANK_TRANSFER';
+    final referenceCtrl = TextEditingController();
     final noteCtrl = TextEditingController();
-    String? proofUrl;
+    final dateCtrl = TextEditingController(text: toInputDate(DateTime.now()));
+    List<String> proofImages = [];
     bool submitting = false;
+
+    final invoiceOptions = candidates.map<AppSelectOption<String>>((u) {
+      final m = u is Map ? Map<String, dynamic>.from(u) : <String, dynamic>{};
+      final rem = resolveResidentInvoiceTotalsSummary(m).remainingAmount;
+      final period = m['period']?.toString() ?? m['billing_period']?.toString() ?? '';
+      final label = period.isNotEmpty ? 'Kỳ $period' : 'Phí phạt tất toán';
+      return AppSelectOption<String>(
+        value: invoiceIdOf(m),
+        label: '$label (${m['invoice_code']?.toString() ?? ''}) — Còn nợ: ${formatMoney(rem)}',
+      );
+    }).toList();
+
+    final methodOptions = _paymentMethods.entries
+        .map((e) => AppSelectOption<String>(value: e.key, label: e.value))
+        .toList();
+
+    Future<void> pickDate(BuildContext pickerContext, StateSetter setModalState) async {
+      final initial = DateTime.tryParse(dateCtrl.text) ?? DateTime.now();
+      final picked = await showDatePicker(
+        context: pickerContext,
+        initialDate: initial,
+        firstDate: DateTime(2000),
+        lastDate: DateTime.now().add(const Duration(days: 365)),
+      );
+      if (picked != null) {
+        setModalState(() => dateCtrl.text = toInputDate(picked));
+      }
+    }
 
     AppModal.show(
       context: context,
       title: 'Báo đã thanh toán hóa đơn',
-      subtitle: '$code • Còn lại: ${formatMoney(summary.remainingAmount)}',
+      subtitle: 'Gửi thông tin giao dịch và ảnh biên lai để kế toán Ban Quản Lý đối soát xác nhận',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
-          return SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                AppInput(
-                  label: 'Số tiền đã chuyển (VND) *',
-                  controller: amountCtrl,
-                  keyboardType: TextInputType.number,
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppSelect<String>(
+                label: 'Chọn hóa đơn thanh toán',
+                required: true,
+                placeholder: '-- Chọn hóa đơn --',
+                value: selectedInvoiceId,
+                options: invoiceOptions,
+                hint: 'Mã hóa đơn: ${selectedInvoiceId.isEmpty ? '—' : selectedInvoiceId}',
+                onChanged: (val) {
+                  setModalState(() {
+                    selectedInvoiceId = val ?? '';
+                    amount = amountFor(selectedInvoiceId);
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              MoneyInput(
+                label: 'Số tiền đã chuyển (VNĐ)',
+                required: true,
+                placeholder: 'VD: 8.500.000',
+                value: amount,
+                hint: amount.isNotEmpty ? 'Bằng số: ${formatMoney(amount)}' : null,
+                onChanged: (val) => amount = val,
+              ),
+              const SizedBox(height: 12),
+              AppSelect<String>(
+                label: 'Phương thức thanh toán',
+                value: method,
+                options: methodOptions,
+                onChanged: (val) => setModalState(() => method = val ?? 'BANK_TRANSFER'),
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Mã tham chiếu / Mã GD ngân hàng',
+                controller: referenceCtrl,
+                placeholder: 'VD: FT2630291823...',
+              ),
+              const SizedBox(height: 12),
+              InkWell(
+                onTap: () => pickDate(ctx, setModalState),
+                borderRadius: BorderRadius.circular(8),
+                child: AbsorbPointer(
+                  child: AppInput(
+                    label: 'Ngày thực hiện giao dịch',
+                    hint: 'Ngày thanh toán (YYYY-MM-DD)',
+                    controller: dateCtrl,
+                    readOnly: true,
+                    rightElement: const Icon(LucideIcons.calendar,
+                        size: 16, color: AppColors.slate400),
+                  ),
                 ),
-                const SizedBox(height: 12),
-                FileUploadField(
-                  label: 'Ảnh chụp ủy nhiệm chi / biên lai chuyển khoản',
-                  value: proofUrl,
-                  onChanged: (val) {
-                    setModalState(() {
-                      proofUrl = val?.toString();
-                    });
-                  },
-                ),
-                const SizedBox(height: 12),
-                AppInput(
-                  label: 'Ghi chú cho kế toán',
-                  controller: noteCtrl,
-                  hint: 'Ví dụ: Đã chuyển khoản qua app ngân hàng lúc 10h...',
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    AppButton(
-                      text: 'Đóng',
-                      variant: AppButtonVariant.outline,
-                      onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
-                    ),
-                    const SizedBox(width: 8),
-                    AppButton(
-                      text: submitting ? 'Đang gửi...' : 'Gửi báo cáo',
-                      loading: submitting,
-                      onPressed: submitting
-                          ? null
-                          : () async {
-                              final amt = int.tryParse(amountCtrl.text.replaceAll(RegExp(r'\D'), '')) ?? 0;
-                              if (amt <= 0) {
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error('Vui lòng nhập số tiền hợp lệ.');
-                                return;
-                              }
+              ),
+              const SizedBox(height: 12),
+              FileUploadField(
+                label: 'Ảnh chụp biên lai / Ủy nhiệm chi chuyển khoản (tối đa 3 ảnh)',
+                hint: 'Ảnh chứng từ thanh toán',
+                multiple: true,
+                maxFiles: 3,
+                value: proofImages,
+                onChanged: (val) {
+                  setModalState(() {
+                    proofImages = (val is List ? val : <dynamic>[])
+                        .map((e) => e.toString())
+                        .where((s) => s.isNotEmpty)
+                        .toList();
+                  });
+                },
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Ghi chú gửi kế toán (tùy chọn)',
+                controller: noteCtrl,
+                multiline: true,
+                rows: 2,
+                placeholder: 'Ví dụ: Đã chuyển khoản thanh toán đủ kỳ tháng này...',
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  AppButton(
+                    text: 'Hủy',
+                    variant: AppButtonVariant.outline,
+                    onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
+                  ),
+                  const SizedBox(width: 8),
+                  AppButton(
+                    text: submitting ? 'Đang gửi...' : 'Gửi đối soát thanh toán',
+                    loading: submitting,
+                    onPressed: submitting
+                        ? null
+                        : () async {
+                            if (selectedInvoiceId.isEmpty) {
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .warning('Vui lòng chọn hóa đơn cần báo thanh toán.');
+                              return;
+                            }
+                            final amt =
+                                num.tryParse(amount.replaceAll(RegExp(r'[^\d.]'), ''))?.round() ?? 0;
+                            if (amt <= 0) {
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .warning('Vui lòng nhập số tiền thanh toán hợp lệ (> 0).');
+                              return;
+                            }
 
-                              setModalState(() => submitting = true);
-                              try {
-                                await ref.read(residentServiceProvider).reportPayment({
-                                  'invoice_id': invoiceId,
-                                  'amount': amt,
-                                  'payment_method': 'BANK_TRANSFER',
-                                  if (proofUrl != null && proofUrl!.isNotEmpty)
-                                    'proof_url': proofUrl,
-                                  'note': noteCtrl.text.trim(),
-                                });
-                                if (ctx.mounted) {
-                                  Navigator.of(ctx).pop();
-                                }
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .success('Đã gửi báo cáo thanh toán thành công.');
-                                await _fetchInvoices();
-                                await widget.onRefreshOverview();
-                              } catch (err) {
-                                setModalState(() => submitting = false);
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error(extractErrorMessage(err, 'Không thể gửi báo cáo thanh toán.'));
+                            setModalState(() => submitting = true);
+                            try {
+                              final paidAt = DateTime.tryParse(dateCtrl.text);
+                              await ref.read(residentServiceProvider).reportPayment({
+                                'invoice_id': selectedInvoiceId,
+                                'amount': amt,
+                                'method': method,
+                                if (referenceCtrl.text.trim().isNotEmpty)
+                                  'reference_code': referenceCtrl.text.trim(),
+                                if (paidAt != null) 'paid_at': paidAt.toUtc().toIso8601String(),
+                                'note': noteCtrl.text.trim(),
+                                'proof_images': proofImages,
+                              });
+                              if (ctx.mounted) {
+                                Navigator.of(ctx).pop();
                               }
-                            },
-                    ),
-                  ],
-                ),
-              ],
-            ),
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .success('Đã gửi thông báo thanh toán kèm chứng từ thành công!');
+                              await _fetchInvoices();
+                              await widget.onRefreshOverview();
+                            } catch (err) {
+                              setModalState(() => submitting = false);
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .error(extractErrorMessage(err, 'Không thể gửi xác nhận thanh toán.'));
+                            }
+                          },
+                  ),
+                ],
+              ),
+            ],
           );
         },
       ),
@@ -657,19 +786,40 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      const Text(
-                        'Hóa đơn & Đối soát Thanh toán',
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: 15,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.slate900,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      const Text(
-                        'Tra cứu chi tiết tiền thuê, điện, nước, dịch vụ hàng tháng và gửi biên lai chuyển khoản',
-                        style: TextStyle(fontSize: 12, color: AppColors.slate500),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Hóa đơn & Đối soát Thanh toán',
+                                  style: TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.slate900,
+                                  ),
+                                ),
+                                SizedBox(height: 2),
+                                Text(
+                                  'Tra cứu chi tiết tiền thuê, điện, nước, dịch vụ hàng tháng và gửi biên lai chuyển khoản',
+                                  style: TextStyle(fontSize: 12, color: AppColors.slate500),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          AppButton(
+                            text: 'Báo đã thanh toán',
+                            size: AppButtonSize.sm,
+                            icon: const Icon(LucideIcons.creditCard, size: 14),
+                            onPressed: unpaidInvoices.isEmpty
+                                ? null
+                                : () => _openPaymentReportModal(context, unpaidInvoices.first),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 14),
                       Row(
@@ -1061,11 +1211,12 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
                   padding: const EdgeInsets.all(4),
                   child: Row(
                     children: [
-                      _buildFilterTabItem('all', 'Tất cả (${_invoices.length})'),
-                      _buildFilterTabItem('unpaid', 'Chờ TT (${unpaidInvoices.length})'),
+                      _buildFilterTabItem('all', 'Tất cả hóa đơn', _invoices.length),
+                      _buildFilterTabItem('unpaid', 'Chờ thanh toán', unpaidInvoices.length),
                       _buildFilterTabItem(
                         'paid',
-                        'Đã TT (${_invoices.where((i) => i is Map && i['status']?.toString().toUpperCase() == 'PAID').length})',
+                        'Đã hoàn tất',
+                        _invoices.where((i) => i is Map && i['status']?.toString().toUpperCase() == 'PAID').length,
                       ),
                     ],
                   ),
@@ -1108,19 +1259,24 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
                     final summary = resolveResidentInvoiceTotalsSummary(inv);
                     final status = inv['status']?.toString().toUpperCase() ?? '';
                     final isPaid = status == 'PAID';
+                    final isOverdue = status == 'OVERDUE';
                     final lines = inv['lines'] is List ? inv['lines'] as List : const [];
 
                     return Container(
                       margin: const EdgeInsets.only(bottom: 16),
                       decoration: BoxDecoration(
-                        color: Colors.white,
+                        color: isOverdue ? AppColors.rose50 : Colors.white,
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: AppColors.slate200),
-                        boxShadow: const [
+                        border: Border.all(
+                          color: isOverdue ? AppColors.rose300 : AppColors.slate200,
+                        ),
+                        boxShadow: [
                           BoxShadow(
-                            color: Color.fromRGBO(15, 23, 42, 0.03),
+                            color: isOverdue
+                                ? AppColors.rose200
+                                : const Color.fromRGBO(15, 23, 42, 0.03),
                             blurRadius: 8,
-                            offset: Offset(0, 2),
+                            offset: const Offset(0, 2),
                           ),
                         ],
                       ),
@@ -1353,8 +1509,14 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
     );
   }
 
-  Widget _buildFilterTabItem(String key, String label) {
+  Widget _buildFilterTabItem(String key, String label, int count) {
     final active = _filterTab == key;
+    final textStyle = TextStyle(
+      fontFamily: 'Inter',
+      fontSize: 12,
+      fontWeight: active ? FontWeight.bold : FontWeight.w500,
+      color: active ? AppColors.slate900 : AppColors.slate600,
+    );
     return Expanded(
       child: InkWell(
         onTap: () => setState(() => _filterTab = key),
@@ -1375,14 +1537,16 @@ class _InvoicesTabState extends ConsumerState<InvoicesTab> {
                 : null,
           ),
           alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontFamily: 'Inter',
-              fontSize: 12,
-              fontWeight: active ? FontWeight.bold : FontWeight.w500,
-              color: active ? AppColors.slate900 : AppColors.slate600,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(label, overflow: TextOverflow.ellipsis, style: textStyle),
+              ),
+              const SizedBox(width: 4),
+              Text('$count', style: textStyle),
+            ],
           ),
         ),
       ),
