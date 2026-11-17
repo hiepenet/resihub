@@ -476,8 +476,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             const SizedBox(height: 32),
 
                             // Showcase Footer
-                            const Text(
-                              '© 2026 ResiHub Property Management System.',
+                            Text(
+                              '© ${DateTime.now().year} ResiHub Property Management System.',
                               style: TextStyle(color: AppColors.slate400, fontSize: 12),
                             ),
                           ],
