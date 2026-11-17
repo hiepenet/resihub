@@ -110,9 +110,16 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(1440, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    final navigated = <String>[];
+    final tabs = <String>[];
+    final extras = <Map<String, dynamic>?>[];
     await tester.pumpWidget(
-      _buildSubject(_fullOverview(), (tab, [extra]) => navigated.add(tab)),
+      _buildSubject(
+        _fullOverview(),
+        (tab, [extra]) {
+          tabs.add(tab);
+          extras.add(extra);
+        },
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -132,7 +139,7 @@ void main() {
     await tester.tap(find.text('Xem đầy đủ danh bạ BQL'));
     await tester.pumpAndSettle();
 
-    expect(navigated, [
+    expect(tabs, [
       'invoices',
       'maintenance',
       'services',
@@ -141,6 +148,45 @@ void main() {
       'invoices',
       'contact',
     ]);
+    expect(extras, [
+      {'action': 'pay'},
+      {'action': 'new'},
+      {'action': 'subscribe'},
+      null,
+      null,
+      {'action': 'pay'},
+      null,
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pay action is gated on current_amount_due > 0', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1440, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final overview = _fullOverview();
+    overview['current_amount_due'] = 0;
+
+    final tabs = <String>[];
+    final extras = <Map<String, dynamic>?>[];
+    await tester.pumpWidget(
+      _buildSubject(
+        overview,
+        (tab, [extra]) {
+          tabs.add(tab);
+          extras.add(extra);
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Báo đã thanh toán'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Thanh toán'));
+    await tester.pumpAndSettle();
+
+    expect(tabs, ['invoices', 'invoices']);
+    expect(extras, [null, null]);
     expect(tester.takeException(), isNull);
   });
 

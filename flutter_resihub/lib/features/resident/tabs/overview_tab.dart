@@ -42,14 +42,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final overview = widget.overview ?? const {};
     final user = overview['user'] is Map ? overview['user'] as Map : const {};
 
-    final fullNameCtrl =
-        TextEditingController(text: user['full_name']?.toString() ?? '');
-    final phoneCtrl =
-        TextEditingController(text: user['phone']?.toString() ?? '');
-    final idNumberCtrl =
-        TextEditingController(text: user['id_number']?.toString() ?? '');
-    final addressCtrl =
-        TextEditingController(text: user['address']?.toString() ?? '');
+    final fullNameCtrl = TextEditingController(text: user['full_name']?.toString() ?? '');
+    final phoneCtrl = TextEditingController(text: user['phone']?.toString() ?? '');
+    final idNumberCtrl = TextEditingController(text: user['id_number']?.toString() ?? '');
+    final addressCtrl = TextEditingController(text: user['address']?.toString() ?? '');
     final jobCtrl = TextEditingController();
     final emergencyNameCtrl = TextEditingController();
     final emergencyPhoneCtrl = TextEditingController();
@@ -59,8 +55,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     AppModal.show(
       context: context,
       title: 'Nộp hồ sơ thuê căn hộ',
-      subtitle:
-          'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
+      subtitle: 'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
           return SingleChildScrollView(
@@ -112,8 +107,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     AppButton(
                       text: 'Hủy',
                       variant: AppButtonVariant.outline,
-                      onPressed:
-                          submitting ? null : () => Navigator.of(ctx).pop(),
+                      onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
                     ),
                     const SizedBox(width: 8),
                     AppButton(
@@ -125,8 +119,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               final name = fullNameCtrl.text.trim();
                               final phone = phoneCtrl.text.trim();
                               if (name.isEmpty || phone.isEmpty) {
-                                ref.read(toastProvider.notifier).error(
-                                    'Vui lòng điền họ tên và số điện thoại.');
+                                ref
+                                    .read(toastProvider.notifier)
+                                    .error('Vui lòng điền họ tên và số điện thoại.');
                                 return;
                               }
 
@@ -135,18 +130,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await ref
                                     .read(residentServiceProvider)
                                     .submitRentalApplication({
-                                  if (apartmentId != null &&
-                                      apartmentId.isNotEmpty)
+                                  if (apartmentId != null && apartmentId.isNotEmpty)
                                     'desired_apartment_id': apartmentId,
                                   'full_name': name,
                                   'phone': phone,
                                   'id_number': idNumberCtrl.text.trim(),
                                   'address': addressCtrl.text.trim(),
                                   'job_title': jobCtrl.text.trim(),
-                                  'emergency_contact_name':
-                                      emergencyNameCtrl.text.trim(),
-                                  'emergency_contact_phone':
-                                      emergencyPhoneCtrl.text.trim(),
+                                  'emergency_contact_name': emergencyNameCtrl.text.trim(),
+                                  'emergency_contact_phone': emergencyPhoneCtrl.text.trim(),
                                 });
                                 if (ctx.mounted) {
                                   Navigator.of(ctx).pop();
@@ -157,9 +149,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await widget.onRefreshOverview();
                               } catch (err) {
                                 setModalState(() => submitting = false);
-                                ref.read(toastProvider.notifier).error(
-                                    extractErrorMessage(
-                                        err, 'Không thể gửi hồ sơ thuê.'));
+                                ref
+                                    .read(toastProvider.notifier)
+                                    .error(extractErrorMessage(err, 'Không thể gửi hồ sơ thuê.'));
                               }
                             },
                     ),
@@ -173,17 +165,13 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
-  void _openReservationBankModal(
-      BuildContext context, Map<String, dynamic> rsv) {
-    final rsvId =
-        rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
+  void _openReservationBankModal(BuildContext context, Map<String, dynamic> rsv) {
+    final rsvId = rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
     String bankName = rsv['bank_name']?.toString() ?? '';
     String? bankCode = rsv['bank_code']?.toString();
     String? bankBin = rsv['bank_bin']?.toString();
-    final accNumCtrl =
-        TextEditingController(text: rsv['account_number']?.toString() ?? '');
-    final accHolderCtrl =
-        TextEditingController(text: rsv['account_holder']?.toString() ?? '');
+    final accNumCtrl = TextEditingController(text: rsv['account_number']?.toString() ?? '');
+    final accHolderCtrl = TextEditingController(text: rsv['account_holder']?.toString() ?? '');
 
     bool saving = false;
 
@@ -236,11 +224,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         : () async {
                             final acc = accNumCtrl.text.trim();
                             final holder = accHolderCtrl.text.trim();
-                            if (bankName.isEmpty ||
-                                acc.isEmpty ||
-                                holder.isEmpty) {
-                              ref.read(toastProvider.notifier).error(
-                                  'Vui lòng điền đầy đủ thông tin ngân hàng.');
+                            if (bankName.isEmpty || acc.isEmpty || holder.isEmpty) {
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .error('Vui lòng điền đầy đủ thông tin ngân hàng.');
                               return;
                             }
 
@@ -258,14 +245,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }
-                              ref.read(toastProvider.notifier).success(
-                                  'Đã cập nhật thông tin tài khoản hoàn tiền.');
+                              ref
+                                  .read(toastProvider.notifier)
+                                  .success('Đã cập nhật thông tin tài khoản hoàn tiền.');
                               await widget.onRefreshOverview();
                             } catch (err) {
                               setModalState(() => saving = false);
                               ref.read(toastProvider.notifier).error(
-                                    extractErrorMessage(err,
-                                        'Không thể cập nhật tài khoản ngân hàng.'),
+                                    extractErrorMessage(
+                                        err, 'Không thể cập nhật tài khoản ngân hàng.'),
                                   );
                             }
                           },
@@ -364,9 +352,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final ov = widget.overview ?? const {};
     final contract = ov['active_contract'] is Map
         ? ov['active_contract'] as Map<String, dynamic>
-        : (ov['contract'] is Map
-            ? ov['contract'] as Map<String, dynamic>
-            : null);
+        : (ov['contract'] is Map ? ov['contract'] as Map<String, dynamic> : null);
 
     // Hero card values (parity: OverviewTab.jsx:1089-1205).
     final user = ov['user'] is Map ? ov['user'] as Map : const {};
@@ -381,8 +367,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         : null;
     final floorName = contract?['floor_name']?.toString().trim() ?? '';
     final buildingName = contract?['building_name']?.toString().trim() ?? '';
-    final buildingAddress =
-        contract?['building_address']?.toString().trim() ?? '';
+    final buildingAddress = contract?['building_address']?.toString().trim() ?? '';
     final amenities = contract != null
         ? parseResidentAmenities(contract['amenities'])
         : const <String>[];
@@ -390,15 +375,13 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final rawReservations = ov['reservations'] is List
         ? ov['reservations'] as List
         : (ov['reservation'] is Map ? [ov['reservation']] : const []);
-    final reservations =
-        rawReservations.whereType<Map<String, dynamic>>().toList();
+    final reservations = rawReservations.whereType<Map<String, dynamic>>().toList();
 
     final unreadCount = ref.watch(notificationProvider).unreadCount;
     final currentAmountDue = ov['current_amount_due'] is num
         ? ov['current_amount_due'] as num
         : num.tryParse(ov['current_amount_due']?.toString() ?? '0') ?? 0;
-    final latestInvoice =
-        ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
+    final latestInvoice = ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
 
     return RefreshIndicator(
       onRefresh: widget.onRefreshOverview,
@@ -413,9 +396,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               ...reservations.map((r) {
                 final aptCode = r['apartment_code']?.toString() ?? '';
                 final bldName = r['building_name']?.toString() ?? '';
-                final status = r['status']?.toString() ??
-                    r['reservation_status']?.toString() ??
-                    '';
+                final status = r['status']?.toString() ?? r['reservation_status']?.toString() ?? '';
                 final holdAmount = r['amount'] ?? r['hold_amount'] ?? 0;
                 final canUpdateBank = canResidentUpdateReservationBankInfo(r);
 
@@ -493,10 +474,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               text: 'Cập nhật TK hoàn tiền',
                               size: AppButtonSize.sm,
                               variant: AppButtonVariant.outline,
-                              icon:
-                                  const Icon(LucideIcons.creditCard, size: 14),
-                              onPressed: () =>
-                                  _openReservationBankModal(context, r),
+                              icon: const Icon(LucideIcons.creditCard, size: 14),
+                              onPressed: () => _openReservationBankModal(context, r),
                             ),
                             const SizedBox(width: 8),
                           ],
@@ -598,8 +577,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         color: Colors.white,
                       ),
                     ),
-                    if (buildingName.isNotEmpty ||
-                        buildingAddress.isNotEmpty) ...[
+                    if (buildingName.isNotEmpty || buildingAddress.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -644,8 +622,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(8),
-                                border:
-                                    Border.all(color: const Color(0x33FFFFFF)),
+                                border: Border.all(
+                                    color: const Color(0x33FFFFFF)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -701,10 +679,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                           _heroSpec(
                             LucideIcons.bedDouble,
                             'Loại phòng',
-                            (contract['apartment_type']
-                                        ?.toString()
-                                        .trim()
-                                        .isNotEmpty ??
+                            (contract['apartment_type']?.toString().trim().isNotEmpty ??
                                     false)
                                 ? contract['apartment_type'].toString().trim()
                                 : (contract['bedrooms'] != null
@@ -943,7 +918,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                       _buildQuickActionCard(
                         width: cardWidth,
                         icon: LucideIcons.receipt,
-                        iconBg: AppColors.sky50,
+                        iconBg: AppColors.primary100,
                         iconFg: AppColors.primary600,
                         title: 'Báo đã thanh toán',
                         subtitle: 'Gửi ủy nhiệm chi / biên lai chuyển khoản',
@@ -1245,8 +1220,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
               AppBadge(
-                variant:
-                    isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                variant: isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
                 label: period.isNotEmpty ? 'Kỳ $period' : 'Phí phạt tất toán',
               ),
               StatusBadge(status: status, domain: StatusDomain.invoice),
@@ -1261,9 +1235,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Hạn thanh toán:',
                 style: TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 12,
-                    color: AppColors.slate500),
+                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
               ),
               Text(
                 formatDate(invoice['due_date']),
@@ -1282,9 +1254,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               const Text(
                 'Đã trả:',
                 style: TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 12,
-                    color: AppColors.slate500),
+                    fontFamily: 'Inter', fontSize: 12, color: AppColors.slate500),
               ),
               Text(
                 formatMoney(paid),
@@ -1354,8 +1324,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final hotline = contact['technical_hotline']?.toString().trim() ?? '';
     final hours = contact['working_hours']?.toString().trim() ?? '';
 
-    const labelStyle =
-        TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
+    const labelStyle = TextStyle(
+        fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
 
     return AppCard(
       key: const Key('resident-manager-support-card'),
@@ -1388,8 +1358,7 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                if (phone.isNotEmpty)
-                  Text('SĐT Quản lý: $phone', style: labelStyle),
+                if (phone.isNotEmpty) Text('SĐT Quản lý: $phone', style: labelStyle),
                 if (email.isNotEmpty) Text('Email: $email', style: labelStyle),
                 Text(
                   'Hotline KT: ${hotline.isEmpty ? '1900 6868' : hotline}',
