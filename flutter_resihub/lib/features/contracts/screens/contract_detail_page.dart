@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -5,8 +6,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/billing_helpers.dart' hide createIdempotencyKey;
 import '../../../core/utils/date_range.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/service_subscription_meta.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
 import '../../../shared/widgets/common/confirm_dialog.dart';
@@ -28,6 +31,9 @@ import '../../../shared/widgets/ui/html_print_preview_modal.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../auth/providers/permission_provider.dart';
 import '../../buildings/services/buildings_service.dart';
+import '../../payments/services/payments_service.dart';
+import '../../services/services/services_service.dart';
+import '../../users/services/users_service.dart';
 import '../services/contracts_service.dart';
 
 const List<AppSelectOption<String>> kRelationshipOptions = [
@@ -38,6 +44,209 @@ const List<AppSelectOption<String>> kRelationshipOptions = [
   AppSelectOption(value: 'friend', label: 'Bạn bè'),
   AppSelectOption(value: 'other', label: 'Khác'),
 ];
+
+// --- Pure helpers (React parity; kept top-level so tests can pin them) ---
+
+List<AppTabItem> buildContractDetailTabItems(dynamic contract) {
+  List<dynamic> listOf(String key) =>
+      (contract is Map && contract[key] is List) ? List<dynamic>.from(contract[key] as List) : <dynamic>[];
+  return [
+    AppTabItem(id: 'overview', label: 'Chi tiết & Bản scan', count: listOf('attachments').length),
+    AppTabItem(id: 'schedule', label: 'Lịch hóa đơn dự kiến', count: listOf('invoice_schedule').length),
+    AppTabItem(id: 'occupants', label: 'Người ở cùng', count: listOf('occupants').length),
+    AppTabItem(id: 'amendments', label: 'Phụ lục hợp đồng', count: listOf('amendments').length),
+    AppTabItem(id: 'credits', label: 'Sổ tín dụng & Hoàn tiền', count: listOf('credit_balances').length),
+    AppTabItem(id: 'history', label: 'Giá dịch vụ riêng', count: listOf('service_prices').length),
+  ];
+}
+
+// ponytail: derived from the contract's own subscriptions/prices rather than an
+// editing grid; add a full service-picker when per-draft edits are required.
+List<Map<String, dynamic>> buildDraftServicesFromContract(dynamic contract) {
+  final subs = (contract is Map && contract['service_subscriptions'] is List)
+      ? List<dynamic>.from(contract['service_subscriptions'] as List)
+      : <dynamic>[];
+  return subs
+      .where((s) =>
+          s is Map &&
+          ['PENDING_APPROVAL', 'ACTIVE'].contains(s['status']?.toString()) &&
+          s['service_id'] != null)
+      .map<Map<String, dynamic>>((s) {
+        var qty = num.tryParse(s['quantity']?.toString() ?? '')?.round() ?? 1;
+        if (qty < 1) qty = 1;
+        var price = num.tryParse(s['unit_price']?.toString() ?? '')?.round() ?? 0;
+        if (price < 0) price = 0;
+        final parking = isParkingService(s['category'] ?? s['service_category']);
+        final note = (s['note']?.toString() ?? '').trim();
+        return <String, dynamic>{
+          'service_id': s['service_id'].toString(),
+          'quantity': qty,
+          'unit_price': price,
+          if (parking)
+            'vehicle_plates':
+                (s['vehicle_plates'] is List) ? List<dynamic>.from(s['vehicle_plates'] as List) : <dynamic>[],
+          if (note.isNotEmpty) 'note': note,
+        };
+      })
+      .toList();
+}
+
+List<Map<String, dynamic>> buildDraftMeterPricesFromContract(dynamic contract) {
+  final prices = (contract is Map && contract['service_prices'] is List)
+      ? List<dynamic>.from(contract['service_prices'] as List)
+      : <dynamic>[];
+  Map<dynamic, dynamic>? find(String code) {
+    for (final p in prices) {
+      if (p is Map && (p['service_code']?.toString() ?? '').toUpperCase() == code) return p;
+    }
+    return null;
+  }
+
+  return ['ELECTRICITY', 'WATER'].map((code) {
+    final raw = find(code)?['unit_price'];
+    final parsed = raw == null ? null : num.tryParse(raw.toString());
+    return <String, dynamic>{
+      'service_code': code,
+      'unit_price': (parsed != null && parsed >= 0) ? parsed.round() : null,
+    };
+  }).toList();
+}
+
+Map<String, dynamic> buildEditDraftSavePayload({
+  required String startDate,
+  required String endDate,
+  required num rentAmount,
+  required num depositAmount,
+  required String billingCycle,
+  required num billingDay,
+  required num paymentDueDays,
+  required String note,
+  required List<dynamic> services,
+  required List<dynamic> servicePrices,
+}) {
+  final day = (billingDay.isNaN ? 1 : billingDay.round()).clamp(1, 31);
+  final due = (paymentDueDays.isNaN ? 5 : paymentDueDays.round()).clamp(1, 60);
+  return {
+    'start_date': startDate,
+    'end_date': endDate,
+    'rent_amount': rentAmount.round(),
+    'deposit_amount': depositAmount.round(),
+    'billing_cycle': billingCycle,
+    'billing_day': day,
+    'payment_due_days': due,
+    'note': note.trim(),
+    'services': services,
+    'service_prices': servicePrices,
+  };
+}
+
+Map<String, dynamic> buildAmendmentChanges({
+  required Map<String, dynamic> current,
+  required String endDate,
+  required String rentAmount,
+  required String depositAmount,
+  required String note,
+}) {
+  final changes = <String, dynamic>{};
+  final curEnd = current['end_date']?.toString() ?? '';
+  final curRent = num.tryParse(current['rent_amount']?.toString() ?? '') ?? 0;
+  final curDep = num.tryParse(current['deposit_amount']?.toString() ?? '') ?? 0;
+  final curNote = (current['note']?.toString() ?? '').trim();
+
+  if (endDate.isNotEmpty && endDate != curEnd) changes['end_date'] = endDate;
+  final rent = num.tryParse(rentAmount);
+  if (rent != null && rent.round() != curRent.round()) changes['rent_amount'] = rent.round();
+  final dep = num.tryParse(depositAmount);
+  if (dep != null && dep.round() != curDep.round()) changes['deposit_amount'] = dep.round();
+  final cleanNote = note.trim();
+  if (cleanNote.isNotEmpty && cleanNote != curNote) changes['note'] = cleanNote;
+  return changes;
+}
+
+class TerminateDefaults {
+  final bool isPreMoveIn;
+  final String date;
+  final String reason;
+
+  const TerminateDefaults({
+    required this.isPreMoveIn,
+    required this.date,
+    required this.reason,
+  });
+}
+
+TerminateDefaults resolveTerminateDefaults({
+  required String todayStr,
+  required String contractStartStr,
+  required String contractEndStr,
+}) {
+  final isPreMoveIn = contractStartStr.isNotEmpty && todayStr.compareTo(contractStartStr) < 0;
+  var date = todayStr;
+  if (!isPreMoveIn && contractStartStr.isNotEmpty && date.compareTo(contractStartStr) < 0) {
+    date = contractStartStr;
+  }
+  if (contractEndStr.isNotEmpty && date.compareTo(contractEndStr) > 0) date = contractEndStr;
+  return TerminateDefaults(
+    isPreMoveIn: isPreMoveIn,
+    date: date,
+    reason: isPreMoveIn
+        ? 'Thanh lý hợp đồng trước ngày nhận phòng theo thỏa thuận'
+        : 'Khách thuê trả phòng / Thanh lý hợp đồng',
+  );
+}
+
+String validateTerminateDate({
+  required String date,
+  required String minDate,
+  required String maxDate,
+}) {
+  if (date.isEmpty) return 'Vui lòng chọn ngày chấm dứt hợp đồng.';
+  if (minDate.isNotEmpty && date.compareTo(minDate) < 0) {
+    return 'Ngày chấm dứt không được nhỏ hơn $minDate.';
+  }
+  if (maxDate.isNotEmpty && date.compareTo(maxDate) > 0) {
+    return 'Ngày chấm dứt không được vượt quá ngày kết thúc HĐ ($maxDate).';
+  }
+  return '';
+}
+
+Map<String, dynamic> buildCreditRefundPayload({
+  required num amount,
+  required String reason,
+  required String bankName,
+  required String accountNumber,
+  required String accountHolder,
+  required String proofImage,
+}) {
+  return {
+    'amount': amount.round(),
+    'reason': reason.trim(),
+    'bank_info': {
+      'bank_name': bankName.trim(),
+      'account_number': accountNumber.trim(),
+      'account_holder': accountHolder.trim(),
+    },
+    if (proofImage.trim().isNotEmpty) 'proof_image': proofImage.trim(),
+  };
+}
+
+String? extractApprovalPendingErrorCode(dynamic err) {
+  String? code;
+  if (err is String) {
+    code = err;
+  } else if (err is DioException) {
+    final data = err.response?.data;
+    if (data is Map) code = data['code']?.toString();
+  } else if (err is Map) {
+    final response = err['response'];
+    if (response is Map && response['data'] is Map) {
+      code = (response['data'] as Map)['code']?.toString();
+    }
+    code ??= err['code']?.toString();
+  }
+  if (code == 'PRICE_NEEDS_APPROVAL' || code == 'TRANSFER_NEEDS_APPROVAL') return code;
+  return null;
+}
 
 class ContractDetailPage extends ConsumerStatefulWidget {
   final String contractId;
@@ -58,6 +267,8 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
   List<dynamic> _occupants = [];
   List<dynamic> _amendments = [];
   List<dynamic> _servicePrices = [];
+  List<dynamic> _catalogServices = [];
+  bool _allowSelfApproval = false;
   bool _loading = true;
   String _activeTab = 'overview';
 
@@ -78,6 +289,8 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
   String _editBillingDay = '1';
   String _editPaymentDueDays = '5';
   String _editNote = '';
+  List<dynamic> _draftServices = const [];
+  List<dynamic> _draftMeterPrices = const [];
   bool _savingDraft = false;
 
   // Cancel draft modal
@@ -99,6 +312,7 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
   String _amendEndDate = '';
   String _amendRentAmount = '';
   String _amendDepositAmount = '';
+  String _amendNote = '';
   String _amendReason = '';
   bool _submittingAmend = false;
 
@@ -160,6 +374,19 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
   String _spEffectiveFrom = '';
   bool _submittingSp = false;
 
+  // Credit refund modal (FR-040)
+  bool _creditRefundOpen = false;
+  dynamic _selectedCredit;
+  final Map<String, String> _creditRefundForm = {
+    'amount': '',
+    'reason': '',
+    'bank_name': '',
+    'account_number': '',
+    'account_holder': '',
+    'proof_image': '',
+  };
+  bool _submittingCreditRefund = false;
+
   @override
   void initState() {
     super.initState();
@@ -186,11 +413,34 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
       ref.read(toastProvider.notifier).error(
             extractErrorMessage(err, 'Không thể tải thông tin chi tiết hợp đồng.'),
           );
-    } finally {
-      if (mounted) {
-        setState(() => _loading = false);
-      }
     }
+
+    // B14: four-eyes self-approval is a server setting, not a hardcoded false.
+    try {
+      final settingsRes = await ref.read(usersServiceProvider).getSettings();
+      final settings = (settingsRes is Map && settingsRes['data'] is Map) ? settingsRes['data'] : null;
+      final config = (settings is Map && settings['approval_config'] is Map)
+          ? settings['approval_config'] as Map
+          : null;
+      if (config != null && mounted) {
+        setState(() => _allowSelfApproval = config['allow_self_approval'] == true);
+      }
+    } catch (_) {
+      // Settings are optional; keep the safe false default.
+    }
+
+    // B10: dynamic service_code options need the active catalog.
+    try {
+      final catRes = await ref.read(servicesServiceProvider).listCatalog({'active_only': 'true'});
+      if (catRes is Map && catRes['data'] is List && mounted) {
+        setState(() => _catalogServices = List<dynamic>.from(catRes['data'] as List));
+      }
+    } catch (_) {
+      // Keep 7 standard codes as fallback.
+    }
+
+    if (!mounted) return;
+    setState(() => _loading = false);
   }
 
   void _applyContractData(dynamic data) {
@@ -275,9 +525,21 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
       setState(() => _confirmType = null);
       _loadAll(force: true);
     } catch (err) {
-      ref.read(toastProvider.notifier).error(
-            extractErrorMessage(err, 'Thao tác không thành công.'),
-          );
+      // B16: backend already moved the contract to PENDING_APPROVAL — surface the
+      // specific 4-eyes message instead of a generic error.
+      final code = extractApprovalPendingErrorCode(err);
+      if (code != null) {
+        final msg = extractErrorMessage(err, code == 'TRANSFER_NEEDS_APPROVAL'
+            ? 'Hợp đồng đổi phòng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt kết chuyển cọc.'
+            : 'Giá thuê thấp hơn 90% giá niêm yết. Hợp đồng đã chuyển sang chờ Chủ sở hữu tòa nhà (OWNER) phê duyệt.');
+        ref.read(toastProvider.notifier).warning(msg);
+        setState(() => _confirmType = null);
+        _loadAll(force: true);
+      } else {
+        ref.read(toastProvider.notifier).error(
+              extractErrorMessage(err, 'Thao tác không thành công.'),
+            );
+      }
     } finally {
       if (mounted) {
         setState(() => _processingConfirm = false);
@@ -289,16 +551,21 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
   Future<void> _handleSaveDraft() async {
     setState(() => _savingDraft = true);
     try {
-      final res = await ref.read(contractsServiceProvider).update(widget.contractId, {
-        'start_date': _editStartDate,
-        'end_date': _editEndDate,
-        'rent_amount': (num.tryParse(_editRentAmount) ?? 0).round(),
-        'deposit_amount': (num.tryParse(_editDepositAmount) ?? 0).round(),
-        'billing_cycle': _editBillingCycle,
-        'billing_day': int.tryParse(_editBillingDay) ?? 1,
-        'payment_due_days': int.tryParse(_editPaymentDueDays) ?? 5,
-        'note': _editNote.trim(),
-      });
+      final res = await ref.read(contractsServiceProvider).update(
+        widget.contractId,
+        buildEditDraftSavePayload(
+          startDate: _editStartDate,
+          endDate: _editEndDate,
+          rentAmount: num.tryParse(_editRentAmount) ?? 0,
+          depositAmount: num.tryParse(_editDepositAmount) ?? 0,
+          billingCycle: _editBillingCycle,
+          billingDay: num.tryParse(_editBillingDay) ?? 1,
+          paymentDueDays: num.tryParse(_editPaymentDueDays) ?? 5,
+          note: _editNote,
+          services: _draftServices,
+          servicePrices: _draftMeterPrices,
+        ),
+      );
       ref.read(toastProvider.notifier).success(
             (res is Map && res['message'] != null) ? res['message'].toString() : 'Cập nhật bản nháp hợp đồng thành công.',
           );
@@ -389,12 +656,17 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
     }
     setState(() => _submittingAmend = true);
     try {
-      final changes = <String, dynamic>{};
-      if (_amendEndDate.isNotEmpty) changes['end_date'] = _amendEndDate;
-      final rent = num.tryParse(_amendRentAmount);
-      if (rent != null && rent > 0) changes['rent_amount'] = rent.round();
-      final dep = num.tryParse(_amendDepositAmount);
-      if (dep != null && dep >= 0) changes['deposit_amount'] = dep.round();
+      final changes = buildAmendmentChanges(
+        current: _contract is Map ? Map<String, dynamic>.from(_contract as Map) : <String, dynamic>{},
+        endDate: _amendEndDate,
+        rentAmount: _amendRentAmount,
+        depositAmount: _amendDepositAmount,
+        note: _amendNote,
+      );
+      if (changes.isEmpty) {
+        ref.read(toastProvider.notifier).warning('Chưa có thông tin nào thay đổi so với hợp đồng hiện tại.');
+        return;
+      }
 
       final res = await ref.read(contractsServiceProvider).createAmendment(widget.contractId, {
         'changes': changes,
@@ -544,8 +816,17 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
 
   // Terminate Submit
   Future<void> _handleTerminateSubmit() async {
-    if (_terminateDate.isEmpty) {
-      ref.read(toastProvider.notifier).warning('Vui lòng chọn ngày chấm dứt hợp đồng.');
+    final today = toDateOnlyStr(DateTime.now());
+    final start = toDateOnlyStr(_contract?['start_date']);
+    final end = toDateOnlyStr(_contract?['end_date']);
+    final minDate = (start.isNotEmpty && start.compareTo(today) > 0) ? today : start;
+    final dateError = validateTerminateDate(date: _terminateDate, minDate: minDate, maxDate: end);
+    if (dateError.isNotEmpty) {
+      ref.read(toastProvider.notifier).warning(dateError);
+      return;
+    }
+    if (_terminateReason.trim().isEmpty) {
+      ref.read(toastProvider.notifier).warning('Vui lòng nhập lý do chấm dứt hợp đồng.');
       return;
     }
     setState(() => _submittingTerminate = true);
@@ -757,7 +1038,148 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
     }
   }
 
+  // Credit refund modal (FR-040)
+  void _openCreditRefundModal(dynamic credit) {
+    if (credit is! Map) return;
+    final remaining = [
+      num.tryParse(credit['amount']?.toString() ?? '') ?? 0,
+      -(num.tryParse(credit['applied_amount']?.toString() ?? '') ?? 0),
+      -(num.tryParse(credit['settlement_refund_amount']?.toString() ?? '') ?? 0),
+    ].reduce((a, b) => a + b);
+    final tenant = (_contract is Map && _contract['tenant'] is Map) ? _contract['tenant'] as Map : null;
+    String tenantField(String key) => tenant?[key]?.toString() ?? '';
+    final holder = tenantField('bank_account_name').isNotEmpty
+        ? tenantField('bank_account_name')
+        : tenantField('full_name');
+    setState(() {
+      _selectedCredit = credit;
+      _creditRefundForm.updateAll((_, __) => '');
+      _creditRefundForm['amount'] = (remaining > 0 ? remaining : 0).round().toString();
+      _creditRefundForm['bank_name'] = tenantField('bank_name');
+      _creditRefundForm['account_number'] = tenantField('bank_account_no');
+      _creditRefundForm['account_holder'] = holder;
+      _creditRefundOpen = true;
+    });
+  }
+
+  Future<void> _handleCreditRefundSubmit() async {
+    if (_selectedCredit == null) return;
+    final amount = num.tryParse(_creditRefundForm['amount'] ?? '');
+    if (amount == null || amount <= 0) {
+      ref.read(toastProvider.notifier).warning('Vui lòng nhập số tiền hoàn trả hợp lệ (> 0).');
+      return;
+    }
+    if ((_creditRefundForm['reason'] ?? '').trim().isEmpty) {
+      ref.read(toastProvider.notifier).warning('Vui lòng nhập lý do hoàn tiền.');
+      return;
+    }
+    setState(() => _submittingCreditRefund = true);
+    try {
+      await ref.read(paymentsServiceProvider).requestCreditRefund(
+        _selectedCredit['id'].toString(),
+        buildCreditRefundPayload(
+          amount: amount,
+          reason: _creditRefundForm['reason'] ?? '',
+          bankName: _creditRefundForm['bank_name'] ?? '',
+          accountNumber: _creditRefundForm['account_number'] ?? '',
+          accountHolder: _creditRefundForm['account_holder'] ?? '',
+          proofImage: _creditRefundForm['proof_image'] ?? '',
+        ),
+      );
+      ref.read(toastProvider.notifier).success('Đã gửi đề nghị hoàn tiền tín dụng (chờ duyệt 4 mắt).');
+      setState(() {
+        _creditRefundOpen = false;
+        _selectedCredit = null;
+      });
+      _loadAll(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể tạo đề nghị hoàn tiền tín dụng.'),
+          );
+    } finally {
+      if (mounted) setState(() => _submittingCreditRefund = false);
+    }
+  }
+
+  Future<void> _handleApproveCreditRefund(String creditId) async {
+    try {
+      await ref.read(paymentsServiceProvider).approveCreditRefund(creditId);
+      ref.read(toastProvider.notifier).success('Đã phê duyệt hoàn tiền tín dụng thành công.');
+      _loadAll(force: true);
+    } catch (err) {
+      ref.read(toastProvider.notifier).error(
+            extractErrorMessage(err, 'Không thể phê duyệt hoàn tiền.'),
+          );
+    }
+  }
+
   Widget? _buildActiveOverlayModal() {
+    if (_creditRefundOpen) {
+      return AppModal(
+        title: 'Đề nghị hoàn tiền tín dụng (4 mắt)',
+        size: AppModalSize.md,
+        onClose: () => setState(() => _creditRefundOpen = false),
+        footer: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            AppButton(
+              text: 'Hủy',
+              variant: AppButtonVariant.outline,
+              onPressed: () => setState(() => _creditRefundOpen = false),
+            ),
+            const SizedBox(width: 10),
+            AppButton(
+              text: 'Gửi đề nghị',
+              loading: _submittingCreditRefund,
+              onPressed: _handleCreditRefundSubmit,
+            ),
+          ],
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            children: [
+              AppInput(
+                label: 'Số tiền hoàn trả (VND)',
+                required: true,
+                initialValue: _creditRefundForm['amount'],
+                onChanged: (val) => _creditRefundForm['amount'] = val,
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Lý do hoàn tiền',
+                required: true,
+                initialValue: _creditRefundForm['reason'],
+                onChanged: (val) => _creditRefundForm['reason'] = val,
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Tên ngân hàng',
+                initialValue: _creditRefundForm['bank_name'],
+                onChanged: (val) => _creditRefundForm['bank_name'] = val,
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Số tài khoản',
+                initialValue: _creditRefundForm['account_number'],
+                onChanged: (val) => _creditRefundForm['account_number'] = val,
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Chủ tài khoản',
+                initialValue: _creditRefundForm['account_holder'],
+                onChanged: (val) => _creditRefundForm['account_holder'] = val,
+              ),
+              const SizedBox(height: 12),
+              FileUploadField(
+                label: 'Ảnh chứng từ (proof_image)',
+                onChanged: (val) => _creditRefundForm['proof_image'] = val?.toString() ?? '',
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     if (_editDraftOpen) {
       return AppModal(
         title: 'Chỉnh sửa hợp đồng nháp (DRAFT)',
@@ -997,6 +1419,14 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              AppInput(
+                label: 'Ghi chú hợp đồng mới (để trống = giữ nguyên)',
+                multiline: true,
+                rows: 2,
+                initialValue: _amendNote,
+                onChanged: (val) => _amendNote = val,
               ),
               const SizedBox(height: 12),
               AppInput(
@@ -1412,10 +1842,16 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
         ),
         child: Column(
           children: [
-            AppInput(
-              label: 'Mã dịch vụ (service_code)',
-              initialValue: _spServiceCode,
-              onChanged: (val) => _spServiceCode = val,
+            AppSelect<String>(
+              label: 'Dịch vụ (service_code)',
+              value: _spServiceCode,
+              options: buildContractServiceCodeOptions(_catalogServices, _servicePrices)
+                  .map((o) => AppSelectOption<String>(
+                        value: o['value']!,
+                        label: o['label']!,
+                      ))
+                  .toList(),
+              onChanged: (val) => setState(() => _spServiceCode = val ?? 'INTERNET'),
             ),
             const SizedBox(height: 12),
             AppInput(
@@ -1512,20 +1948,15 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
     final isProposer = _contract['created_by'] != null &&
         currentUserId != null &&
         _contract['created_by'].toString() == currentUserId;
-    const allowSelfApproval = false;
+    final allowSelfApproval = _allowSelfApproval;
     final canPerformApproval = canApprovePrice && (!isProposer || allowSelfApproval);
 
     final idStr = _contract['id']?.toString() ?? '';
     final contractCode = 'HĐ-${idStr.substring(0, idStr.length >= 8 ? 8 : idStr.length).toUpperCase()}';
     final attachments = (_contract['attachments'] is List) ? List<dynamic>.from(_contract['attachments']) : [];
 
-    // Tabs
-    final tabs = [
-      AppTabItem(id: 'overview', label: 'Chi tiết & Bản scan', count: attachments.length),
-      AppTabItem(id: 'occupants', label: 'Người ở cùng', count: _occupants.length),
-      AppTabItem(id: 'amendments', label: 'Phụ lục hợp đồng', count: _amendments.length),
-      AppTabItem(id: 'history', label: 'Giá dịch vụ riêng', count: _servicePrices.length),
-    ];
+    // Tabs — 6 parity tabs with React (B9)
+    final tabs = buildContractDetailTabItems(_contract);
 
     final overlayModal = _buildActiveOverlayModal();
 
@@ -1577,6 +2008,8 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                                 _editBillingDay = _contract['billing_day']?.toString() ?? '1';
                                 _editPaymentDueDays = _contract['payment_due_days']?.toString() ?? '5';
                                 _editNote = _contract['note']?.toString() ?? '';
+                                _draftServices = buildDraftServicesFromContract(_contract);
+                                _draftMeterPrices = buildDraftMeterPricesFromContract(_contract);
                                 _editDraftOpen = true;
                               });
                             },
@@ -1623,6 +2056,7 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                                 _amendRentAmount = _contract['rent_amount'] != null ? _contract['rent_amount'].toString() : '';
                                 _amendDepositAmount = _contract['deposit_amount'] != null ? _contract['deposit_amount'].toString() : '';
                                 _amendEffectiveFrom = toDateOnlyStr(DateTime.now());
+                                _amendNote = _contract['note']?.toString() ?? '';
                                 _amendReason = '';
                                 _amendOpen = true;
                               });
@@ -1643,9 +2077,14 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                             variant: AppButtonVariant.danger,
                             icon: const Icon(LucideIcons.xCircle, size: 16),
                             onPressed: () {
+                              final defs = resolveTerminateDefaults(
+                                todayStr: toDateOnlyStr(DateTime.now()),
+                                contractStartStr: toDateOnlyStr(_contract['start_date']),
+                                contractEndStr: toDateOnlyStr(_contract['end_date']),
+                              );
                               setState(() {
-                                _terminateDate = toDateOnlyStr(DateTime.now());
-                                _terminateReason = 'Khách thuê trả phòng / Thanh lý hợp đồng';
+                                _terminateDate = defs.date;
+                                _terminateReason = defs.reason;
                                 _terminateNote = '';
                                 _terminateOpen = true;
                               });
@@ -1684,7 +2123,19 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                             text: 'Chốt trả phòng & Chấm dứt ngay',
                             variant: AppButtonVariant.danger,
                             icon: const Icon(LucideIcons.checkCircle2, size: 16),
-                            onPressed: () => setState(() => _confirmType = 'approve_termination'),
+                            onPressed: () {
+                              final defs = resolveTerminateDefaults(
+                                todayStr: toDateOnlyStr(DateTime.now()),
+                                contractStartStr: toDateOnlyStr(_contract['start_date']),
+                                contractEndStr: toDateOnlyStr(_contract['end_date']),
+                              );
+                              setState(() {
+                                _terminateDate = defs.date;
+                                _terminateReason = defs.reason;
+                                _terminateNote = '';
+                                _terminateOpen = true;
+                              });
+                            },
                           ),
                         ],
                       ],
@@ -1839,6 +2290,54 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                           ),
                         ),
                       ],
+                    ),
+
+                  // Tab: Lịch hóa đơn dự kiến (B9)
+                  if (_activeTab == 'schedule')
+                    AppCard(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'Lịch hóa đơn dự kiến toàn kỳ hợp đồng',
+                            style: TextStyle(fontFamily: 'Inter', fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.slate900),
+                          ),
+                          const SizedBox(height: 12),
+                          DataTableWidget<dynamic>(
+                            columns: [
+                              DataTableColumn<dynamic>(
+                                key: 'period_no',
+                                label: 'Kỳ thu',
+                                render: (r) => Text('#${r['period_no'] ?? '—'} ${r['billing_period']?.toString() ?? ''}',
+                                    style: const TextStyle(fontWeight: FontWeight.w600)),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'issue_date',
+                                label: 'Ngày phát hành',
+                                render: (r) => Text(formatDate(r['issue_date'])),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'due_date',
+                                label: 'Hạn thanh toán',
+                                render: (r) => Text(formatDate(r['due_date'])),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'expected_total',
+                                label: 'Tổng tạm tính',
+                                align: TextAlign.right,
+                                render: (r) => Text(formatMoney(r['expected_total']),
+                                    style: const TextStyle(fontWeight: FontWeight.w700)),
+                              ),
+                            ],
+                            data: (_contract['invoice_schedule'] is List)
+                                ? List<dynamic>.from(_contract['invoice_schedule'] as List)
+                                : const [],
+                            loading: false,
+                            emptyTitle: 'Chưa có lịch hóa đơn dự kiến',
+                          ),
+                        ],
+                      ),
                     ),
 
                   // Tab 2: Occupants
@@ -2006,6 +2505,97 @@ class _ContractDetailPageState extends ConsumerState<ContractDetailPage> {
                                 );
                               }).toList(),
                             ),
+                        ],
+                      ),
+                    ),
+
+                  // Tab: Sổ tín dụng & Hoàn tiền (B9)
+                  if (_activeTab == 'credits')
+                    AppCard(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Sổ số dư tín dụng & Hoàn tiền trực tiếp',
+                                style: TextStyle(fontFamily: 'Inter', fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.slate900),
+                              ),
+                              AppBadge(
+                                label: 'Khả dụng: ${formatMoney(_contract['available_credit_balance'])}',
+                                variant: AppBadgeVariant.emerald,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          DataTableWidget<dynamic>(
+                            columns: [
+                              DataTableColumn<dynamic>(
+                                key: 'amount',
+                                label: 'Số tiền gốc',
+                                align: TextAlign.right,
+                                render: (r) => Text(formatMoney(r['amount']), style: const TextStyle(fontWeight: FontWeight.w600)),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'applied_amount',
+                                label: 'Đã cấn trừ',
+                                align: TextAlign.right,
+                                render: (r) => Text(formatMoney(r['applied_amount'])),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'reason_type',
+                                label: 'Lý do / Mô tả',
+                                render: (r) => Text((r['description'] ?? r['reason_type'] ?? '—').toString()),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'status',
+                                label: 'Trạng thái',
+                                align: TextAlign.center,
+                                render: (r) => StatusBadge(status: r['status']?.toString() ?? '', domain: StatusDomain.creditBalance),
+                              ),
+                              DataTableColumn<dynamic>(
+                                key: 'actions',
+                                label: 'Thao tác 4 mắt',
+                                align: TextAlign.center,
+                                render: (r) {
+                                  final amount = num.tryParse(r['amount']?.toString() ?? '') ?? 0;
+                                  final applied = num.tryParse(r['applied_amount']?.toString() ?? '') ?? 0;
+                                  final refunded = num.tryParse(r['settlement_refund_amount']?.toString() ?? '') ?? 0;
+                                  final remaining = (amount - applied - refunded) > 0 ? amount - applied - refunded : 0;
+                                  if (['AVAILABLE', 'PARTIALLY_APPLIED'].contains(r['status']?.toString()) && remaining > 0) {
+                                    return AppButton(
+                                      text: 'Đề nghị hoàn tiền',
+                                      size: AppButtonSize.xs,
+                                      variant: AppButtonVariant.outline,
+                                      onPressed: () => _openCreditRefundModal(r),
+                                    );
+                                  }
+                                  if (r['status']?.toString() == 'PENDING_DIRECT_REFUND' &&
+                                      canActorApproveCreditRefund(
+                                        actor: user,
+                                        record: r,
+                                        buildingHasActiveOwner: true,
+                                        allowSelfApproval: allowSelfApproval,
+                                      )) {
+                                    return AppButton(
+                                      text: 'Duyệt hoàn',
+                                      size: AppButtonSize.xs,
+                                      variant: AppButtonVariant.primary,
+                                      onPressed: () => _handleApproveCreditRefund(r['id'].toString()),
+                                    );
+                                  }
+                                  return const Text('—');
+                                },
+                              ),
+                            ],
+                            data: (_contract['credit_balances'] is List)
+                                ? List<dynamic>.from(_contract['credit_balances'] as List)
+                                : const [],
+                            loading: false,
+                            emptyTitle: 'Chưa có bản ghi số dư tín dụng',
+                          ),
                         ],
                       ),
                     ),
