@@ -30,7 +30,14 @@
 - H3 chưa có phép đo kết luận → giữ Task 4 nhưng phải viết lại test đo đúng (không dùng child probe).
 - H7 (list dài) chưa đo → giữ Task 6.
 
-## Số liệu cần có ở report cuối
+## Sau các fix (Task 3 + 4 + 5)
 
-- Trước: `listInvoices` = 2 lần / 2 lần ghé tab; runtime crash sau ~8 tab.
-- Sau (các task tiếp theo): `listInvoices` = 1 lần; không crash; full suite xanh.
+- Build release lại từ HEAD sau fix (`3b4c6ca`), serve 8083, login resident, đổi lần lượt 8 tab: **tất cả 8 tab đổi được, renderer KHÔNG crash** (baseline trước đó crash ở tab ~6). Một dialog thông báo mở do bấm tab "Thông báo" (bell) — hành vi bình thường, đóng bằng Escape, không phải lỗi.
+- `listInvoices` = 1 lần / 2 lần ghé tab (widget test).
+- Rebuild shell trên notification.loading-only = 1 (trước 2) — widget test.
+- Task 6 (lazy list) đã **revert** vì nested-scroll 560px phá UI-1-1; lợi ích lazy chưa được chứng minh bằng runtime trace.
+- Task 2 (SelectionArea) không triển khai: crash đã hết sau khi sửa refetch → SelectionArea không phải nguyên nhân chính. Giữ deferred, không mở rộng scope.
+
+## Kết luận chung
+
+Nguyên nhân gây "chuyển trang rất chậm" là **refetch mỗi lần đổi tab** (mỗi tab tạo widget mới → initState → gọi API + rebuild cả cây), không phải SelectionArea hay provider watch. Fix bằng IndexedStack + cache widget (Task 3), thu hẹp provider watch (Task 4), cache khi remount (Task 5). Không đo được milliseconds do DevTools trace bị renderer timeout ở baseline, nhưng hành vi crash → không-crash lặp lại được.
