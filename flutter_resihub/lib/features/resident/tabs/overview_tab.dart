@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/deposit_ui_helpers.dart';
 import '../../../core/utils/format.dart';
@@ -41,10 +42,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final overview = widget.overview ?? const {};
     final user = overview['user'] is Map ? overview['user'] as Map : const {};
 
-    final fullNameCtrl = TextEditingController(text: user['full_name']?.toString() ?? '');
-    final phoneCtrl = TextEditingController(text: user['phone']?.toString() ?? '');
-    final idNumberCtrl = TextEditingController(text: user['id_number']?.toString() ?? '');
-    final addressCtrl = TextEditingController(text: user['address']?.toString() ?? '');
+    final fullNameCtrl =
+        TextEditingController(text: user['full_name']?.toString() ?? '');
+    final phoneCtrl =
+        TextEditingController(text: user['phone']?.toString() ?? '');
+    final idNumberCtrl =
+        TextEditingController(text: user['id_number']?.toString() ?? '');
+    final addressCtrl =
+        TextEditingController(text: user['address']?.toString() ?? '');
     final jobCtrl = TextEditingController();
     final emergencyNameCtrl = TextEditingController();
     final emergencyPhoneCtrl = TextEditingController();
@@ -54,7 +59,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     AppModal.show(
       context: context,
       title: 'Nộp hồ sơ thuê căn hộ',
-      subtitle: 'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
+      subtitle:
+          'Vui lòng xác nhận thông tin cư trú để ban quản lý lập hợp đồng thuê.',
       child: StatefulBuilder(
         builder: (ctx, setModalState) {
           return SingleChildScrollView(
@@ -106,7 +112,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                     AppButton(
                       text: 'Hủy',
                       variant: AppButtonVariant.outline,
-                      onPressed: submitting ? null : () => Navigator.of(ctx).pop(),
+                      onPressed:
+                          submitting ? null : () => Navigator.of(ctx).pop(),
                     ),
                     const SizedBox(width: 8),
                     AppButton(
@@ -118,9 +125,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               final name = fullNameCtrl.text.trim();
                               final phone = phoneCtrl.text.trim();
                               if (name.isEmpty || phone.isEmpty) {
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error('Vui lòng điền họ tên và số điện thoại.');
+                                ref.read(toastProvider.notifier).error(
+                                    'Vui lòng điền họ tên và số điện thoại.');
                                 return;
                               }
 
@@ -129,15 +135,18 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await ref
                                     .read(residentServiceProvider)
                                     .submitRentalApplication({
-                                  if (apartmentId != null && apartmentId.isNotEmpty)
+                                  if (apartmentId != null &&
+                                      apartmentId.isNotEmpty)
                                     'desired_apartment_id': apartmentId,
                                   'full_name': name,
                                   'phone': phone,
                                   'id_number': idNumberCtrl.text.trim(),
                                   'address': addressCtrl.text.trim(),
                                   'job_title': jobCtrl.text.trim(),
-                                  'emergency_contact_name': emergencyNameCtrl.text.trim(),
-                                  'emergency_contact_phone': emergencyPhoneCtrl.text.trim(),
+                                  'emergency_contact_name':
+                                      emergencyNameCtrl.text.trim(),
+                                  'emergency_contact_phone':
+                                      emergencyPhoneCtrl.text.trim(),
                                 });
                                 if (ctx.mounted) {
                                   Navigator.of(ctx).pop();
@@ -148,9 +157,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                                 await widget.onRefreshOverview();
                               } catch (err) {
                                 setModalState(() => submitting = false);
-                                ref
-                                    .read(toastProvider.notifier)
-                                    .error(extractErrorMessage(err, 'Không thể gửi hồ sơ thuê.'));
+                                ref.read(toastProvider.notifier).error(
+                                    extractErrorMessage(
+                                        err, 'Không thể gửi hồ sơ thuê.'));
                               }
                             },
                     ),
@@ -164,13 +173,17 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
-  void _openReservationBankModal(BuildContext context, Map<String, dynamic> rsv) {
-    final rsvId = rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
+  void _openReservationBankModal(
+      BuildContext context, Map<String, dynamic> rsv) {
+    final rsvId =
+        rsv['reservation_id']?.toString() ?? rsv['id']?.toString() ?? '';
     String bankName = rsv['bank_name']?.toString() ?? '';
     String? bankCode = rsv['bank_code']?.toString();
     String? bankBin = rsv['bank_bin']?.toString();
-    final accNumCtrl = TextEditingController(text: rsv['account_number']?.toString() ?? '');
-    final accHolderCtrl = TextEditingController(text: rsv['account_holder']?.toString() ?? '');
+    final accNumCtrl =
+        TextEditingController(text: rsv['account_number']?.toString() ?? '');
+    final accHolderCtrl =
+        TextEditingController(text: rsv['account_holder']?.toString() ?? '');
 
     bool saving = false;
 
@@ -223,10 +236,11 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         : () async {
                             final acc = accNumCtrl.text.trim();
                             final holder = accHolderCtrl.text.trim();
-                            if (bankName.isEmpty || acc.isEmpty || holder.isEmpty) {
-                              ref
-                                  .read(toastProvider.notifier)
-                                  .error('Vui lòng điền đầy đủ thông tin ngân hàng.');
+                            if (bankName.isEmpty ||
+                                acc.isEmpty ||
+                                holder.isEmpty) {
+                              ref.read(toastProvider.notifier).error(
+                                  'Vui lòng điền đầy đủ thông tin ngân hàng.');
                               return;
                             }
 
@@ -244,15 +258,14 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               if (ctx.mounted) {
                                 Navigator.of(ctx).pop();
                               }
-                              ref
-                                  .read(toastProvider.notifier)
-                                  .success('Đã cập nhật thông tin tài khoản hoàn tiền.');
+                              ref.read(toastProvider.notifier).success(
+                                  'Đã cập nhật thông tin tài khoản hoàn tiền.');
                               await widget.onRefreshOverview();
                             } catch (err) {
                               setModalState(() => saving = false);
                               ref.read(toastProvider.notifier).error(
-                                    extractErrorMessage(
-                                        err, 'Không thể cập nhật tài khoản ngân hàng.'),
+                                    extractErrorMessage(err,
+                                        'Không thể cập nhật tài khoản ngân hàng.'),
                                   );
                             }
                           },
@@ -351,7 +364,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final ov = widget.overview ?? const {};
     final contract = ov['active_contract'] is Map
         ? ov['active_contract'] as Map<String, dynamic>
-        : (ov['contract'] is Map ? ov['contract'] as Map<String, dynamic> : null);
+        : (ov['contract'] is Map
+            ? ov['contract'] as Map<String, dynamic>
+            : null);
 
     // Hero card values (parity: OverviewTab.jsx:1089-1205).
     final user = ov['user'] is Map ? ov['user'] as Map : const {};
@@ -366,7 +381,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
         : null;
     final floorName = contract?['floor_name']?.toString().trim() ?? '';
     final buildingName = contract?['building_name']?.toString().trim() ?? '';
-    final buildingAddress = contract?['building_address']?.toString().trim() ?? '';
+    final buildingAddress =
+        contract?['building_address']?.toString().trim() ?? '';
     final amenities = contract != null
         ? parseResidentAmenities(contract['amenities'])
         : const <String>[];
@@ -374,13 +390,15 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     final rawReservations = ov['reservations'] is List
         ? ov['reservations'] as List
         : (ov['reservation'] is Map ? [ov['reservation']] : const []);
-    final reservations = rawReservations.whereType<Map<String, dynamic>>().toList();
+    final reservations =
+        rawReservations.whereType<Map<String, dynamic>>().toList();
 
     final unreadCount = ref.watch(notificationProvider).unreadCount;
     final currentAmountDue = ov['current_amount_due'] is num
         ? ov['current_amount_due'] as num
         : num.tryParse(ov['current_amount_due']?.toString() ?? '0') ?? 0;
-    final latestInvoice = ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
+    final latestInvoice =
+        ov['latest_invoice'] is Map ? ov['latest_invoice'] as Map : null;
 
     return RefreshIndicator(
       onRefresh: widget.onRefreshOverview,
@@ -395,7 +413,9 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
               ...reservations.map((r) {
                 final aptCode = r['apartment_code']?.toString() ?? '';
                 final bldName = r['building_name']?.toString() ?? '';
-                final status = r['status']?.toString() ?? r['reservation_status']?.toString() ?? '';
+                final status = r['status']?.toString() ??
+                    r['reservation_status']?.toString() ??
+                    '';
                 final holdAmount = r['amount'] ?? r['hold_amount'] ?? 0;
                 final canUpdateBank = canResidentUpdateReservationBankInfo(r);
 
@@ -473,8 +493,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               text: 'Cập nhật TK hoàn tiền',
                               size: AppButtonSize.sm,
                               variant: AppButtonVariant.outline,
-                              icon: const Icon(LucideIcons.creditCard, size: 14),
-                              onPressed: () => _openReservationBankModal(context, r),
+                              icon:
+                                  const Icon(LucideIcons.creditCard, size: 14),
+                              onPressed: () =>
+                                  _openReservationBankModal(context, r),
                             ),
                             const SizedBox(width: 8),
                           ],
@@ -576,7 +598,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                         color: Colors.white,
                       ),
                     ),
-                    if (buildingName.isNotEmpty || buildingAddress.isNotEmpty) ...[
+                    if (buildingName.isNotEmpty ||
+                        buildingAddress.isNotEmpty) ...[
                       const SizedBox(height: 6),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -621,8 +644,8 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                    color: const Color(0x33FFFFFF)),
+                                border:
+                                    Border.all(color: const Color(0x33FFFFFF)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -678,7 +701,10 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
                           _heroSpec(
                             LucideIcons.bedDouble,
                             'Loại phòng',
-                            (contract['apartment_type']?.toString().trim().isNotEmpty ??
+                            (contract['apartment_type']
+                                        ?.toString()
+                                        .trim()
+                                        .isNotEmpty ??
                                     false)
                                 ? contract['apartment_type'].toString().trim()
                                 : (contract['bedrooms'] != null
@@ -896,40 +922,104 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
             ),
             const SizedBox(height: 20),
 
-            // Quick Actions Section
+            // Quick Actions Section (parity: OverviewTab.jsx:1414-1477).
             AppCard(
-              header: const AppCardHeader(title: 'Lối tắt thao tác nhanh'),
-              child: Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  _buildQuickAction(
-                    icon: LucideIcons.wrench,
-                    label: 'Báo hỏng / Sự cố',
-                    onTap: () => widget.onNavigateTab('maintenance', {'action': 'create'}),
-                  ),
-                  _buildQuickAction(
-                    icon: LucideIcons.receipt,
-                    label: 'Thanh toán hóa đơn',
-                    onTap: () => widget.onNavigateTab('invoices'),
-                  ),
-                  _buildQuickAction(
-                    icon: LucideIcons.sparkles,
-                    label: 'Đăng ký dịch vụ',
-                    onTap: () => widget.onNavigateTab('services'),
-                  ),
-                  _buildQuickAction(
-                    icon: LucideIcons.fileText,
-                    label: 'Chi tiết hợp đồng',
-                    onTap: () => widget.onNavigateTab('contract'),
-                  ),
-                  _buildQuickAction(
-                    icon: LucideIcons.phoneCall,
-                    label: 'Liên hệ BQL',
-                    onTap: () => widget.onNavigateTab('contact'),
-                  ),
-                ],
+              key: const Key('resident-quick-actions'),
+              header: const AppCardHeader(
+                title: 'Thao tác nhanh',
+                subtitle: 'Các tiện ích thường dùng dành cho cư dân căn hộ',
               ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  const gap = 12.0;
+                  final raw = constraints.maxWidth.isFinite
+                      ? (constraints.maxWidth - gap * 3) / 4
+                      : 200.0;
+                  final cardWidth = raw.clamp(140.0, 320.0).toDouble();
+                  return Wrap(
+                    spacing: gap,
+                    runSpacing: gap,
+                    children: [
+                      _buildQuickActionCard(
+                        width: cardWidth,
+                        icon: LucideIcons.receipt,
+                        iconBg: AppColors.sky50,
+                        iconFg: AppColors.primary600,
+                        title: 'Báo đã thanh toán',
+                        subtitle: 'Gửi ủy nhiệm chi / biên lai chuyển khoản',
+                        onTap: () => widget.onNavigateTab(
+                          'invoices',
+                          currentAmountDue > 0 ? {'action': 'pay'} : null,
+                        ),
+                      ),
+                      _buildQuickActionCard(
+                        width: cardWidth,
+                        icon: LucideIcons.wrench,
+                        iconBg: AppColors.amber100,
+                        iconFg: AppColors.amber600,
+                        title: 'Gửi yêu cầu sửa chữa',
+                        subtitle: 'Báo hỏng điện, nước, điều hòa, nội thất',
+                        onTap: () => widget.onNavigateTab(
+                          'maintenance',
+                          {'action': 'new'},
+                        ),
+                      ),
+                      _buildQuickActionCard(
+                        width: cardWidth,
+                        icon: LucideIcons.sparkles,
+                        iconBg: AppColors.emerald100,
+                        iconFg: AppColors.emerald600,
+                        title: 'Đăng ký dịch vụ',
+                        subtitle: 'Gửi xe, dọn phòng, tiện ích mở rộng',
+                        onTap: () => widget.onNavigateTab(
+                          'services',
+                          {'action': 'subscribe'},
+                        ),
+                      ),
+                      _buildQuickActionCard(
+                        width: cardWidth,
+                        icon: LucideIcons.fileText,
+                        iconBg: AppColors.secondary100,
+                        iconFg: AppColors.secondary600,
+                        title: 'Xem hợp đồng',
+                        subtitle: 'Bản in A4, phụ lục, gia hạn & sổ cọc',
+                        onTap: () => widget.onNavigateTab('contract'),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Latest invoice (2fr) + manager support (1fr) — parity: 1479-1570.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final invoiceCard = _buildLatestInvoiceCard(
+                  latestInvoice,
+                  currentAmountDue,
+                );
+                final supportCard = _buildManagerSupportCard(ov);
+                if (constraints.maxWidth >= 1024) {
+                  return IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(flex: 2, child: invoiceCard),
+                        const SizedBox(width: 16),
+                        Expanded(child: supportCard),
+                      ],
+                    ),
+                  );
+                }
+                return Column(
+                  children: [
+                    invoiceCard,
+                    const SizedBox(height: 16),
+                    supportCard,
+                  ],
+                );
+              },
             ),
           ],
         ),
@@ -1022,37 +1112,311 @@ class _OverviewTabState extends ConsumerState<OverviewTab> {
     );
   }
 
-  Widget _buildQuickAction({
+  Widget _buildQuickActionCard({
+    required double width,
     required IconData icon,
-    required String label,
+    required Color iconBg,
+    required Color iconFg,
+    required String title,
+    required String subtitle,
     required VoidCallback onTap,
   }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.slate50,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.slate200),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: AppColors.primary600),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: const TextStyle(
-                fontFamily: 'Inter',
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: AppColors.slate800,
+    return SizedBox(
+      width: width,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.slate200),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: iconBg,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, size: 20, color: iconFg),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.slate900,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  color: AppColors.slate500,
+                ),
+              ),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildLatestInvoiceCard(Map? invoice, num currentAmountDue) {
+    return AppCard(
+      key: const Key('resident-latest-invoice-card'),
+      header: AppCardHeader(
+        title: 'Hóa đơn kỳ gần nhất',
+        subtitle: 'Theo dõi trạng thái thanh toán kỳ hiện hành',
+        action: AppButton(
+          text: 'Tất cả hóa đơn',
+          size: AppButtonSize.sm,
+          variant: AppButtonVariant.ghost,
+          onPressed: () => widget.onNavigateTab('invoices'),
+        ),
+      ),
+      child: invoice == null
+          ? const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Text(
+                'Hiện chưa có hóa đơn nào được phát hành cho căn hộ của bạn.',
+                style: TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  color: AppColors.slate500,
+                ),
+              ),
+            )
+          : _buildLatestInvoiceBody(invoice, currentAmountDue),
+    );
+  }
+
+  Widget _buildLatestInvoiceBody(Map invoice, num currentAmountDue) {
+    final code = invoice['invoice_code']?.toString() ?? '';
+    final period = invoice['period']?.toString() ?? '';
+    final isLateFee =
+        invoice['invoice_type']?.toString() == 'LATE_FEE_SETTLEMENT' ||
+            period.isEmpty;
+    final status = invoice['status']?.toString() ?? '';
+    final total = num.tryParse(invoice['total_amount']?.toString() ?? '0') ?? 0;
+    final paid = num.tryParse(invoice['paid_amount']?.toString() ?? '0') ?? 0;
+    final showPay = [
+          'ISSUED',
+          'PARTIALLY_PAID',
+          'OVERDUE',
+          'ADJUSTED',
+        ].contains(status) &&
+        (total - paid) > 0;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.slate50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.slate200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (code.isNotEmpty)
+                Text(
+                  code,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.slate900,
+                  ),
+                ),
+              AppBadge(
+                variant:
+                    isLateFee ? AppBadgeVariant.amber : AppBadgeVariant.sky,
+                label: period.isNotEmpty ? 'Kỳ $period' : 'Phí phạt tất toán',
+              ),
+              StatusBadge(status: status, domain: StatusDomain.invoice),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text(
+                'Hạn thanh toán:',
+                style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate500),
+              ),
+              Text(
+                formatDate(invoice['due_date']),
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: AppColors.slate700,
+                ),
+              ),
+              const Text('•',
+                  style: TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate500)),
+              const Text(
+                'Đã trả:',
+                style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 12,
+                    color: AppColors.slate500),
+              ),
+              Text(
+                formatMoney(paid),
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: AppColors.emerald700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Tổng hóa đơn',
+                      style: TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 11,
+                          color: AppColors.slate500),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      formatMoney(total),
+                      style: const TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.slate900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (showPay) ...[
+                const SizedBox(width: 12),
+                AppButton(
+                  text: 'Thanh toán',
+                  size: AppButtonSize.sm,
+                  onPressed: () => widget.onNavigateTab(
+                    'invoices',
+                    currentAmountDue > 0 ? {'action': 'pay'} : null,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildManagerSupportCard(Map overview) {
+    final contact = overview['manager_contact'] is Map
+        ? overview['manager_contact'] as Map
+        : const {};
+    final name = contact['full_name']?.toString().trim() ?? '';
+    final phone = contact['phone']?.toString().trim() ?? '';
+    final email = contact['email']?.toString().trim() ?? '';
+    final hotline = contact['technical_hotline']?.toString().trim() ?? '';
+    final hours = contact['working_hours']?.toString().trim() ?? '';
+
+    const labelStyle =
+        TextStyle(fontFamily: 'Inter', fontSize: 12, color: AppColors.slate600);
+
+    return AppCard(
+      key: const Key('resident-manager-support-card'),
+      header: const AppCardHeader(
+        title: 'Ban Quản Lý hỗ trợ',
+        subtitle: 'Liên hệ nhanh khi cần giúp đỡ',
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.slate50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.slate200),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  name.isEmpty ? 'Ban Quản Lý ResiHub' : name,
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.slate900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                if (phone.isNotEmpty)
+                  Text('SĐT Quản lý: $phone', style: labelStyle),
+                if (email.isNotEmpty) Text('Email: $email', style: labelStyle),
+                Text(
+                  'Hotline KT: ${hotline.isEmpty ? '1900 6868' : hotline}',
+                  style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate500),
+                ),
+                Text(
+                  'Giờ làm việc: ${hours.isEmpty ? '08:00 – 18:00' : hours}',
+                  style: const TextStyle(
+                      fontFamily: 'Inter',
+                      fontSize: 12,
+                      color: AppColors.slate500),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          AppButton(
+            text: 'Xem đầy đủ danh bạ BQL',
+            variant: AppButtonVariant.outline,
+            size: AppButtonSize.sm,
+            fullWidth: true,
+            onPressed: () => widget.onNavigateTab('contact'),
+          ),
+        ],
       ),
     );
   }
