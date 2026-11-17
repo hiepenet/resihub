@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,6 +25,7 @@ import 'package:flutter_resihub/features/meters/widgets/meter_batch_photo_import
 import 'package:flutter_resihub/features/services/screens/service_catalog_page.dart';
 import 'package:flutter_resihub/features/services/screens/subscriptions_page.dart';
 import 'package:flutter_resihub/features/services/services/services_service.dart';
+import 'package:flutter_resihub/shared/providers/toast_provider.dart';
 import 'package:flutter_resihub/shared/widgets/ui/app_button.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
@@ -48,6 +50,28 @@ Uint8List _createDummyPngBytes({int width = 10, int height = 10}) {
   final image = img.Image(width: width, height: height);
   img.fill(image, color: img.ColorRgb8(255, 0, 0));
   return Uint8List.fromList(img.encodePng(image));
+}
+
+class _FakePhotoPicker extends FilePickerIO {
+  List<PlatformFile> files = const [];
+
+  @override
+  Future<FilePickerResult?> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    bool? allowCompression = true,
+    int compressionQuality = 30,
+    bool allowMultiple = false,
+    bool? withData = false,
+    bool? withReadStream = false,
+    bool lockParentWindow = false,
+    bool readSequential = false,
+  }) async {
+    return files.isEmpty ? null : FilePickerResult(files);
+  }
 }
 
 void main() {
@@ -782,6 +806,197 @@ void main() {
       expect(find.text('Căn hộ áp dụng'), findsOneWidget);
       // Ensure METERED service 'Điện sinh hoạt' is NOT selected or in options, but 'Dọn dẹp căn hộ' is
       expect(find.textContaining('Dọn dẹp căn hộ'), findsOneWidget);
+    });
+  });
+
+  group('MeterBatchPhotoImportModal D9 parity', () {
+    late Dio dio;
+    late QueryCache queryCache;
+    late BuildingsService buildingsService;
+    late MetersService metersService;
+    late AiService aiService;
+    late AppStorage storage;
+    late _FakePhotoPicker picker;
+    final List<RequestOptions> requests = [];
+    Map<String, dynamic> batchResponse = const {};
+
+    setUp(() async {
+      requests.clear();
+      batchResponse = const {};
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      storage = AppStorage(prefs: prefs, isWeb: true);
+
+      dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      queryCache = QueryCache();
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        requests.add(options);
+        if (options.path.contains('/buildings')) {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': [{'id': 'b-1', 'code': 'B1', 'name': 'Tòa A'}]}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/meters' && options.method == 'GET') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': [
+                {
+                  'id': 'm-1',
+                  'meter_code': 'ELEC-101',
+                  'apartment_code': '101',
+                  'apartment_id': 'apt-1',
+                  'meter_type': 'ELECTRICITY',
+                  'unit': 'kWh',
+                  'period_previous_reading': 100,
+                  'baseline_avg_consumption': 10,
+                  'target_contract_id': 'ct-1',
+                },
+              ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/ai/meter-ocr') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'suggestion_id': 'sug-1',
+                'confidence': 0.93,
+                'output': {
+                  'reading': 200,
+                  'detected_meter_type': 'ELECTRICITY',
+                  'reason': 'AI đọc rõ số 200',
+                },
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/meters/readings/batch') {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'message': 'Đã lưu', ...batchResponse}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+          jsonEncode({'success': true, 'data': []}),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      buildingsService = BuildingsService(dio: dio, queryCache: queryCache);
+      metersService = MetersService(dio: dio, queryCache: queryCache);
+      aiService = AiService(dio: dio);
+
+      picker = _FakePhotoPicker();
+      picker.files = [
+        PlatformFile(name: 'ELEC-101.jpg', bytes: _createDummyPngBytes(), size: 100),
+      ];
+      FilePicker.platform = picker;
+      addTearDown(() => FilePicker.platform = FilePickerIO());
+    });
+
+    ProviderContainer createContainer() {
+      final container = ProviderContainer(
+        overrides: [
+          appStorageProvider.overrideWithValue(storage),
+          dioProvider.overrideWithValue(dio),
+          queryCacheProvider.overrideWithValue(queryCache),
+          buildingsServiceProvider.overrideWithValue(buildingsService),
+          metersServiceProvider.overrideWithValue(metersService),
+          aiServiceProvider.overrideWithValue(aiService),
+        ],
+      );
+      container.read(authProvider.notifier).setAuthData(
+            accessToken: 'token',
+            refreshToken: 'refresh',
+            user: const UserModel(
+              id: 'u-1',
+              email: 'manager@resihub.vn',
+              fullName: 'Manager',
+              roles: [UserRoleModel(code: 'MANAGER')],
+            ),
+          );
+      return container;
+    }
+
+    test('D9: default building prioritizes initial, then sole building, else empty', () {
+      final buildings = [
+        {'id': 'b-1'},
+        {'id': 'b-2'},
+      ];
+      expect(resolveBatchPhotoTargetBuildingId('b-2', buildings), 'b-2');
+      expect(resolveBatchPhotoTargetBuildingId('', buildings), '');
+      expect(resolveBatchPhotoTargetBuildingId('', [{'id': 'b-1'}]), 'b-1');
+      expect(resolveBatchPhotoTargetBuildingId('b-9', buildings), '');
+    });
+
+    test('D9: batch save toast warns on flagged/abnormal, otherwise success', () {
+      expect(resolveBatchSaveToastVariant({'flagged_count': 1}), ToastVariant.warning);
+      expect(resolveBatchSaveToastVariant({'abnormal_count': 2}), ToastVariant.warning);
+      expect(
+        resolveBatchSaveToastVariant({'flagged_count': 0, 'abnormal_count': 0}),
+        ToastVariant.success,
+      );
+      expect(resolveBatchSaveToastVariant(null), ToastVariant.success);
+    });
+
+    testWidgets('D9: banner, note column, AI badges, retry and abnormal_note payload', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      final container = createContainer();
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MeterBatchPhotoImportModal(period: '2026-11'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(AppButton, 'Tải ảnh chụp (Tối đa 30 ảnh)'));
+      await tester.pumpAndSettle();
+
+      // FR-031 banner + note column + AI badges + per-row retry
+      expect(find.textContaining('FR-031'), findsOneWidget);
+      expect(find.text('Ghi chú giải trình'), findsOneWidget);
+      expect(find.textContaining('AI: Điện'), findsOneWidget);
+      expect(find.textContaining('AI 93%'), findsOneWidget);
+      expect(find.textContaining('Thử lại'), findsOneWidget);
+
+      // Note entered in the UI must reach the save payload
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField &&
+              (w.decoration?.hintText?.contains('Giải trình biến động') ?? false),
+        ),
+        'Đã đối chiếu thực tế',
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('FR-031'), findsNothing);
+
+      await tester.tap(find.widgetWithText(AppButton, 'Lưu & Chốt chỉ số'));
+      await tester.pumpAndSettle();
+
+      final batchReq = requests.lastWhere((r) => r.path == '/api/v1/meters/readings/batch');
+      final readings = (batchReq.data as Map)['readings'] as List;
+      expect(readings.first['abnormal_note'], 'Đã đối chiếu thực tế');
+
+      // Drain the toast auto-dismiss timer before the test tree is disposed.
+      await tester.pump(const Duration(seconds: 5));
     });
   });
 }

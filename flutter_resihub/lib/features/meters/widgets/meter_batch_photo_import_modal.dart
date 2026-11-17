@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/ai_helpers.dart' show formatConfidenceBadge;
 import '../../../core/utils/base64_file.dart';
 import '../../../core/utils/meter_batch_photo_helpers.dart';
 import '../../../core/utils/validation.dart';
@@ -17,6 +18,34 @@ import '../../../shared/widgets/ui/auth_media_viewer.dart';
 import '../../ai_gateway/services/ai_service.dart';
 import '../../buildings/services/buildings_service.dart';
 import '../services/meters_service.dart';
+
+/// React `MeterBatchPhotoImportModal.jsx:178-192`: ưu tiên tòa được truyền vào,
+/// giữ lựa chọn cũ nếu còn hợp lệ, chỉ tự chọn khi danh sách có đúng 1 tòa.
+String resolveBatchPhotoTargetBuildingId(
+  String requestedId,
+  List<Map<String, dynamic>> buildings, {
+  String previousId = '',
+}) {
+  final ids = buildings.map((b) => b['id']?.toString()).whereType<String>().toSet();
+  if (requestedId.isNotEmpty && ids.contains(requestedId)) return requestedId;
+  if (previousId.isNotEmpty && ids.contains(previousId)) return previousId;
+  return buildings.length == 1 ? (buildings.first['id']?.toString() ?? '') : '';
+}
+
+/// React `MeterBatchPhotoImportModal.jsx:499-508`: phản hồi có flagged/abnormal
+/// thì toast cảnh báo, ngược lại toast thành công.
+ToastVariant resolveBatchSaveToastVariant(dynamic response) {
+  if (response is Map) {
+    final flagged = response['flagged_count'];
+    final abnormal = response['abnormal_count'];
+    final flaggedCount = flagged is num ? flagged : num.tryParse(flagged?.toString() ?? '');
+    final abnormalCount = abnormal is num ? abnormal : num.tryParse(abnormal?.toString() ?? '');
+    if ((flaggedCount ?? 0) > 0 || (abnormalCount ?? 0) > 0) {
+      return ToastVariant.warning;
+    }
+  }
+  return ToastVariant.success;
+}
 
 /// Batch Meter Photo Import & AI OCR Modal (FR-030).
 /// Port of `frontend/src/components/meters/MeterBatchPhotoImportModal.jsx`.
@@ -95,9 +124,11 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
       if (mounted) {
         setState(() {
           _buildings = list;
-          if (_targetBuildingId.isEmpty && list.isNotEmpty) {
-            _targetBuildingId = list[0]['id']?.toString() ?? '';
-          }
+          _targetBuildingId = resolveBatchPhotoTargetBuildingId(
+            widget.initialBuildingId,
+            list,
+            previousId: _targetBuildingId,
+          );
         });
         if (_targetBuildingId.isNotEmpty) {
           _fetchBuildingMeters(_targetBuildingId);
@@ -182,7 +213,18 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
 
     if (result == null || result.files.isEmpty) return;
 
-    final pickedFiles = result.files;
+    // React :364-371 — lọc MIME, báo tệp bị bỏ (FilePicker chỉ lọc theo extension trên vài nền tảng).
+    final pickedFiles = result.files.where((f) {
+      final ext = (f.extension ?? f.name.split('.').last).toLowerCase();
+      return ext == 'jpg' || ext == 'jpeg' || ext == 'png' || ext == 'webp';
+    }).toList();
+    if (pickedFiles.length < result.files.length) {
+      ref.read(toastProvider.notifier).warning(
+            'Đã bỏ qua ${result.files.length - pickedFiles.length} tệp không phải ảnh JPG/PNG/WEBP.',
+          );
+    }
+    if (pickedFiles.isEmpty) return;
+
     if (pickedFiles.length > remainingSlots) {
       ref.read(toastProvider.notifier).warning(
             'Chỉ nhận $remainingSlots ảnh đầu tiên để đảm bảo giới hạn tối đa $kMaxBatchMeterPhotos ảnh/đợt.',
@@ -219,6 +261,9 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
           'suggestionId': null,
           'confidence': null,
           'detectedMeterType': null,
+          'aiReason': '',
+          'aiWarnings': <String>[],
+          'needsHumanReview': false,
           'ocrError': '',
         });
       } catch (err) {
@@ -317,6 +362,9 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
           _items[idx]['suggestionId'] = data['suggestion_id'];
           _items[idx]['confidence'] = data['confidence'];
           _items[idx]['detectedMeterType'] = out['detected_meter_type'];
+          _items[idx]['aiReason'] = out['reason']?.toString() ?? '';
+          _items[idx]['aiWarnings'] = data['warnings'] is List ? data['warnings'] : <String>[];
+          _items[idx]['needsHumanReview'] = data['needs_human_review'] == true;
           _items[idx]['ocrError'] = '';
         }
       });
@@ -364,11 +412,17 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
       widget.onSaved?.call();
 
       if (remaining.isEmpty) {
-        ref.read(toastProvider.notifier).success(
-              res is Map && res['message'] != null
-                  ? res['message'].toString()
-                  : 'Đã lưu thành công ${payload['readings'].length} chỉ số công tơ.',
-            );
+        final toastVariant = resolveBatchSaveToastVariant(res);
+        final message = res is Map && res['message'] != null
+            ? res['message'].toString()
+            : toastVariant == ToastVariant.warning
+                ? 'Đã lưu ${payload['readings'].length} chỉ số (có chỉ số biến động >${widget.anomalyThresholdPct}%).'
+                : 'Đã import thành công ${payload['readings'].length} chỉ số công tơ.';
+        if (toastVariant == ToastVariant.warning) {
+          ref.read(toastProvider.notifier).warning(message);
+        } else {
+          ref.read(toastProvider.notifier).success(message);
+        }
         setState(() => _items.clear());
         if (mounted) Navigator.of(context).pop();
       } else {
@@ -388,6 +442,14 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
     } finally {
       if (mounted) setState(() => _savingStatus = null);
     }
+  }
+
+  /// React :452-460 / :1016-1029 — đọc lại AI cho từng dòng.
+  Future<void> _retrySingleRow(Map<String, dynamic> row) async {
+    if (!widget.canWriteMeters || _targetBuildingId.isEmpty || _isQueueRunning || _savingStatus != null) {
+      return;
+    }
+    await _runOcrForRow(Map<String, dynamic>.from(row), _sessionGen);
   }
 
   Widget _buildValidationBadge(BatchPhotoImportRow row) {
@@ -500,6 +562,36 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
 
         const SizedBox(height: 16),
 
+        // FR-031 — React :773-785: cảnh báo dòng biến động >ngưỡng thiếu ghi chú giải trình.
+        if (evaluation.summary.abnormalMissingNoteCount > 0)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: AppColors.amber50,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.amber200),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(LucideIcons.triangleAlert, size: 16, color: AppColors.amber600),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Có ${evaluation.summary.abnormalMissingNoteCount} công tơ biến động vượt ngưỡng '
+                    '>${widget.anomalyThresholdPct}% chưa nhập ghi chú giải trình. Nếu bấm '
+                    '"Lưu & Chốt chỉ số" ngay, hệ thống sẽ tự động giữ các dòng đó ở trạng thái '
+                    'Tạm giữ (FLAGGED) theo quy tắc an toàn FR-031; nhập ghi chú giải trình để '
+                    'chốt thẳng sang CONFIRMED.',
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF78350F)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+        if (evaluation.summary.abnormalMissingNoteCount > 0) const SizedBox(height: 12),
+
         // Items Table
         if (_items.isEmpty) ...[
           Container(
@@ -542,6 +634,7 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                     child: ConstrainedBox(
                       constraints: BoxConstraints(minWidth: minWidth),
                       child: DataTable(
+                  dataRowHeight: 96,
                   headingRowColor: WidgetStateProperty.all(AppColors.slate50),
                   columns: const [
                     DataColumn(label: Text('Ảnh chụp')),
@@ -550,6 +643,7 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                     DataColumn(label: Text('Chỉ số cũ')),
                     DataColumn(label: Text('Chỉ số mới (Draft)')),
                     DataColumn(label: Text('Tiêu thụ & Biến động')),
+                    DataColumn(label: Text('Ghi chú giải trình')),
                     DataColumn(label: Text('Đánh giá')),
                     DataColumn(label: Text('Xóa')),
                   ],
@@ -557,6 +651,9 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                     final raw = evalRow.raw;
                     final meter = evalRow.meter;
                     final localId = raw['localId'];
+                    final confMeta = raw['confidence'] != null
+                        ? formatConfidenceBadge(raw['confidence'], 0.8)
+                        : null;
 
                     return DataRow(
                       cells: [
@@ -579,20 +676,63 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                           ),
                         ),
                         DataCell(
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                raw['fileName']?.toString() ?? '',
-                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                              ),
-                              if (raw['ocrError'] != null && raw['ocrError'].toString().isNotEmpty)
+                          SizedBox(
+                            width: 230,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
                                 Text(
-                                  raw['ocrError'].toString(),
-                                  style: const TextStyle(fontSize: 11, color: AppColors.rose600),
+                                  raw['fileName']?.toString() ?? '',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
                                 ),
-                            ],
+                                Wrap(
+                                  spacing: 4,
+                                  runSpacing: 4,
+                                  children: [
+                                    if (raw['detectedMeterType'] == 'ELECTRICITY')
+                                      const AppBadge(
+                                        label: 'AI: Điện',
+                                        variant: AppBadgeVariant.amber,
+                                        icon: Icon(LucideIcons.zap, size: 10),
+                                      ),
+                                    if (raw['detectedMeterType'] == 'WATER')
+                                      const AppBadge(
+                                        label: 'AI: Nước',
+                                        variant: AppBadgeVariant.sky,
+                                        icon: Icon(LucideIcons.droplets, size: 10),
+                                      ),
+                                    if (raw['detectedMeterType'] == null &&
+                                        raw['matchKind'] == 'APARTMENT_ONLY' &&
+                                        raw['apartmentCode'] != null)
+                                      AppBadge(
+                                        label: 'Khớp căn ${raw['apartmentCode']}',
+                                        variant: AppBadgeVariant.slate,
+                                      ),
+                                    if (confMeta != null)
+                                      AppBadge(
+                                        label: 'AI ${confMeta.percentText}',
+                                        variant: AppBadgeVariant.fromString(confMeta.tone),
+                                      ),
+                                  ],
+                                ),
+                                if (evalRow.hasTypeMismatchWarning)
+                                  Text(
+                                    'Ảnh chụp nghi là đồng hồ ${raw['detectedMeterType'] == 'WATER' ? 'Nước' : 'Điện'}, khác loại công tơ đang chọn!',
+                                    style: const TextStyle(fontSize: 11, color: AppColors.rose600),
+                                  ),
+                                if (raw['ocrError'] != null && raw['ocrError'].toString().isNotEmpty)
+                                  Text(
+                                    raw['ocrError'].toString(),
+                                    style: const TextStyle(fontSize: 11, color: AppColors.rose600),
+                                  )
+                                else if (raw['aiReason'] != null && raw['aiReason'].toString().isNotEmpty)
+                                  Text(
+                                    raw['aiReason'].toString(),
+                                    style: const TextStyle(fontSize: 11, color: AppColors.slate500),
+                                  ),
+                              ],
+                            ),
                           ),
                         ),
                         DataCell(
@@ -666,15 +806,47 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                             ],
                           ),
                         ),
+                        DataCell(
+                          SizedBox(
+                            width: 210,
+                            child: AppInput(
+                              placeholder: evalRow.isAbnormal
+                                  ? 'Giải trình biến động >${widget.anomalyThresholdPct}%...'
+                                  : 'Ghi chú (nếu có)...',
+                              initialValue: raw['abnormalNote']?.toString() ?? '',
+                              onChanged: (val) {
+                                final idx = _items.indexWhere((r) => r['localId'] == localId);
+                                if (idx >= 0) {
+                                  _items[idx]['abnormalNote'] = val;
+                                }
+                                setState(() {});
+                              },
+                            ),
+                          ),
+                        ),
                         DataCell(_buildValidationBadge(evalRow)),
                         DataCell(
-                          IconButton(
-                            icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.slate400),
-                            onPressed: () {
-                              setState(() {
-                                _items.removeWhere((r) => r['localId'] == localId);
-                              });
-                            },
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TextButton.icon(
+                                onPressed: _isQueueRunning ||
+                                        _savingStatus != null ||
+                                        evalRow.validationState == 'OCR_PROCESSING'
+                                    ? null
+                                    : () => _retrySingleRow(raw),
+                                icon: const Icon(LucideIcons.refreshCw, size: 14),
+                                label: const Text('Thử lại', style: TextStyle(fontSize: 11)),
+                              ),
+                              IconButton(
+                                icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.slate400),
+                                onPressed: () {
+                                  setState(() {
+                                    _items.removeWhere((r) => r['localId'] == localId);
+                                  });
+                                },
+                              ),
+                            ],
                           ),
                         ),
                       ],
