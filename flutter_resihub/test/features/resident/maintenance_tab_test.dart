@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_resihub/core/network/query_cache.dart';
 import 'package:flutter_resihub/features/resident/services/resident_service.dart';
 import 'package:flutter_resihub/features/resident/tabs/maintenance_tab.dart';
 
@@ -80,7 +81,10 @@ List<Map<String, dynamic>> _requests() {
 
 Widget _buildTab(_FakeResidentService service) {
   return ProviderScope(
-    overrides: [residentServiceProvider.overrideWithValue(service)],
+    overrides: [
+      queryCacheProvider.overrideWithValue(QueryCache()),
+      residentServiceProvider.overrideWithValue(service),
+    ],
     child: MaterialApp(
       home: Scaffold(
         body: MaintenanceTab(
