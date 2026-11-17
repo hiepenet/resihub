@@ -233,7 +233,7 @@ void main() {
     await pumpAt(tester, '/admin/deposits');
 
     // Restrict to the tab bar: "Đang giữ cọc" also appears as a row status badge.
-    final tabLabel = (String label) =>
+    Finder tabLabel(String label) =>
         find.descendant(of: find.byType(AppTabs), matching: find.text(label));
 
     expect(tabLabel('Đang giữ cọc'), findsOneWidget);
