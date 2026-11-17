@@ -67,6 +67,12 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
   bool _loading = true;
   String _error = '';
 
+  /// Tabs already mounted. Keeping their widget instances alive in an
+  /// [IndexedStack] prevents re-entering initState (and re-fetching) every
+  /// time the resident switches back to a visited tab.
+  final List<String> _visitedTabs = [];
+  final Map<String, Widget> _tabWidgets = {};
+
   @override
   void initState() {
     super.initState();
@@ -195,6 +201,7 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
     final safeTab = kValidResidentTabs.contains(nextTab) ? nextTab : 'overview';
     setState(() {
       _activeTab = safeTab;
+      if (!_visitedTabs.contains(safeTab)) _visitedTabs.add(safeTab);
       if (extra != null && extra.containsKey('action')) {
         _actionParam = extra['action']?.toString();
       }
@@ -293,9 +300,25 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
       );
     }
 
-    switch (_activeTab) {
+    if (!_visitedTabs.contains(_activeTab)) _visitedTabs.add(_activeTab);
+    for (final tab in _visitedTabs) {
+      _tabWidgets.putIfAbsent(tab, () => _createTab(tab));
+    }
+    final activeIdx = kValidResidentTabs.indexOf(_activeTab);
+    return IndexedStack(
+      index: activeIdx >= 0 ? activeIdx : 0,
+      children: [
+        for (final tab in kValidResidentTabs)
+          _tabWidgets[tab] ?? const SizedBox.shrink(),
+      ],
+    );
+  }
+
+  Widget _createTab(String tab) {
+    switch (tab) {
       case 'overview':
         return OverviewTab(
+          key: const ValueKey('overview'),
           overview: _overview,
           openRequestsCount: _openRequestsCount,
           onRefreshOverview: () => _fetchOverviewData(true),
@@ -303,12 +326,14 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'contract':
         return ContractTab(
+          key: const ValueKey('contract'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'invoices':
         return InvoicesTab(
+          key: const ValueKey('invoices'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -316,12 +341,14 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'services':
         return ServicesTab(
+          key: const ValueKey('services'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'maintenance':
         return MaintenanceTab(
+          key: const ValueKey('maintenance'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
@@ -331,24 +358,28 @@ class _ResidentPortalPageState extends ConsumerState<ResidentPortalPage> {
         );
       case 'notifications':
         return NotificationsTab(
+          key: const ValueKey('notifications'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'contact':
         return ContactTab(
+          key: const ValueKey('contact'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       case 'profile':
         return ProfileTab(
+          key: const ValueKey('profile'),
           overview: _overview,
           onRefreshOverview: () => _fetchOverviewData(true),
           onNavigateTab: _handleNavigateTab,
         );
       default:
         return OverviewTab(
+          key: const ValueKey('overview'),
           overview: _overview,
           openRequestsCount: _openRequestsCount,
           onRefreshOverview: () => _fetchOverviewData(true),
