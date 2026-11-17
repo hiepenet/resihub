@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_resihub/features/resident/tabs/contact_tab.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_badge.dart';
 
 Widget _buildSubject({
   required void Function(String tab, [Map<String, dynamic>? extra])
@@ -45,7 +46,14 @@ void main() {
     expect(find.text('Khẩn cấp 24/7'), findsOneWidget);
     expect(find.text('CSKH'), findsOneWidget);
     expect(find.text('Gọi ngay'), findsWidgets);
-    expect(find.byTooltip('Sao chép số'), findsWidgets);
+    expect(find.byTooltip('Sao chép số'), findsNWidgets(3));
+    expect(find.byTooltip('Sao chép email'), findsOneWidget);
+
+    // Shared AppBadge with React's dot glyph on the two 24/7 badges.
+    expect(find.byWidgetPredicate((w) => w is AppBadge && w.dot),
+        findsNWidgets(2));
+    expect(find.byWidgetPredicate((w) => w is AppBadge && !w.dot),
+        findsNWidgets(2));
   });
 
   testWidgets(
@@ -88,5 +96,31 @@ void main() {
         findsOneWidget);
     expect(find.textContaining('Giờ làm việc Văn phòng BQL'), findsOneWidget);
     expect(find.text('08:00 – 18:00 (Thứ 2 – Thứ 7)'), findsOneWidget);
+  });
+
+  testWidgets(
+      'ContactTab stacks hotline cards in one column on narrow surfaces',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(400, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(_buildSubject(onNavigateTab: (tab, [extra]) {}));
+    await tester.pumpAndSettle();
+
+    for (final title in [
+      'Hotline Kỹ thuật Tòa nhà',
+      'Hotline An ninh & Bảo vệ',
+      'Đường dây Khẩn cấp (SOS / PCCC)',
+      'Chăm sóc Cư dân & Email Hỗ trợ',
+    ]) {
+      expect(find.text(title), findsOneWidget);
+    }
+
+    // Full-width cards share the same left edge => single-column branch.
+    final firstLeft =
+        tester.getTopLeft(find.text('Hotline Kỹ thuật Tòa nhà')).dx;
+    final secondLeft =
+        tester.getTopLeft(find.text('Hotline An ninh & Bảo vệ')).dx;
+    expect((firstLeft - secondLeft).abs(), lessThan(1));
   });
 }

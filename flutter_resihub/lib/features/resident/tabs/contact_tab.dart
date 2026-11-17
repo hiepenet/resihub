@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/validation.dart';
 import '../../../shared/providers/toast_provider.dart';
+import '../../../shared/widgets/ui/app_badge.dart';
 import '../../../shared/widgets/ui/app_button.dart';
 import '../../../shared/widgets/ui/app_card.dart';
 
@@ -57,9 +58,9 @@ class ContactTab extends ConsumerWidget {
     }
   }
 
-  void _copyToClipboard(WidgetRef ref, String text, String label) {
+  void _copyToClipboard(WidgetRef ref, String text) {
     Clipboard.setData(ClipboardData(text: text));
-    ref.read(toastProvider.notifier).info('Đã sao chép $label: $text');
+    ref.read(toastProvider.notifier).info('Đã sao chép: $text');
   }
 
   @override
@@ -163,10 +164,11 @@ class ContactTab extends ConsumerWidget {
                         color: AppColors.amber600,
                         background: AppColors.amber50,
                         badge: 'Kỹ thuật',
+                        badgeVariant: AppBadgeVariant.amber,
                         title: 'Hotline Kỹ thuật Tòa nhà',
                         copy: 'Sự cố điện, nước, điều hòa, thang máy, internet',
                         value: technicalHotline,
-                        copyLabel: 'số Hotline kỹ thuật',
+                        copyTooltip: 'Sao chép số',
                         actionLabel: 'Gọi ngay',
                         actionIcon: LucideIcons.phoneCall,
                         onAction: () => _makePhoneCall(ref, technicalHotline),
@@ -199,11 +201,12 @@ class ContactTab extends ConsumerWidget {
                         color: AppColors.secondary600,
                         background: AppColors.secondary50,
                         badge: 'Trực 24/7',
+                        badgeVariant: AppBadgeVariant.indigo,
                         title: 'Hotline An ninh & Bảo vệ',
                         copy:
                             'Trực chốt sảnh, hầm gửi xe, kiểm soát ra vào & thẻ từ',
                         value: securityHotline,
-                        copyLabel: 'số Hotline an ninh',
+                        copyTooltip: 'Sao chép số',
                         actionLabel: 'Gọi ngay',
                         actionIcon: LucideIcons.phoneCall,
                         onAction: () => _makePhoneCall(ref, securityHotline),
@@ -222,11 +225,12 @@ class ContactTab extends ConsumerWidget {
                         color: AppColors.rose600,
                         background: AppColors.rose100,
                         badge: 'Khẩn cấp 24/7',
+                        badgeVariant: AppBadgeVariant.red,
                         title: 'Đường dây Khẩn cấp (SOS / PCCC)',
                         copy:
                             'Sự cố cháy nổ, y tế khẩn cấp, an toàn tính mạng & tài sản',
                         value: emergencyPhone,
-                        copyLabel: 'số khẩn cấp',
+                        copyTooltip: 'Sao chép số',
                         actionLabel: 'Gọi SOS',
                         actionIcon: LucideIcons.phoneCall,
                         onAction: () => _makePhoneCall(ref, emergencyPhone),
@@ -272,11 +276,12 @@ class ContactTab extends ConsumerWidget {
                         color: AppColors.emerald600,
                         background: AppColors.emerald50,
                         badge: 'CSKH',
+                        badgeVariant: AppBadgeVariant.emerald,
                         title: 'Chăm sóc Cư dân & Email Hỗ trợ',
                         copy:
                             'Giải đáp hóa đơn, thủ tục hợp đồng, đăng ký tạm trú & góp ý dịch vụ',
                         value: supportEmail,
-                        copyLabel: 'email hỗ trợ',
+                        copyTooltip: 'Sao chép email',
                         actionLabel: 'Gửi Email',
                         actionIcon: LucideIcons.mail,
                         onAction: () => _sendEmail(ref, supportEmail),
@@ -370,12 +375,14 @@ class ContactTab extends ConsumerWidget {
                           Icon(LucideIcons.userCheck,
                               size: 12, color: Colors.white),
                           SizedBox(width: 4),
-                          Text(
-                            'Quản lý tòa nhà phụ trách trực tiếp',
-                            style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white),
+                          Flexible(
+                            child: Text(
+                              'Quản lý tòa nhà phụ trách trực tiếp',
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white),
+                            ),
                           ),
                         ],
                       ),
@@ -454,17 +461,25 @@ class ContactTab extends ConsumerWidget {
           const Divider(color: Colors.white24, height: 1),
           const SizedBox(height: 10),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Icon(LucideIcons.clock, size: 14, color: AppColors.sky200),
               const SizedBox(width: 6),
-              const Text('Giờ làm việc Văn phòng BQL: ',
-                  style: TextStyle(fontSize: 11, color: Color(0xFFE2E8F0))),
-              Text(
-                workingHours,
-                style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
+              Expanded(
+                child: Wrap(
+                  children: [
+                    const Text('Giờ làm việc Văn phòng BQL: ',
+                        style:
+                            TextStyle(fontSize: 11, color: Color(0xFFE2E8F0))),
+                    Text(
+                      workingHours,
+                      style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -478,35 +493,17 @@ class ContactTab extends ConsumerWidget {
     );
   }
 
-  Widget _buildBadge(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: 'Inter',
-          fontSize: 10,
-          fontWeight: FontWeight.w700,
-          color: color,
-        ),
-      ),
-    );
-  }
-
   Widget _buildHotlineCard({
     required WidgetRef ref,
     required IconData icon,
     required Color color,
     required Color background,
     required String badge,
+    required AppBadgeVariant badgeVariant,
     required String title,
     required String copy,
     required String value,
-    required String copyLabel,
+    required String copyTooltip,
     required String actionLabel,
     required IconData actionIcon,
     required VoidCallback onAction,
@@ -559,7 +556,11 @@ class ContactTab extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              _buildBadge(badge, color),
+              AppBadge(
+                label: badge,
+                variant: badgeVariant,
+                dot: badge == 'Trực 24/7' || badge == 'Khẩn cấp 24/7',
+              ),
             ],
           ),
           const SizedBox(height: 14),
@@ -587,8 +588,8 @@ class ContactTab extends ConsumerWidget {
                 IconButton(
                   icon: const Icon(LucideIcons.copy,
                       size: 16, color: AppColors.slate500),
-                  tooltip: 'Sao chép số',
-                  onPressed: () => _copyToClipboard(ref, value, copyLabel),
+                  tooltip: copyTooltip,
+                  onPressed: () => _copyToClipboard(ref, value),
                 ),
                 AppButton(
                   text: actionLabel,
