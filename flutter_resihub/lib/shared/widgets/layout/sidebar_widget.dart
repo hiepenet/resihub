@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../../core/constants/navigation.dart';
 import '../../../core/storage/app_storage.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/permissions.dart';
 import '../../../features/auth/providers/auth_provider.dart';
 
 /// Manages reactive sidebar collapse state persisted in AppStorage.
@@ -71,15 +72,15 @@ class SidebarWidget extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authState = ref.watch(authProvider);
+    final user = ref.watch(authProvider.select((s) => s.user));
+    final primaryRole = ref.watch(authProvider.select((s) => s.primaryRole));
     final collapsedState = ref.watch(sidebarCollapsedProvider);
     final isCollapsed = collapsible && collapsedState && !isDrawer;
-    final primaryRole = authState.primaryRole;
 
     // Filter navigation groups by user roles
     final filteredGroups = kAdminNavGroups.map((grp) {
       final items = grp.items.where((item) {
-        return authState.hasRole(item.roles);
+        return user != null && hasAnyRole(user, item.roles);
       }).toList();
       return NavGroup(group: grp.group, items: items);
     }).where((grp) => grp.items.isNotEmpty).toList();

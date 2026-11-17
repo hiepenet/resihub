@@ -110,13 +110,11 @@ class _TopBarState extends ConsumerState<TopBar> {
       });
     });
 
-    final authState = ref.watch(authProvider);
-    final user = authState.user;
-    final primaryRole = authState.primaryRole;
-    final selectedBuildingId = authState.selectedBuildingId;
+    final user = ref.watch(authProvider.select((s) => s.user));
+    final primaryRole = ref.watch(authProvider.select((s) => s.primaryRole));
+    final selectedBuildingId = ref.watch(authProvider.select((s) => s.selectedBuildingId));
 
-    final buildingsAsync = ref.watch(buildingsListProvider);
-    final buildings = buildingsAsync.valueOrNull ?? const [];
+    final buildings = ref.watch(buildingsListProvider.select((s) => s.valueOrNull)) ?? const [];
 
     final width = MediaQuery.sizeOf(context).width;
     final isDesktop = width >= 1024;

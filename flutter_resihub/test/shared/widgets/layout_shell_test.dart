@@ -17,6 +17,9 @@ import 'package:flutter_resihub/shared/widgets/layout/admin_shell.dart';
 import 'package:flutter_resihub/shared/widgets/layout/resident_shell.dart';
 import 'package:flutter_resihub/shared/widgets/layout/sidebar_widget.dart';
 import 'package:flutter_resihub/shared/widgets/layout/top_bar.dart';
+import 'package:flutter_resihub/shared/providers/notification_provider.dart';
+
+import '../../performance/navigation_perf_harness.dart';
 
 class _FakeNotificationsService extends Fake implements NotificationsService {
   @override
@@ -91,6 +94,42 @@ UserModel _createUserWithRole(String roleCode, {String? buildingId}) {
       UserRoleModel(code: roleCode, buildingId: buildingId),
     ],
   );
+}
+
+/// Flips only `loading` while keeping `unreadCount` fixed — the shape of the
+/// 60s notification poll that used to rebuild the whole shell.
+class _LoadingFlipNotifier extends NotificationNotifier {
+  _LoadingFlipNotifier(this._initial);
+
+  final NotificationState _initial;
+
+  @override
+  NotificationState build() => _initial;
+
+  void flipLoading() => state = state.copyWith(loading: !state.loading);
+}
+
+/// Counts its own builds while watching either the full notification state
+/// (control) or the exact watch the shell uses (under test).
+class _NotificationWatchProbe extends ConsumerWidget {
+  const _NotificationWatchProbe({
+    required this.counter,
+    required this.narrow,
+  });
+
+  final PerfCounter counter;
+  final bool narrow;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    counter.increment();
+    if (narrow) {
+      watchShellUnreadCount(ref);
+    } else {
+      ref.watch(notificationProvider);
+    }
+    return const SizedBox.shrink();
+  }
 }
 
 Widget _wrapWithScope({
@@ -881,6 +920,52 @@ void main() {
 
       expect(find.byKey(const Key('resident-mobile-tab-strip')), findsNothing);
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('5. Shell provider watches (narrow rebuilds)', () {
+    testWidgets(
+        'loading flip with unchanged unreadCount does not rebuild shell watch',
+        (tester) async {
+      final notifier = _LoadingFlipNotifier(
+        const NotificationState(unreadCount: 3),
+      );
+      final narrowBuilds = PerfCounter();
+      final fullBuilds = PerfCounter();
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            notificationProvider.overrideWith(() => notifier),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: Column(
+                children: [
+                  _NotificationWatchProbe(counter: fullBuilds, narrow: false),
+                  _NotificationWatchProbe(counter: narrowBuilds, narrow: true),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final narrowBefore = narrowBuilds.value;
+      final fullBefore = fullBuilds.value;
+
+      notifier.flipLoading();
+      await tester.pump();
+
+      // Control: a full-state watch does see the loading flip.
+      expect(fullBuilds.value, greaterThan(fullBefore));
+      // The shell's watch must ignore it — this is the regression under test.
+      expect(narrowBuilds.value, narrowBefore,
+          reason: 'shell watch rebuilt on notification loading flip');
+
+      notifier.flipLoading();
+      await tester.pump();
+      expect(narrowBuilds.value, narrowBefore);
     });
   });
 }
