@@ -18,7 +18,10 @@ import 'package:flutter_resihub/features/tenants/screens/tenant_detail_page.dart
 import 'package:flutter_resihub/features/tenants/screens/tenants_page.dart';
 import 'package:flutter_resihub/features/tenants/services/tenants_service.dart';
 import 'package:flutter_resihub/shared/widgets/common/page_header.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_button.dart';
+import 'package:flutter_resihub/shared/widgets/ui/app_input.dart';
 import 'package:flutter_resihub/shared/widgets/ui/app_modal.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class _MockHttpClientAdapter implements HttpClientAdapter {
   final Future<ResponseBody> Function(RequestOptions options) _handler;
@@ -816,6 +819,278 @@ void main() {
       // reviewSuggestion with REJECT was called and button disappeared
       expect(reviewCalled, isTrue);
       expect(find.text('Hủy nháp AI'), findsNothing);
+
+      // Drain toast timer
+      await tester.pump(const Duration(seconds: 5));
+    });
+  });
+
+  group('C14-C16 React parity (T6)', () {
+    ProviderContainer makeContainer(Dio dio, QueryCache cache, UserModel user) {
+      final c = ProviderContainer(
+        overrides: [
+          appStorageProvider.overrideWithValue(storage),
+          dioProvider.overrideWithValue(dio),
+          queryCacheProvider.overrideWithValue(cache),
+        ],
+      );
+      c.read(authProvider.notifier).setAuthData(
+            accessToken: 'token',
+            refreshToken: 'refresh',
+            user: user,
+          );
+      return c;
+    }
+
+    UserModel sysAdminUser() => UserModel(
+          id: 'u-sys',
+          fullName: 'Sys Admin',
+          phone: '0900000001',
+          roles: const [UserRoleModel(code: 'SYS_ADMIN', name: 'Quản trị hệ thống')],
+        );
+
+    UserModel managerUser() => UserModel(
+          id: 'u-mgr',
+          fullName: 'Ban Quan Ly',
+          phone: '0900000002',
+          roles: const [UserRoleModel(code: 'MANAGER', name: 'Quản lý')],
+        );
+
+    testWidgets('C14: delete only for sysadmin and disabled when has_past_contract', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      final cache = QueryCache();
+      final mockTenants = [
+        {
+          'id': 't-past',
+          'full_name': 'Le Van PastContract',
+          'phone': '0901111111',
+          'status': 'ACTIVE',
+          'has_past_contract': true,
+        },
+        {
+          'id': 't-clean',
+          'full_name': 'Tran Thi Clean',
+          'phone': '0902222222',
+          'status': 'ACTIVE',
+        },
+      ];
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        final data = options.path == '/api/v1/tenants' ? mockTenants : [];
+        return ResponseBody.fromString(
+          jsonEncode({'success': true, 'data': data}),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      final container = makeContainer(dio, cache, sysAdminUser());
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: TenantsPage())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final deletes = find.widgetWithIcon(IconButton, LucideIcons.trash2);
+      expect(deletes, findsNWidgets(2));
+      // Row 1 has has_past_contract: true -> delete disabled even without active contract.
+      expect(tester.widget<IconButton>(deletes.at(0)).onPressed, isNull);
+      // Row 2 has no contract -> delete enabled for sysadmin.
+      expect(tester.widget<IconButton>(deletes.at(1)).onPressed, isNotNull);
+
+      // A non-sysadmin (manager) must not see the delete button at all.
+      container.read(authProvider.notifier).setAuthData(
+            accessToken: 'token',
+            refreshToken: 'refresh',
+            user: managerUser(),
+          );
+      await tester.pumpAndSettle();
+      expect(find.widgetWithIcon(IconButton, LucideIcons.trash2), findsNothing);
+    });
+
+    testWidgets('C15: shared profile lock shows banner and disables identity fields for non-sysadmin', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      final cache = QueryCache();
+      final sharedTenant = {
+        'id': 't-shared',
+        'full_name': 'Shared Profile User',
+        'phone': '0903333333',
+        'id_number': '001200005555',
+        'dob': '1990-01-01',
+        'email': 'shared@example.com',
+        'nationality': 'Việt Nam',
+        'status': 'ACTIVE',
+        'is_shared_profile': true,
+      };
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path == '/api/v1/tenants') {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': [sharedTenant]}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/tenants/t-shared') {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': sharedTenant}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+          jsonEncode({'success': true, 'masked_for_owner': false, 'data': []}),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      final container = makeContainer(dio, cache, managerUser());
+      const banner = 'Hồ sơ định danh chung liên tòa (Shared Profile Lock)';
+      const lockedLabels = ['Họ và tên', 'Số điện thoại', 'CCCD / Hộ chiếu', 'Ngày sinh (YYYY-MM-DD)'];
+      const detailLockedLabels = ['Họ và tên', 'Số điện thoại', 'Số CCCD / Hộ chiếu', 'Ngày sinh (YYYY-MM-DD)'];
+
+      // --- List page: edit modal ---
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: TenantsPage())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Chỉnh sửa'));
+      await tester.pumpAndSettle();
+
+      expect(find.text(banner), findsOneWidget);
+      for (final label in lockedLabels) {
+        final input = find.ancestor(of: find.text(label), matching: find.byType(AppInput));
+        expect(input, findsOneWidget, reason: 'missing field $label');
+        expect(tester.widget<AppInput>(input).enabled, isFalse, reason: 'field $label must be locked');
+      }
+
+      // --- Detail page: profile tab ---
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: TenantDetailPage(tenantId: 't-shared'))),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(AppButton, 'Chỉnh sửa'));
+      await tester.pumpAndSettle();
+
+      expect(find.text(banner), findsOneWidget);
+      for (final label in detailLockedLabels) {
+        final input = find.ancestor(of: find.text(label), matching: find.byType(AppInput));
+        expect(input, findsOneWidget, reason: 'missing field $label');
+        expect(tester.widget<AppInput>(input).enabled, isFalse, reason: 'field $label must be locked');
+      }
+    });
+
+    testWidgets('C16: AI extracted CCCD appears in controlled field; delete disabled with past contract', (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final dio = Dio(BaseOptions(baseUrl: 'http://localhost:3000'));
+      final cache = QueryCache();
+      final tenant = {
+        'id': 't-ai',
+        'full_name': 'Old Name',
+        'phone': '0904444444',
+        'id_number': '',
+        'status': 'ACTIVE',
+        'contracts': [
+          {'id': 'c-old'},
+        ],
+      };
+      dio.httpClientAdapter = _MockHttpClientAdapter((options) async {
+        if (options.path == '/api/v1/tenants/t-ai') {
+          return ResponseBody.fromString(
+            jsonEncode({'success': true, 'data': tenant}),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/tenants/t-ai/id-images') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'masked_for_owner': false,
+              'data': [
+                {
+                  'attachment_id': 'att-front',
+                  'side': 'front',
+                  'url': 'http://localhost/api/v1/attachments/att-front',
+                },
+              ],
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        if (options.path == '/api/v1/ai/extract') {
+          return ResponseBody.fromString(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'suggestion_id': 's-ai',
+                'confidence': 0.9,
+                'output': {
+                  'full_name': 'AI Extracted Name',
+                  'id_number': '079200001234',
+                },
+              },
+            }),
+            200,
+            headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+          );
+        }
+        return ResponseBody.fromString(
+          jsonEncode({'success': true, 'data': []}),
+          200,
+          headers: {Headers.contentTypeHeader: [Headers.jsonContentType]},
+        );
+      });
+
+      final container = makeContainer(dio, cache, sysAdminUser());
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(home: Scaffold(body: TenantDetailPage(tenantId: 't-ai'))),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Detail page delete is disabled when the tenant has past contracts.
+      final deleteBtn = find.widgetWithText(AppButton, 'Xóa hồ sơ');
+      expect(deleteBtn, findsOneWidget);
+      expect(tester.widget<AppButton>(deleteBtn).disabled, isTrue);
+
+      // Trigger AI scan and assert the value appears on the controlled field.
+      await tester.tap(find.widgetWithText(AppButton, 'Quét nhanh CCCD'));
+      await tester.pumpAndSettle();
+
+      final idInput = find.ancestor(of: find.text('Số CCCD / Hộ chiếu'), matching: find.byType(AppInput));
+      final idField = tester.widget<TextFormField>(
+        find.descendant(of: idInput, matching: find.byType(TextFormField)),
+      );
+      expect(idField.controller, isNotNull, reason: 'CCCD field must be controller-backed');
+      expect(idField.controller!.text, '079200001234');
+
+      final nameInput = find.ancestor(of: find.text('Họ và tên'), matching: find.byType(AppInput));
+      final nameField = tester.widget<TextFormField>(
+        find.descendant(of: nameInput, matching: find.byType(TextFormField)),
+      );
+      expect(nameField.controller?.text, 'AI Extracted Name');
 
       // Drain toast timer
       await tester.pump(const Duration(seconds: 5));

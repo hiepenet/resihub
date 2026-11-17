@@ -74,6 +74,12 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
   Map<String, dynamic>? _cccdAiTracker;
   String? _cccdAiError;
 
+  // Controllers for AI-filled identity fields (controlled so AI values show immediately).
+  final TextEditingController _fullNameController = TextEditingController();
+  final TextEditingController _idNumberController = TextEditingController();
+  final TextEditingController _dobController = TextEditingController();
+  final TextEditingController _addressController = TextEditingController();
+
   // Approval modal state
   bool _applicationReviewOpen = false;
   bool _approvalDialogOpen = false;
@@ -90,6 +96,15 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
   void initState() {
     super.initState();
     _loadData();
+  }
+
+  @override
+  void dispose() {
+    _fullNameController.dispose();
+    _idNumberController.dispose();
+    _dobController.dispose();
+    _addressController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadData({bool force = false}) async {
@@ -149,6 +164,10 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
     _form['dob'] = data['dob'] != null ? toInputDate(data['dob']) : '';
     _form['nationality'] = data['nationality']?.toString() ?? 'Việt Nam';
     _form['address'] = data['address']?.toString() ?? '';
+    _fullNameController.text = _form['full_name']!;
+    _idNumberController.text = _form['id_number']!;
+    _dobController.text = _form['dob']!;
+    _addressController.text = _form['address']!;
   }
 
   Future<void> _handleSaveProfile() async {
@@ -247,19 +266,25 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
         'dob': out['dob'] != null ? toInputDate(out['dob']) : '',
         'address': out['permanent_address']?.toString().trim() ?? '',
       };
+      final sharedLocked = _tenant?['is_shared_profile'] == true &&
+          !ref.read(permissionProvider).isSysAdmin;
 
       setState(() {
-        if (mapped['full_name']?.isNotEmpty == true) {
+        if (mapped['full_name']?.isNotEmpty == true && !(sharedLocked && (_form['full_name']?.isNotEmpty == true))) {
           _form['full_name'] = mapped['full_name'];
+          _fullNameController.text = mapped['full_name'];
         }
-        if (mapped['id_number']?.isNotEmpty == true) {
+        if (mapped['id_number']?.isNotEmpty == true && !(sharedLocked && (_form['id_number']?.isNotEmpty == true))) {
           _form['id_number'] = mapped['id_number'];
+          _idNumberController.text = mapped['id_number'];
         }
-        if (mapped['dob']?.isNotEmpty == true) {
+        if (mapped['dob']?.isNotEmpty == true && !(sharedLocked && (_form['dob']?.isNotEmpty == true))) {
           _form['dob'] = mapped['dob'];
+          _dobController.text = mapped['dob'];
         }
         if (mapped['address']?.isNotEmpty == true) {
           _form['address'] = mapped['address'];
+          _addressController.text = mapped['address'];
         }
 
         final baseConf = data is Map ? data['confidence'] : null;
@@ -718,6 +743,7 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
 
     final permissions = ref.watch(permissionProvider);
     final canManageTenants = permissions.canManageTenants;
+    final isSysAdmin = permissions.isSysAdmin;
 
     // Strict PII protection check: maskedForOwner from API OR isTenantIdImagesMasked from role
     final isMaskedForOwner = _idImagesMeta['maskedForOwner'] == true || permissions.isTenantIdImagesMasked;
@@ -730,6 +756,10 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
 
     final contracts = (tenant['contracts'] is List) ? tenant['contracts'] as List : [];
     final occupants = (tenant['occupants'] is List) ? tenant['occupants'] as List : [];
+    final hasContractHistory = tenant['active_contract'] != null ||
+        contracts.isNotEmpty ||
+        tenant['has_past_contract'] == true;
+    final sharedLocked = tenant['is_shared_profile'] == true && !isSysAdmin;
 
     final latestFrontImg = _idImages.reversed.firstWhere(
       (img) => img is Map && img['side'] == 'front',
@@ -820,13 +850,15 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                         loading: _saving,
                         onPressed: _handleSaveProfile,
                       ),
+                  ],
+                  if (isSysAdmin && status != 'MERGED')
                     AppButton(
                       text: 'Xóa hồ sơ',
                       variant: AppButtonVariant.danger,
                       icon: const Icon(LucideIcons.trash2, size: 16),
+                      disabled: hasContractHistory,
                       onPressed: () => setState(() => _deleteTenantOpen = true),
                     ),
-                  ],
                 ],
               ),
             ),
@@ -874,6 +906,45 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                         ),
                         const SizedBox(height: 16),
 
+                        if (sharedLocked)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppColors.amber50,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: AppColors.amber200),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: const [
+                                Icon(LucideIcons.triangleAlert, size: 18, color: AppColors.amber600),
+                                SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Hồ sơ định danh chung liên tòa (Shared Profile Lock)',
+                                        style: TextStyle(
+                                          fontFamily: 'Inter',
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.amber900,
+                                        ),
+                                      ),
+                                      SizedBox(height: 4),
+                                      Text(
+                                        'Các thông tin định danh gốc đã xác thực (Họ tên, SĐT, CCCD, Ngày sinh) được khóa đối với Quản lý tòa — chỉ Cư dân tự cập nhật hoặc Quản trị hệ thống (SYS_ADMIN) điều chỉnh.',
+                                        style: TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.amber700),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+
                         AISuggestionField(
                           active: _cccdAiTracker?['fields']?['full_name']?['active'] == true,
                           confidence: _cccdAiTracker?['fields']?['full_name']?['confidence'],
@@ -881,8 +952,8 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                           child: AppInput(
                             label: 'Họ và tên',
                             required: true,
-                            enabled: _isEditing,
-                            initialValue: _form['full_name']?.toString(),
+                            enabled: _isEditing && !sharedLocked,
+                            controller: _fullNameController,
                             error: _errors['full_name'],
                             onChanged: (val) => _form['full_name'] = val,
                           ),
@@ -896,7 +967,7 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                               child: AppInput(
                                 label: 'Số điện thoại',
                                 required: true,
-                                enabled: _isEditing,
+                                enabled: _isEditing && !sharedLocked,
                                 initialValue: _form['phone']?.toString(),
                                 error: _errors['phone'],
                                 onChanged: (val) => _form['phone'] = val,
@@ -926,8 +997,8 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                                 onDismiss: () => setState(() => _cccdAiTracker?['fields']?.remove('id_number')),
                                 child: AppInput(
                                   label: 'Số CCCD / Hộ chiếu',
-                                  enabled: _isEditing,
-                                  initialValue: _form['id_number']?.toString(),
+                                  enabled: _isEditing && !sharedLocked,
+                                  controller: _idNumberController,
                                   error: _errors['id_number'],
                                   onChanged: (val) => _form['id_number'] = val,
                                 ),
@@ -941,8 +1012,8 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                                 onDismiss: () => setState(() => _cccdAiTracker?['fields']?.remove('dob')),
                                 child: AppInput(
                                   label: 'Ngày sinh (YYYY-MM-DD)',
-                                  enabled: _isEditing,
-                                  initialValue: _form['dob']?.toString(),
+                                  enabled: _isEditing && !sharedLocked,
+                                  controller: _dobController,
                                   onChanged: (val) => _form['dob'] = val,
                                 ),
                               ),
@@ -966,7 +1037,7 @@ class _TenantDetailPageState extends ConsumerState<TenantDetailPage> {
                           child: AppInput(
                             label: 'Địa chỉ thường trú',
                             enabled: _isEditing,
-                            initialValue: _form['address']?.toString(),
+                            controller: _addressController,
                             onChanged: (val) => _form['address'] = val,
                           ),
                         ),

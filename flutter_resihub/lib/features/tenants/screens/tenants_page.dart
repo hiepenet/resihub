@@ -106,6 +106,12 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
   bool _cccdAiConsent = true;
   String? _cccdAiError;
 
+  // Controllers for AI-filled create fields (controlled so AI values show immediately).
+  final TextEditingController _createFullNameController = TextEditingController();
+  final TextEditingController _createIdNumberController = TextEditingController();
+  final TextEditingController _createDobController = TextEditingController();
+  final TextEditingController _createAddressController = TextEditingController();
+
   // Edit Modal state
   bool _editOpen = false;
   dynamic _editingTenant;
@@ -142,6 +148,10 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
   @override
   void dispose() {
     _dupTimer?.cancel();
+    _createFullNameController.dispose();
+    _createIdNumberController.dispose();
+    _createDobController.dispose();
+    _createAddressController.dispose();
     super.dispose();
   }
 
@@ -282,15 +292,19 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
       setState(() {
         if (mapped['full_name']?.isNotEmpty == true) {
           _createForm['full_name'] = mapped['full_name'];
+          _createFullNameController.text = mapped['full_name'];
         }
         if (mapped['id_number']?.isNotEmpty == true) {
           _createForm['id_number'] = mapped['id_number'];
+          _createIdNumberController.text = mapped['id_number'];
         }
         if (mapped['dob']?.isNotEmpty == true) {
           _createForm['dob'] = mapped['dob'];
+          _createDobController.text = mapped['dob'];
         }
         if (mapped['address']?.isNotEmpty == true) {
           _createForm['address'] = mapped['address'];
+          _createAddressController.text = mapped['address'];
         }
 
         final baseConf = data is Map ? data['confidence'] : null;
@@ -508,6 +522,11 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
   }
 
   Widget? _buildActiveModal(List<dynamic> mergeableTenants) {
+    final isSysAdmin = ref.read(permissionProvider).isSysAdmin;
+    final sharedLocked = _editingTenant is Map &&
+        _editingTenant['is_shared_profile'] == true &&
+        !isSysAdmin;
+
     if (_createOpen) {
       return Material(
         color: Colors.transparent,
@@ -679,7 +698,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                   child: AppInput(
                     label: 'Họ và tên',
                     required: true,
-                    initialValue: _createForm['full_name']?.toString(),
+                    controller: _createFullNameController,
                     error: _createErrors['full_name'],
                     onChanged: (val) {
                       _createForm['full_name'] = val;
@@ -731,7 +750,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                         onDismiss: () => setState(() => _cccdAiTracker?['fields']?.remove('id_number')),
                         child: AppInput(
                           label: 'CCCD / Hộ chiếu',
-                          initialValue: _createForm['id_number']?.toString(),
+                          controller: _createIdNumberController,
                           error: _createErrors['id_number'],
                           onChanged: (val) {
                             _createForm['id_number'] = val;
@@ -749,7 +768,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                         onDismiss: () => setState(() => _cccdAiTracker?['fields']?.remove('dob')),
                         child: AppInput(
                           label: 'Ngày sinh (YYYY-MM-DD)',
-                          initialValue: _createForm['dob']?.toString(),
+                          controller: _createDobController,
                           onChanged: (val) => _createForm['dob'] = val,
                         ),
                       ),
@@ -790,7 +809,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                   onDismiss: () => setState(() => _cccdAiTracker?['fields']?.remove('address')),
                   child: AppInput(
                     label: 'Địa chỉ thường trú',
-                    initialValue: _createForm['address']?.toString(),
+                    controller: _createAddressController,
                     onChanged: (val) => _createForm['address'] = val,
                   ),
                 ),
@@ -863,9 +882,48 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
           child: SingleChildScrollView(
             child: Column(
               children: [
+                if (sharedLocked)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.amber50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.amber200),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Icon(LucideIcons.triangleAlert, size: 18, color: AppColors.amber600),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Hồ sơ định danh chung liên tòa (Shared Profile Lock)',
+                                style: TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.amber900,
+                                ),
+                              ),
+                              SizedBox(height: 4),
+                              Text(
+                                'Các trường định danh gốc đã có dữ liệu được khóa đối với Quản lý tòa — chỉ Cư dân tự cập nhật hoặc Quản trị hệ thống (SYS_ADMIN) điều chỉnh.',
+                                style: TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.amber700),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 AppInput(
                   label: 'Họ và tên',
                   required: true,
+                  enabled: !sharedLocked,
                   initialValue: _editForm['full_name']?.toString(),
                   error: _editErrors['full_name'],
                   onChanged: (val) {
@@ -880,6 +938,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                       child: AppInput(
                         label: 'Số điện thoại',
                         required: true,
+                        enabled: !sharedLocked,
                         initialValue: _editForm['phone']?.toString(),
                         error: _editErrors['phone'],
                         onChanged: (val) {
@@ -908,6 +967,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                     Expanded(
                       child: AppInput(
                         label: 'CCCD / Hộ chiếu',
+                        enabled: !sharedLocked,
                         initialValue: _editForm['id_number']?.toString(),
                         error: _editErrors['id_number'],
                         onChanged: (val) {
@@ -920,6 +980,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                     Expanded(
                       child: AppInput(
                         label: 'Ngày sinh (YYYY-MM-DD)',
+                        enabled: !sharedLocked,
                         initialValue: _editForm['dob']?.toString(),
                         onChanged: (val) => _editForm['dob'] = val,
                       ),
@@ -1047,6 +1108,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
   Widget build(BuildContext context) {
     final permissions = ref.watch(permissionProvider);
     final canManageTenants = permissions.canManageTenants;
+    final isSysAdmin = permissions.isSysAdmin;
     final selectedBuildingId = ref.watch(authProvider).selectedBuildingId;
 
     // Filter scoped tenants
@@ -1342,6 +1404,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
         render: (row) {
           if (row is! Map) return const SizedBox.shrink();
           final id = row['id']?.toString() ?? '';
+          final hasContractRef = row['active_contract'] != null || row['has_past_contract'] == true;
 
           return Row(
             mainAxisSize: MainAxisSize.min,
@@ -1374,6 +1437,8 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                   icon: const Icon(LucideIcons.gitMerge, size: 16, color: AppColors.secondary600),
                   onPressed: () => _handleOpenMerge(row),
                 ),
+              ],
+              if (isSysAdmin && row['status'] != 'MERGED') ...[
                 const SizedBox(width: 4),
                 IconButton(
                   tooltip: 'Xóa',
@@ -1381,7 +1446,7 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                   visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                   icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.rose600),
-                  onPressed: () => setState(() => _deleteTarget = row),
+                  onPressed: hasContractRef ? null : () => setState(() => _deleteTarget = row),
                 ),
               ],
             ],
@@ -1431,6 +1496,10 @@ class _TenantsPageState extends ConsumerState<TenantsPage> {
                               _createForm['type'] = 'primary';
                               _createForm['password'] = '';
                               _createForm['privacy_consent'] = true;
+                              _createFullNameController.clear();
+                              _createIdNumberController.clear();
+                              _createDobController.clear();
+                              _createAddressController.clear();
                               _createIdImages = {'front': '', 'back': ''};
                               _createErrors = {};
                               _dupInfo = {'isDuplicate': false, 'inScope': true, 'duplicates': [], 'message': ''};
