@@ -1,3 +1,5 @@
+import { ROLE_PRIORITY } from '../constants/roles';
+
 const DEFAULT_TTL_MS = 20_000;
 const DEFAULT_MAX_STALE_MS = 300_000;
 
@@ -25,7 +27,15 @@ function resolveScope() {
       if (rawUser) {
         const parsed = JSON.parse(rawUser);
         const uid = parsed?.sub || parsed?.id || parsed?.email;
-        if (uid) return `u:${uid}`;
+        if (uid) {
+          const roleCodes = Array.isArray(parsed.roles)
+            ? parsed.roles.map((r) => (typeof r === 'string' ? r : r?.code)).filter(Boolean)
+            : [];
+          const role = ROLE_PRIORITY.find((code) => roleCodes.includes(code)) || '';
+          const buildingId = localStorage.getItem('resihub_selected_building_id') || '';
+          if (role || buildingId) return `u:${uid}:r:${role}:b:${buildingId}`;
+          return `u:${uid}`;
+        }
       }
       const token = localStorage.getItem('accessToken');
       if (token) return `t:${token.slice(-24)}`;
@@ -179,6 +189,10 @@ const URL_INVALIDATION_RULES = [
   { match: '/api/v1/announcements', namespaces: ['notifications'] },
   { match: '/api/v1/zalo-groups', namespaces: ['notifications'] },
   { match: '/api/v1/admin/users', namespaces: ['users', 'tenants'] },
+  {
+    match: '/api/v1/resident',
+    namespaces: ['resident', 'contracts', 'invoices', 'services', 'serviceRequests', 'deposits'],
+  },
 ];
 
 export function invalidateRelatedNamespacesForUrl(url) {

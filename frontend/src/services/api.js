@@ -82,9 +82,17 @@ api.interceptors.response.use(
               });
           }
           const res = await refreshPromise;
-          const { accessToken: newAccessToken, user: refreshedUser } = res.data;
+          const {
+            accessToken: newAccessToken,
+            refreshToken: newRefreshToken,
+            user: refreshedUser,
+          } = res.data;
 
           localStorage.setItem('accessToken', newAccessToken);
+          if (newRefreshToken) {
+            localStorage.setItem('refreshToken', newRefreshToken);
+            useAuthStore.setState({ refreshToken: newRefreshToken });
+          }
           if (refreshedUser) {
             useAuthStore.getState().updateUser(refreshedUser);
           }
