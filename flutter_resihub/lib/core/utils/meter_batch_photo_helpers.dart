@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'billing_helpers.dart' show
+    ClientMeterAnomalyResult,
     evaluateClientMeterAnomaly,
     computeMeterEstimatedAmount,
     isMeterRowLockedForEdit;
@@ -329,8 +330,9 @@ class QueueTaskResult<R> {
 Future<List<QueueTaskResult<R>>> runBoundedConcurrencyQueue<T, R>(
   List<T> items,
   int concurrency,
-  Future<R> Function(T item, int index) workerFn,
-) async {
+  Future<R> Function(T item, int index) workerFn, {
+  bool Function()? isAborted,
+}) async {
   if (items.isEmpty) return [];
 
   final limit = math.max(1, math.min(concurrency, items.length));
@@ -339,6 +341,7 @@ Future<List<QueueTaskResult<R>>> runBoundedConcurrencyQueue<T, R>(
 
   Future<void> runWorker() async {
     while (true) {
+      if (isAborted != null && isAborted()) return;
       final idx = cursor;
       cursor += 1;
       if (idx >= items.length) return;
@@ -466,6 +469,7 @@ BatchPhotoImportEvaluation evaluateBatchPhotoImportItems(
     final baselineAvg = meter != null ? _resolveMeterRollingAvg(meter) : null;
 
     final draftReadingVal = it['draftReading'];
+    // React: không có meter -> object cố định, KHÔNG evaluate với prev = 0.
     final anomaly = meter != null
         ? evaluateClientMeterAnomaly(
             prevReading: prevReading,
@@ -473,11 +477,13 @@ BatchPhotoImportEvaluation evaluateBatchPhotoImportItems(
             baselineAvg: baselineAvg,
             thresholdPct: anomalyThresholdPct,
           )
-        : evaluateClientMeterAnomaly(
-            prevReading: 0,
-            currentReading: draftReadingVal,
+        : ClientMeterAnomalyResult(
+            hasInput: draftReadingVal != null && draftReadingVal.toString().trim().isNotEmpty,
+            isInvalid: false,
+            consumption: null,
             baselineAvg: null,
-            thresholdPct: anomalyThresholdPct,
+            diffPct: null,
+            isAbnormal: false,
           );
 
     bool isAbnormal = anomaly.isAbnormal;
@@ -498,7 +504,8 @@ BatchPhotoImportEvaluation evaluateBatchPhotoImportItems(
         ? computeMeterEstimatedAmount(anomaly.consumption, meter)
         : null;
 
-    final detType = it['detectedMeterType']?.toString().toUpperCase();
+    // React so sánh phân biệt hoa thường — không toUpperCase().
+    final detType = it['detectedMeterType']?.toString();
     final hasTypeMismatchWarning = meter != null &&
         detType != null &&
         (detType == 'ELECTRICITY' || detType == 'WATER') &&
@@ -605,10 +612,13 @@ Map<String, dynamic> buildBatchPhotoSavePayload({
 
     if (targetMeter == null || targetMeter['id'] == null) continue;
 
-    final num? readingNum = num.tryParse(draftReading?.toString() ?? '');
+    // React: Number(undefined) = NaN -> JSON null. Không ép 0 (ghi sai chỉ số).
+    final num? readingNum = draftReading == null
+        ? null
+        : (num.tryParse(draftReading.toString()) ?? 0);
     final entry = <String, dynamic>{
       'meter_id': targetMeter['id'],
-      'current_reading': readingNum ?? 0,
+      'current_reading': readingNum,
     };
 
     if (targetMeter['target_contract_id'] != null) {

@@ -1,5 +1,8 @@
 import 'dart:math';
 
+/// JS `Math.round`: nửa số làm tròn về +∞ (khác Dart `.round()` làm tròn khỏi 0 với số âm).
+int _roundJs(num value) => (value + 0.5).floor();
+
 /// Gom nhóm các chữ số thành cụm 3 ngăn cách bởi dấu chấm `.` (VD: `"1000000"` -> `"1.000.000"`).
 String groupDigitsWithDots(String digits) {
   if (digits.isEmpty) return '';
@@ -37,7 +40,7 @@ String normalizeMoneyPropValue(dynamic value, {bool allowNegative = false}) {
 
   if (value is num) {
     if (value.isNaN || value.isInfinite) return '';
-    final rounded = value.round();
+    final rounded = _roundJs(value);
     if (rounded == 0) return '0';
     if (rounded < 0) {
       return allowNegative ? '$rounded' : '${rounded.abs()}';
@@ -52,7 +55,7 @@ String normalizeMoneyPropValue(dynamic value, {bool allowNegative = false}) {
   if (RegExp(r'^-?\d+\.\d{1,2}$').hasMatch(trimmed)) {
     final numVal = double.tryParse(trimmed);
     if (numVal == null || numVal.isNaN || numVal.isInfinite) return '';
-    final rounded = numVal.round();
+    final rounded = _roundJs(numVal);
     if (rounded == 0) return '0';
     if (rounded < 0) {
       return allowNegative ? '$rounded' : '${rounded.abs()}';

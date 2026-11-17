@@ -185,6 +185,15 @@ void main() {
       expect(normalizeMoneyPropValue('-500000', allowNegative: false), equals('500000'));
     });
 
+    test('normalizeMoneyPropValue matches JS Math.round on negative halves (allowNegative)', () {
+      // JS Math.round(-500000.5) === -500000 (ties toward +Infinity); Dart .round() gives -500001.
+      expect(normalizeMoneyPropValue(-1.5, allowNegative: true), equals('-1'));
+      expect(normalizeMoneyPropValue(-500000.5, allowNegative: true), equals('-500000'));
+      expect(normalizeMoneyPropValue('-500000.5', allowNegative: true), equals('-500000'));
+      // Positive halves unchanged.
+      expect(normalizeMoneyPropValue(220000.5), equals('220001'));
+    });
+
     test('formatMoneyInputDisplay formats strings and Postgres values with thousand dots', () {
       expect(formatMoneyInputDisplay('8500000'), equals('8.500.000'));
       expect(formatMoneyInputDisplay('8500000.00'), equals('8.500.000'));
@@ -536,6 +545,20 @@ void main() {
       expect(isValidZaloGroupUrl(null), isTrue);
       expect(isValidZaloGroupUrl('https://facebook.com/group'), isFalse);
       expect(isValidZaloGroupUrl('https://zalo.me/../etc'), isFalse);
+    });
+
+    test('buildZaloPreviewText formats timestamp in Asia/Ho_Chi_Minh as HH:mm dd/MM/yyyy', () {
+      // UTC 17:30 -> 00:30 next day in UTC+7; React Intl vi-VN order is time-first.
+      final text = buildZaloPreviewText(scheduledOrSentAt: '2026-11-17T17:30:00Z');
+      expect(text, contains('🕒 Thời điểm ghi nhận: **00:30 18/11/2026**'));
+      expect(text, isNot(contains('17/11/2026 17:30')));
+    });
+
+    test('buildRoomMaintenanceZaloText formats next appointment in Asia/Ho_Chi_Minh', () {
+      final text = buildRoomMaintenanceZaloText({
+        'next_appointment_at': '2026-11-17T17:30:00Z',
+      });
+      expect(text, contains('📅 Lịch hẹn xử lý tiếp theo: **00:30 18/11/2026**'));
     });
 
     test('buildRoomMaintenanceZaloText NEVER leaks internal_note to residents', () {

@@ -1,5 +1,5 @@
 import 'dart:math';
-import 'format.dart';
+import 'package:intl/intl.dart';
 import 'zalo_clipboard_stub.dart'
     if (dart.library.js_interop) 'zalo_clipboard_web.dart';
 
@@ -167,6 +167,16 @@ bool isValidZaloGroupUrl(String? rawUrl) {
   return true;
 }
 
+/// Khớp `formatVnDateTimeShort` của React: Intl vi-VN, `Asia/Ho_Chi_Minh` (UTC+7, không DST),
+/// thứ tự `HH:mm dd/MM/yyyy`. Trả về '' cho giá trị rỗng/không parse được.
+String _formatVnDateTimeShort(dynamic value) {
+  if (value == null || value == '') return '';
+  final dt = value is DateTime ? value : DateTime.tryParse(value.toString());
+  if (dt == null) return '';
+  final vnWallTime = (dt.isUtc ? dt : dt.toUtc()).add(const Duration(hours: 7));
+  return DateFormat('HH:mm dd/MM/yyyy').format(vnWallTime);
+}
+
 /// Tạo nội dung xem trước tin nhắn Zalo gửi cư dân.
 String buildZaloPreviewText({
   String type = 'ANNOUNCEMENT',
@@ -203,8 +213,8 @@ String buildZaloPreviewText({
   ];
 
   if (scheduledOrSentAt != null) {
-    final tsStr = formatDateTime(scheduledOrSentAt);
-    if (tsStr != '—' && tsStr.isNotEmpty) {
+    final tsStr = _formatVnDateTimeShort(scheduledOrSentAt);
+    if (tsStr.isNotEmpty) {
       lines.addAll(['', '🕒 Thời điểm ghi nhận: **$tsStr**']);
     }
   }
@@ -247,8 +257,8 @@ String buildRoomMaintenanceZaloText(Map<String, dynamic>? detail) {
     lines.add('⏸️ Lý do tạm hoãn / hẹn lại: **${detail['hold_reason']}**');
   }
   if (detail['next_appointment_at'] != null) {
-    final dtStr = formatDateTime(detail['next_appointment_at']);
-    if (dtStr != '—' && dtStr.isNotEmpty) {
+    final dtStr = _formatVnDateTimeShort(detail['next_appointment_at']);
+    if (dtStr.isNotEmpty) {
       lines.add('📅 Lịch hẹn xử lý tiếp theo: **$dtStr**');
     }
   }

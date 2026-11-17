@@ -147,7 +147,8 @@ SubscriptionProrataResult previewSubscriptionProrata({
   final num rawQty = quantity is num
       ? quantity
       : num.tryParse(quantity?.toString() ?? '') ?? 1;
-  final safeQty = math.max(1, rawQty.toInt());
+  // React giữ số thập phân (Math.max(1, Number(quantity))) — không .toInt().
+  final num safeQty = math.max(1, rawQty);
 
   final startStr = _toDateStr(startDate);
   final endStr = _toDateStr(endDate);

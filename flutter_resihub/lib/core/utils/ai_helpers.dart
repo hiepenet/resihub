@@ -123,7 +123,8 @@ class ConfidenceBadgeMeta {
 ConfidenceBadgeMeta formatConfidenceBadge(dynamic confidence, [dynamic threshold = 0.75]) {
   final num? numVal = confidence is num ? confidence : num.tryParse(confidence?.toString() ?? '');
   final num? threshVal = threshold is num ? threshold : num.tryParse(threshold?.toString() ?? '');
-  final safeThreshold = (threshVal != null && threshVal > 0) ? threshVal.toDouble() : 0.75;
+  // React: Number.isFinite(Number(threshold)) — chấp nhận cả threshold = 0.
+  final safeThreshold = (threshVal != null && threshVal.isFinite) ? threshVal.toDouble() : 0.75;
 
   if (numVal == null || numVal <= 0) {
     return const ConfidenceBadgeMeta(
@@ -240,8 +241,8 @@ AiErrorMessage mapAiErrorToVietnamese(dynamic error) {
       );
     case 'AI_RATE_LIMIT_EXCEEDED':
     case 'AI_UPSTREAM_RATE_LIMIT':
-      return const AiErrorMessage(
-        code: 'AI_RATE_LIMIT_EXCEEDED',
+      return AiErrorMessage(
+        code: code, // React trả nguyên code gốc, không hardcode.
         title: 'Tần suất gọi AI đang cao',
         guidance: 'Hệ thống đang giới hạn tốc độ gọi AI để bảo vệ hạn mức. Vui lòng đợi vài giây rồi thử lại hoặc nhập tay.',
         canManualFallback: true,

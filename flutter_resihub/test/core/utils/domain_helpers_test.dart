@@ -97,6 +97,17 @@ void main() {
       expect(fullRes.toString(), equals('400.000 ₫'));
     });
 
+    test('previewSubscriptionProrata keeps fractional quantity like React (A7)', () {
+      // React quantity = Math.max(1, Number(1.5)) = 1.5; Flutter .toInt() cut it to 1.
+      final res = previewSubscriptionProrata(
+        unitPrice: 1000,
+        quantity: 1.5,
+        periodYm: '2026-11',
+      );
+      // 1000 * 1.5 = 1500 -> roundVND -> 2000 (truncated qty would give 1000).
+      expect(res.amount, equals(2000));
+    });
+
     test('canConfirmInvoiceVoid requires exact code and non-empty reason', () {
       expect(
         canConfirmInvoiceVoid(
@@ -604,6 +615,64 @@ void main() {
       expect(results.map((r) => r.value).toList(), equals([20, 40, 60, 80, 100]));
     });
 
+    test('no-meter row mirrors React anomaly object instead of evaluating with prev=0 (A10-1)', () {
+      final eval = evaluateBatchPhotoImportItems([
+        {'draftReading': '-5', 'meterId': null},
+      ], const []);
+      final row = eval.rows.single;
+      expect(row.hasReadingInput, isTrue);
+      // React: isInvalid:false when no meter; Flutter prev=0 marked -5 invalid.
+      expect(row.isInvalidReading, isFalse);
+      expect(row.consumption, isNull);
+      expect(row.validationState, equals('MISSING_METER'));
+    });
+
+    test('hasTypeMismatchWarning is case-sensitive like React (A10-2)', () {
+      final meters = [
+        {'id': 'm-1', 'meter_type': 'WATER'},
+      ];
+      // Lowercase hint must NOT be uppercased into a mismatch warning.
+      final eval = evaluateBatchPhotoImportItems([
+        {'meterId': 'm-1', 'draftReading': '100', 'detectedMeterType': 'electricity'},
+      ], meters);
+      expect(eval.rows.single.hasTypeMismatchWarning, isFalse);
+
+      // Uppercase mismatch still warns.
+      final upper = evaluateBatchPhotoImportItems([
+        {'meterId': 'm-1', 'draftReading': '100', 'detectedMeterType': 'ELECTRICITY'},
+      ], meters);
+      expect(upper.rows.single.hasTypeMismatchWarning, isTrue);
+    });
+
+    test('runBoundedConcurrencyQueue honours cancellation signal (A10-3)', () async {
+      var cancelled = false;
+      var calls = 0;
+      final results = await runBoundedConcurrencyQueue<int, int>(
+        List<int>.generate(10, (i) => i),
+        1,
+        (item, index) async {
+          calls++;
+          if (index == 0) cancelled = true;
+          return item;
+        },
+        isAborted: () => cancelled,
+      );
+      expect(calls, equals(1));
+      expect(results.length, equals(1));
+    });
+
+    test('buildBatchPhotoSavePayload keeps React null for unparseable reading (A10-4)', () {
+      final payload = buildBatchPhotoSavePayload(
+        saveableRows: [
+          {'isSaveable': true, 'meter': {'id': 'm-1'}, 'draftReading': null},
+        ],
+        period: '2026-11',
+      );
+      final readings = payload['readings'] as List;
+      // JS Number(undefined) is NaN -> JSON null; Flutter ?? 0 silently wrote 0.
+      expect((readings.single as Map)['current_reading'], isNull);
+    });
+
     test('evaluateBatchPhotoImportItems detects duplicates, missing readings, and anomalies', () {
       final buildingMeters = [
         {
@@ -716,6 +785,23 @@ void main() {
       expect(high.percentText, equals('95%'));
       expect(high.tone, equals('emerald'));
       expect(high.isUncertain, isFalse);
+    });
+
+    test('formatConfidenceBadge accepts finite threshold = 0 like React (A9)', () {
+      // React Number.isFinite(0) -> threshold 0; Flutter's > 0 fallback used 0.75.
+      final badge = formatConfidenceBadge(0.5, 0);
+      expect(badge.tone, equals('amber'));
+      expect(badge.percentText, equals('50%'));
+      expect(badge.label, equals('Độ tin cậy khá (50%)'));
+    });
+
+    test('mapAiErrorToVietnamese returns original upstream rate-limit code (A9)', () {
+      final err = mapAiErrorToVietnamese('AI_UPSTREAM_RATE_LIMIT');
+      expect(err.code, equals('AI_UPSTREAM_RATE_LIMIT'));
+      expect(err.title, equals('Tần suất gọi AI đang cao'));
+
+      final explicit = mapAiErrorToVietnamese('AI_RATE_LIMIT_EXCEEDED');
+      expect(explicit.code, equals('AI_RATE_LIMIT_EXCEEDED'));
     });
 
     test('createAiFieldTracker and markFieldConfirmedOrEdited track manual modifications', () {
