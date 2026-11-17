@@ -378,7 +378,31 @@ class _ApartmentDetailPageState extends ConsumerState<ApartmentDetailPage> {
         'amenities': amenitiesMap,
       };
 
-      await buildingsService.updateApartment(widget.apartmentId, payload);
+      try {
+        await buildingsService.updateApartment(widget.apartmentId, payload);
+      } on DioException catch (err) {
+        final data = err.response?.data;
+        if (err.response?.statusCode == 409 &&
+            data is Map &&
+            data['code'] == 'AREA_CHANGE_REQUIRES_CONFIRM') {
+          if (!mounted) return;
+          final confirmed = await ConfirmDialog.show(
+            context: context,
+            title: 'Xác nhận đổi diện tích',
+            message:
+                'Căn hộ đang có hợp đồng hiệu lực. Thay đổi diện tích có thể ảnh hưởng cách tính phí dịch vụ. Bạn có chắc chắn muốn tiếp tục?',
+            confirmLabel: 'Tiếp tục',
+            variant: ConfirmDialogVariant.warning,
+          );
+          if (confirmed != true) return;
+          await buildingsService.updateApartment(widget.apartmentId, {
+            ...payload,
+            'confirm_recalculate_fees': true,
+          });
+        } else {
+          rethrow;
+        }
+      }
       ref.read(toastProvider.notifier).success('Đã cập nhật thông tin căn hộ.');
       if (mounted) setState(() => _editOpen = false);
       _fetchApartment(force: true);

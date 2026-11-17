@@ -50,6 +50,8 @@ class MockBuildingsService extends Fake implements BuildingsService {
   String? lastDeletedApartmentId;
   String? lastUpdatedApartmentId;
   Map<String, dynamic>? lastUpdatedApartmentPayload;
+  List<Map<String, dynamic>> updateApartmentPayloads = [];
+  Exception? updateApartmentFirstError;
 
   Exception? handoverError;
   Exception? cancelSettleError;
@@ -99,6 +101,12 @@ class MockBuildingsService extends Fake implements BuildingsService {
   Future<dynamic> updateApartment(String id, Map<String, dynamic> payload) async {
     lastUpdatedApartmentId = id;
     lastUpdatedApartmentPayload = payload;
+    updateApartmentPayloads.add(Map<String, dynamic>.from(payload));
+    if (updateApartmentFirstError != null) {
+      final err = updateApartmentFirstError!;
+      updateApartmentFirstError = null;
+      throw err;
+    }
     return {'data': {...?apartmentData, ...payload}};
   }
 
@@ -598,6 +606,64 @@ void main() {
 
       final toasts = containerRef.read(toastProvider);
       expect(toasts.any((t) => t.message.contains('Biên bản nghiệm thu chưa đủ điều kiện.')), isTrue);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('8. 409 AREA_CHANGE_REQUIRES_CONFIRM retries with confirm flag', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final mock = MockBuildingsService();
+      mock.apartmentData = _defaultApartmentData('apt-8');
+      mock.updateApartmentFirstError = DioException(
+        requestOptions: RequestOptions(path: '/api/v1/apartments/apt-8'),
+        response: Response(
+          requestOptions: RequestOptions(path: '/api/v1/apartments/apt-8'),
+          statusCode: 409,
+          data: {
+            'code': 'AREA_CHANGE_REQUIRES_CONFIRM',
+            'message': 'Căn hộ đang có hợp đồng hiệu lực.',
+          },
+        ),
+        type: DioExceptionType.badResponse,
+      );
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          mockService: mock,
+          roleCode: 'MANAGER',
+          currentUserId: 'mgr-1',
+          storage: storage,
+          apartmentId: 'apt-8',
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Chỉnh sửa'));
+      await tester.pumpAndSettle();
+
+      final saveBtn = find.text('Lưu thay đổi');
+      await tester.ensureVisible(saveBtn);
+      await tester.pumpAndSettle();
+      await tester.tap(saveBtn);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // Confirm dialog appears for 409 AREA_CHANGE_REQUIRES_CONFIRM.
+      expect(
+        find.textContaining('Căn hộ đang có hợp đồng hiệu lực'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Tiếp tục'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      // First call is the plain payload; retry carries the confirm flag.
+      expect(mock.updateApartmentPayloads.length, 2);
+      expect(mock.updateApartmentPayloads.first.containsKey('confirm_recalculate_fees'), isFalse);
+      expect(mock.updateApartmentPayloads.last['confirm_recalculate_fees'], true);
       await tester.pump(const Duration(seconds: 5));
     });
   });
