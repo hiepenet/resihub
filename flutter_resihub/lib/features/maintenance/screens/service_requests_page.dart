@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/constants/statuses.dart';
 import '../../../core/theme/app_colors.dart';
@@ -29,19 +30,83 @@ import '../../../shared/widgets/ui/app_input.dart';
 import '../../../shared/widgets/ui/app_modal.dart';
 import '../../../shared/widgets/ui/app_select.dart';
 import '../../../shared/widgets/ui/auth_media_viewer.dart';
+import '../../../shared/widgets/ui/file_upload_field.dart';
 import '../services/service_requests_service.dart';
 
-const List<String> kOpenSrStatuses = ['NEW', 'ASSIGNED', 'IN_PROGRESS', 'ON_HOLD', 'REOPENED'];
+const List<String> kOpenSrStatuses = [
+  'NEW',
+  'ASSIGNED',
+  'IN_PROGRESS',
+  'ON_HOLD',
+  'REOPENED'
+];
 
-const List<({String status, String title, Color borderTopColor, String badgeVariant})> kKanbanColumns = [
-  (status: 'NEW', title: 'Mới tiếp nhận', borderTopColor: Color(0xFF0EA5E9), badgeVariant: 'sky'),
-  (status: 'REOPENED', title: 'Mở lại xử lý', borderTopColor: Color(0xFFF43F5E), badgeVariant: 'red'),
-  (status: 'ASSIGNED', title: 'Đã phân công', borderTopColor: Color(0xFF6366F1), badgeVariant: 'indigo'),
-  (status: 'IN_PROGRESS', title: 'Đang xử lý', borderTopColor: Color(0xFFF59E0B), badgeVariant: 'amber'),
-  (status: 'ON_HOLD', title: 'Tạm hoãn / Hẹn lại', borderTopColor: Color(0xFFA855F7), badgeVariant: 'purple'),
-  (status: 'RESOLVED', title: 'Đã xử lý xong', borderTopColor: Color(0xFF10B981), badgeVariant: 'emerald'),
-  (status: 'CLOSED', title: 'Đã đóng', borderTopColor: Color(0xFF94A3B8), badgeVariant: 'slate'),
-  (status: 'CANCELLED', title: 'Đã hủy', borderTopColor: Color(0xFFE11D48), badgeVariant: 'red'),
+/// Port of `AUDIT_ACTION_LABELS` trong ServiceRequestsPage.jsx.
+const Map<String, String> kSrAuditActionLabels = {
+  'CREATE_SERVICE_REQUEST': 'Tạo yêu cầu báo hỏng',
+  'UPDATE_SERVICE_REQUEST': 'Cập nhật xử lý kỹ thuật',
+  'APPLY_SERVICE_REQUEST_TRIAGE': 'Duyệt / điều phối từ gợi ý AI',
+  'REOPEN_SERVICE_REQUEST': 'Cư dân yêu cầu xử lý lại',
+  'CANCEL_SERVICE_REQUEST': 'Hủy yêu cầu sửa chữa',
+  'RATE_SERVICE_REQUEST': 'Cư dân nghiệm thu & đánh giá sao',
+  'SLA_ESCALATION_SERVICE_REQUEST': 'Hệ thống cảnh báo quá hạn SLA',
+};
+
+const List<
+    ({
+      String status,
+      String title,
+      Color borderTopColor,
+      String badgeVariant
+    })> kKanbanColumns = [
+  (
+    status: 'NEW',
+    title: 'Mới tiếp nhận',
+    borderTopColor: Color(0xFF0EA5E9),
+    badgeVariant: 'sky'
+  ),
+  (
+    status: 'REOPENED',
+    title: 'Mở lại xử lý',
+    borderTopColor: Color(0xFFF43F5E),
+    badgeVariant: 'red'
+  ),
+  (
+    status: 'ASSIGNED',
+    title: 'Đã phân công',
+    borderTopColor: Color(0xFF6366F1),
+    badgeVariant: 'indigo'
+  ),
+  (
+    status: 'IN_PROGRESS',
+    title: 'Đang xử lý',
+    borderTopColor: Color(0xFFF59E0B),
+    badgeVariant: 'amber'
+  ),
+  (
+    status: 'ON_HOLD',
+    title: 'Tạm hoãn / Hẹn lại',
+    borderTopColor: Color(0xFFA855F7),
+    badgeVariant: 'purple'
+  ),
+  (
+    status: 'RESOLVED',
+    title: 'Đã xử lý xong',
+    borderTopColor: Color(0xFF10B981),
+    badgeVariant: 'emerald'
+  ),
+  (
+    status: 'CLOSED',
+    title: 'Đã đóng',
+    borderTopColor: Color(0xFF94A3B8),
+    badgeVariant: 'slate'
+  ),
+  (
+    status: 'CANCELLED',
+    title: 'Đã hủy',
+    borderTopColor: Color(0xFFE11D48),
+    badgeVariant: 'red'
+  ),
 ];
 
 /// Màn hình Yêu cầu Bảo trì / Báo hỏng, Cam kết SLA & AI Triage (M11).
@@ -55,7 +120,8 @@ class ServiceRequestsPage extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<ServiceRequestsPage> createState() => _ServiceRequestsPageState();
+  ConsumerState<ServiceRequestsPage> createState() =>
+      _ServiceRequestsPageState();
 }
 
 class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
@@ -97,9 +163,14 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
     try {
       final selectedBuildingId = ref.read(authProvider).selectedBuildingId;
       final service = ref.read(serviceRequestsServiceProvider);
-      final peeked = service.peekList({'building_id': selectedBuildingId.isNotEmpty ? selectedBuildingId : null});
+      final peeked = service.peekList({
+        'building_id': selectedBuildingId.isNotEmpty ? selectedBuildingId : null
+      });
       if (peeked is Map && peeked['data'] is List) {
-        _requests = (peeked['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        _requests = (peeked['data'] as List)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList();
         _loading = false;
       }
     } catch (_) {}
@@ -136,6 +207,17 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
     };
   }
 
+  void _resetFilters() {
+    setState(() {
+      _search = '';
+      _categoryFilter = '';
+      _priorityFilter = '';
+      _statusFilter = '';
+      _overdueOnly = false;
+    });
+    _fetchRequests();
+  }
+
   Future<void> _fetchRequests({bool force = false}) async {
     try {
       final service = ref.read(serviceRequestsServiceProvider);
@@ -145,12 +227,18 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
 
       if (res is Map && res['data'] is List) {
         setState(() {
-          _requests = (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          _requests = (res['data'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
           _loading = false;
         });
       } else if (res is List) {
         setState(() {
-          _requests = res.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          _requests = res
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
           _loading = false;
         });
       } else {
@@ -163,14 +251,22 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
       if (mounted) {
         setState(() => _loading = false);
         ref.read(toastProvider.notifier).error(
-              extractErrorMessage(err, 'Không thể tải danh sách yêu cầu bảo trì.'),
+              extractErrorMessage(
+                  err, 'Không thể tải danh sách yêu cầu bảo trì.'),
             );
       }
     }
   }
 
   // Thống kê KPIs
-  ({int total, int newCount, int processingCount, int doneCount, int overdueCount, int urgentCount}) _calculateStats() {
+  ({
+    int total,
+    int newCount,
+    int processingCount,
+    int doneCount,
+    int overdueCount,
+    int urgentCount
+  }) _calculateStats() {
     final total = _requests.length;
     var newCount = 0;
     var processingCount = 0;
@@ -183,19 +279,22 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
       final priority = (r['priority']?.toString() ?? 'NORMAL').toUpperCase();
 
       if (status == 'NEW' || status == 'REOPENED') newCount++;
-      if (status == 'ASSIGNED' || status == 'IN_PROGRESS' || status == 'ON_HOLD') processingCount++;
+      if (status == 'ASSIGNED' ||
+          status == 'IN_PROGRESS' ||
+          status == 'ON_HOLD') processingCount++;
       if (status == 'RESOLVED' || status == 'CLOSED') doneCount++;
 
       final isOverdue = r['is_sla_overdue'] == true ||
           computeSlaBadgeMeta(
-            status: status,
-            slaDueAt: r['sla_due_at'],
-            slaBreachedAt: r['sla_breached_at'],
-          ).state ==
+                status: status,
+                slaDueAt: r['sla_due_at'],
+                slaBreachedAt: r['sla_breached_at'],
+              ).state ==
               'OVERDUE';
       if (isOverdue) overdueCount++;
 
-      if (priority == 'URGENT' && kOpenSrStatuses.contains(status)) urgentCount++;
+      if (priority == 'URGENT' && kOpenSrStatuses.contains(status))
+        urgentCount++;
     }
 
     return (
@@ -228,9 +327,13 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
     await AppModal.show<void>(
       context: context,
       size: AppModalSize.lg,
-      title: 'Tiếp nhận Yêu cầu Bảo trì / Báo hỏng',
+      title: 'Tạo yêu cầu bảo trì hộ cư dân',
       child: _ServiceRequestCreateModal(
         onCreated: () => _fetchRequests(force: true),
+        onOpenExisting: (id) {
+          Navigator.of(context).pop();
+          _openDetailDrawer(id);
+        },
       ),
     );
   }
@@ -248,13 +351,14 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             PageHeader(
-              title: 'Quản lý Yêu cầu Bảo trì & Báo hỏng',
-              subtitle: 'Theo dõi xử lý sự cố, cam kết SLA bảo trì và hỗ trợ điều phối thông minh cùng AI Triage.',
+              title: 'Yêu cầu & Báo hỏng Kỹ thuật',
+              subtitle:
+                  'Tiếp nhận, điều phối nhân sự bảo trì, kiểm soát cam kết SLA và đồng bộ tin nhắn nhóm Zalo phòng.',
               actions: Wrap(
                 crossAxisAlignment: WrapCrossAlignment.center,
                 spacing: 10,
                 children: [
-                  // Nút chuyển chế độ xem (Kanban / Table)
+                  // Nút chuyển chế độ xem có nhãn (Kanban / Table)
                   Container(
                     decoration: BoxDecoration(
                       color: Colors.white,
@@ -264,36 +368,74 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        IconButton(
-                          tooltip: 'Xem dạng thẻ (Kanban)',
-                          icon: Icon(
-                            LucideIcons.layoutGrid,
-                            size: 18,
-                            color: _viewMode == 'kanban' ? AppColors.primary600 : AppColors.slate500,
+                        Tooltip(
+                          message: 'Xem dạng thẻ (Kanban)',
+                          child: TextButton.icon(
+                            onPressed: () =>
+                                setState(() => _viewMode = 'kanban'),
+                            icon: Icon(
+                              LucideIcons.layoutGrid,
+                              size: 16,
+                              color: _viewMode == 'kanban'
+                                  ? AppColors.primary600
+                                  : AppColors.slate500,
+                            ),
+                            label: Text(
+                              'Bảng Kanban',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _viewMode == 'kanban'
+                                    ? AppColors.primary600
+                                    : AppColors.slate600,
+                              ),
+                            ),
+                            style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8)),
                           ),
-                          onPressed: () => setState(() => _viewMode = 'kanban'),
                         ),
-                        Container(width: 1, height: 20, color: AppColors.slate200),
-                        IconButton(
-                          tooltip: 'Xem dạng bảng',
-                          icon: Icon(
-                            LucideIcons.list,
-                            size: 18,
-                            color: _viewMode == 'table' ? AppColors.primary600 : AppColors.slate500,
+                        Container(
+                            width: 1, height: 20, color: AppColors.slate200),
+                        Tooltip(
+                          message: 'Xem dạng bảng',
+                          child: TextButton.icon(
+                            onPressed: () =>
+                                setState(() => _viewMode = 'table'),
+                            icon: Icon(
+                              LucideIcons.list,
+                              size: 16,
+                              color: _viewMode == 'table'
+                                  ? AppColors.primary600
+                                  : AppColors.slate500,
+                            ),
+                            label: Text(
+                              'Chế độ Bảng',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: _viewMode == 'table'
+                                    ? AppColors.primary600
+                                    : AppColors.slate600,
+                              ),
+                            ),
+                            style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8)),
                           ),
-                          onPressed: () => setState(() => _viewMode = 'table'),
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Tải lại danh sách',
-                    icon: const Icon(LucideIcons.refreshCw, size: 18, color: AppColors.slate600),
+                  AppButton(
+                    text: 'Làm mới',
+                    icon: const Icon(LucideIcons.refreshCw, size: 16),
+                    variant: AppButtonVariant.outline,
                     onPressed: () => _fetchRequests(force: true),
                   ),
                   if (permissions.canHandleMaintenance) ...[
                     AppButton(
-                      text: '+ Tiếp nhận yêu cầu',
+                      text: 'Tạo yêu cầu hộ cư dân',
                       icon: const Icon(LucideIcons.plus, size: 18),
                       onPressed: _openCreateModal,
                     ),
@@ -303,87 +445,59 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
             ),
             const SizedBox(height: 20),
 
-            // Hàng Thẻ Thống Kê KPIs
+            // Hàng Thẻ Thống Kê KPIs (port of React KPIs)
             LayoutBuilder(
               builder: (context, constraints) {
                 final isWide = constraints.maxWidth >= 900;
+                final kpis = <StatsCard>[
+                  StatsCard(
+                    title: 'Tổng yêu cầu',
+                    value: stats.total,
+                    subtext: stats.urgentCount > 0
+                        ? '${stats.urgentCount} sự cố KHẨN CẤP đang mở'
+                        : 'Tất cả sự cố ghi nhận',
+                    icon: LucideIcons.wrench,
+                    color: 'sky',
+                  ),
+                  StatsCard(
+                    title: 'Mới / Mở lại',
+                    value: stats.newCount,
+                    subtext: stats.overdueCount > 0
+                        ? '${stats.overdueCount} phiếu đang quá hạn SLA!'
+                        : 'Chờ tiếp nhận & phân công',
+                    icon: LucideIcons.alertTriangle,
+                    color: stats.overdueCount > 0 ? 'rose' : 'amber',
+                  ),
+                  StatsCard(
+                    title: 'Đang xử lý / Hẹn lại',
+                    value: stats.processingCount,
+                    subtext: 'Đã phân công / Đang sửa / Tạm hoãn',
+                    icon: LucideIcons.clock,
+                    color: 'indigo',
+                  ),
+                  StatsCard(
+                    title: 'Đã hoàn thành',
+                    value: stats.doneCount,
+                    subtext: 'Đã xử lý xong & nghiệm thu',
+                    icon: LucideIcons.checkCircle2,
+                    color: 'emerald',
+                  ),
+                ];
                 return isWide
                     ? Row(
                         children: [
-                          Expanded(
-                            child: StatsCard(
-                              title: 'Tiếp nhận mới',
-                              value: stats.newCount,
-                              subtext: 'Chờ điều phối kỹ thuật',
-                              icon: LucideIcons.inbox,
-                              color: 'sky',
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: StatsCard(
-                              title: 'Đang xử lý',
-                              value: stats.processingCount,
-                              subtext: 'Trong quy trình sửa chữa',
-                              icon: LucideIcons.hammer,
-                              color: 'amber',
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: StatsCard(
-                              title: 'Quá hạn SLA',
-                              value: stats.overdueCount,
-                              subtext: 'Cần can thiệp khẩn cấp',
-                              icon: LucideIcons.alertTriangle,
-                              color: 'rose',
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: StatsCard(
-                              title: 'Khẩn cấp',
-                              value: stats.urgentCount,
-                              subtext: 'Yêu cầu mức độ URGENT mở',
-                              icon: LucideIcons.flame,
-                              color: 'indigo',
-                            ),
-                          ),
+                          for (var i = 0; i < kpis.length; i++) ...[
+                            if (i > 0) const SizedBox(width: 16),
+                            Expanded(child: kpis[i]),
+                          ],
                         ],
                       )
                     : Column(
                         children: [
-                          StatsCard(
-                            title: 'Tiếp nhận mới',
-                            value: stats.newCount,
-                            subtext: 'Chờ điều phối kỹ thuật',
-                            icon: LucideIcons.inbox,
-                            color: 'sky',
-                          ),
-                          const SizedBox(height: 12),
-                          StatsCard(
-                            title: 'Đang xử lý',
-                            value: stats.processingCount,
-                            subtext: 'Trong quy trình sửa chữa',
-                            icon: LucideIcons.hammer,
-                            color: 'amber',
-                          ),
-                          const SizedBox(height: 12),
-                          StatsCard(
-                            title: 'Quá hạn SLA',
-                            value: stats.overdueCount,
-                            subtext: 'Cần can thiệp khẩn cấp',
-                            icon: LucideIcons.alertTriangle,
-                            color: 'rose',
-                          ),
-                          const SizedBox(height: 12),
-                          StatsCard(
-                            title: 'Khẩn cấp',
-                            value: stats.urgentCount,
-                            subtext: 'Yêu cầu mức độ URGENT mở',
-                            icon: LucideIcons.flame,
-                            color: 'indigo',
-                          ),
+                          for (var i = 0; i < kpis.length; i++) ...[
+                            if (i > 0) const SizedBox(height: 12),
+                            kpis[i],
+                          ],
                         ],
                       );
               },
@@ -401,14 +515,13 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                   SizedBox(
                     width: 240,
                     child: SearchBarWidget(
-                      placeholder: 'Tìm mã, phòng, tiêu đề...',
+                      placeholder:
+                          'Tìm theo mã tra cứu (SR-...), căn hộ, tiêu đề, cư dân...',
                       value: _search,
+                      // Port of React debounce: 200ms trước khi gọi API.
+                      debounceDuration: const Duration(milliseconds: 200),
                       onChanged: (val) {
                         setState(() => _search = val);
-                        _fetchRequests();
-                      },
-                      onClear: () {
-                        setState(() => _search = '');
                         _fetchRequests();
                       },
                     ),
@@ -419,9 +532,11 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                       placeholder: 'Tất cả trạng thái',
                       value: _statusFilter.isEmpty ? null : _statusFilter,
                       options: [
-                        const AppSelectOption(value: '', label: 'Tất cả trạng thái'),
+                        const AppSelectOption(
+                            value: '', label: 'Tất cả trạng thái'),
                         ...kKanbanColumns.map(
-                          (c) => AppSelectOption(value: c.status, label: c.title),
+                          (c) =>
+                              AppSelectOption(value: c.status, label: c.title),
                         ),
                       ],
                       onChanged: (val) {
@@ -436,7 +551,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                       placeholder: 'Tất cả hạng mục',
                       value: _categoryFilter.isEmpty ? null : _categoryFilter,
                       options: [
-                        const AppSelectOption(value: '', label: 'Tất cả hạng mục'),
+                        const AppSelectOption(
+                            value: '', label: 'Tất cả hạng mục'),
                         ...kServiceRequestCategories.entries.map(
                           (e) => AppSelectOption(value: e.key, label: e.value),
                         ),
@@ -450,10 +566,10 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                   SizedBox(
                     width: 150,
                     child: AppSelect<String>(
-                      placeholder: 'Tất cả mức độ',
+                      placeholder: 'Tất cả mức ưu tiên',
                       value: _priorityFilter.isEmpty ? null : _priorityFilter,
                       options: const [
-                        AppSelectOption(value: '', label: 'Tất cả mức độ'),
+                        AppSelectOption(value: '', label: 'Tất cả mức ưu tiên'),
                         AppSelectOption(value: 'LOW', label: 'Thấp'),
                         AppSelectOption(value: 'NORMAL', label: 'Bình thường'),
                         AppSelectOption(value: 'HIGH', label: 'Cao'),
@@ -472,35 +588,69 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                     },
                     borderRadius: BorderRadius.circular(8),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
                       decoration: BoxDecoration(
-                        color: _overdueOnly ? const Color(0xFFFFF1F2) : Colors.transparent,
+                        color: _overdueOnly
+                            ? const Color(0xFFFFF1F2)
+                            : Colors.transparent,
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(
-                          color: _overdueOnly ? const Color(0xFFFDA4AF) : AppColors.slate200,
+                          color: _overdueOnly
+                              ? const Color(0xFFFDA4AF)
+                              : AppColors.slate200,
                         ),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
-                            _overdueOnly ? LucideIcons.checkSquare : LucideIcons.square,
+                            _overdueOnly
+                                ? LucideIcons.checkSquare
+                                : LucideIcons.square,
                             size: 16,
-                            color: _overdueOnly ? AppColors.rose600 : AppColors.slate500,
+                            color: _overdueOnly
+                                ? AppColors.rose600
+                                : AppColors.slate500,
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            'Chỉ quá hạn SLA',
+                            'Chỉ hiển thị phiếu đang Quá hạn SLA',
                             style: TextStyle(
                               fontSize: 13,
-                              fontWeight: _overdueOnly ? FontWeight.w600 : FontWeight.w400,
-                              color: _overdueOnly ? AppColors.rose700 : AppColors.slate700,
+                              fontWeight: _overdueOnly
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                              color: _overdueOnly
+                                  ? AppColors.rose700
+                                  : AppColors.slate700,
                             ),
                           ),
                         ],
                       ),
                     ),
                   ),
+                  if (_categoryFilter.isNotEmpty ||
+                      _priorityFilter.isNotEmpty ||
+                      _statusFilter.isNotEmpty ||
+                      _overdueOnly ||
+                      _search.isNotEmpty)
+                    InkWell(
+                      onTap: _resetFilters,
+                      borderRadius: BorderRadius.circular(6),
+                      child: const Padding(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+                        child: Text(
+                          'Xóa bộ lọc',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.primary600,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -517,7 +667,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
             else if (_requests.isEmpty)
               const EmptyState(
                 title: 'Không có yêu cầu bảo trì nào',
-                description: 'Chưa có yêu cầu sự cố nào phù hợp với bộ lọc hiện tại.',
+                description:
+                    'Chưa có yêu cầu sự cố nào phù hợp với bộ lọc hiện tại.',
                 icon: LucideIcons.clipboardCheck,
               )
             else if (_viewMode == 'kanban')
@@ -570,11 +721,13 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                   height: 4,
                   decoration: BoxDecoration(
                     color: col.borderTopColor,
-                    borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                    borderRadius:
+                        const BorderRadius.vertical(top: Radius.circular(12)),
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -597,7 +750,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                     ],
                   ),
                 ),
-                const Divider(height: 1, thickness: 1, color: AppColors.slate200),
+                const Divider(
+                    height: 1, thickness: 1, color: AppColors.slate200),
 
                 // Card List
                 Expanded(
@@ -605,13 +759,15 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                       ? const Center(
                           child: Text(
                             'Trống',
-                            style: TextStyle(fontSize: 12, color: AppColors.slate400),
+                            style: TextStyle(
+                                fontSize: 12, color: AppColors.slate400),
                           ),
                         )
                       : ListView.separated(
                           padding: const EdgeInsets.all(10),
                           itemCount: items.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: 10),
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
                           itemBuilder: (context, cardIdx) {
                             return _buildKanbanCard(items[cardIdx]);
                           },
@@ -633,7 +789,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
       slaDueAt: r['sla_due_at'],
       slaBreachedAt: r['sla_breached_at'],
     );
-    final categoryLabel = kServiceRequestCategories[r['category']] ?? r['category'] ?? 'Khác';
+    final categoryLabel =
+        kServiceRequestCategories[r['category']] ?? r['category'] ?? 'Khác';
 
     return InkWell(
       onTap: () => _openDetailDrawer(r['id']?.toString() ?? ''),
@@ -677,7 +834,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                       if (r['apartment_code'] != null) ...[
                         const SizedBox(width: 6),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
                             color: AppColors.primary50,
                             borderRadius: BorderRadius.circular(4),
@@ -740,15 +898,20 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
                   variant: AppBadgeVariant.fromString(slaMeta.variant),
                   dot: true,
                 ),
-                if (r['assigned_to_name'] != null && r['assigned_to_name'].toString().isNotEmpty)
+                if (r['assigned_to_name'] != null &&
+                    r['assigned_to_name'].toString().isNotEmpty)
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(LucideIcons.userCheck, size: 12, color: AppColors.secondary600),
+                      const Icon(LucideIcons.userCheck,
+                          size: 12, color: AppColors.secondary600),
                       const SizedBox(width: 4),
                       Text(
                         r['assigned_to_name'].toString(),
-                        style: const TextStyle(fontSize: 11, color: AppColors.secondary700, fontWeight: FontWeight.w500),
+                        style: const TextStyle(
+                            fontSize: 11,
+                            color: AppColors.secondary700,
+                            fontWeight: FontWeight.w500),
                       ),
                     ],
                   ),
@@ -775,7 +938,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
           cellText: (r) => r['tracking_code']?.toString() ?? '—',
           render: (r) => Text(
             '#${r['tracking_code'] ?? '—'}',
-            style: const TextStyle(fontWeight: FontWeight.w700, color: AppColors.slate800),
+            style: const TextStyle(
+                fontWeight: FontWeight.w700, color: AppColors.slate800),
           ),
         ),
         DataTableColumn<Map<String, dynamic>>(
@@ -795,7 +959,8 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
           key: 'category',
           label: 'Hạng mục',
           width: 160,
-          cellText: (r) => kServiceRequestCategories[r['category']] ?? r['category'] ?? '—',
+          cellText: (r) =>
+              kServiceRequestCategories[r['category']] ?? r['category'] ?? '—',
         ),
         DataTableColumn<Map<String, dynamic>>(
           key: 'priority',
@@ -833,6 +998,63 @@ class _ServiceRequestsPageState extends ConsumerState<ServiceRequestsPage> {
           },
         ),
         DataTableColumn<Map<String, dynamic>>(
+          key: 'assigned_to_name',
+          label: 'Phụ trách',
+          width: 150,
+          cellText: (r) =>
+              r['assigned_to_name']?.toString() ?? 'Chưa phân công',
+          render: (r) {
+            final name = r['assigned_to_name']?.toString() ?? '';
+            if (name.isEmpty) {
+              return const Text(
+                'Chưa phân công',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: AppColors.slate400,
+                    fontStyle: FontStyle.italic),
+              );
+            }
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(LucideIcons.userCheck,
+                    size: 14, color: AppColors.secondary600),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(name,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.slate700)),
+                ),
+              ],
+            );
+          },
+        ),
+        DataTableColumn<Map<String, dynamic>>(
+          key: 'rating',
+          label: 'Đánh giá',
+          width: 120,
+          cellText: (r) => r['rating']?.toString() ?? '—',
+          render: (r) {
+            final rating = num.tryParse(r['rating']?.toString() ?? '') ?? 0;
+            if (rating <= 0) {
+              return const Text('—',
+                  style: TextStyle(color: AppColors.slate400));
+            }
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(
+                5,
+                (i) => Icon(
+                  LucideIcons.star,
+                  size: 14,
+                  color: i < rating ? AppColors.amber500 : AppColors.slate300,
+                ),
+              ),
+            );
+          },
+        ),
+        DataTableColumn<Map<String, dynamic>>(
           key: 'actions',
           label: 'Thao tác',
           width: 180,
@@ -862,10 +1084,12 @@ class _ServiceRequestDetailDrawer extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<_ServiceRequestDetailDrawer> createState() => _ServiceRequestDetailDrawerState();
+  ConsumerState<_ServiceRequestDetailDrawer> createState() =>
+      _ServiceRequestDetailDrawerState();
 }
 
-class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDetailDrawer> {
+class _ServiceRequestDetailDrawerState
+    extends ConsumerState<_ServiceRequestDetailDrawer> {
   Map<String, dynamic>? _detail;
   bool _loading = true;
   bool _updating = false;
@@ -904,14 +1128,18 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
     _status = d['status']?.toString() ?? 'NEW';
     _priority = d['priority']?.toString() ?? 'NORMAL';
     _assignedTo = d['assigned_to']?.toString() ?? '';
-    _triageOverrideCategory = d['ai_suggested_category']?.toString() ?? d['category']?.toString() ?? 'OTHER';
+    _triageOverrideCategory = d['ai_suggested_category']?.toString() ??
+        d['category']?.toString() ??
+        'OTHER';
     _holdReasonController.text = d['hold_reason']?.toString() ?? '';
-    _nextAppointmentController.text = d['next_appointment_at']?.toString() ?? '';
+    _nextAppointmentController.text =
+        d['next_appointment_at']?.toString() ?? '';
     _resolutionNoteController.text = d['resolution_note']?.toString() ?? '';
     _internalNoteController.text = d['internal_note']?.toString() ?? '';
 
     if (d['resolution_images'] is List) {
-      _resolutionImages = (d['resolution_images'] as List).map((e) => e.toString()).toList();
+      _resolutionImages =
+          (d['resolution_images'] as List).map((e) => e.toString()).toList();
     } else {
       _resolutionImages = [];
     }
@@ -943,7 +1171,8 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
       if (mounted) {
         setState(() => _loading = false);
         ref.read(toastProvider.notifier).error(
-              extractErrorMessage(err, 'Không thể tải chi tiết yêu cầu bảo trì.'),
+              extractErrorMessage(
+                  err, 'Không thể tải chi tiết yêu cầu bảo trì.'),
             );
       }
     }
@@ -994,7 +1223,9 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
       final payload = {
         'category': _triageOverrideCategory,
         'priority': _priority,
-        'assigned_to': _assignedTo.isNotEmpty ? _assignedTo : _detail?['ai_suggested_assignee_id'],
+        'assigned_to': _assignedTo.isNotEmpty
+            ? _assignedTo
+            : _detail?['ai_suggested_assignee_id'],
       };
       final service = ref.read(serviceRequestsServiceProvider);
       final res = await service.applyTriage(widget.requestId, payload);
@@ -1010,7 +1241,8 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
     } catch (err) {
       if (mounted) {
         ref.read(toastProvider.notifier).error(
-              extractErrorMessage(err, 'Không thể áp dụng điều chỉnh phân loại.'),
+              extractErrorMessage(
+                  err, 'Không thể áp dụng điều chỉnh phân loại.'),
             );
       }
     } finally {
@@ -1029,10 +1261,13 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
 
     try {
       final aiService = ref.read(aiServiceProvider);
-      await aiService.classifyServiceRequest({'service_request_id': widget.requestId});
+      await aiService
+          .classifyServiceRequest({'service_request_id': widget.requestId});
       if (!mounted) return;
 
-      ref.read(toastProvider.notifier).success('AI đã cập nhật gợi ý phân loại & điều phối mới.');
+      ref
+          .read(toastProvider.notifier)
+          .success('AI đã cập nhật gợi ý phân loại & điều phối mới.');
       await _fetchDetail(force: true);
       widget.onUpdated?.call();
     } catch (err) {
@@ -1049,9 +1284,11 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
   Future<void> _handleSaveStatusUpdate([String? overrideStatus]) async {
     final nextStatus = overrideStatus ?? _status;
 
-    if (nextStatus == 'ON_HOLD' && _holdReasonController.text.trim().length < 3) {
+    if (nextStatus == 'ON_HOLD' &&
+        _holdReasonController.text.trim().length < 3) {
       setState(() => _status = 'ON_HOLD');
-      ref.read(toastProvider.notifier).warning('Vui lòng nhập lý do tạm hoãn / hẹn lại (tối thiểu 3 ký tự) trước khi lưu.');
+      ref.read(toastProvider.notifier).warning(
+          'Vui lòng nhập lý do tạm hoãn / hẹn lại (tối thiểu 3 ký tự) trước khi lưu.');
       return;
     }
 
@@ -1101,7 +1338,22 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
     await copyZaloRichText(text);
     if (!mounted) return;
 
-    ref.read(toastProvider.notifier).success('Đã sao chép nội dung gửi nhóm Zalo phòng!');
+    ref
+        .read(toastProvider.notifier)
+        .success('Đã sao chép nội dung gửi nhóm Zalo phòng!');
+  }
+
+  /// Lightbox xem ảnh phóng to (React: Modal "Xem ảnh đính kèm").
+  void _openImagePreview(String src) {
+    AuthMediaViewer.show(context, src: src, title: 'Xem ảnh đính kèm');
+  }
+
+  Future<void> _openZaloGroupLink(String rawUrl) async {
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {}
   }
 
   @override
@@ -1130,170 +1382,331 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
       slaDueAt: d['sla_due_at'],
       slaBreachedAt: d['sla_breached_at'],
     );
-    final aiTriageMeta = getAiTriageBadgeMeta(d['ai_triage_status']?.toString());
-    final availableAssignees = (d['available_assignees'] as List?)?.whereType<Map>().toList() ?? [];
+    final aiTriageMeta =
+        getAiTriageBadgeMeta(d['ai_triage_status']?.toString());
+    final availableAssignees =
+        (d['available_assignees'] as List?)?.whereType<Map>().toList() ?? [];
+    final zaloGroup = d['apartment_zalo_group'] is Map
+        ? Map<String, dynamic>.from(d['apartment_zalo_group'] as Map)
+        : <String, dynamic>{};
+    final zaloInviteLink = zaloGroup['invite_link']?.toString() ?? '';
+    final zaloGroupName = zaloGroup['name']?.toString() ?? '';
+    final zaloPreview = buildRoomMaintenanceZaloText(d);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-          // Banner Read-Only cho OWNER hoặc SYS_ADMIN
-          if (!canEdit)
-            Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: AppColors.slate300),
-              ),
-              child: const Row(
-                children: [
-                  Icon(LucideIcons.lock, size: 16, color: AppColors.slate600),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Chế độ xem (Chỉ Quản lý vận hành mới có quyền tiếp nhận và cập nhật xử lý bảo trì).',
-                      style: TextStyle(fontSize: 12, color: AppColors.slate700, fontWeight: FontWeight.w500),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-          // Header: Mã yêu cầu, Phòng, Resident & Badges
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '#${d['tracking_code'] ?? d['id'] ?? ''}',
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.slate900),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Phòng ${d['apartment_code'] ?? '—'} • Tòa ${d['building_code'] ?? d['building_name'] ?? 'RESIHUB'}',
-                      style: const TextStyle(fontSize: 13, color: AppColors.slate600, fontWeight: FontWeight.w600),
-                    ),
-                    if (d['resident_name'] != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'Cư dân: ${d['resident_name']} • SĐT: ${d['resident_phone'] ?? '—'}',
-                        style: const TextStyle(fontSize: 12, color: AppColors.slate500),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  StatusBadge(status: status, domain: StatusDomain.serviceRequest),
-                  const SizedBox(height: 6),
-                  AppBadge(
-                    label: slaMeta.label,
-                    variant: AppBadgeVariant.fromString(slaMeta.variant),
-                    dot: true,
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          const Divider(height: 1, color: AppColors.slate200),
-          const SizedBox(height: 16),
-
-          // Nút Sao Chép Gửi Nhóm Zalo (Safe Zalo Room Copy)
+        // Banner Read-Only cho OWNER hoặc SYS_ADMIN
+        if (!canEdit)
           Container(
+            margin: const EdgeInsets.only(bottom: 16),
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: const Color(0xFFF0F9FF),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFFBAE6FD)),
+              color: const Color(0xFFF1F5F9),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppColors.slate300),
             ),
-            child: Wrap(
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 8,
-              runSpacing: 8,
+            child: const Row(
               children: [
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(LucideIcons.messageSquare, size: 18, color: Color(0xFF0284C7)),
-                      const SizedBox(width: 8),
-                      const Expanded(
-                        child: Text(
-                          'Định dạng tin nhắn chuẩn hóa gửi cư dân qua nhóm Zalo phòng.',
-                          style: TextStyle(fontSize: 12, color: Color(0xFF0369A1)),
-                        ),
-                      ),
-                    ],
+                Icon(LucideIcons.lock, size: 16, color: AppColors.slate600),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Chế độ xem (Chỉ Quản lý vận hành mới có quyền tiếp nhận và cập nhật xử lý bảo trì).',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.slate700,
+                        fontWeight: FontWeight.w500),
                   ),
-                ),
-                AppButton(
-                  text: 'Sao chép gửi nhóm Zalo',
-                  icon: const Icon(LucideIcons.copy, size: 14),
-                  size: AppButtonSize.xs,
-                  onPressed: _handleCopyZaloRoomMessage,
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 16),
 
-          // Card AI Triage
-          _buildAiTriageCard(d, canEdit, aiTriageMeta, availableAssignees),
-          const SizedBox(height: 16),
-
-          // Thông tin yêu cầu từ Cư dân
-          AppCard(
-            header: const AppCardHeader(title: 'Nội dung phản ánh từ Cư dân'),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        // Header: Mã yêu cầu, Phòng, Resident & Badges
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '#${d['tracking_code'] ?? d['id'] ?? ''}',
+                    style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.slate900),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Phòng ${d['apartment_code'] ?? '—'} • Tòa ${d['building_code'] ?? d['building_name'] ?? 'RESIHUB'}',
+                    style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.slate600,
+                        fontWeight: FontWeight.w600),
+                  ),
+                  if (d['resident_name'] != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Cư dân: ${d['resident_name']} • SĐT: ${d['resident_phone'] ?? '—'}',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.slate500),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(
-                  d['title']?.toString() ?? '(Không tiêu đề)',
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.slate900),
-                ),
+                StatusBadge(
+                    status: status, domain: StatusDomain.serviceRequest),
                 const SizedBox(height: 6),
-                Text(
-                  d['description']?.toString() ?? 'Chưa có mô tả chi tiết.',
-                  style: const TextStyle(fontSize: 13, color: AppColors.slate700, height: 1.4),
+                AppBadge(
+                  label: slaMeta.label,
+                  variant: AppBadgeVariant.fromString(slaMeta.variant),
+                  dot: true,
                 ),
-                if (d['location_detail'] != null && d['location_detail'].toString().isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    'Vị trí cụ thể: ${d['location_detail']}',
-                    style: const TextStyle(fontSize: 12, color: AppColors.slate600, fontStyle: FontStyle.italic),
-                  ),
-                ],
-                if (d['preferred_slot'] != null) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    'Khung giờ thuận tiện: ${d['preferred_slot']}',
-                    style: const TextStyle(fontSize: 12, color: AppColors.slate600),
-                  ),
-                ],
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        const Divider(height: 1, color: AppColors.slate200),
+        const SizedBox(height: 16),
 
-                // Ảnh chụp đính kèm (nếu có)
-                if (d['images'] is List && (d['images'] as List).isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Ảnh hiện trường sự cố:',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate700),
+        // Card AI Triage (React đặt trước hộp Zalo)
+        _buildAiTriageCard(d, canEdit, aiTriageMeta, availableAssignees),
+        const SizedBox(height: 16),
+
+        // Hộp tiện ích Đồng bộ Nhóm Zalo Phòng (FR-069)
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0F9FF),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFBAE6FD)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Cập nhật tiến độ qua Nhóm Zalo Phòng',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF0C4A6E)),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Tin nhắn tự động loại bỏ ghi chú nội bộ BQL để gửi an toàn cho cư dân.',
+                          style:
+                              TextStyle(fontSize: 11, color: Color(0xFF0369A1)),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
-                    children: (d['images'] as List).map((imgUrl) {
-                      return ClipRRect(
+                    children: [
+                      AppButton(
+                        text: 'Sao chép gửi nhóm Zalo',
+                        icon: const Icon(LucideIcons.copy, size: 14),
+                        size: AppButtonSize.xs,
+                        onPressed: _handleCopyZaloRoomMessage,
+                      ),
+                      if (zaloInviteLink.isNotEmpty)
+                        InkWell(
+                          onTap: () => _openZaloGroupLink(zaloInviteLink),
+                          borderRadius: BorderRadius.circular(8),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0284C7),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(LucideIcons.externalLink,
+                                    size: 14, color: Colors.white),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Mở nhóm Zalo phòng',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+              if (zaloGroupName.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Nhóm liên kết: $zaloGroupName',
+                  style:
+                      const TextStyle(fontSize: 11, color: Color(0xFF0369A1)),
+                ),
+              ],
+              if (zaloPreview.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFBAE6FD)),
+                  ),
+                  child: RichText(
+                    text: TextSpan(
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.slate700, height: 1.4),
+                      children: parseZaloBoldSegments(zaloPreview)
+                          .map(
+                            (seg) => TextSpan(
+                              text: seg.text,
+                              style: seg.bold
+                                  ? const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.slate900)
+                                  : null,
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 6),
+              const Text(
+                'Mẹo trên Zalo PC / Zalo Web: nhấn Ctrl+V (hoặc chuột phải chọn Dán giữ định dạng) để giữ nguyên chữ in đậm.',
+                style: TextStyle(fontSize: 11, color: Color(0xFF0369A1)),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Thông tin chung & SLA (ngày tiếp nhận, hạn SLA, phản hồi đầu tiên)
+        _buildGeneralInfoCard(d),
+        const SizedBox(height: 16),
+
+        // Thông tin yêu cầu từ Cư dân
+        AppCard(
+          header: const AppCardHeader(title: 'Nội dung phản ánh từ Cư dân'),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                d['title']?.toString() ?? '(Không tiêu đề)',
+                style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.slate900),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                d['description']?.toString() ?? 'Chưa có mô tả chi tiết.',
+                style: const TextStyle(
+                    fontSize: 13, color: AppColors.slate700, height: 1.4),
+              ),
+              if (d['location_detail'] != null &&
+                  d['location_detail'].toString().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  'Vị trí cụ thể: ${d['location_detail']}',
+                  style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.slate600,
+                      fontStyle: FontStyle.italic),
+                ),
+              ],
+              if (d['preferred_slot'] != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  'Khung giờ thuận tiện: ${d['preferred_slot']}',
+                  style:
+                      const TextStyle(fontSize: 12, color: AppColors.slate600),
+                ),
+              ],
+
+              // Lý do mở lại / hủy (React: Mô tả sự cố & Lý do mở lại / hủy)
+              if (d['reopen_reason'] != null &&
+                  d['reopen_reason'].toString().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF1F2),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFFECDD3)),
+                  ),
+                  child: Text(
+                    'Lý do cư dân mở lại yêu cầu: ${d['reopen_reason']}',
+                    style:
+                        const TextStyle(fontSize: 12, color: AppColors.rose800),
+                  ),
+                ),
+              ],
+              if (d['cancelled_reason'] != null &&
+                  d['cancelled_reason'].toString().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppColors.slate50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.slate200),
+                  ),
+                  child: Text(
+                    'Lý do hủy phiếu: ${d['cancelled_reason']}',
+                    style: const TextStyle(
+                        fontSize: 12, color: AppColors.slate700),
+                  ),
+                ),
+              ],
+
+              // Ảnh hiện trạng — nhấn để mở lightbox "Xem ảnh đính kèm"
+              if (d['images'] is List && (d['images'] as List).isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Ảnh hiện trạng (${(d['images'] as List).length})',
+                  style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.slate700),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: (d['images'] as List).map((imgUrl) {
+                    return InkWell(
+                      onTap: () => _openImagePreview(imgUrl.toString()),
+                      borderRadius: BorderRadius.circular(8),
+                      child: ClipRRect(
                         borderRadius: BorderRadius.circular(8),
                         child: AuthImage(
                           src: imgUrl.toString(),
@@ -1301,99 +1714,186 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                           height: 80,
                           fit: BoxFit.cover,
                         ),
-                      );
-                    }).toList(),
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Quy trình Xử lý & Cập nhật Trạng thái Kỹ thuật
+        if (canEdit)
+          _buildManagementEditSection(d, availableAssignees)
+        else
+          _buildReadOnlySummarySection(d),
+
+        // Đánh giá sao từ cư dân (nếu có)
+        if (d['rating'] != null) ...[
+          const SizedBox(height: 16),
+          AppCard(
+            header:
+                const AppCardHeader(title: 'Đánh giá nghiệm thu của Cư dân'),
+            child: Row(
+              children: [
+                ...List.generate(5, (starIdx) {
+                  final numRating = num.tryParse(d['rating'].toString()) ?? 0;
+                  return Icon(
+                    LucideIcons.star,
+                    size: 20,
+                    color: starIdx < numRating
+                        ? AppColors.amber500
+                        : AppColors.slate300,
+                  );
+                }),
+                const SizedBox(width: 10),
+                if (d['rating_note'] != null &&
+                    d['rating_note'].toString().isNotEmpty)
+                  Expanded(
+                    child: Text(
+                      '“${d['rating_note']}”',
+                      style: const TextStyle(
+                          fontSize: 13,
+                          fontStyle: FontStyle.italic,
+                          color: AppColors.slate700),
+                    ),
                   ),
-                ],
               ],
             ),
           ),
-          const SizedBox(height: 16),
-
-          // Quy trình Xử lý & Cập nhật Trạng thái Kỹ thuật
-          if (canEdit)
-            _buildManagementEditSection(d, availableAssignees)
-          else
-            _buildReadOnlySummarySection(d),
-
-          // Đánh giá sao từ cư dân (nếu có)
-          if (d['rating'] != null) ...[
-            const SizedBox(height: 16),
-            AppCard(
-              header: const AppCardHeader(title: 'Đánh giá nghiệm thu của Cư dân'),
-              child: Row(
-                children: [
-                  ...List.generate(5, (starIdx) {
-                    final numRating = num.tryParse(d['rating'].toString()) ?? 0;
-                    return Icon(
-                      LucideIcons.star,
-                      size: 20,
-                      color: starIdx < numRating ? AppColors.amber500 : AppColors.slate300,
-                    );
-                  }),
-                  const SizedBox(width: 10),
-                  if (d['rating_note'] != null && d['rating_note'].toString().isNotEmpty)
-                    Expanded(
-                      child: Text(
-                        '“${d['rating_note']}”',
-                        style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic, color: AppColors.slate700),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ],
-
-          // Lịch sử xử lý (Audit Timeline)
-          if (d['audit_timeline'] is List && (d['audit_timeline'] as List).isNotEmpty) ...[
-            const SizedBox(height: 16),
-            AppCard(
-              header: AppCardHeader(title: 'Lịch sử xử lý (${(d['audit_timeline'] as List).length})'),
-              child: Column(
-                children: (d['audit_timeline'] as List).whereType<Map>().map((log) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(LucideIcons.history, size: 16, color: AppColors.slate500),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                log['action']?.toString() ?? 'Cập nhật',
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.slate800),
-                              ),
-                              if (log['actor_name'] != null)
-                                Text(
-                                  log['actor_name'].toString(),
-                                  style: const TextStyle(fontSize: 12, color: AppColors.slate500),
-                                ),
-                              if (log['note'] != null && log['note'].toString().isNotEmpty)
-                                Text(
-                                  log['note'].toString(),
-                                  style: const TextStyle(fontSize: 12, color: AppColors.slate600),
-                                ),
-                            ],
-                          ),
-                        ),
-                        if (log['created_at'] != null)
-                          Text(
-                            formatDateTime(log['created_at']),
-                            style: const TextStyle(fontSize: 11, color: AppColors.slate400),
-                          ),
-                      ],
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ],
         ],
-      );
-    }
+
+        // Lịch sử xử lý (Audit Timeline)
+        if (d['audit_timeline'] is List &&
+            (d['audit_timeline'] as List).isNotEmpty) ...[
+          const SizedBox(height: 16),
+          AppCard(
+            header: AppCardHeader(
+                title:
+                    'Lịch sử xử lý (${(d['audit_timeline'] as List).length})'),
+            child: Column(
+              children:
+                  (d['audit_timeline'] as List).whereType<Map>().map((log) {
+                final action = log['action']?.toString();
+                final actionLabel =
+                    (action != null ? kSrAuditActionLabels[action] : null) ??
+                        action ??
+                        'Cập nhật';
+                final prevSt = log['before'] is Map
+                    ? log['before']['status']?.toString()
+                    : null;
+                final nextSt = log['after'] is Map
+                    ? log['after']['status']?.toString()
+                    : null;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(LucideIcons.history,
+                          size: 16, color: AppColors.slate500),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              actionLabel,
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.slate800),
+                            ),
+                            Text(
+                              'Thực hiện bởi: ${log['actor_name']?.toString() ?? 'Hệ thống tự động'}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: AppColors.slate500),
+                            ),
+                            if (nextSt != null && nextSt.isNotEmpty)
+                              Text(
+                                prevSt != null && prevSt != nextSt
+                                    ? '$prevSt → $nextSt'
+                                    : nextSt,
+                                style: const TextStyle(
+                                    fontSize: 11, color: AppColors.slate700),
+                              ),
+                            if (log['note'] != null &&
+                                log['note'].toString().isNotEmpty)
+                              Text(
+                                log['note'].toString(),
+                                style: const TextStyle(
+                                    fontSize: 12, color: AppColors.slate600),
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (log['created_at'] != null)
+                        Text(
+                          formatDateTime(log['created_at']),
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.slate400),
+                        ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // Thông tin chung & SLA — port of React "Thông tin chung & SLA"
+  Widget _buildGeneralInfoCard(Map<String, dynamic> d) {
+    final slot = d['preferred_slot']?.toString() ?? '';
+    final requester = d['requester_name']?.toString() ??
+        d['resident_name']?.toString() ??
+        'Ban quản lý';
+    final requesterPhone = d['requester_phone']?.toString() ??
+        d['resident_phone']?.toString() ??
+        '';
+
+    return AppCard(
+      header: const AppCardHeader(title: 'Thông tin chung & SLA'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildInfoRow('Mã tra cứu', d['tracking_code']?.toString() ?? '—'),
+          _buildInfoRow(
+            'Vị trí căn hộ',
+            'Căn ${d['apartment_code'] ?? '—'} (${d['building_code'] ?? d['building_name'] ?? 'RESIHUB'})',
+          ),
+          _buildInfoRow('Vị trí trong phòng',
+              d['location_detail']?.toString() ?? 'Không ghi cụ thể'),
+          _buildInfoRow(
+              'Khung giờ cư dân hẹn',
+              slot.isEmpty
+                  ? 'Linh hoạt'
+                  : (kPreferredSlotLabels[slot] ?? slot)),
+          _buildInfoRow(
+              'Người gửi yêu cầu',
+              requesterPhone.isNotEmpty
+                  ? '$requester ($requesterPhone)'
+                  : requester),
+          _buildInfoRow('Thời điểm tiếp nhận', formatDateTime(d['created_at'])),
+          if (d['sla_due_at'] != null)
+            _buildInfoRow(
+                'Hạn hoàn thành SLA', formatDateTime(d['sla_due_at'])),
+          if (d['first_responded_at'] != null)
+            _buildInfoRow(
+                'Phản hồi đầu tiên', formatDateTime(d['first_responded_at'])),
+          if (d['resolved_at'] != null)
+            _buildInfoRow(
+              'Hoàn thành bởi',
+              '${d['resolved_by_name']?.toString() ?? 'Kỹ thuật viên'} • ${formatDateTime(d['resolved_at'])}',
+            ),
+        ],
+      ),
+    );
+  }
 
   // Card Trí tuệ nhân tạo AI Triage
   Widget _buildAiTriageCard(
@@ -1428,12 +1928,16 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(LucideIcons.sparkles, size: 18, color: Color(0xFF9333EA)),
+                    const Icon(LucideIcons.sparkles,
+                        size: 18, color: Color(0xFF9333EA)),
                     const SizedBox(width: 8),
                     const Flexible(
                       child: Text(
                         'Phân loại & điều phối từ AI',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF6B21A8)),
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B21A8)),
                       ),
                     ),
                   ],
@@ -1442,7 +1946,8 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
               if (aiTriageMeta != null)
                 AppBadge(
                   label: aiTriageMeta['label']?.toString() ?? '',
-                  variant: AppBadgeVariant.fromString(aiTriageMeta['variant']?.toString()),
+                  variant: AppBadgeVariant.fromString(
+                      aiTriageMeta['variant']?.toString()),
                   icon: const Icon(LucideIcons.sparkles, size: 10),
                 ),
             ],
@@ -1458,12 +1963,18 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                 if (cat != null)
                   Text(
                     'Hạng mục: ${kServiceRequestCategories[cat] ?? cat}',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate800),
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.slate800),
                   ),
                 if (prio != null)
                   Text(
                     'Mức độ: $prio',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate800),
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.slate800),
                   ),
                 AppBadge(
                   label: confidenceMeta.label,
@@ -1472,15 +1983,22 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                 if (d['ai_suggested_assignee_name'] != null)
                   Text(
                     'Kỹ thuật đề xuất: ${d['ai_suggested_assignee_name']}',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.secondary700),
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.secondary700),
                   ),
               ],
             ),
-            if (d['ai_rationale'] != null && d['ai_rationale'].toString().isNotEmpty) ...[
+            if (d['ai_rationale'] != null &&
+                d['ai_rationale'].toString().isNotEmpty) ...[
               const SizedBox(height: 6),
               Text(
                 'Lý do: ${d['ai_rationale']}',
-                style: const TextStyle(fontSize: 12, color: AppColors.slate600, fontStyle: FontStyle.italic),
+                style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.slate600,
+                    fontStyle: FontStyle.italic),
               ),
             ],
             const SizedBox(height: 12),
@@ -1501,12 +2019,16 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                 children: [
                   Text(
                     _aiTriageError!.title,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.rose800),
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.rose800),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     _aiTriageError!.guidance,
-                    style: const TextStyle(fontSize: 11, color: AppColors.rose700),
+                    style:
+                        const TextStyle(fontSize: 11, color: AppColors.rose700),
                   ),
                 ],
               ),
@@ -1551,7 +2073,8 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
   }
 
   // Section chỉnh sửa xử lý kỹ thuật cho MANAGER
-  Widget _buildManagementEditSection(Map<String, dynamic> d, List<Map> availableAssignees) {
+  Widget _buildManagementEditSection(
+      Map<String, dynamic> d, List<Map> availableAssignees) {
     return AppCard(
       header: const AppCardHeader(title: 'Điều phối & Xử lý Kỹ thuật'),
       child: Column(
@@ -1560,7 +2083,10 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
           // Quick actions
           const Text(
             'Thao tác nhanh:',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate600),
+            style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.slate600),
           ),
           const SizedBox(height: 8),
           Wrap(
@@ -1574,21 +2100,30 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
                   variant: AppButtonVariant.primary,
                   onPressed: () => _handleSaveStatusUpdate('ASSIGNED'),
                 ),
-              if (_status == 'NEW' || _status == 'ASSIGNED' || _status == 'ON_HOLD' || _status == 'REOPENED')
+              if (_status == 'NEW' ||
+                  _status == 'ASSIGNED' ||
+                  _status == 'ON_HOLD' ||
+                  _status == 'REOPENED')
                 AppButton(
-                  text: _status == 'ON_HOLD' ? 'Tiếp tục xử lý' : 'Bắt đầu xử lý',
+                  text:
+                      _status == 'ON_HOLD' ? 'Tiếp tục xử lý' : 'Bắt đầu xử lý',
                   size: AppButtonSize.xs,
                   variant: AppButtonVariant.primary,
                   onPressed: () => _handleSaveStatusUpdate('IN_PROGRESS'),
                 ),
-              if (_status == 'ASSIGNED' || _status == 'IN_PROGRESS' || _status == 'REOPENED')
+              if (_status == 'ASSIGNED' ||
+                  _status == 'IN_PROGRESS' ||
+                  _status == 'REOPENED')
                 AppButton(
                   text: 'Hoàn tất xử lý',
                   size: AppButtonSize.xs,
                   variant: AppButtonVariant.success,
                   onPressed: () => _handleSaveStatusUpdate('RESOLVED'),
                 ),
-              if (_status == 'ASSIGNED' || _status == 'IN_PROGRESS' || _status == 'ON_HOLD' || _status == 'REOPENED')
+              if (_status == 'ASSIGNED' ||
+                  _status == 'IN_PROGRESS' ||
+                  _status == 'ON_HOLD' ||
+                  _status == 'REOPENED')
                 AppButton(
                   text: 'Tạm hoãn / Hẹn lại',
                   size: AppButtonSize.xs,
@@ -1621,7 +2156,9 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
           AppSelect<String>(
             label: 'Trạng thái xử lý',
             value: _status,
-            options: kKanbanColumns.map((c) => AppSelectOption(value: c.status, label: c.title)).toList(),
+            options: kKanbanColumns
+                .map((c) => AppSelectOption(value: c.status, label: c.title))
+                .toList(),
             onChanged: (val) {
               if (val != null) setState(() => _status = val);
             },
@@ -1633,14 +2170,17 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
             options: [
               const AppSelectOption(value: '', label: 'Chưa phân công'),
               ...availableAssignees.map(
-                (u) => AppSelectOption(value: u['id'].toString(), label: u['name']?.toString() ?? u['id'].toString()),
+                (u) => AppSelectOption(
+                    value: u['id'].toString(),
+                    label: u['name']?.toString() ?? u['id'].toString()),
               ),
             ],
             onChanged: (val) => setState(() => _assignedTo = val ?? ''),
           ),
           const SizedBox(height: 12),
 
-          if (_status == 'ON_HOLD' || _holdReasonController.text.isNotEmpty) ...[
+          if (_status == 'ON_HOLD' ||
+              _holdReasonController.text.isNotEmpty) ...[
             AppInput(
               label: 'Lý do tạm hoãn / hẹn lại *',
               hint: 'Ví dụ: Đang đợi phụ tùng thay thế từ nhà cung cấp',
@@ -1657,8 +2197,10 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
           ],
 
           AppInput(
-            label: 'Kết quả xử lý gửi cư dân (hiển thị công khai & gửi nhóm Zalo)',
-            hint: 'Mô tả chi tiết linh kiện đã sửa / thay mới để cư dân nghiệm thu',
+            label:
+                'Kết quả xử lý gửi cư dân (hiển thị công khai & gửi nhóm Zalo)',
+            hint:
+                'Mô tả chi tiết linh kiện đã sửa / thay mới để cư dân nghiệm thu',
             controller: _resolutionNoteController,
             multiline: true,
             rows: 2,
@@ -1666,7 +2208,8 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
           const SizedBox(height: 12),
 
           AppInput(
-            label: 'Ghi chú nội bộ BQL (Tuyệt đối KHÔNG hiển thị ra cư dân hay Zalo)',
+            label:
+                'Ghi chú nội bộ BQL (Tuyệt đối KHÔNG hiển thị ra cư dân hay Zalo)',
             hint: 'Ghi chú chi phí nội bộ, báo giá thợ ngoài, lịch sử lưu ý...',
             controller: _internalNoteController,
             multiline: true,
@@ -1693,14 +2236,41 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildInfoRow('Trạng thái hiện tại:', d['status']?.toString() ?? '—'),
-          _buildInfoRow('Kỹ thuật viên phụ trách:', d['assigned_to_name']?.toString() ?? 'Chưa phân công'),
-          if (d['hold_reason'] != null && d['hold_reason'].toString().isNotEmpty)
+          _buildInfoRow('Kỹ thuật viên phụ trách:',
+              d['assigned_to_name']?.toString() ?? 'Chưa phân công'),
+          if (d['hold_reason'] != null &&
+              d['hold_reason'].toString().isNotEmpty)
             _buildInfoRow('Lý do tạm hoãn:', d['hold_reason'].toString()),
           if (d['next_appointment_at'] != null)
-            _buildInfoRow('Lịch hẹn xử lý tiếp theo:', formatDateTime(d['next_appointment_at'])),
-          if (d['resolution_note'] != null && d['resolution_note'].toString().isNotEmpty)
+            _buildInfoRow('Lịch hẹn xử lý tiếp theo:',
+                formatDateTime(d['next_appointment_at'])),
+          if (d['resolution_note'] != null &&
+              d['resolution_note'].toString().isNotEmpty)
             _buildInfoRow('Kết quả xử lý:', d['resolution_note'].toString()),
-          if (d['internal_note'] != null && d['internal_note'].toString().isNotEmpty)
+          if (d['resolution_images'] is List &&
+              (d['resolution_images'] as List).isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: (d['resolution_images'] as List).map((imgUrl) {
+                return InkWell(
+                  onTap: () => _openImagePreview(imgUrl.toString()),
+                  borderRadius: BorderRadius.circular(8),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: AuthImage(
+                        src: imgUrl.toString(),
+                        width: 80,
+                        height: 80,
+                        fit: BoxFit.cover),
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+          if (d['internal_note'] != null &&
+              d['internal_note'].toString().isNotEmpty)
             _buildInfoRow('Ghi chú nội bộ:', d['internal_note'].toString()),
         ],
       ),
@@ -1717,7 +2287,10 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
             width: 170,
             child: Text(
               label,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate600),
+              style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.slate600),
             ),
           ),
           Expanded(
@@ -1737,14 +2310,17 @@ class _ServiceRequestDetailDrawerState extends ConsumerState<_ServiceRequestDeta
 // =============================================================================
 class _ServiceRequestCreateModal extends ConsumerStatefulWidget {
   final VoidCallback? onCreated;
+  final ValueChanged<String>? onOpenExisting;
 
-  const _ServiceRequestCreateModal({this.onCreated});
+  const _ServiceRequestCreateModal({this.onCreated, this.onOpenExisting});
 
   @override
-  ConsumerState<_ServiceRequestCreateModal> createState() => _ServiceRequestCreateModalState();
+  ConsumerState<_ServiceRequestCreateModal> createState() =>
+      _ServiceRequestCreateModalState();
 }
 
-class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreateModal> {
+class _ServiceRequestCreateModalState
+    extends ConsumerState<_ServiceRequestCreateModal> {
   List<Map<String, dynamic>> _apartments = [];
   bool _loadingApts = true;
   bool _submitting = false;
@@ -1756,6 +2332,7 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
   final _titleController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _locationDetailController = TextEditingController();
+  List<String> _images = [];
 
   Map<String, dynamic>? _duplicatePrompt;
 
@@ -1784,7 +2361,10 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
       if (!mounted) return;
       if (res is Map && res['data'] is List) {
         setState(() {
-          _apartments = (res['data'] as List).whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+          _apartments = (res['data'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList();
           _loadingApts = false;
         });
       } else {
@@ -1822,7 +2402,8 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
       if (errResp is Map && errResp['code'] == 'DUPLICATE_SERVICE_REQUEST') {
         setState(() {
           _duplicatePrompt = {
-            'message': errResp['message'] ?? 'Căn hộ đang có yêu cầu cùng hạng mục trong 24 giờ qua.',
+            'message': errResp['message'] ??
+                'Căn hộ đang có yêu cầu cùng hạng mục trong 24 giờ qua.',
             'existing_request': errResp['existing_request'],
             'pending_payload': payload,
           };
@@ -1839,11 +2420,16 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
 
   void _handleSubmit() {
     if (_apartmentId.isEmpty) {
-      ref.read(toastProvider.notifier).warning('Vui lòng chọn căn hộ cần tạo yêu cầu bảo trì.');
+      ref
+          .read(toastProvider.notifier)
+          .warning('Vui lòng chọn căn hộ cần tạo yêu cầu bảo trì.');
       return;
     }
-    if (_titleController.text.trim().isEmpty || _descriptionController.text.trim().isEmpty) {
-      ref.read(toastProvider.notifier).warning('Vui lòng nhập đầy đủ tiêu đề và mô tả chi tiết sự cố.');
+    if (_titleController.text.trim().isEmpty ||
+        _descriptionController.text.trim().isEmpty) {
+      ref
+          .read(toastProvider.notifier)
+          .warning('Vui lòng nhập đầy đủ tiêu đề và mô tả chi tiết sự cố.');
       return;
     }
 
@@ -1854,6 +2440,7 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
       'preferred_slot': _preferredSlot,
       'title': _titleController.text.trim(),
       'description': _descriptionController.text.trim(),
+      'images': _images,
       if (_locationDetailController.text.trim().isNotEmpty)
         'location_detail': _locationDetailController.text.trim(),
     };
@@ -1872,12 +2459,16 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
           children: [
             Row(
               children: [
-                const Icon(LucideIcons.alertTriangle, size: 24, color: AppColors.amber500),
+                const Icon(LucideIcons.alertTriangle,
+                    size: 24, color: AppColors.amber500),
                 const SizedBox(width: 10),
                 const Expanded(
                   child: Text(
                     'Cảnh báo Yêu cầu Trùng lặp',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.slate900),
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.slate900),
                   ),
                 ),
               ],
@@ -1888,21 +2479,40 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
               style: const TextStyle(fontSize: 13, color: AppColors.slate700),
             ),
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 10,
+              runSpacing: 8,
               children: [
+                if (_duplicatePrompt!['existing_request'] is Map &&
+                    (_duplicatePrompt!['existing_request'] as Map)['id'] !=
+                        null)
+                  AppButton(
+                    text:
+                        'Mở phiếu #${(_duplicatePrompt!['existing_request'] as Map)['tracking_code'] ?? ''}',
+                    variant: AppButtonVariant.secondary,
+                    onPressed: () {
+                      final existingId =
+                          (_duplicatePrompt!['existing_request'] as Map)['id']
+                              .toString();
+                      setState(() => _duplicatePrompt = null);
+                      widget.onOpenExisting?.call(existingId);
+                    },
+                  ),
                 AppButton(
                   text: 'Hủy bỏ',
                   variant: AppButtonVariant.outline,
                   onPressed: () => setState(() => _duplicatePrompt = null),
                 ),
-                const SizedBox(width: 10),
                 AppButton(
-                  text: 'Vẫn tiếp tục tạo',
+                  text: 'Vẫn tạo phiếu mới',
+                  variant: AppButtonVariant.warning,
                   loading: _submitting,
                   onPressed: () {
-                    final p = Map<String, dynamic>.from(_duplicatePrompt!['pending_payload'] as Map);
-                    p['force_duplicate'] = true;
+                    final p = Map<String, dynamic>.from(
+                        _duplicatePrompt!['pending_payload'] as Map);
+                    // Backend (api/src/routes/service-requests.js) đọc ignore_duplicate_warning.
+                    p['ignore_duplicate_warning'] = true;
                     _submitPayload(p);
                   },
                 ),
@@ -1920,20 +2530,21 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
         children: [
           AppSelect<String>(
             label: 'Căn hộ yêu cầu *',
-            placeholder: _loadingApts ? 'Đang tải danh sách căn hộ...' : 'Chọn căn hộ',
+            placeholder:
+                _loadingApts ? 'Đang tải danh sách căn hộ...' : 'Chọn căn hộ',
             value: _apartmentId.isEmpty ? null : _apartmentId,
             options: _apartments.map((apt) {
               final code = apt['code'] ?? apt['apartment_code'] ?? apt['id'];
               final bName = apt['building_name'] ?? apt['building_code'] ?? '';
               return AppSelectOption(
                 value: apt['id'].toString(),
-                label: 'Phòng $code${bName.toString().isNotEmpty ? ' — $bName' : ''}',
+                label:
+                    'Phòng $code${bName.toString().isNotEmpty ? ' — $bName' : ''}',
               );
             }).toList(),
             onChanged: (val) => setState(() => _apartmentId = val ?? ''),
           ),
           const SizedBox(height: 12),
-
           Row(
             children: [
               Expanded(
@@ -1967,47 +2578,60 @@ class _ServiceRequestCreateModalState extends ConsumerState<_ServiceRequestCreat
             ],
           ),
           const SizedBox(height: 12),
-
           AppSelect<String>(
             label: 'Khung giờ tiếp nhận thuận tiện',
             value: _preferredSlot,
             options: const [
               AppSelectOption(value: 'ANYTIME', label: 'Linh hoạt cả ngày'),
-              AppSelectOption(value: 'MORNING_08_12', label: 'Buổi sáng (08:00 – 12:00)'),
-              AppSelectOption(value: 'AFTERNOON_13_17', label: 'Buổi chiều (13:00 – 17:00)'),
-              AppSelectOption(value: 'EVENING_18_21', label: 'Buổi tối (18:00 – 21:00)'),
+              AppSelectOption(
+                  value: 'MORNING_08_12', label: 'Buổi sáng (08:00 – 12:00)'),
+              AppSelectOption(
+                  value: 'AFTERNOON_13_17',
+                  label: 'Buổi chiều (13:00 – 17:00)'),
+              AppSelectOption(
+                  value: 'EVENING_18_21', label: 'Buổi tối (18:00 – 21:00)'),
             ],
             onChanged: (val) {
               if (val != null) setState(() => _preferredSlot = val);
             },
           ),
           const SizedBox(height: 12),
-
           AppInput(
+            key: const Key('sr-create-title'),
             label: 'Tiêu đề sự cố *',
             hint: 'Ví dụ: Hỏng vòi sen nhà tắm, Chập aptomat...',
             controller: _titleController,
             required: true,
           ),
           const SizedBox(height: 12),
-
           AppInput(
             label: 'Vị trí cụ thể trong phòng',
             hint: 'Ví dụ: Ban công, Phòng ngủ Master, Dưới bồn rửa bát...',
             controller: _locationDetailController,
           ),
           const SizedBox(height: 12),
-
           AppInput(
+            key: const Key('sr-create-description'),
             label: 'Mô tả chi tiết sự cố *',
-            hint: 'Mô tả hiện tượng sự cố, nguyên nhân nếu biết, thời điểm phát hiện...',
+            hint:
+                'Mô tả hiện tượng sự cố, nguyên nhân nếu biết, thời điểm phát hiện...',
             controller: _descriptionController,
             multiline: true,
             rows: 3,
             required: true,
           ),
+          const SizedBox(height: 12),
+          FileUploadField(
+            label: 'Ảnh hiện trạng đính kèm (tối đa 3 ảnh)',
+            multiple: true,
+            maxFiles: 3,
+            allowPdf: false,
+            value: _images,
+            onChanged: (val) => setState(() {
+              _images = List<String>.from((val as List?) ?? const <String>[]);
+            }),
+          ),
           const SizedBox(height: 20),
-
           AppButton(
             text: 'Tạo yêu cầu bảo trì',
             icon: const Icon(LucideIcons.checkCircle, size: 16),

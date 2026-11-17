@@ -482,13 +482,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('route:/admin/service-requests')), findsOneWidget);
-      expect(find.text('Quản lý Yêu cầu Bảo trì & Báo hỏng'), findsOneWidget);
+      expect(find.text('Yêu cầu & Báo hỏng Kỹ thuật'), findsOneWidget);
 
       // Verify StatsCard (StatsCard converts title to uppercase)
-      expect(find.text('TIẾP NHẬN MỚI'), findsOneWidget);
-      expect(find.text('ĐANG XỬ LÝ'), findsOneWidget);
-      expect(find.text('QUÁ HẠN SLA'), findsOneWidget);
-      expect(find.text('KHẨN CẤP'), findsOneWidget);
+      expect(find.text('TỔNG YÊU CẦU'), findsOneWidget);
+      expect(find.text('MỚI / MỞ LẠI'), findsOneWidget);
+      expect(find.text('ĐANG XỬ LÝ / HẸN LẠI'), findsOneWidget);
+      expect(find.text('ĐÃ HOÀN THÀNH'), findsOneWidget);
     });
 
     testWidgets('2. Switches between Kanban view and Table view cleanly', (tester) async {
