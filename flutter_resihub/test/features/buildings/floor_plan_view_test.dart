@@ -817,7 +817,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(mockService.lastPreviewedApartmentsBulk, isNotNull);
-      expect(mockService.lastPreviewedApartmentsBulk!['dry_run'], true);
+      // Modal gửi payload sạch; service thêm dry_run khi gọi API (React parity C13).
+      expect(mockService.lastPreviewedApartmentsBulk!['dry_run'], isNot(true));
 
       // Now "Khởi tạo căn hộ" is available
       expect(find.text('Khởi tạo căn hộ'), findsOneWidget);

@@ -89,6 +89,7 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
   final Set<String> _selectedFloorIds = {};
   String _zoneId = '';
   final _codePrefixController = TextEditingController();
+  final _unitsPerFloorController = TextEditingController(text: '5');
   late List<BulkUnitRow> _units;
   Map<String, dynamic>? _preview;
   bool _loadingPreview = false;
@@ -111,6 +112,7 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
   @override
   void dispose() {
     _codePrefixController.dispose();
+    _unitsPerFloorController.dispose();
     super.dispose();
   }
 
@@ -124,6 +126,7 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
     }
     _zoneId = '';
     _codePrefixController.clear();
+    _unitsPerFloorController.text = '5';
     _units = makeDefaultUnits(5);
     _preview = null;
     _loadingPreview = false;
@@ -134,6 +137,17 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
     if (_preview != null) {
       setState(() => _preview = null);
     }
+  }
+
+  void _applyUnitCount(int raw) {
+    final count = raw.clamp(1, 50);
+    _unitsPerFloorController.text = count.toString();
+    setState(() => _units = makeDefaultUnits(count, _units));
+    _invalidate();
+  }
+
+  void _syncUnitCount() {
+    _unitsPerFloorController.text = _units.length.toString();
   }
 
   Future<void> _handlePreview() async {
@@ -152,7 +166,6 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
             ? null
             : _codePrefixController.text.trim().toUpperCase(),
         'units': _units.map((u) => u.toJson()).toList(),
-        'dry_run': true,
       };
       final res = await service.previewApartmentsBulk(payload);
       if (mounted) {
@@ -281,10 +294,26 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
           ),
           const SizedBox(height: 16),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('2. Danh sách mẫu căn hộ (${_units.length} căn/tầng)',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              Expanded(
+                child: Text('2. Danh sách mẫu căn hộ (${_units.length} căn/tầng)',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 130,
+                child: AppInput(
+                  key: const Key('bulk-units-per-floor'),
+                  label: 'Số căn mỗi tầng',
+                  controller: _unitsPerFloorController,
+                  keyboardType: TextInputType.number,
+                  onChanged: (v) {
+                    final parsed = int.tryParse(v);
+                    if (parsed != null) _applyUnitCount(parsed);
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
               AppButton(
                 text: 'Thêm căn',
                 size: AppButtonSize.xs,
@@ -292,18 +321,7 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
                 icon: const Icon(LucideIcons.plus, size: 14),
                 onPressed: _units.length >= 50
                     ? null
-                    : () {
-                        setState(() {
-                          _units.add(BulkUnitRow(
-                            suffix: (_units.length + 1).toString().padLeft(2, '0'),
-                            type: '1PN',
-                            bedrooms: 1,
-                            areaM2: 45,
-                            baseRent: 8500000,
-                          ));
-                        });
-                        _invalidate();
-                      },
+                    : () => _applyUnitCount(_units.length + 1),
               ),
             ],
           ),
@@ -365,6 +383,24 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
                       ),
                       const SizedBox(width: 8),
                       SizedBox(
+                        width: 64,
+                        child: TextFormField(
+                          key: Key('bulk-bedrooms-$idx'),
+                          initialValue: row.bedrooms.toString(),
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: 'Số PN',
+                            contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                          ),
+                          onChanged: (v) {
+                            row.bedrooms = int.tryParse(v) ?? 0;
+                            _invalidate();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
                         width: 80,
                         child: TextFormField(
                           initialValue: row.areaM2.toString(),
@@ -401,6 +437,7 @@ class _BulkApartmentModalState extends ConsumerState<BulkApartmentModal> {
                           icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.rose500),
                           onPressed: () {
                             setState(() => _units.removeAt(idx));
+                            _syncUnitCount();
                             _invalidate();
                           },
                         ),
