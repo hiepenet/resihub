@@ -977,6 +977,17 @@ void main() {
       expect(find.textContaining('AI 93%'), findsOneWidget);
       expect(find.textContaining('Thử lại'), findsOneWidget);
 
+      // Verify compact table width + Scrollbar + AI OCR auto-filled '200' into the input field
+      final dataTable = tester.widget<DataTable>(find.byType(DataTable));
+      expect(dataTable.columnSpacing, 12.0);
+      expect(dataTable.horizontalMargin, 12.0);
+      expect(find.byType(Scrollbar), findsWidgets);
+      expect(
+        find.byWidgetPredicate((w) => w is EditableText && w.controller.text == '200'),
+        findsOneWidget,
+        reason: 'Batch OCR must auto-fill reading 200 into the draft input field',
+      );
+
       // Note entered in the UI must reach the save payload
       await tester.enterText(
         find.byWidgetPredicate(

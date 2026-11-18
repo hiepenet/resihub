@@ -54,6 +54,7 @@ class MeterBatchPhotoImportModal extends ConsumerStatefulWidget {
   final String period;
   final num anomalyThresholdPct;
   final bool canWriteMeters;
+  final List<Map<String, dynamic>>? initialItems;
   final VoidCallback? onSaved;
   final VoidCallback? onClose;
 
@@ -63,6 +64,7 @@ class MeterBatchPhotoImportModal extends ConsumerStatefulWidget {
     required this.period,
     this.anomalyThresholdPct = 30,
     this.canWriteMeters = true,
+    this.initialItems,
     this.onSaved,
     this.onClose,
   });
@@ -101,6 +103,9 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
   List<Map<String, dynamic>> _buildingMeters = [];
 
   final List<Map<String, dynamic>> _items = [];
+  final Map<String, TextEditingController> _readingControllers = {};
+  final Map<String, TextEditingController> _noteControllers = {};
+  final ScrollController _horizontalScrollController = ScrollController();
   int _queueTotal = 0;
   int _queueCompleted = 0;
   bool _isQueueRunning = false;
@@ -111,7 +116,30 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
   void initState() {
     super.initState();
     _targetBuildingId = widget.initialBuildingId;
+    if (widget.initialItems != null) {
+      for (final raw in widget.initialItems!) {
+        final copy = Map<String, dynamic>.from(raw);
+        final id = copy['localId']?.toString() ?? '';
+        _items.add(copy);
+        _readingControllers[id] = TextEditingController(text: copy['draftReading']?.toString() ?? '');
+        _noteControllers[id] = TextEditingController(text: copy['abnormalNote']?.toString() ?? '');
+      }
+    }
     _loadBuildingsAndMeters();
+  }
+
+  @override
+  void dispose() {
+    for (final c in _readingControllers.values) {
+      c.dispose();
+    }
+    for (final c in _noteControllers.values) {
+      c.dispose();
+    }
+    _readingControllers.clear();
+    _noteControllers.clear();
+    _horizontalScrollController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadBuildingsAndMeters() async {
@@ -242,9 +270,12 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
       try {
         final compressedDataUrl = await compressImageBytesToDataUrl(bytes, maxDimension: 1280);
         final match = matchMeterFromFilename(file.name, _buildingMeters);
+        final localId = 'bmo-${DateTime.now().millisecondsSinceEpoch}-${file.name}';
+        _readingControllers[localId] = TextEditingController(text: '');
+        _noteControllers[localId] = TextEditingController(text: '');
 
         prepared.add({
-          'localId': 'bmo-${DateTime.now().millisecondsSinceEpoch}-${file.name}',
+          'localId': localId,
           'buildingId': _targetBuildingId,
           'fileName': file.name,
           'imageDataUri': compressedDataUrl,
@@ -351,16 +382,30 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
             );
 
       final hasAiReading = out['reading'] != null;
-      final nextDraft = hasAiReading ? out['reading'].toString() : rowSnapshot['draftReading'];
 
       setState(() {
         final idx = _items.indexWhere((r) => r['localId'] == localId);
         if (idx >= 0) {
-          _items[idx]['meterId'] = autoMeterId ?? _items[idx]['meterId'];
+          final curr = _items[idx];
+          final currDraft = curr['draftReading']?.toString() ?? '';
+          final userEdited = curr['userEditedReading'] == true && currDraft.trim().isNotEmpty;
+          final nextDraft = userEdited
+              ? currDraft
+              : (hasAiReading ? out['reading'].toString() : currDraft);
+
+          final key = localId.toString();
+          final ctrl = _readingControllers.putIfAbsent(key, () => TextEditingController());
+          if (ctrl.text != nextDraft) {
+            ctrl.text = nextDraft;
+          }
+
+          _items[idx]['meterId'] = curr['manualMeterAssigned'] == true
+              ? curr['meterId']
+              : (autoMeterId ?? curr['meterId']);
           _items[idx]['draftReading'] = nextDraft;
           _items[idx]['ocrStatus'] = hasAiReading ? 'DONE' : 'NEEDS_MANUAL';
           _items[idx]['suggestionId'] = data['suggestion_id'];
-          _items[idx]['confidence'] = data['confidence'];
+          _items[idx]['confidence'] = data['confidence'] ?? out['confidence'];
           _items[idx]['detectedMeterType'] = out['detected_meter_type'];
           _items[idx]['aiReason'] = out['reason']?.toString() ?? '';
           _items[idx]['aiWarnings'] = data['warnings'] is List ? data['warnings'] : <String>[];
@@ -532,6 +577,14 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
                             ? null
                             : () {
                                 _sessionGen++;
+                                for (final c in _readingControllers.values) {
+                                  c.dispose();
+                                }
+                                for (final c in _noteControllers.values) {
+                                  c.dispose();
+                                }
+                                _readingControllers.clear();
+                                _noteControllers.clear();
                                 setState(() => _items.clear());
                               },
                       ),
@@ -620,7 +673,7 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
           ),
         ] else ...[
           Container(
-            constraints: const BoxConstraints(maxHeight: 420),
+            constraints: const BoxConstraints(maxHeight: 450),
             decoration: BoxDecoration(
               border: Border.all(color: AppColors.border),
               borderRadius: BorderRadius.circular(12),
@@ -628,230 +681,315 @@ class _MeterBatchPhotoImportModalState extends ConsumerState<MeterBatchPhotoImpo
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final minWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 600.0;
-                return SingleChildScrollView(
+                return Scrollbar(
+                  controller: _horizontalScrollController,
+                  thumbVisibility: true,
                   child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(minWidth: minWidth),
-                      child: DataTable(
-                  dataRowHeight: 96,
-                  headingRowColor: WidgetStateProperty.all(AppColors.slate50),
-                  columns: const [
-                    DataColumn(label: Text('Ảnh chụp')),
-                    DataColumn(label: Text('Tên file & Trạng thái AI')),
-                    DataColumn(label: Text('Công tơ đích')),
-                    DataColumn(label: Text('Chỉ số cũ')),
-                    DataColumn(label: Text('Chỉ số mới (Draft)')),
-                    DataColumn(label: Text('Tiêu thụ & Biến động')),
-                    DataColumn(label: Text('Ghi chú giải trình')),
-                    DataColumn(label: Text('Đánh giá')),
-                    DataColumn(label: Text('Xóa')),
-                  ],
-                  rows: evaluation.rows.map((evalRow) {
-                    final raw = evalRow.raw;
-                    final meter = evalRow.meter;
-                    final localId = raw['localId'];
-                    final confMeta = raw['confidence'] != null
-                        ? formatConfidenceBadge(raw['confidence'], 0.8)
-                        : null;
+                    child: SingleChildScrollView(
+                      controller: _horizontalScrollController,
+                      scrollDirection: Axis.horizontal,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(minWidth: minWidth),
+                        child: DataTable(
+                          columnSpacing: 12.0,
+                          horizontalMargin: 12.0,
+                          dataRowMinHeight: 72.0,
+                          dataRowMaxHeight: 96.0,
+                          headingRowColor: WidgetStateProperty.all(AppColors.slate50),
+                          columns: [
+                            const DataColumn(label: SizedBox(width: 46, child: Text('Ảnh'))),
+                            const DataColumn(label: SizedBox(width: 175, child: Text('Tệp & Gợi ý AI'))),
+                            const DataColumn(label: SizedBox(width: 180, child: Text('Công tơ đích'))),
+                            const DataColumn(label: SizedBox(width: 50, child: Text('Số cũ', textAlign: TextAlign.right))),
+                            DataColumn(label: SizedBox(width: 84, child: Text('Số mới (${widget.period})'))),
+                            const DataColumn(label: SizedBox(width: 86, child: Text('Tiêu thụ', textAlign: TextAlign.right))),
+                            const DataColumn(label: SizedBox(width: 145, child: Text('Ghi chú giải trình'))),
+                            const DataColumn(label: SizedBox(width: 100, child: Text('Đánh giá'))),
+                            const DataColumn(label: Text('Thao tác')),
+                          ],
+                          rows: evaluation.rows.map((evalRow) {
+                            final raw = evalRow.raw;
+                            final meter = evalRow.meter;
+                            final localId = raw['localId'];
+                            final localKey = localId.toString();
+                            final confMeta = raw['confidence'] != null
+                                ? formatConfidenceBadge(raw['confidence'], 0.8)
+                                : null;
 
-                    return DataRow(
-                      cells: [
-                        DataCell(
-                          InkWell(
-                            onTap: () {
-                              if (raw['imageDataUri'] != null) {
-                                AuthMediaViewer.show(context, src: raw['imageDataUri'].toString());
-                              }
-                            },
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(6),
-                              child: AuthImage(
-                                src: raw['imageDataUri']?.toString(),
-                                width: 44,
-                                height: 44,
-                                fit: BoxFit.cover,
-                              ),
-                            ),
-                          ),
-                        ),
-                        DataCell(
-                          SizedBox(
-                            width: 230,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  raw['fileName']?.toString() ?? '',
-                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                                ),
-                                Wrap(
-                                  spacing: 4,
-                                  runSpacing: 4,
-                                  children: [
-                                    if (raw['detectedMeterType'] == 'ELECTRICITY')
-                                      const AppBadge(
-                                        label: 'AI: Điện',
-                                        variant: AppBadgeVariant.amber,
-                                        icon: Icon(LucideIcons.zap, size: 10),
+                            return DataRow(
+                              cells: [
+                                DataCell(
+                                  SizedBox(
+                                    width: 46,
+                                    child: InkWell(
+                                      onTap: () {
+                                        if (raw['imageDataUri'] != null) {
+                                          AuthMediaViewer.show(context, src: raw['imageDataUri'].toString());
+                                        }
+                                      },
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(6),
+                                        child: AuthImage(
+                                          src: raw['imageDataUri']?.toString(),
+                                          width: 44,
+                                          height: 44,
+                                          fit: BoxFit.cover,
+                                        ),
                                       ),
-                                    if (raw['detectedMeterType'] == 'WATER')
-                                      const AppBadge(
-                                        label: 'AI: Nước',
-                                        variant: AppBadgeVariant.sky,
-                                        icon: Icon(LucideIcons.droplets, size: 10),
-                                      ),
-                                    if (raw['detectedMeterType'] == null &&
-                                        raw['matchKind'] == 'APARTMENT_ONLY' &&
-                                        raw['apartmentCode'] != null)
-                                      AppBadge(
-                                        label: 'Khớp căn ${raw['apartmentCode']}',
-                                        variant: AppBadgeVariant.slate,
-                                      ),
-                                    if (confMeta != null)
-                                      AppBadge(
-                                        label: 'AI ${confMeta.percentText}',
-                                        variant: AppBadgeVariant.fromString(confMeta.tone),
-                                      ),
-                                  ],
-                                ),
-                                if (evalRow.hasTypeMismatchWarning)
-                                  Text(
-                                    'Ảnh chụp nghi là đồng hồ ${raw['detectedMeterType'] == 'WATER' ? 'Nước' : 'Điện'}, khác loại công tơ đang chọn!',
-                                    style: const TextStyle(fontSize: 11, color: AppColors.rose600),
-                                  ),
-                                if (raw['ocrError'] != null && raw['ocrError'].toString().isNotEmpty)
-                                  Text(
-                                    raw['ocrError'].toString(),
-                                    style: const TextStyle(fontSize: 11, color: AppColors.rose600),
-                                  )
-                                else if (raw['aiReason'] != null && raw['aiReason'].toString().isNotEmpty)
-                                  Text(
-                                    raw['aiReason'].toString(),
-                                    style: const TextStyle(fontSize: 11, color: AppColors.slate500),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        DataCell(
-                          SizedBox(
-                            width: 220,
-                            child: DropdownButton<String>(
-                              isExpanded: true,
-                              value: raw['meterId']?.toString(),
-                              hint: const Text('-- Chọn công tơ --', style: TextStyle(fontSize: 12)),
-                              items: [
-                                const DropdownMenuItem(value: null, child: Text('-- Bỏ chọn --', style: TextStyle(fontSize: 12))),
-                                ..._buildingMeters.map((m) {
-                                  final type = m['meter_type'] == 'WATER' ? 'Nước' : 'Điện';
-                                  return DropdownMenuItem(
-                                    value: m['id']?.toString(),
-                                    child: Text(
-                                      'Căn ${m['apartment_code']} • $type (${m['meter_code']})',
-                                      style: const TextStyle(fontSize: 12),
-                                      overflow: TextOverflow.ellipsis,
                                     ),
-                                  );
-                                }),
-                              ],
-                              onChanged: (val) {
-                                setState(() {
-                                  final idx = _items.indexWhere((r) => r['localId'] == localId);
-                                  if (idx >= 0) {
-                                    _items[idx]['meterId'] = val;
-                                    _items[idx]['manualMeterAssigned'] = true;
-                                  }
-                                });
-                              },
-                            ),
-                          ),
-                        ),
-                        DataCell(Text(evalRow.prevReading != null ? evalRow.prevReading.toString() : '—')),
-                        DataCell(
-                          SizedBox(
-                            width: 90,
-                            child: AppInput(
-                              initialValue: raw['draftReading']?.toString(),
-                              onChanged: (val) {
-                                final idx = _items.indexWhere((r) => r['localId'] == localId);
-                                if (idx >= 0) {
-                                  _items[idx]['draftReading'] = val.trim();
-                                  _items[idx]['userEditedReading'] = true;
-                                }
-                                setState(() {});
-                              },
-                            ),
-                          ),
-                        ),
-                        DataCell(
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                evalRow.consumption != null ? '${evalRow.consumption} ${meter?['unit'] ?? ''}' : '—',
-                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                              ),
-                              if (evalRow.diffPct != null)
-                                Text(
-                                  '${evalRow.diffPct! > 0 ? '+' : ''}${evalRow.diffPct}%',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: evalRow.isAbnormal ? AppColors.amber600 : AppColors.slate500,
-                                    fontWeight: evalRow.isAbnormal ? FontWeight.bold : FontWeight.normal,
                                   ),
                                 ),
-                            ],
-                          ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 175,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          raw['fileName']?.toString() ?? '',
+                                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.slate900),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Wrap(
+                                          spacing: 4,
+                                          runSpacing: 4,
+                                          children: [
+                                            if (raw['detectedMeterType'] == 'ELECTRICITY')
+                                              const AppBadge(
+                                                label: 'AI: Điện',
+                                                variant: AppBadgeVariant.amber,
+                                                icon: Icon(LucideIcons.zap, size: 10),
+                                              ),
+                                            if (raw['detectedMeterType'] == 'WATER')
+                                              const AppBadge(
+                                                label: 'AI: Nước',
+                                                variant: AppBadgeVariant.sky,
+                                                icon: Icon(LucideIcons.droplets, size: 10),
+                                              ),
+                                            if (raw['detectedMeterType'] == null &&
+                                                raw['matchKind'] == 'APARTMENT_ONLY' &&
+                                                raw['apartmentCode'] != null)
+                                              AppBadge(
+                                                label: 'Khớp căn ${raw['apartmentCode']}',
+                                                variant: AppBadgeVariant.slate,
+                                              ),
+                                            if (confMeta != null)
+                                              AppBadge(
+                                                label: 'AI ${confMeta.percentText}',
+                                                variant: AppBadgeVariant.fromString(confMeta.tone),
+                                              ),
+                                          ],
+                                        ),
+                                        if (evalRow.hasTypeMismatchWarning)
+                                          Text(
+                                            'Ảnh chụp nghi là đồng hồ ${raw['detectedMeterType'] == 'WATER' ? 'Nước' : 'Điện'}, khác loại công tơ đang chọn!',
+                                            style: const TextStyle(fontSize: 10, color: AppColors.rose600),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        if (raw['ocrError'] != null && raw['ocrError'].toString().isNotEmpty)
+                                          Text(
+                                            raw['ocrError'].toString(),
+                                            style: const TextStyle(fontSize: 10, color: AppColors.rose600),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          )
+                                        else if (raw['aiReason'] != null && raw['aiReason'].toString().isNotEmpty)
+                                          Text(
+                                            raw['aiReason'].toString(),
+                                            style: const TextStyle(fontSize: 10, color: AppColors.slate500),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 180,
+                                    child: () {
+                                      final meterIdVal = raw['meterId']?.toString();
+                                      final hasMatchingItem = meterIdVal != null &&
+                                          _buildingMeters.any((m) => m['id']?.toString() == meterIdVal);
+                                      return DropdownButton<String>(
+                                        isExpanded: true,
+                                        value: meterIdVal,
+                                        hint: const Text('-- Chọn công tơ --', style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                                        items: [
+                                          const DropdownMenuItem(
+                                            value: null,
+                                            child: Text('-- Chọn công tơ --', style: TextStyle(fontSize: 12, color: AppColors.slate500)),
+                                          ),
+                                          if (meterIdVal != null && !hasMatchingItem)
+                                            DropdownMenuItem(
+                                              value: meterIdVal,
+                                              child: Text(
+                                                'Công tơ $meterIdVal',
+                                                style: const TextStyle(fontSize: 12),
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ..._buildingMeters.map((m) {
+                                            final type = m['meter_type'] == 'WATER' ? 'Nước' : 'Điện';
+                                            return DropdownMenuItem(
+                                              value: m['id']?.toString(),
+                                              child: Text(
+                                                'Căn ${m['apartment_code'] ?? '—'} • $type (${m['meter_code']})',
+                                                style: const TextStyle(fontSize: 12),
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            );
+                                          }),
+                                        ],
+                                        onChanged: (val) {
+                                          setState(() {
+                                            final idx = _items.indexWhere((r) => r['localId'] == localId);
+                                            if (idx >= 0) {
+                                              _items[idx]['meterId'] = val;
+                                              _items[idx]['manualMeterAssigned'] = true;
+                                            }
+                                          });
+                                        },
+                                      );
+                                    }(),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 50,
+                                    child: Align(
+                                      alignment: Alignment.centerRight,
+                                      child: Text(
+                                        evalRow.prevReading != null ? evalRow.prevReading.toString() : '—',
+                                        style: const TextStyle(fontSize: 12, color: AppColors.slate600),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 84,
+                                    child: AppInput(
+                                      controller: _readingControllers.putIfAbsent(
+                                        localKey,
+                                        () => TextEditingController(text: raw['draftReading']?.toString() ?? ''),
+                                      ),
+                                      onChanged: (val) {
+                                        final idx = _items.indexWhere((r) => r['localId'] == localId);
+                                        if (idx >= 0) {
+                                          _items[idx]['draftReading'] = val.trim();
+                                          _items[idx]['userEditedReading'] = true;
+                                        }
+                                        setState(() {});
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 86,
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          evalRow.consumption != null ? '+${evalRow.consumption} ${meter?['unit'] ?? ''}' : '—',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: evalRow.isAbnormal ? AppColors.amber700 : AppColors.slate900,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        if (evalRow.diffPct != null)
+                                          Text(
+                                            '${evalRow.diffPct! > 0 ? '+' : ''}${evalRow.diffPct}%',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: evalRow.isAbnormal ? AppColors.amber600 : AppColors.slate500,
+                                              fontWeight: evalRow.isAbnormal ? FontWeight.bold : FontWeight.normal,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 145,
+                                    child: AppInput(
+                                      controller: _noteControllers.putIfAbsent(
+                                        localKey,
+                                        () => TextEditingController(text: raw['abnormalNote']?.toString() ?? ''),
+                                      ),
+                                      placeholder: evalRow.isAbnormal
+                                          ? 'Giải trình biến động >${widget.anomalyThresholdPct}%...'
+                                          : 'Ghi chú (nếu có)...',
+                                      onChanged: (val) {
+                                        final idx = _items.indexWhere((r) => r['localId'] == localId);
+                                        if (idx >= 0) {
+                                          _items[idx]['abnormalNote'] = val;
+                                        }
+                                        setState(() {});
+                                      },
+                                    ),
+                                  ),
+                                ),
+                                DataCell(
+                                  SizedBox(
+                                    width: 100,
+                                    child: _buildValidationBadge(evalRow),
+                                  ),
+                                ),
+                                DataCell(
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      TextButton.icon(
+                                        style: TextButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                                          minimumSize: Size.zero,
+                                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                        ),
+                                        onPressed: _isQueueRunning ||
+                                                _savingStatus != null ||
+                                                evalRow.validationState == 'OCR_PROCESSING'
+                                            ? null
+                                            : () => _retrySingleRow(raw),
+                                        icon: const Icon(LucideIcons.refreshCw, size: 12),
+                                        label: const Text('Thử lại', style: TextStyle(fontSize: 11)),
+                                      ),
+                                      const SizedBox(width: 2),
+                                      InkWell(
+                                        borderRadius: BorderRadius.circular(6),
+                                        onTap: () {
+                                          setState(() {
+                                            _readingControllers[localKey]?.dispose();
+                                            _readingControllers.remove(localKey);
+                                            _noteControllers[localKey]?.dispose();
+                                            _noteControllers.remove(localKey);
+                                            _items.removeWhere((r) => r['localId'] == localId);
+                                          });
+                                        },
+                                        child: const Tooltip(
+                                          message: 'Xóa ảnh',
+                                          child: Padding(
+                                            padding: EdgeInsets.all(5),
+                                            child: Icon(LucideIcons.trash2, size: 15, color: AppColors.slate400),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
                         ),
-                        DataCell(
-                          SizedBox(
-                            width: 210,
-                            child: AppInput(
-                              placeholder: evalRow.isAbnormal
-                                  ? 'Giải trình biến động >${widget.anomalyThresholdPct}%...'
-                                  : 'Ghi chú (nếu có)...',
-                              initialValue: raw['abnormalNote']?.toString() ?? '',
-                              onChanged: (val) {
-                                final idx = _items.indexWhere((r) => r['localId'] == localId);
-                                if (idx >= 0) {
-                                  _items[idx]['abnormalNote'] = val;
-                                }
-                                setState(() {});
-                              },
-                            ),
-                          ),
-                        ),
-                        DataCell(_buildValidationBadge(evalRow)),
-                        DataCell(
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              TextButton.icon(
-                                onPressed: _isQueueRunning ||
-                                        _savingStatus != null ||
-                                        evalRow.validationState == 'OCR_PROCESSING'
-                                    ? null
-                                    : () => _retrySingleRow(raw),
-                                icon: const Icon(LucideIcons.refreshCw, size: 14),
-                                label: const Text('Thử lại', style: TextStyle(fontSize: 11)),
-                              ),
-                              IconButton(
-                                icon: const Icon(LucideIcons.trash2, size: 16, color: AppColors.slate400),
-                                onPressed: () {
-                                  setState(() {
-                                    _items.removeWhere((r) => r['localId'] == localId);
-                                  });
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    );
-                  }).toList(),
                       ),
                     ),
                   ),

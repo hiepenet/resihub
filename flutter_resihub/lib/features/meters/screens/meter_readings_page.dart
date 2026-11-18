@@ -79,10 +79,20 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
   // Local drafts and notes
   final Map<String, String> _draftReadings = {};
   final Map<String, String> _abnormalNotes = {};
+  final Map<String, TextEditingController> _inlineReadingControllers = {};
   // AI OCR suggestion state per row (inline edit), mirrors React aiOcrByMeter.
   final Map<String, Map<String, dynamic>> _rowOcr = {};
   bool _batchSaving = false;
   bool _deepLinkHandled = false;
+
+  @override
+  void dispose() {
+    for (final c in _inlineReadingControllers.values) {
+      c.dispose();
+    }
+    _inlineReadingControllers.clear();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -201,7 +211,18 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
           for (final m in list) {
             final id = m['id']?.toString() ?? '';
             if (m['period_current_reading'] != null) {
-              _draftReadings[id] = m['period_current_reading'].toString();
+              final nextDraft = m['period_current_reading'].toString();
+              _draftReadings[id] = nextDraft;
+              final ctrl = _inlineReadingControllers[id];
+              if (ctrl != null && ctrl.text != nextDraft) {
+                ctrl.text = nextDraft;
+              }
+            } else {
+              _draftReadings.remove(id);
+              final ctrl = _inlineReadingControllers[id];
+              if (ctrl != null && ctrl.text.isNotEmpty) {
+                ctrl.text = '';
+              }
             }
             if (m['period_abnormal_note'] != null) {
               _abnormalNotes[id] = m['period_abnormal_note'].toString();
@@ -465,8 +486,14 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
     String abnormalNote = noteVal;
     String? proofImage = activeMeter['period_image_url']?.toString();
     String? aiSuggestionId;
+    num? aiOcrReading;
+    dynamic aiOcrConfidence;
+    bool aiOcrConfirmed = false;
+    bool aiOcrEdited = false;
+    String? aiOcrWarningText;
     bool isAiRunning = false;
     bool saving = false;
+    final readingController = TextEditingController(text: currentReadingStr);
 
     // Reading history for this meter (React :1597-1666).
     List<Map<String, dynamic>> history = [];
@@ -531,7 +558,14 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                             selectedContractId = slot['contract_id']?.toString();
                             activeMeter = resolveMeterSlotView(rawMeter, selectedContractId);
                             currentReadingStr = activeMeter['period_current_reading']?.toString() ?? '';
+                            readingController.text = currentReadingStr;
                             proofImage = activeMeter['period_image_url']?.toString();
+                            aiOcrReading = null;
+                            aiOcrConfidence = null;
+                            aiOcrConfirmed = false;
+                            aiOcrEdited = false;
+                            aiOcrWarningText = null;
+                            aiSuggestionId = null;
                           });
                         }
                       },
@@ -620,14 +654,42 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                   ),
                 ),
 
-              // Reading input
-              AppInput(
-                label: 'Chỉ số mới kỳ $_period (${activeMeter['unit'] ?? ''})',
-                required: true,
-                readOnly: isLocked,
-                initialValue: currentReadingStr,
-                placeholder: '>= $prevReading',
-                onChanged: (val) => setModalState(() => currentReadingStr = val.trim()),
+              // Reading input with AISuggestionField
+              AISuggestionField(
+                active: !isLocked && aiOcrReading != null,
+                confirmed: aiOcrConfirmed,
+                edited: aiOcrEdited,
+                confidence: aiOcrConfidence,
+                threshold: 0.85,
+                warningText: aiOcrWarningText,
+                onConfirm: () => setModalState(() {
+                  aiOcrConfirmed = true;
+                  aiOcrEdited = num.tryParse(readingController.text.trim()) != aiOcrReading;
+                }),
+                onDismiss: () => setModalState(() {
+                  aiOcrReading = null;
+                  aiOcrConfidence = null;
+                  aiOcrConfirmed = false;
+                  aiOcrEdited = false;
+                  aiOcrWarningText = null;
+                  aiSuggestionId = null;
+                }),
+                child: AppInput(
+                  controller: readingController,
+                  label: 'Chỉ số mới kỳ $_period (${activeMeter['unit'] ?? ''})',
+                  required: true,
+                  readOnly: isLocked,
+                  placeholder: '>= $prevReading',
+                  onChanged: (val) {
+                    setModalState(() {
+                      currentReadingStr = val.trim();
+                      if (aiOcrReading != null) {
+                        aiOcrConfirmed = true;
+                        aiOcrEdited = num.tryParse(val.trim()) != aiOcrReading;
+                      }
+                    });
+                  },
+                ),
               ),
               const SizedBox(height: 12),
 
@@ -666,11 +728,24 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
                         final out = data['output'] is Map ? data['output'] : {};
 
                         if (out['reading'] != null) {
+                          final readingVal = out['reading'];
                           setModalState(() {
-                            currentReadingStr = out['reading'].toString();
+                            readingController.text = readingVal.toString();
+                            currentReadingStr = readingVal.toString();
                             aiSuggestionId = data['suggestion_id']?.toString();
+                            aiOcrReading = num.tryParse(readingVal.toString());
+                            aiOcrConfidence = data['confidence'] ?? out['confidence'];
+                            aiOcrWarningText = (out['reason']?.toString().isNotEmpty == true)
+                                ? out['reason'].toString()
+                                : (data['warnings'] is List && (data['warnings'] as List).isNotEmpty)
+                                    ? (data['warnings'] as List).join(', ')
+                                    : null;
+                            aiOcrConfirmed = false;
+                            aiOcrEdited = false;
                           });
-                          ref.read(toastProvider.notifier).success('AI đã đọc chỉ số: ${out['reading']}');
+                          ref.read(toastProvider.notifier).success('AI đã đọc chỉ số: $readingVal');
+                        } else if (out['reason'] != null) {
+                          ref.read(toastProvider.notifier).warning(out['reason'].toString());
                         }
                       } catch (err) {
                         ref.read(toastProvider.notifier).error(
@@ -961,17 +1036,24 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
       confirmed: ocr?['confirmed'] == true,
       edited: ocr?['edited'] == true,
       confidence: ocr?['confidence'],
+      threshold: 0.85,
+      warningText: ocr?['reason']?.toString(),
       onConfirm: () {
         if (ocr == null) return;
+        final nextVal = ocr['reading']?.toString() ?? draft;
+        _inlineReadingControllers[id]?.text = nextVal;
         setState(() {
-          _draftReadings[id] = ocr['reading']?.toString() ?? draft;
+          _draftReadings[id] = nextVal;
           _rowOcr[id] = {...ocr, 'confirmed': true, 'edited': false};
         });
       },
       onDismiss: () => setState(() => _rowOcr.remove(id)),
       child: AppInput(
         key: Key('meter-inline-reading-$id'),
-        initialValue: draft,
+        controller: _inlineReadingControllers.putIfAbsent(
+          id,
+          () => TextEditingController(text: draft),
+        ),
         readOnly: locked,
         placeholder: '>= $prev',
         error: invalid ? '< $prev' : null,
@@ -1008,14 +1090,28 @@ class _MeterReadingsPageState extends ConsumerState<MeterReadingsPage> {
       final data = res is Map ? (res['data'] is Map ? res['data'] : res) : {};
       final out = data['output'] is Map ? data['output'] : {};
       final reading = out['reading'];
-      if (reading == null) return;
+      if (reading == null) {
+        if (out['reason'] != null && mounted) {
+          ref.read(toastProvider.notifier).warning(out['reason'].toString());
+        }
+        return;
+      }
       if (!mounted) return;
+      final readingStr = reading.toString();
+      final ctrl = _inlineReadingControllers.putIfAbsent(id, () => TextEditingController());
+      ctrl.text = readingStr;
       setState(() {
-        _draftReadings[id] = reading.toString();
+        _draftReadings[id] = readingStr;
         _rowOcr[id] = {
           'active': true,
           'reading': reading,
-          'confidence': out['confidence'],
+          'confidence': data['confidence'] ?? out['confidence'],
+          'suggestionId': data['suggestion_id']?.toString(),
+          'reason': (out['reason']?.toString().isNotEmpty == true)
+              ? out['reason'].toString()
+              : (data['warnings'] is List && (data['warnings'] as List).isNotEmpty)
+                  ? (data['warnings'] as List).join(', ')
+                  : null,
           'confirmed': false,
           'edited': false,
         };
